@@ -5,8 +5,10 @@
 //!   hosts that can be used;
 //! * [`model`] holds engine data as plain Rust types, so no `bollard` type leaks
 //!   into the UI;
+//! * [`backend`] runs the background worker: polling, stats, events and commands;
 //! * [`client`] turns an [`context::Endpoint`] into a connected `bollard::Docker`.
 
+pub mod backend;
 pub mod client;
 pub mod context;
 pub mod model;
