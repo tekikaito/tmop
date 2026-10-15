@@ -6,7 +6,11 @@ use eframe::egui;
 
 /// Dialog state (open dialog and its inputs, added by later steps).
 #[derive(Debug, Default)]
-pub struct DialogState {}
+pub struct DialogState {
+    pub wizards: super::wizards::WizardState,
+}
 
 /// Draws any open dialog. Called from the Docker page each frame.
-pub fn show(_app: &mut App, _ctx: &egui::Context, _fd: &FrameData<'_>) {}
+pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
+    super::wizards::show(app, ctx, fd);
+}

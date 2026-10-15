@@ -15,6 +15,7 @@ pub mod detail;
 pub mod dialogs;
 pub mod engine_tab;
 pub mod tables;
+pub mod wizards;
 
 use super::kit::{self, GAP, MARGIN};
 use super::table::TableState;
