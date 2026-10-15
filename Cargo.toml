@@ -54,6 +54,8 @@ features = [
     "Win32_System_Services",
     "Win32_System_Com",
     "Win32_Graphics_Gdi",
+    "Data_Xml_Dom",
+    "UI_Notifications",
 ]
 
 [dev-dependencies]
