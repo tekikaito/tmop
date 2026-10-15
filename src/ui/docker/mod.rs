@@ -23,7 +23,7 @@ use super::theme::{self, Palette};
 use super::widgets::{self, Icon};
 use super::{App, FrameData, STATUS_H};
 use crate::docker::backend::{Backend, Command, EngineEvent, NoticeKind, Shared};
-use crate::docker::context::{default_contexts, docker_dir, Context};
+use crate::docker::context::{docker_dir, Context};
 use crate::docker::model::{Container, EngineInfo, EngineStatus, Image, Network, Stack, StatsSample, Totals, Volume};
 use crate::docker::notify;
 use crate::settings::Settings;
@@ -136,7 +136,7 @@ pub struct DockerState {
 impl DockerState {
     /// Reads the Docker contexts and starts the background worker on the active one.
     pub fn new(ctx: &egui::Context, settings: &Settings) -> Self {
-        let contexts = default_contexts();
+        let contexts = wizards::merged_contexts(settings);
         let installed = docker_dir().map(|d| d.exists()).unwrap_or(false);
         let active = settings.docker_active_context.clone();
         let resolved = resolve_name(&contexts, &active);
@@ -199,6 +199,11 @@ impl DockerState {
         let now = Instant::now();
         self.ui.toasts.retain(|t| now.duration_since(t.at) < toast_ttl(t.kind));
         if self.page_open != Some(page_open) {
+            if self.page_open == Some(true) && !page_open {
+                // Leaving the page stops the log follow and releases any volume helper.
+                let engine = b.engine();
+                self.ui.detail.close(engine.as_ref());
+            }
             self.page_open = Some(page_open);
             b.send(Command::SetPageOpen(page_open));
         }
@@ -378,6 +383,9 @@ impl App {
             // The worker reads the read-only flag when it connects, so it is sent first.
             let ro = self.settings.docker_contexts.get(&name).map(|c| c.read_only).unwrap_or(false);
             if let Some(b) = &self.docker.backend {
+                // Release the helper and log session on the old host before the switch.
+                let engine = b.engine();
+                self.docker.ui.detail.close(engine.as_ref());
                 b.send(Command::SetReadOnly(ro));
                 b.send(Command::SwitchContext(name.clone()));
             }

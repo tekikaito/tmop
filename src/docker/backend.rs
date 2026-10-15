@@ -57,6 +57,10 @@ const ALERTS_KEPT: usize = 100;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const RESTART_DEATHS: usize = 3;
 const RESTART_ALERT_COOLDOWN: Duration = Duration::from_secs(300);
+/// A non-zero exit within this time after a `kill` event is the stop that was asked for.
+const KILL_EXIT_WINDOW: Duration = Duration::from_secs(20);
+/// A non-zero exit within this time after a stop, kill, restart or remove sent by TMOP is expected.
+const REQUESTED_STOP_WINDOW: Duration = Duration::from_secs(60);
 /// Event actions that change the container list.
 const REFRESH_ACTIONS: [&str; 8] = ["start", "die", "destroy", "create", "pause", "unpause", "rename", "oom"];
 
@@ -306,6 +310,8 @@ struct Inner {
     shared: Arc<Mutex<Shared>>,
     engine: Arc<Mutex<Option<Engine>>>,
     on_change: Arc<dyn Fn() + Send + Sync>,
+    /// Container id to the time TMOP last sent a stop, kill, restart or remove for it.
+    requested_stops: Mutex<HashMap<String, Instant>>,
     /// Bumped whenever a session ends; tasks stop writing when their captured value is stale.
     gen: AtomicU64,
 }
@@ -349,6 +355,7 @@ impl Backend {
             shared: Arc::clone(&shared),
             engine: Arc::new(Mutex::new(None)),
             on_change: Arc::new(on_change),
+            requested_stops: Mutex::new(HashMap::new()),
             gen: AtomicU64::new(0),
         });
         let (tx, rx) = mpsc::unbounded_channel();
@@ -725,6 +732,14 @@ fn run_mutation(link: &Link, inner: &Arc<Inner>, cmd: Command) {
     if let Some(key) = busy_key(&cmd) {
         lock(&inner.shared).busy.insert(key, progress_label(&cmd));
         inner.publish();
+    }
+    if let Command::Container { id, action, .. } = &cmd {
+        if matches!(
+            action,
+            ContainerAction::Stop | ContainerAction::Kill | ContainerAction::Restart | ContainerAction::Remove { .. }
+        ) {
+            note_requested_stop(&mut lock(&inner.requested_stops), id, Instant::now());
+        }
     }
     tokio::spawn(run_and_report(
         session.docker.clone(),
@@ -1148,9 +1163,24 @@ fn publish_totals(inner: &Inner) {
 pub struct RestartTracker {
     deaths: HashMap<String, VecDeque<Instant>>,
     alerted: HashMap<String, Instant>,
+    /// Time of the last `kill` event per container.
+    kills: HashMap<String, Instant>,
 }
 
 impl RestartTracker {
+    /// Records a `kill` event for container `id`. Docker emits it before the `die` of a stop,
+    /// kill or restart.
+    pub fn note_kill(&mut self, id: &str, now: Instant) {
+        self.kills.insert(id.to_string(), now);
+    }
+
+    /// Whether a non-zero exit of container `id` at `now` is a stop that was asked for: a
+    /// `kill` event seen shortly before, or a stop TMOP sent (`requested`) shortly before.
+    pub fn exit_expected(&self, id: &str, now: Instant, requested: &HashMap<String, Instant>) -> bool {
+        let recent = |t: Option<&Instant>, window: Duration| t.is_some_and(|t| now.saturating_duration_since(*t) <= window);
+        recent(self.kills.get(id), KILL_EXIT_WINDOW) || recent(requested.get(id), REQUESTED_STOP_WINDOW)
+    }
+
     /// Records a `die` event for container `id`. Returns true when the container has died
     /// at least three times within the last minute and no restart-loop alert was raised for
     /// it in the last five minutes.
@@ -1171,6 +1201,13 @@ impl RestartTracker {
     }
 }
 
+/// Records a stop, kill, restart or remove that TMOP sent for container `id` and forgets
+/// entries older than [`REQUESTED_STOP_WINDOW`].
+fn note_requested_stop(stops: &mut HashMap<String, Instant>, id: &str, now: Instant) {
+    stops.retain(|_, t| now.saturating_duration_since(*t) <= REQUESTED_STOP_WINDOW);
+    stops.insert(id.to_string(), now);
+}
+
 /// The result of decoding one engine event.
 #[derive(Debug)]
 pub struct Decoded {
@@ -1182,8 +1219,14 @@ pub struct Decoded {
     pub refresh: bool,
 }
 
-/// Turns an engine event into an [`EngineEvent`], alerts and a refresh request.
-pub fn decode_event(msg: &api::EventMessage, restarts: &mut RestartTracker, now: Instant) -> Decoded {
+/// Turns an engine event into an [`EngineEvent`], alerts and a refresh request. `requested`
+/// holds the stops TMOP sent, see [`RestartTracker::exit_expected`].
+pub fn decode_event(
+    msg: &api::EventMessage,
+    restarts: &mut RestartTracker,
+    requested: &HashMap<String, Instant>,
+    now: Instant,
+) -> Decoded {
     let kind = msg.typ.as_ref().map(ToString::to_string).unwrap_or_default();
     let action = msg.action.clone().unwrap_or_default();
     let verb = action.split(':').next().unwrap_or("").trim().to_string();
@@ -1201,9 +1244,12 @@ pub fn decode_event(msg: &api::EventMessage, restarts: &mut RestartTracker, now:
     if kind == "container" {
         refresh = REFRESH_ACTIONS.contains(&verb.as_str());
         match verb.as_str() {
+            "kill" => restarts.note_kill(&id, now),
             "die" => {
                 if let Some(code) = attrs.and_then(|a| a.get("exitCode")).filter(|c| c.as_str() != "0") {
-                    alerts.push(AlertKind::UnexpectedExit { code: code.parse().unwrap_or(-1) });
+                    if !restarts.exit_expected(&id, now, requested) {
+                        alerts.push(AlertKind::UnexpectedExit { code: code.parse().unwrap_or(-1) });
+                    }
                 }
                 if restarts.record(&id, now) {
                     alerts.push(AlertKind::RestartLoop);
@@ -1230,7 +1276,10 @@ async fn events_loop(docker: Docker, inner: Arc<Inner>, gen: u64, notify: Arc<No
                 return;
             }
             let Ok(msg) = item else { break };
-            let decoded = decode_event(&msg, &mut restarts, Instant::now());
+            let decoded = {
+                let requested = lock(&inner.requested_stops);
+                decode_event(&msg, &mut restarts, &requested, Instant::now())
+            };
             {
                 let mut s = lock(&inner.shared);
                 let context = s.active.clone();
@@ -1634,7 +1683,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let d = decode_event(&msg, &mut restarts, Instant::now());
+        let none = HashMap::new();
+        let d = decode_event(&msg, &mut restarts, &none, Instant::now());
         assert_eq!(d.container, "web");
         assert_eq!(d.event.actor, "web");
         assert_eq!(d.alerts, [AlertKind::UnexpectedExit { code: 137 }]);
@@ -1645,9 +1695,62 @@ mod tests {
             actor: Some(api::EventActor { id: Some("abd".into()), attributes: labels(&[("exitCode", "0")]) }),
             ..msg.clone()
         };
-        let d = decode_event(&clean, &mut restarts, Instant::now());
+        let d = decode_event(&clean, &mut restarts, &none, Instant::now());
         assert!(d.alerts.is_empty(), "exit code 0 is not an alert");
         assert_eq!(d.container, "abd", "falls back to the id");
+    }
+
+    fn container_event(action: &str, id: &str, exit_code: Option<&str>) -> api::EventMessage {
+        let mut attrs = vec![("name", "web")];
+        if let Some(code) = exit_code {
+            attrs.push(("exitCode", code));
+        }
+        api::EventMessage {
+            typ: Some(api::EventMessageTypeEnum::CONTAINER),
+            action: Some(action.into()),
+            actor: Some(api::EventActor { id: Some(id.into()), attributes: labels(&attrs) }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn die_after_kill_is_not_alerted() {
+        let mut restarts = RestartTracker::default();
+        let none = HashMap::new();
+        let t0 = Instant::now();
+        let kill = decode_event(&container_event("kill", "k1", None), &mut restarts, &none, t0);
+        assert!(kill.alerts.is_empty());
+        let die = decode_event(&container_event("die", "k1", Some("137")), &mut restarts, &none, t0 + Duration::from_secs(1));
+        assert!(die.alerts.is_empty(), "kill before die is a requested stop");
+
+        let late = decode_event(&container_event("die", "k1", Some("137")), &mut restarts, &none, t0 + Duration::from_secs(25));
+        assert_eq!(late.alerts, [AlertKind::UnexpectedExit { code: 137 }], "kill is only trusted for 20 s");
+    }
+
+    #[test]
+    fn die_without_kill_with_code_137_is_alerted() {
+        let mut restarts = RestartTracker::default();
+        let d = decode_event(&container_event("die", "u1", Some("137")), &mut restarts, &HashMap::new(), Instant::now());
+        assert_eq!(d.alerts, [AlertKind::UnexpectedExit { code: 137 }]);
+    }
+
+    #[test]
+    fn die_with_code_zero_is_not_alerted() {
+        let mut restarts = RestartTracker::default();
+        let d = decode_event(&container_event("die", "z1", Some("0")), &mut restarts, &HashMap::new(), Instant::now());
+        assert!(d.alerts.is_empty());
+    }
+
+    #[test]
+    fn die_after_requested_stop_is_not_alerted() {
+        let mut restarts = RestartTracker::default();
+        let t0 = Instant::now();
+        let mut requested = HashMap::new();
+        note_requested_stop(&mut requested, "r1", t0);
+        let d = decode_event(&container_event("die", "r1", Some("137")), &mut restarts, &requested, t0 + Duration::from_secs(5));
+        assert!(d.alerts.is_empty(), "TMOP asked for the stop");
+        let d = decode_event(&container_event("die", "r1", Some("137")), &mut restarts, &requested, t0 + Duration::from_secs(61));
+        assert_eq!(d.alerts, [AlertKind::UnexpectedExit { code: 137 }], "request window is 60 s");
     }
 
     #[test]
