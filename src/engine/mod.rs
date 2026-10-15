@@ -1,6 +1,17 @@
 //! TMOP's own Docker engine: a WSL2 distro with dockerd, managed from the Docker page and reached through the `--engine-relay` named-pipe relay.
 
+pub mod asset;
 pub mod config;
+pub mod pathenv;
+pub mod proxy;
+pub mod rewrite;
+pub mod wslconfig;
+#[cfg(windows)]
+pub mod http;
+#[cfg(windows)]
+pub mod winreg;
+#[cfg(windows)]
+pub mod wsl;
 
 use std::path::PathBuf;
 
