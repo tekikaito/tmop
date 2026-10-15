@@ -303,6 +303,8 @@ pub struct Launch {
     pub bench: Option<Vec<crate::pro::bench::Test>>,
     /// Start a Disk Space scan of this folder at launch.
     pub disk_scan: Option<std::path::PathBuf>,
+    /// Container (name or id prefix) to open a terminal session in at start-up, with an optional command (used for runtime checks).
+    pub docker_terminal: Option<(String, Option<String>)>,
 }
 
 struct Pending {
@@ -411,6 +413,9 @@ impl App {
         if let Some(root) = launch.disk_scan {
             app.pro.disk_root = root.display().to_string();
             app.pro.scanner.start(root);
+        }
+        if let Some((container, command)) = launch.docker_terminal {
+            app.docker.ui.detail.terminals.request(container, command);
         }
         app.palette().apply(&cc.egui_ctx);
         app

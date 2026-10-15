@@ -3,7 +3,9 @@
 //!
 //! Usage:
 //!   TMOP                  main window (page from `defaultPage`)
-//!   TMOP --page=<id>      start on summary|performance|processes|settings
+//!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
+//!   TMOP --docker-terminal=<container>[;<command>]
+//!                         open a terminal session in a container on the Docker page
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
@@ -160,6 +162,12 @@ fn main() -> eframe::Result<()> {
             }
         }),
         disk_scan: value(&["--disk-scan="]).map(std::path::PathBuf::from),
+        docker_terminal: value(&["--docker-terminal="]).and_then(|v| {
+            let (container, command) = v.split_once(';').unwrap_or((v.as_str(), ""));
+            let container = container.trim();
+            let command = command.trim();
+            (!container.is_empty()).then(|| (container.to_string(), (!command.is_empty()).then(|| command.to_string())))
+        }),
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;
