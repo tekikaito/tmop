@@ -2,6 +2,7 @@
 //! the pages, and the skinnable popout window.
 
 pub mod bench_page;
+pub mod docker;
 pub mod icons;
 pub mod inventory_pages;
 pub mod kit;
@@ -34,6 +35,7 @@ pub enum Page {
     Summary,
     Performance,
     Processes,
+    Docker,
     SystemInfo,
     AppHistory,
     StartupApps,
@@ -50,10 +52,11 @@ pub enum Page {
 }
 
 impl Page {
-    pub const NAV: [Page; 15] = [
+    pub const NAV: [Page; 16] = [
         Page::Summary,
         Page::Performance,
         Page::Processes,
+        Page::Docker,
         Page::SystemInfo,
         Page::AppHistory,
         Page::StartupApps,
@@ -73,6 +76,7 @@ impl Page {
         match id {
             "performance" => Page::Performance,
             "processes" | "details" => Page::Processes,
+            "docker" => Page::Docker,
             "system-info" => Page::SystemInfo,
             "app-history" => Page::AppHistory,
             "startup" | "startup-apps" => Page::StartupApps,
@@ -94,6 +98,7 @@ impl Page {
             Page::Summary => "summary",
             Page::Performance => "performance",
             Page::Processes => "processes",
+            Page::Docker => "docker",
             Page::SystemInfo => "system-info",
             Page::AppHistory => "app-history",
             Page::StartupApps => "startup-apps",
@@ -114,6 +119,7 @@ impl Page {
             Page::Summary => "Summary",
             Page::Performance => "Performance",
             Page::Processes => "Processes",
+            Page::Docker => "Docker",
             Page::SystemInfo => "System Info",
             Page::AppHistory => "App history",
             Page::StartupApps => "Startup apps",
@@ -134,6 +140,7 @@ impl Page {
             Page::Summary => Icon::Home,
             Page::Performance => Icon::Chart,
             Page::Processes => Icon::List,
+            Page::Docker => Icon::Container,
             Page::SystemInfo => Icon::Info,
             Page::AppHistory => Icon::History,
             Page::StartupApps => Icon::Play,
@@ -319,6 +326,7 @@ pub struct App {
     pub pro: pro_pages::ProState,
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
+    pub docker: docker::DockerState,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
@@ -339,7 +347,9 @@ impl App {
             status = format!("{} skin(s) failed to load", catalog.errors.len());
         }
         let settings_popout_on = settings.extra.get("popoutMode").and_then(|v| v.as_str()).map(|m| m != "off").unwrap_or(false);
+        let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
+            docker,
             settings,
             settings_dirty: false,
             catalog,
@@ -405,6 +415,11 @@ impl App {
                 }
             }
         }
+    }
+
+    /// `Page::NAV` without the pages that are hidden right now (Docker when its page is off).
+    pub fn visible_pages(&self) -> Vec<Page> {
+        Page::NAV.into_iter().filter(|p| *p != Page::Docker || self.docker.visible(&self.settings)).collect()
     }
 
     pub fn bloom(&self) -> f32 {
@@ -512,7 +527,7 @@ impl App {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    for p in Page::NAV.iter().chain([Page::Settings].iter()) {
+                    for p in self.visible_pages().iter().chain([Page::Settings].iter()) {
                         if ui.button(format!("{}\t{}", p.title(), p.shortcut())).clicked() {
                             self.page = *p;
                             ui.close_menu();
@@ -543,7 +558,8 @@ impl App {
             // The nav list gets the space above the bottom controls. The wordmark is shown only when
             // the list fits above it too; if the list doesn't fit at all, it scrolls (mouse wheel).
             let bottom = full.bottom();
-            let nav_h = 14.0 + Page::NAV.len() as f32 * 42.0;
+            let pages = self.visible_pages();
+            let nav_h = 14.0 + pages.len() as f32 * 42.0;
             let show_logo = full.top() + nav_h <= bottom - 136.0;
             let nav_rect = Rect::from_min_max(full.min, pos2(full.right(), if show_logo { bottom - 136.0 } else { bottom - 56.0 }));
             let scroll_id = ui.id().with("nav-scroll");
@@ -557,7 +573,7 @@ impl App {
             let nav_painter = ui.painter().with_clip_rect(nav_rect);
             // One plain list of all pages.
             let mut y = full.top() + 14.0 - scroll;
-            for page in Page::NAV {
+            for page in pages {
                 let rect = Rect::from_min_size(pos2(full.left() + 12.0, y), vec2(SIDEBAR_W - 26.0, 36.0));
                 y += 42.0;
                 let hit = rect.intersect(nav_rect);
@@ -1055,6 +1071,10 @@ impl App {
         }
         self.shortcuts(ctx);
         self.icons.poll(ctx);
+        self.docker.poll(self.page == Page::Docker);
+        if self.page == Page::Docker && !self.docker.visible(&self.settings) {
+            self.page = Page::Summary;
+        }
         let (snap, mut hist, rows) = self.snapshot();
         let cap = history_capacity(self.settings.graph_history_multiplier);
         if hist.capacity() != cap {
@@ -1115,8 +1135,10 @@ impl App {
                 Page::InstalledApps => self.apps_page(ui, &fd),
                 Page::Drivers => self.drivers_page(ui, &fd),
                 Page::DiskSpace => self.diskspace_page(ui, &fd),
+                Page::Docker => self.docker_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
+            self.draw_toasts(ctx);
             if self.popout_open {
                 self.popout_viewport(ctx, &fd);
             }

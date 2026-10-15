@@ -199,6 +199,7 @@ impl App {
                     changed |= toggle_row(ui, &pal, &mut s.confirm_efficiency_mode, "Ask before applying Efficiency mode");
                     changed |= toggle_row(ui, &pal, &mut s.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                     changed |= toggle_row(ui, &pal, &mut s.show_full_account_name, "Show full account name");
+                    changed |= toggle_row(ui, &pal, &mut s.docker_hide_page, "Hide the Docker page");
                 });
                 section(ui, &pal, Icon::Record, "Skins and files", |ui| {
                     ui.horizontal(|ui| {

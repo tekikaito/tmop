@@ -1094,6 +1094,7 @@ pub enum Icon {
     History,
     User,
     Wrench,
+    Container,
 }
 
 pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
@@ -1262,6 +1263,12 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             p.circle_stroke(pt(0.68, 0.32), w * 0.2, s);
             line((0.54, 0.46), (0.14, 0.86));
             line((0.2, 0.92), (0.08, 0.8));
+        }
+        Icon::Container => {
+            // Two stacked boxes.
+            for (y0, y1) in [(0.08, 0.44), (0.56, 0.92)] {
+                p.rect_stroke(Rect::from_min_max(pt(0.08, y0), pt(0.92, y1)), 2.0, s);
+            }
         }
     }
 }
