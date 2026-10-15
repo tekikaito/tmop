@@ -11,7 +11,7 @@ use crate::terminal::transport::{Sink, Transport, TransportState};
 use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
-use bollard::models::ExecInspectResponse;
+use bollard::models::{ExecConfig, ExecInspectResponse};
 use bollard::Docker;
 use futures_util::StreamExt;
 use std::future::Future;
@@ -46,13 +46,15 @@ pub struct ExecOptions {
 }
 
 /// Splits a command line into arguments: whitespace separated, with single and
-/// double quotes and backslash escapes (outside single quotes).
+/// double quotes and backslash escapes. Outside quotes a backslash escapes the next
+/// character; inside double quotes only `"`, `\`, `$` and backtick are escaped, and
+/// inside single quotes nothing is.
 pub fn split_command(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     // True once the current argument has started, so `""` yields an empty argument.
     let mut started = false;
-    let mut chars = line.chars();
+    let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
@@ -69,7 +71,15 @@ pub fn split_command(line: &str) -> Vec<String> {
                 while let Some(c) = chars.next() {
                     match c {
                         '"' => break,
-                        '\\' => current.extend(chars.next()),
+                        // Inside double quotes a backslash only escapes these characters;
+                        // before any other one it is kept literally.
+                        '\\' => match chars.peek() {
+                            Some(&next) if matches!(next, '"' | '\\' | '$' | '`') => {
+                                current.push(next);
+                                chars.next();
+                            }
+                            _ => current.push('\\'),
+                        },
                         _ => current.push(c),
                     }
                 }
@@ -212,7 +222,6 @@ async fn run(
     input_rx: UnboundedReceiver<Vec<u8>>,
     mut resize_rx: UnboundedReceiver<(u16, u16)>,
 ) {
-    let (cols, rows) = (opts.cols, opts.rows);
     let (id, started) = match attach(&docker, &container, &opts, &shell).await {
         Ok(attached) => attached,
         Err(message) => return fail(&state, &sink, message),
@@ -223,7 +232,6 @@ async fn run(
 
     *lock(&state) = TransportState::Running;
     sink.notify();
-    let _ = docker.resize_exec(&id, resize_options(cols, rows)).await;
 
     let writer = tokio::spawn(async move {
         let mut input = input;
@@ -300,7 +308,11 @@ async fn attach(
         env: Some(vec!["TERM=xterm-256color".to_string()]),
         ..Default::default()
     };
-    let created = request(docker.create_exec(container, options)).await.map_err(|e| missing_text(e, &missing))?;
+    // The size goes in at create time: a resize after the start makes busybox ash redraw
+    // the prompt it has already printed.
+    let mut config = ExecConfig::from(options);
+    config.console_size = Some(vec![usize::from(opts.rows.max(1)), usize::from(opts.cols.max(1))]);
+    let created = request(docker.create_exec(container, config)).await.map_err(|e| missing_text(e, &missing))?;
     let start = StartExecOptions { detach: false, tty: true, output_capacity: None };
     let started = request(docker.start_exec(&created.id, Some(start))).await.map_err(|e| missing_text(e, &missing))?;
     Ok((created.id, started))
@@ -376,6 +388,10 @@ mod tests {
         assert_eq!(split_command("  ls   -la  "), ["ls", "-la"]);
         assert_eq!(split_command(r#"echo "" ''"#), ["echo", "", ""]);
         assert_eq!(split_command(r"a\\b"), [r"a\b"]);
+        assert_eq!(split_command(r#"sh -c "printf '\033[31mred\n'""#), ["sh", "-c", r"printf '\033[31mred\n'"]);
+        assert_eq!(split_command(r#""a\"b""#), [r#"a"b"#]);
+        assert_eq!(split_command(r#""a\\b""#), [r"a\b"]);
+        assert_eq!(split_command(r"x\ y"), ["x y"]);
         assert!(split_command("   ").is_empty());
     }
 }
