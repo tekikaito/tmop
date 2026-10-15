@@ -5,6 +5,7 @@
 //! Recording writes every sample to a CSV file in `%LOCALAPPDATA%\TMOP\recordings`
 //! (or a folder the user picks) until stopped or until an optional time limit.
 
+use crate::docker::model::Totals;
 use crate::metrics::Snapshot;
 use crate::process::ProcessRow;
 use std::collections::{HashMap, VecDeque};
@@ -12,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const CSV_HEADER: &str = "time,cpu_pct,kernel_pct,clock_mhz,memory_pct,memory_used_bytes,disk_active_pct,disk_read_bps,disk_write_bps,net_rx_bps,net_tx_bps,gpu_pct,temperature_c,processes,top_processes";
+pub const CSV_HEADER: &str = "time,cpu_pct,kernel_pct,clock_mhz,memory_pct,memory_used_bytes,disk_active_pct,disk_read_bps,disk_write_bps,net_rx_bps,net_tx_bps,gpu_pct,temperature_c,processes,top_processes,docker_running,docker_cpu_pct,docker_memory_bytes";
 
 /// One recorded sample.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -34,6 +35,12 @@ pub struct Record {
     pub processes: usize,
     /// Top three processes by CPU, `name 12.3%|name 4.0%|...`.
     pub top: String,
+    /// Running Docker containers; 0 when the engine is not connected.
+    pub docker_running: u32,
+    /// Summed CPU of the running containers, in percent (can exceed 100).
+    pub docker_cpu: f32,
+    /// Summed memory of the running containers, in bytes.
+    pub docker_mem: u64,
 }
 
 impl Record {
@@ -57,12 +64,13 @@ impl Record {
             temp_c: s.thermal.max_c(),
             processes: s.process_count,
             top,
+            ..Default::default()
         }
     }
 
     pub fn to_csv(&self) -> String {
         format!(
-            "{},{:.2},{:.2},{},{:.2},{},{:.2},{:.0},{:.0},{:.0},{:.0},{:.2},{},{},{}",
+            "{},{:.2},{:.2},{},{:.2},{},{:.2},{:.0},{:.0},{:.0},{:.0},{:.2},{},{},{},{},{:.2},{}",
             self.time,
             self.cpu,
             self.kernel,
@@ -77,12 +85,17 @@ impl Record {
             self.gpu,
             self.temp_c.map(|t| format!("{t:.1}")).unwrap_or_default(),
             self.processes,
-            self.top
+            self.top,
+            self.docker_running,
+            self.docker_cpu,
+            self.docker_mem
         )
     }
 
+    /// Parses a CSV row. Rows written before the Docker columns were added (15 fields) parse
+    /// with zero Docker totals.
     pub fn from_csv(line: &str) -> Option<Self> {
-        let f: Vec<&str> = line.splitn(15, ',').collect();
+        let f: Vec<&str> = line.split(',').collect();
         if f.len() < 14 {
             return None;
         }
@@ -102,6 +115,9 @@ impl Record {
             temp_c: f[12].parse().ok(),
             processes: f[13].parse().unwrap_or(0),
             top: f.get(14).map(|s| s.to_string()).unwrap_or_default(),
+            docker_running: f.get(15).and_then(|s| s.parse().ok()).unwrap_or(0),
+            docker_cpu: f.get(16).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            docker_mem: f.get(17).and_then(|s| s.parse().ok()).unwrap_or(0),
         })
     }
 }
@@ -140,6 +156,8 @@ pub struct Recorder {
     pub dir: PathBuf,
     pub last_error: Option<String>,
     pub last_saved: Option<PathBuf>,
+    /// Docker totals for the next sample; `None` when the engine is not connected.
+    pub docker: Option<Totals>,
 }
 
 impl Default for Recorder {
@@ -153,6 +171,7 @@ impl Default for Recorder {
             dir: default_dir(),
             last_error: None,
             last_saved: None,
+            docker: None,
         }
     }
 }
@@ -168,7 +187,12 @@ impl Recorder {
         if snap.seq == 0 {
             return;
         }
-        let rec = Record::from_snapshot(snap, rows);
+        let mut rec = Record::from_snapshot(snap, rows);
+        if let Some(t) = self.docker {
+            rec.docker_running = t.running as u32;
+            rec.docker_cpu = t.cpu_pct;
+            rec.docker_mem = t.mem_used;
+        }
         self.track_processes(&rec.time, rows);
         if let Some(f) = &mut self.file {
             let res = writeln!(f.out, "{}", rec.to_csv()).and_then(|_| {
@@ -366,12 +390,30 @@ mod tests {
 
     #[test]
     fn csv_roundtrip() {
-        let r = Record::from_snapshot(&snap(1, 12.5), &[row(4, "a,b.exe", 3.0), row(8, "c.exe", 9.0)]);
+        let mut r = Record::from_snapshot(&snap(1, 12.5), &[row(4, "a,b.exe", 3.0), row(8, "c.exe", 9.0)]);
         assert!(r.top.starts_with("c.exe 9.0%|a b.exe"));
+        r.docker_running = 3;
+        r.docker_cpu = 42.5;
+        r.docker_mem = 512 * 1024 * 1024;
         let back = Record::from_csv(&r.to_csv()).unwrap();
         assert_eq!(back.cpu, 12.5);
         assert_eq!(back.mem_used, 600);
         assert_eq!(back.top, r.top);
+        assert_eq!(back.docker_running, 3);
+        assert_eq!(back.docker_cpu, 42.5);
+        assert_eq!(back.docker_mem, 512 * 1024 * 1024);
+        assert_eq!(CSV_HEADER.split(',').count(), 18);
+        assert_eq!(r.to_csv().split(',').count(), 18);
+    }
+
+    #[test]
+    fn legacy_csv_row_parses_with_zero_docker_totals() {
+        let legacy = "2026-10-15 10:00:00,12.50,3.00,2400,55.00,1000,1.00,0,0,0,0,0.00,45.0,120,a 1.0%|b 2.0%";
+        let r = Record::from_csv(legacy).unwrap();
+        assert_eq!(r.cpu, 12.5);
+        assert_eq!(r.processes, 120);
+        assert_eq!(r.top, "a 1.0%|b 2.0%");
+        assert_eq!((r.docker_running, r.docker_cpu, r.docker_mem), (0, 0.0, 0));
     }
 
     #[test]
@@ -382,7 +424,9 @@ mod tests {
         let path = rec.start(None).unwrap();
         assert!(rec.is_recording());
         rec.on_sample(&snap(2, 6.0), &[row(10, "a.exe", 1.0), row(11, "b.exe", 2.0)]);
+        rec.docker = Some(Totals { running: 2, cpu_pct: 7.5, mem_used: 100, ..Default::default() });
         rec.on_sample(&snap(3, 7.0), &[row(11, "b.exe", 2.0)]);
+        assert_eq!(rec.ring.back().map(|r| (r.docker_running, r.docker_cpu, r.docker_mem)), Some((2, 7.5, 100)));
         assert!(rec.events.iter().any(|e| e.kind == EventKind::Started && e.text.starts_with("b.exe")));
         assert!(rec.events.iter().any(|e| e.kind == EventKind::Exited && e.text.starts_with("a.exe")));
         assert_eq!(rec.stop(), Some(path.clone()));

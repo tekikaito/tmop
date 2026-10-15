@@ -4,6 +4,7 @@
 use super::theme::{self, metric_color, mix, with_alpha};
 use super::widgets::{self, draw_graph, draw_icon, led_gradient_row, led_row, Graph, GraphLine, Icon, LedStyle};
 use super::{App, Device, FrameData};
+use crate::docker::model::{Container, EngineStatus};
 use crate::metrics::Series;
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Stroke};
@@ -14,9 +15,51 @@ const VALUE_BLUE: Color32 = Color32::from_rgb(0x4F, 0xB4, 0xFF);
 const CELL_BORDER: Color32 = Color32::from_rgb(0x31, 0xD1, 0xFF);
 const CELL_BG: Color32 = Color32::from_rgb(0x22, 0x27, 0x23);
 
+/// Docker series copied from the backend for the Performance page.
+#[derive(Clone, Debug)]
+pub struct DockerPerfCache {
+    /// Backend `stats_seq` the copy was taken at.
+    pub stats_seq: u64,
+    pub totals_cpu: Series,
+    /// Bytes.
+    pub totals_mem: Series,
+    /// CPU series of each tracked container, keyed by full id.
+    pub per_container: Vec<(String, Series)>,
+}
+
+impl Default for DockerPerfCache {
+    fn default() -> Self {
+        Self { stats_seq: 0, totals_cpu: Series::new(2), totals_mem: Series::new(2), per_container: Vec::new() }
+    }
+}
+
 impl App {
     fn cpus_expanded(&self) -> bool {
         self.settings.extra.get("performanceCpusExpanded").and_then(|v| v.as_bool()).unwrap_or(true)
+    }
+
+    /// Copies the Docker series when the backend published new stats. The backend lock is
+    /// held only for the copy.
+    pub fn refresh_docker_perf(&mut self) {
+        let Some(b) = self.docker.backend() else { return };
+        let s = match b.shared.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        if s.stats_seq == self.perf_docker.stats_seq {
+            return;
+        }
+        self.perf_docker = DockerPerfCache {
+            stats_seq: s.stats_seq,
+            totals_cpu: s.totals_hist.cpu.clone(),
+            totals_mem: s.totals_hist.mem_used.clone(),
+            per_container: s.stats.iter().map(|(id, st)| (id.clone(), st.cpu.clone())).collect(),
+        };
+    }
+
+    /// The Docker device is listed while the engine is reachable and the Docker page is enabled.
+    fn docker_listed(&self) -> bool {
+        self.docker.visible(&self.settings) && self.docker.last_status == EngineStatus::Connected
     }
 
     pub fn performance_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
@@ -26,6 +69,10 @@ impl App {
         super::kit::header_toolbar(ui, body, 200.0, |ui| refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked());
         if refresh {
             self.sampler.refresh();
+        }
+        // Still connecting is not a reason to leave the page; a disabled or unreachable engine is.
+        if self.device == Device::Docker && (!self.docker.visible(&self.settings) || self.docker.last_status == EngineStatus::Unreachable) {
+            self.device = Device::Cpu;
         }
         let list = Rect::from_min_size(body.min, vec2(LIST_W, body.height()));
         let detail = Rect::from_min_max(pos2(list.right(), body.top()), body.max);
@@ -39,6 +86,7 @@ impl App {
             Device::Disk => self.disk_detail(ui, inner, fd),
             Device::Network => self.network_detail(ui, inner, fd),
             Device::Thermal => self.thermal_detail(ui, inner, fd),
+            Device::Docker => self.docker_detail(ui, inner, fd),
         }
     }
 
@@ -51,8 +99,12 @@ impl App {
         }
         net.pushed = fd.hist.net_rx.pushed;
         let net_peak = net.max().max(1024.0);
+        let docker_listed = self.docker_listed();
         let mut y = list.top() + 6.0;
         for d in Device::ALL {
+            if d == Device::Docker && !docker_listed {
+                continue;
+            }
             let r = Rect::from_min_size(pos2(list.left() + 4.0, y), vec2(list.width() - 8.0, 58.0));
             let resp = ui.interact(r, ui.id().with(("dev", d.key())), Sense::click());
             let p = ui.painter();
@@ -77,6 +129,10 @@ impl App {
                 Device::Disk => ("Disk".into(), "Physical disks".into(), format!("{:.1}%", s.disk.active_pct), &fd.hist.disk, (0.0, 100.0)),
                 Device::Network => ("Network".into(), "All network adapters".into(), format!("S: {}  R: {}", format_rate(s.network.tx_bps), format_rate(s.network.rx_bps)), &net, (0.0, net_peak)),
                 Device::Thermal => ("Thermals".into(), "ACPI thermal zones".into(), s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("no sensor".into()), &fd.hist.thermal, (0.0, 110.0)),
+                Device::Docker => {
+                    let t = self.docker.ui.snap.totals;
+                    ("Docker".into(), format!("{} running", t.running), format!("{:.1}% CPU", t.cpu_pct), &self.perf_docker.totals_cpu, (0.0, 100.0))
+                }
             };
             let tx = r.left() + 42.0;
             let tw = r.right() - 90.0 - tx;
@@ -401,5 +457,102 @@ impl App {
             let items: Vec<(&str, String)> = s.thermal.zones.iter().map(|(z, c)| (z.as_str(), self.temp(*c))).collect();
             self.stat_row(ui, rect, y, &items, fd);
         }
+    }
+
+    fn docker_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
+        let pal = fd.pal;
+        let t = self.docker.ui.snap.totals;
+        let blue = Device::Docker.color();
+        // The running count is in the stat row; the headline must fit beside the LED bar.
+        let value = format!("{:.1}% CPU", t.cpu_pct);
+        let mut y = self.detail_title(ui, rect, "Docker", &value, (t.cpu_pct / 100.0).clamp(0.0, 1.0), [blue, theme::lighten(blue, 0.3), metric_color("clock")], fd);
+        let p = ui.painter().clone();
+        let items = [
+            ("Containers", format!("{} / {}", t.running, t.containers)),
+            ("CPU", format!("{:.1}%", t.cpu_pct)),
+            ("Memory", format_bytes(t.mem_used as f64)),
+            ("Net rx", format_rate(t.net_rx_bps)),
+            ("Net tx", format_rate(t.net_tx_bps)),
+            ("Disk read", format_rate(t.blk_read_bps)),
+            ("Disk write", format_rate(t.blk_write_bps)),
+        ];
+        y = self.stat_row(ui, rect, y + 4.0, &items, fd);
+        let mem_max = self.docker.ui.snap.info.as_ref().map(|i| i.mem_total as f32).filter(|m| *m > 0.0).unwrap_or(self.perf_docker.totals_mem.max()).max(1.0);
+        let gr = Rect::from_min_max(pos2(rect.left(), y + 8.0), pos2(rect.right(), y + 8.0 + 160.0));
+        let mut g = self.graph(
+            vec![
+                GraphLine { series: &self.perf_docker.totals_cpu, color: blue, range: (0.0, 100.0) },
+                GraphLine { series: &self.perf_docker.totals_mem, color: metric_color("memory"), range: (0.0, mem_max) },
+            ],
+            fd,
+        );
+        g.border = Some(blue);
+        g.fill = 0.10;
+        draw_graph(&p, gr, &g);
+        p.text(pos2(gr.left() + 6.0, gr.top() + 4.0), Align2::LEFT_TOP, "100%", theme::ui(11.0), blue);
+        p.text(pos2(gr.right() - 6.0, gr.top() + 4.0), Align2::RIGHT_TOP, format!("CPU  \u{2022}  Memory    scale {}", format_bytes(mem_max as f64)), theme::ui(11.0), pal.text_dim);
+        y = gr.bottom() + 14.0;
+        let foot = rect.bottom() - 18.0;
+        let cards = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), foot - 12.0));
+        if cards.height() > 40.0 {
+            self.docker_cards(ui, cards, fd);
+        }
+        let snap = &self.docker.ui.snap;
+        let host = if snap.active.is_empty() { "N/A".to_string() } else { snap.active.clone() };
+        let engine = snap.info.as_ref().map(|i| i.server_version.clone()).filter(|v| !v.is_empty()).unwrap_or("N/A".into());
+        p.text(pos2(rect.left(), rect.bottom()), Align2::LEFT_BOTTOM, format!("Host {host}  \u{2022}  Engine {engine}"), theme::ui(11.5), pal.text_dim);
+    }
+
+    /// Scrollable grid of container cards: name, state, CPU and memory, and a CPU graph for
+    /// containers with a series. Containers without one (not running) come last, dimmed.
+    fn docker_cards(&self, ui: &mut egui::Ui, area: Rect, fd: &FrameData<'_>) {
+        let pal = fd.pal;
+        let blue = Device::Docker.color();
+        let snap = &self.docker.ui.snap;
+        let mut cards: Vec<(&Container, Option<&Series>)> = snap
+            .containers
+            .iter()
+            .map(|c| (c, self.perf_docker.per_container.iter().find(|(id, _)| *id == c.id).map(|(_, s)| s)))
+            .collect();
+        cards.sort_by_key(|(_, s)| s.is_none());
+        if cards.is_empty() {
+            ui.painter().text(area.left_top() + vec2(0.0, 8.0), Align2::LEFT_TOP, "No containers on this engine.", theme::ui(12.0), pal.text_dim);
+            return;
+        }
+        let cols = if area.width() >= 720.0 { 3 } else { 2 };
+        let (gap, ch) = (10.0, 110.0);
+        let cw = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
+        let content_h = cards.len().div_ceil(cols) as f32 * (ch + gap) - gap;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area), |ui| {
+            egui::ScrollArea::vertical().id_salt("docker-cards").auto_shrink([false, false]).show(ui, |ui| {
+                let (content, _) = ui.allocate_exact_size(vec2(area.width(), content_h), Sense::hover());
+                let p = ui.painter().clone();
+                for (i, (c, series)) in cards.iter().enumerate() {
+                    let (col, row) = (i % cols, i / cols);
+                    let r = Rect::from_min_size(pos2(content.left() + col as f32 * (cw + gap), content.top() + row as f32 * (ch + gap)), vec2(cw, ch));
+                    let running = c.state.is_running();
+                    p.rect_filled(r, 4.0, CELL_BG);
+                    p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, if running { with_alpha(blue, 0.9) } else { pal.card_stroke }));
+                    let name_color = if running { pal.text } else { pal.text_dim };
+                    widgets::text_fit(&p, pos2(r.left() + 10.0, r.top() + 14.0), Align2::LEFT_CENTER, &c.name, theme::semibold(13.0), name_color, cw - 110.0);
+                    p.text(pos2(r.right() - 10.0, r.top() + 14.0), Align2::RIGHT_CENTER, c.state.label(), theme::ui(11.5), if running { blue } else { pal.text_dim });
+                    let line = match snap.stats_last.get(&c.id) {
+                        Some(s) if running => format!("CPU {:.1}%   Mem {}", s.cpu_pct, format_bytes(s.mem_used as f64)),
+                        _ => c.status.clone(),
+                    };
+                    widgets::text_fit(&p, pos2(r.left() + 10.0, r.top() + 34.0), Align2::LEFT_CENTER, &line, theme::ui(11.5), pal.text_dim, cw - 20.0);
+                    if let (true, Some(s)) = (running, *series) {
+                        let gr = Rect::from_min_max(pos2(r.left() + 6.0, r.top() + 48.0), pos2(r.right() - 6.0, r.bottom() - 6.0));
+                        let mut g = self.graph(vec![GraphLine { series: s, color: blue, range: (0.0, 100.0) }], fd);
+                        g.background = None;
+                        g.grid = Some(with_alpha(Color32::from_rgb(0x3A, 0x44, 0x3C), 0.9));
+                        g.px_per_update = (self.settings.graph_pixels_per_update as f32 / 2.0).max(2.0);
+                        g.line_width = 1.6;
+                        g.fill = 0.10;
+                        draw_graph(&p, gr, &g);
+                    }
+                }
+            });
+        });
     }
 }
