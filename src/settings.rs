@@ -57,6 +57,12 @@ pub struct Settings {
     pub main_window_placement: String,
     pub popout_bounds_by_skin: String,
     pub popout_skin: String,
+    /// Hides the Docker page in the navigation.
+    pub docker_hide_page: bool,
+    /// Docker context in use; empty means the context selected in the Docker CLI.
+    pub docker_active_context: String,
+    /// Per-context Docker options, keyed by context name.
+    pub docker_contexts: BTreeMap<String, DockerContextSettings>,
     /// Any other keys (e.g. `diskLights.*`) are preserved verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -102,8 +108,28 @@ impl Default for Settings {
             main_window_placement: String::new(),
             popout_bounds_by_skin: String::new(),
             popout_skin: "com.tmog.console".into(),
+            docker_hide_page: false,
+            docker_active_context: String::new(),
+            docker_contexts: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
+    }
+}
+
+/// Per-context Docker options.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerContextSettings {
+    /// Blocks start, stop, remove and other changes for this context.
+    pub read_only: bool,
+    /// Shows desktop notifications for container events.
+    pub notifications: bool,
+}
+
+impl Default for DockerContextSettings {
+    /// Read-only off, notifications on.
+    fn default() -> Self {
+        Self { read_only: false, notifications: true }
     }
 }
 
@@ -348,6 +374,36 @@ mod tests {
         let Ok(text) = std::fs::read_to_string(&p) else { return };
         let (_, outcome) = Settings::from_json(&text).expect("TMOG settings should parse");
         assert!(matches!(outcome, LoadOutcome::Loaded | LoadOutcome::ResetSchema(_)));
+    }
+
+    #[test]
+    fn docker_settings_roundtrip() {
+        let mut s = Settings { docker_hide_page: true, docker_active_context: "work".into(), ..Default::default() };
+        s.docker_contexts
+            .insert("work".into(), DockerContextSettings { read_only: true, notifications: false });
+        s.docker_contexts.insert("desktop-linux".into(), DockerContextSettings::default());
+        let json = s.to_json();
+        assert!(json.contains("\"dockerContexts\""));
+        assert!(json.contains("\"readOnly\":true"));
+        let (back, outcome) = Settings::from_json(&json).unwrap();
+        assert!(matches!(outcome, LoadOutcome::Loaded));
+        assert_eq!(back, s);
+        assert!(back.docker_hide_page);
+        assert_eq!(back.docker_active_context, "work");
+        assert!(!back.docker_contexts["work"].notifications);
+        assert!(back.docker_contexts["desktop-linux"].notifications);
+    }
+
+    #[test]
+    fn docker_settings_default_when_absent() {
+        let (s, outcome) = Settings::from_json(SAMPLE).unwrap();
+        assert!(matches!(outcome, LoadOutcome::Loaded));
+        assert!(!s.docker_hide_page);
+        assert!(s.docker_active_context.is_empty());
+        assert!(s.docker_contexts.is_empty());
+        let (s, _) = Settings::from_json(r#"{"schemaVersion":12,"dockerContexts":{"x":{"readOnly":true}}}"#).unwrap();
+        assert!(s.docker_contexts["x"].read_only);
+        assert!(s.docker_contexts["x"].notifications, "missing notifications defaults to true");
     }
 
     #[test]
