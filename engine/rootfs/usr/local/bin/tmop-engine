@@ -1,0 +1,367 @@
+#!/bin/sh
+# tmop-engine: lifecycle and maintenance commands for the TMOP engine distro.
+#
+# Runs inside the WSL2 distro as root. wsl.conf starts it with "start" at distro boot,
+# and TMOP calls the other subcommands through "wsl --exec".
+#
+# Subcommands:
+#   start                    mount cgroups, apply limits, start containerd and dockerd (idempotent)
+#   stop                     stop dockerd, then containerd (TERM, 20 s grace, then KILL)
+#   status                   print "running" (exit 0) or "stopped" (exit 1)
+#   limits <cpus> <mem_mb>   persist limits to /etc/tmop/limits and apply them now (0 = unlimited)
+#   upgrade <tar|tar.gz>     replace the rootfs, keeping Docker data, limits and temp dirs
+#   ip                       print the IPv4 address of eth0
+#   version                  print the engine version tag
+#   windows-cli-dir          print the directory holding the Windows docker CLI for this arch
+#
+# Busybox ash compatible: only POSIX sh constructs and busybox applets.
+
+set -u
+
+# Exported: the [boot] command may start with no PATH, and the daemons look up runc, iptables
+# and docker-proxy through it.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ENGINE=/usr/local/bin/tmop-engine
+CG=tmop-engine                        # cgroup holding the daemons; also the docker cgroup-parent
+LIMITS_FILE=/etc/tmop/limits
+VERSION_FILE=/etc/tmop/version
+RUN_DIR=/run/tmop
+LOG_DIR=/var/log/tmop
+SOCK=/var/run/docker.sock
+CONTAINERD_PID=$RUN_DIR/containerd.pid
+DOCKERD_PID=$RUN_DIR/dockerd.pid
+
+die() {
+    echo "tmop-engine: $*" >&2
+    exit 1
+}
+
+usage() {
+    echo "usage: tmop-engine start|stop|status|limits <cpus> <memory_mb>|upgrade <tar>|ip|version|windows-cli-dir" >&2
+    exit 2
+}
+
+# Writes $2 to file $1. A failure is reported but does not abort the caller.
+write_file() {
+    printf '%s\n' "$2" > "$1" 2>/dev/null || echo "tmop-engine: warning: cannot write $1" >&2
+}
+
+# ---------------------------------------------------------------------------
+# cgroups
+#
+# Two layouts are supported:
+#  - v2 (unified): /sys/fs/cgroup/cgroup.controllers exists. The engine lives in
+#    /sys/fs/cgroup/tmop-engine and limits are cpu.max and memory.max.
+#  - v1 (legacy): one hierarchy per controller, /sys/fs/cgroup/<controller>/tmop-engine.
+#    Limits are cpu.cfs_period_us / cpu.cfs_quota_us and memory.limit_in_bytes.
+# A limit of 0 means unlimited: "max" on v2, -1 on v1.
+# ---------------------------------------------------------------------------
+
+is_v2() {
+    [ -f /sys/fs/cgroup/cgroup.controllers ]
+}
+
+# Mounts the cgroup hierarchy if WSL did not already do so. Tries unified first.
+mount_cgroups() {
+    mountpoint -q /sys/fs/cgroup && return 0
+    mkdir -p /sys/fs/cgroup
+    if mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null; then
+        return 0
+    fi
+    mount -t tmpfs -o mode=755 tmpfs /sys/fs/cgroup || die "cannot mount /sys/fs/cgroup"
+    for c in $(awk 'NR > 1 && $4 == "1" { print $1 }' /proc/cgroups); do
+        mkdir -p "/sys/fs/cgroup/$c"
+        mount -t cgroup -o "$c" cgroup "/sys/fs/cgroup/$c" 2>/dev/null
+    done
+}
+
+# Creates the tmop-engine cgroup in every hierarchy that is available.
+create_cgroup() {
+    if is_v2; then
+        mkdir -p "/sys/fs/cgroup/$CG"
+        # Enable every controller below the root so the engine and its children can be limited.
+        for c in $(cat /sys/fs/cgroup/cgroup.controllers); do
+            echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+        done
+    else
+        for d in /sys/fs/cgroup/*/; do
+            [ -d "$d" ] && mkdir -p "${d}${CG}"
+        done
+        # A new cpuset cgroup has no CPUs or memory nodes and refuses processes until they are set.
+        cs=/sys/fs/cgroup/cpuset/$CG
+        if [ -d "$cs" ] && [ -z "$(cat "$cs/cpuset.cpus")" ]; then
+            write_file "$cs/cpuset.cpus" "$(cat /sys/fs/cgroup/cpuset/cpuset.cpus)"
+            write_file "$cs/cpuset.mems" "$(cat /sys/fs/cgroup/cpuset/cpuset.mems)"
+        fi
+    fi
+}
+
+# Moves process $1 into the tmop-engine cgroup (in all hierarchies on v1).
+join_cgroup() {
+    if is_v2; then
+        write_file "/sys/fs/cgroup/$CG/cgroup.procs" "$1"
+    else
+        for d in /sys/fs/cgroup/*/$CG; do
+            [ -d "$d" ] && write_file "$d/cgroup.procs" "$1"
+        done
+    fi
+}
+
+# Reads CPUS and MEMORY_MB from the limits file. Missing or invalid values mean 0.
+read_limits() {
+    CPUS=$(sed -n 's/^CPUS=//p' "$LIMITS_FILE" 2>/dev/null | head -n 1)
+    MEMORY_MB=$(sed -n 's/^MEMORY_MB=//p' "$LIMITS_FILE" 2>/dev/null | head -n 1)
+    case "$CPUS" in ''|*[!0-9]*) CPUS=0 ;; esac
+    case "$MEMORY_MB" in ''|*[!0-9]*) MEMORY_MB=0 ;; esac
+}
+
+# Applies CPUS and MEMORY_MB from the limits file to the tmop-engine cgroup.
+apply_limits() {
+    read_limits
+    mount_cgroups
+    create_cgroup
+
+    if [ "$CPUS" -eq 0 ]; then
+        cpu_quota_v1=-1
+        cpu_max="max 100000"
+    else
+        cpu_quota_v1=$((CPUS * 100000))
+        cpu_max="$cpu_quota_v1 100000"
+    fi
+    if [ "$MEMORY_MB" -eq 0 ]; then
+        mem_bytes_v1=-1
+        mem_max=max
+    else
+        mem_bytes_v1=$((MEMORY_MB * 1048576))
+        mem_max=$mem_bytes_v1
+    fi
+
+    if is_v2; then
+        write_file "/sys/fs/cgroup/$CG/cpu.max" "$cpu_max"
+        write_file "/sys/fs/cgroup/$CG/memory.max" "$mem_max"
+    else
+        if [ -d "/sys/fs/cgroup/cpu/$CG" ]; then
+            # The period must be written before the quota.
+            write_file "/sys/fs/cgroup/cpu/$CG/cpu.cfs_period_us" 100000
+            write_file "/sys/fs/cgroup/cpu/$CG/cpu.cfs_quota_us" "$cpu_quota_v1"
+        fi
+        if [ -d "/sys/fs/cgroup/memory/$CG" ]; then
+            write_file "/sys/fs/cgroup/memory/$CG/memory.limit_in_bytes" "$mem_bytes_v1"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# daemons
+# ---------------------------------------------------------------------------
+
+# True if the process whose pid is in pidfile $1 is alive.
+pid_alive() {
+    [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+is_running() {
+    pid_alive "$DOCKERD_PID"
+}
+
+# Starts "$@" in the background, appending output to $LOG_DIR/<name>.log.
+# $1 is the daemon name, the rest is the command line.
+start_daemon() {
+    name=$1
+    shift
+    nohup "$@" >> "$LOG_DIR/$name.log" 2>&1 &
+    echo $! > "$RUN_DIR/$name.pid"
+}
+
+# Stops the daemon whose pid is in pidfile $1: TERM, wait up to 20 s, then KILL.
+stop_daemon() {
+    [ -f "$1" ] || return 0
+    pid=$(cat "$1")
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "tmop-engine: pid $pid did not stop, sending KILL" >&2
+            kill -KILL "$pid" 2>/dev/null
+        fi
+    fi
+    rm -f "$1"
+}
+
+# Waits up to 30 s for the Docker API on the socket to answer. Gives up at once if dockerd exited.
+wait_for_docker() {
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if docker version >/dev/null 2>&1; then
+            return 0
+        fi
+        pid_alive "$DOCKERD_PID" || return 1
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# The [boot] command and a TMOP call can run start at the same time. A mkdir lock serializes
+# the commands that change daemon state. The lock is released on exit, or before an exec.
+LOCK_DIR=$RUN_DIR/lock
+
+lock() {
+    mkdir -p "$RUN_DIR"
+    i=0
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        # Reclaim the lock if its owner is gone (for example after a kill -9).
+        owner=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$LOCK_DIR"
+            continue
+        fi
+        i=$((i + 1))
+        [ "$i" -lt 120 ] || die "timed out waiting for the lock $LOCK_DIR"
+        sleep 1
+    done
+    echo $$ > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT
+}
+
+unlock() {
+    trap - EXIT
+    rm -rf "$LOCK_DIR"
+}
+
+cmd_start() {
+    lock
+    mkdir -p "$LOG_DIR" /run/containerd /var/lib/docker
+
+    apply_limits
+    if is_running; then
+        echo ok
+        return 0
+    fi
+
+    # Clear leftovers from a previous run that did not shut down cleanly.
+    stop_daemon "$DOCKERD_PID"
+    stop_daemon "$CONTAINERD_PID"
+    rm -f "$SOCK"
+
+    # Moving this shell into the cgroup first means the daemons inherit it.
+    join_cgroup $$
+
+    # Container networking needs IPv4 forwarding.
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null
+
+    start_daemon containerd containerd
+
+    # dockerd can fail on the first try while boot is still settling (for example
+    # "iptables not found" during its NAT setup), so retry a few times.
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        start_daemon dockerd dockerd
+        if wait_for_docker; then
+            echo ok
+            return 0
+        fi
+        echo "tmop-engine: dockerd attempt $attempt failed, last log lines:" >&2
+        tail -n 5 "$LOG_DIR/dockerd.log" >&2 2>/dev/null
+        stop_daemon "$DOCKERD_PID"
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    return 1
+}
+
+# Stops dockerd first so it can finish its work before containerd goes away.
+stop_all() {
+    stop_daemon "$DOCKERD_PID"
+    stop_daemon "$CONTAINERD_PID"
+    rm -f "$SOCK"
+}
+
+cmd_stop() {
+    lock
+    stop_all
+    echo "stopped"
+}
+
+cmd_status() {
+    if is_running; then
+        echo running
+        return 0
+    fi
+    echo stopped
+    return 1
+}
+
+cmd_limits() {
+    [ $# -eq 2 ] || usage
+    case "$1" in ''|*[!0-9]*) die "cpus must be a whole number: $1" ;; esac
+    case "$2" in ''|*[!0-9]*) die "memory_mb must be a whole number: $2" ;; esac
+    lock
+    mkdir -p /etc/tmop
+    printf 'CPUS=%s\nMEMORY_MB=%s\n' "$1" "$2" > "$LIMITS_FILE" || die "cannot write $LIMITS_FILE"
+    apply_limits
+    echo "limits: cpus=$1 memory_mb=$2"
+}
+
+# Replaces the rootfs from a tar or tar.gz. Docker data, limits and temp dirs are kept.
+cmd_upgrade() {
+    [ $# -eq 1 ] || usage
+    [ -f "$1" ] || die "no such file: $1"
+    file=$1
+    lock
+    stop_all
+
+    # Paths that must survive the extraction. Archives may store names with or without
+    # a leading "./", so both spellings are excluded. An excluded directory is skipped with its contents.
+    set --
+    for p in var/lib/docker etc/tmop/limits tmp run proc sys dev mnt; do
+        set -- "$@" --exclude="$p" --exclude="./$p"
+    done
+    case "$file" in
+        *.gz) gzip -dc "$file" ;;
+        *) cat "$file" ;;
+    esac | tar -x -f - -C / "$@" || die "extracting $file failed"
+    sync
+    echo "upgraded to $(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
+    # Release the lock before exec, because the exec'd start takes it again.
+    unlock
+    # Re-exec the new script so the start logic comes from the new rootfs.
+    exec "$ENGINE" start
+}
+
+cmd_ip() {
+    addr=$(ip -4 -o addr show eth0 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p' | head -n 1)
+    [ -n "$addr" ] || addr=$(hostname -i 2>/dev/null | awk '{ print $1 }')
+    [ -n "$addr" ] || die "no IPv4 address found"
+    echo "$addr"
+}
+
+cmd_version() {
+    cat "$VERSION_FILE" 2>/dev/null || die "no version file at $VERSION_FILE"
+}
+
+cmd_windows_cli_dir() {
+    case "$(uname -m)" in
+        x86_64) arch=x64 ;;
+        aarch64) arch=arm64 ;;
+        *) die "unsupported architecture: $(uname -m)" ;;
+    esac
+    echo "/usr/share/tmop/windows/$arch"
+}
+
+case "${1:-}" in
+    start) shift; cmd_start "$@" ;;
+    stop) shift; cmd_stop "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    limits) shift; cmd_limits "$@" ;;
+    upgrade) shift; cmd_upgrade "$@" ;;
+    ip) shift; cmd_ip "$@" ;;
+    version) shift; cmd_version "$@" ;;
+    windows-cli-dir) shift; cmd_windows_cli_dir "$@" ;;
+    *) usage ;;
+esac
