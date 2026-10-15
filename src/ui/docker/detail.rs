@@ -4,7 +4,7 @@
 //! Engine work runs as [`Task`]s on the worker runtime and log follows as [`LogSession`]s.
 //! Both are stopped or cancelled when the selection changes or the engine goes away.
 
-use super::terminal_tab::{terminal_tab, TerminalSessions};
+use super::terminal_tab::{body_rect, terminal_tab, TerminalSessions};
 use super::{DockerUi, Snap, Tab};
 use crate::docker::backend::{err_text, Backend, Engine, NoticeKind, Task};
 use crate::docker::exec::ExecOptions;
@@ -16,6 +16,7 @@ use crate::process::format_rate;
 use crate::ui::icons::IconCache;
 use crate::ui::kit;
 use crate::ui::table::{self, cmp_str, Cell, Col, TableState};
+use crate::ui::terminal::grid_for;
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, Graph, GraphLine, Icon};
 use crate::ui::{App, FrameData};
@@ -240,19 +241,27 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
         let alive: HashSet<&str> = app.docker.ui.snap.containers.iter().map(|c| c.id.as_str()).collect();
         app.docker.ui.detail.terminals.retain(&alive);
     }
+    let loaded = app.docker.ui.snap.status == EngineStatus::Connected && (!app.docker.ui.snap.containers.is_empty() || app.docker.ui.last_list_seq > 0);
+    if let Some(name) = app.docker.ui.detail.terminals.drop_unmatched(&app.docker.ui.snap.containers, loaded) {
+        app.docker.ui.toast(NoticeKind::Error, format!("Container {name} not found for the terminal request"));
+    }
     if let Some((id, options)) = app.docker.ui.detail.terminals.take_pending(&app.docker.ui.snap.containers) {
         // The containers table keeps its own selection and writes it back every frame, so it must agree.
         app.docker.ui.selected_container = Some(id.clone());
         app.docker.ui.containers.selected = Some(id.clone());
         app.docker.ui.detail.tab = DetailTab::Terminal;
         app.docker.ui.tab = Tab::Containers;
-        open_terminal(app, ui, &id, options);
+        // The session opens at the size its terminal body will have, so the first frame does not resize it.
+        let grid = grid_for(ui, body_rect(detail_split(inner)[2]));
+        open_terminal(app, ui, &id, options, grid);
     }
+    app.docker.ui.detail.terminals.pump();
 
     let page_tab = app.docker.ui.tab;
     let subject = subject_of(&app.docker.ui);
     let engine = app.docker.backend().and_then(|b| b.engine());
     if subject == Subject::None {
+        app.docker.ui.detail.terminals.set_visible(None);
         app.docker.ui.detail.close(engine.as_ref());
         kit::empty_state(&p, inner, &pal, hint(page_tab));
         return;
@@ -279,7 +288,7 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
 
     let mut toasts: Toasts = Vec::new();
     let ctx = ui.ctx().clone();
-    let split = kit::vsplit(inner, &[24.0, 26.0, -1.0], 6.0);
+    let split = detail_split(inner);
     let state = &mut app.docker.ui.detail;
 
     let allowed = subject.tabs();
@@ -295,10 +304,18 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
 
     let content = split[2];
     let Some(engine) = engine else {
+        state.terminals.set_visible(None);
         state.close(None);
         kit::empty_state(&p, content, &pal, "Engine not reachable");
         return;
     };
+
+    // Only the shown terminal session may request repaints.
+    let shown_terminal = match (&subject, tab) {
+        (Subject::Container(id), DetailTab::Terminal) => Some(id.as_str()),
+        _ => None,
+    };
+    state.terminals.set_visible(shown_terminal);
 
     match tab {
         DetailTab::Logs => logs_tab(&mut state.logs, &engine, &subject, &members, &title, &ctx, ui, content, &pal, &mut toasts),
@@ -327,15 +344,20 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
     }
 }
 
-/// Opens a terminal session for a container chosen by the start-up request; errors become toasts.
-fn open_terminal(app: &mut App, ui: &egui::Ui, id: &str, options: ExecOptions) {
+/// Opens a terminal session of `grid` cells for a container chosen by the start-up request; errors become toasts.
+fn open_terminal(app: &mut App, ui: &egui::Ui, id: &str, options: ExecOptions, grid: (usize, usize)) {
     let Some(engine) = app.docker.backend().and_then(|b| b.engine()) else {
         app.docker.ui.toast(NoticeKind::Error, "Engine not reachable");
         return;
     };
-    if let Err(e) = app.docker.ui.detail.terminals.open(&engine, ui.ctx(), id, options) {
+    if let Err(e) = app.docker.ui.detail.terminals.open(&engine, ui.ctx(), id, options, grid) {
         app.docker.ui.toast(NoticeKind::Error, e);
     }
+}
+
+/// Header, tab strip and content rects of the detail area inside `inner`.
+fn detail_split(inner: Rect) -> Vec<Rect> {
+    kit::vsplit(inner, &[24.0, 26.0, -1.0], 6.0)
 }
 
 /// The subject for the page tab and its selection. Unknown or removed objects give `None`.

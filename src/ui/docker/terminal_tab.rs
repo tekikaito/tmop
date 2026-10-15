@@ -2,7 +2,9 @@
 //! session.
 //!
 //! [`TerminalSessions`] is owned by the detail area and survives container switches and
-//! page changes. Sessions end when their container disappears or the host changes.
+//! page changes. Sessions end when their container disappears or the host changes. Only the
+//! shown session asks for repaints; the others keep their output and query replies flowing
+//! through [`TerminalSessions::pump`].
 
 use super::detail::{Toasts, TOOLBAR_H};
 use crate::docker::backend::{Engine, NoticeKind};
@@ -10,11 +12,12 @@ use crate::docker::exec::{split_command, ExecOptions, ExecSession};
 use crate::docker::model::Container;
 use crate::terminal::{sink_for, Emulator, Transport, TransportState};
 use crate::ui::kit;
-use crate::ui::terminal::TerminalView;
+use crate::ui::terminal::{grid_for, TerminalView};
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets;
 use eframe::egui::{self, pos2, popup::popup_below_widget, popup::PopupCloseBehavior, vec2, Align2, Color32, Rect, Sense, Stroke, TextEdit};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Width of a session's close mark.
@@ -23,9 +26,6 @@ const CLOSE_W: f32 = 18.0;
 const DROP_W: f32 = 26.0;
 /// Width of the command and user inputs in the dropdown.
 const MENU_W: f32 = 260.0;
-/// Initial terminal size in cells.
-const COLS: u16 = 80;
-const ROWS: u16 = 24;
 const SCROLLBACK: usize = 10_000;
 /// Opacity of the buttons that cannot be used right now.
 const DIMMED: f32 = 0.45;
@@ -55,6 +55,8 @@ struct Session {
     view: TerminalView,
     /// Kept for the Restart button.
     options: ExecOptions,
+    /// Set while the session is the one shown; output requests repaints only then.
+    visible: Arc<AtomicBool>,
 }
 
 struct PendingOpen {
@@ -83,13 +85,13 @@ impl TerminalSessions {
         self.by_container.iter().filter(|(_, c)| !c.sessions.is_empty()).map(|(id, _)| id.clone()).collect()
     }
 
-    /// Opens a new session; on success it becomes the active sub-tab and receives focus.
-    pub fn open(&mut self, engine: &Engine, ctx: &egui::Context, container_id: &str, options: ExecOptions) -> Result<(), String> {
+    /// Opens a new session of `grid` cells; on success it becomes the active sub-tab and receives focus.
+    pub fn open(&mut self, engine: &Engine, ctx: &egui::Context, container_id: &str, options: ExecOptions, grid: (usize, usize)) -> Result<(), String> {
         let n = self.next_id;
         self.next_id += 1;
         let cs = self.by_container.entry(container_id.to_string()).or_default();
         let label = label_for(&options, cs.opened + 1);
-        let session = start(engine, ctx, container_id, options, label, view_salt(container_id, n))?;
+        let session = start(engine, ctx, container_id, options, grid, label, view_salt(container_id, n))?;
         cs.opened += 1;
         cs.sessions.push(session);
         cs.active = cs.sessions.len() - 1;
@@ -107,6 +109,32 @@ impl TerminalSessions {
         self.by_container.retain(|id, _| alive.contains(id.as_str()));
     }
 
+    /// Marks the active session of `container` as shown and every other session as hidden.
+    /// Hidden sessions do not request repaints for their output. `None` hides all of them.
+    pub fn set_visible(&self, container: Option<&str>) {
+        for (id, cs) in &self.by_container {
+            for (i, s) in cs.sessions.iter().enumerate() {
+                s.visible.store(container == Some(id.as_str()) && i == cs.active, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Writes the terminal query replies of every running session to its shell, shown or not,
+    /// so a background shell that waits for a reply does not stall.
+    pub fn pump(&mut self) {
+        for cs in self.by_container.values() {
+            for s in &cs.sessions {
+                if s.transport.state() != TransportState::Running {
+                    continue;
+                }
+                let replies = s.emulator.lock().unwrap_or_else(|e| e.into_inner()).take_pty_writes();
+                if !replies.is_empty() {
+                    s.transport.write(&replies);
+                }
+            }
+        }
+    }
+
     /// Asks to open a session as soon as the named container (name or id prefix) is listed; used by the start-up flag.
     pub fn request(&mut self, container: String, command: Option<String>) {
         self.pending = Some(PendingOpen { container, command });
@@ -114,24 +142,43 @@ impl TerminalSessions {
 
     /// Consumes a pending request if its container is listed: returns (container id, options).
     pub fn take_pending(&mut self, containers: &[Container]) -> Option<(String, ExecOptions)> {
-        let wanted = self.pending.as_ref()?;
-        let id = containers.iter().find(|c| c.name == wanted.container || (!wanted.container.is_empty() && c.id.starts_with(&wanted.container)))?.id.clone();
+        let id = find_pending(self.pending.as_ref()?, containers)?;
         let pending = self.pending.take()?;
         let command = pending.command.map(|line| split_command(&line)).filter(|c| !c.is_empty());
-        Some((id, ExecOptions { command, user: None, cols: COLS, rows: ROWS }))
+        Some((id, ExecOptions { command, ..ExecOptions::default() }))
+    }
+
+    /// Drops a pending request whose container is not listed, once the list has loaded.
+    /// Returns the requested container name for the message.
+    pub fn drop_unmatched(&mut self, containers: &[Container], loaded: bool) -> Option<String> {
+        let wanted = self.pending.as_ref()?;
+        if !loaded || find_pending(wanted, containers).is_some() {
+            return None;
+        }
+        self.pending.take().map(|p| p.container)
     }
 
     /// Replaces the session at `index` with a new one that starts with the same options.
-    fn restart(&mut self, engine: &Engine, ctx: &egui::Context, container_id: &str, index: usize) -> Result<(), String> {
+    fn restart(&mut self, engine: &Engine, ctx: &egui::Context, container_id: &str, index: usize, grid: (usize, usize)) -> Result<(), String> {
         let n = self.next_id;
         self.next_id += 1;
         let Some(cs) = self.by_container.get_mut(container_id) else { return Ok(()) };
         let Some(old) = cs.sessions.get(index) else { return Ok(()) };
-        let session = start(engine, ctx, container_id, old.options.clone(), old.label.clone(), view_salt(container_id, n))?;
+        let session = start(engine, ctx, container_id, old.options.clone(), grid, old.label.clone(), view_salt(container_id, n))?;
         cs.sessions[index] = session;
         cs.active = index;
         Ok(())
     }
+}
+
+/// Id of the listed container that a pending request names (by name, or by id prefix).
+fn find_pending(wanted: &PendingOpen, containers: &[Container]) -> Option<String> {
+    containers.iter().find(|c| c.name == wanted.container || (!wanted.container.is_empty() && c.id.starts_with(&wanted.container))).map(|c| c.id.clone())
+}
+
+/// Body of the terminal tab inside the content rect `rect`: below the session toolbar.
+pub fn body_rect(rect: Rect) -> Rect {
+    kit::vsplit(rect, &[TOOLBAR_H, -1.0], 4.0)[1]
 }
 
 impl ContainerSessions {
@@ -156,14 +203,22 @@ fn view_salt(container_id: &str, n: u64) -> String {
     format!("docker-term-{container_id}-{n}")
 }
 
-fn start(engine: &Engine, ctx: &egui::Context, container_id: &str, options: ExecOptions, label: String, salt: String) -> Result<Session, String> {
-    let emulator = Arc::new(Mutex::new(Emulator::new(usize::from(COLS), usize::from(ROWS), SCROLLBACK)));
+/// Starts a session sized `grid` cells; the emulator, the view and the shell all use that size.
+fn start(engine: &Engine, ctx: &egui::Context, container_id: &str, options: ExecOptions, grid: (usize, usize), label: String, salt: String) -> Result<Session, String> {
+    let emulator = Arc::new(Mutex::new(Emulator::new(grid.0, grid.1, SCROLLBACK)));
+    let visible = Arc::new(AtomicBool::new(false));
+    let shown = visible.clone();
     let repaint = ctx.clone();
-    let sink = sink_for(&emulator, move || repaint.request_repaint());
+    let sink = sink_for(&emulator, move || {
+        if shown.load(Ordering::Relaxed) {
+            repaint.request_repaint();
+        }
+    });
+    let options = ExecOptions { cols: grid.0 as u16, rows: grid.1 as u16, ..options };
     let transport = ExecSession::start(engine, container_id, options.clone(), sink)?;
-    let mut view = TerminalView::new(salt);
+    let mut view = TerminalView::new(salt).with_grid(grid);
     view.request_focus();
-    Ok(Session { label, emulator, transport, view, options })
+    Ok(Session { label, emulator, transport, view, options, visible })
 }
 
 /// Terminal tab: the session toolbar on top, the active session below.
@@ -182,6 +237,7 @@ pub fn terminal_tab(
     toasts: &mut Toasts,
 ) {
     let split = kit::vsplit(rect, &[TOOLBAR_H, -1.0], 4.0);
+    let grid = grid_for(ui, body_rect(rect));
     let blocked = if !running {
         Some("Container is not running")
     } else if read_only {
@@ -201,7 +257,7 @@ pub fn terminal_tab(
         }
         ui.add_space(6.0);
         if gated_button(ui, "New session", pal, blocked) {
-            action = Action::New(ExecOptions { command: None, user: None, cols: COLS, rows: ROWS });
+            action = Action::New(ExecOptions::default());
         }
         let drop = drop_button(ui, pal);
         let menu_id = ui.id().with("docker-term-menu");
@@ -215,7 +271,7 @@ pub fn terminal_tab(
             if gated_button(ui, "Start", pal, blocked) {
                 let command = Some(split_command(&cs.command)).filter(|c| !c.is_empty());
                 let user = Some(cs.user.trim().to_string()).filter(|u| !u.is_empty());
-                action = Action::New(ExecOptions { command, user, cols: COLS, rows: ROWS });
+                action = Action::New(ExecOptions { command, user, ..ExecOptions::default() });
                 ui.memory_mut(|m| m.close_popup());
             }
         });
@@ -247,12 +303,12 @@ pub fn terminal_tab(
             }
         }
         Action::New(options) => {
-            if let Err(e) = state.open(engine, ctx, id, options) {
+            if let Err(e) = state.open(engine, ctx, id, options, grid) {
                 toasts.push((NoticeKind::Error, format!("{name}: {e}")));
             }
         }
         Action::Restart(i) => {
-            if let Err(e) = state.restart(engine, ctx, id, i) {
+            if let Err(e) = state.restart(engine, ctx, id, i, grid) {
                 toasts.push((NoticeKind::Error, format!("{name}: {e}")));
             }
         }

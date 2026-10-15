@@ -5,10 +5,13 @@
 
 mod common;
 
+use bollard::container::LogOutput;
+use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{CreateContainerOptionsBuilder, StopContainerOptionsBuilder};
 use bollard::Docker;
 use common::{ensure_image, engine, remove_container, suffix, TEST_IMAGE};
+use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tmop::docker::backend::Engine;
@@ -87,6 +90,27 @@ fn wait_output(out: &Arc<Mutex<Vec<u8>>>, text: &str) -> bool {
 
 fn is_ended(state: &TransportState) -> bool {
     matches!(state, TransportState::Ended(_))
+}
+
+/// Runs `cmd` in the container without a TTY and returns its stdout.
+async fn exec_stdout(docker: &Docker, container: &str, cmd: &[&str]) -> String {
+    let options = CreateExecOptions::<String> {
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    let created = docker.create_exec(container, options).await.expect("create exec");
+    let StartExecResults::Attached { mut output, .. } = docker.start_exec(&created.id, None).await.expect("start exec") else {
+        panic!("exec was not attached");
+    };
+    let mut text = String::new();
+    while let Some(item) = output.next().await {
+        if let Ok(LogOutput::StdOut { message }) = item {
+            text.push_str(&String::from_utf8_lossy(&message));
+        }
+    }
+    text
 }
 
 #[test]
@@ -193,4 +217,33 @@ fn stopping_the_container_ends_the_session() {
     };
     eprintln!("Ended text after stop: {text}");
     assert!(wait_output(&out, "[session ended:"), "no end marker in output: {}", output_text(&out));
+}
+
+#[test]
+fn closing_the_session_ends_the_shell() {
+    let Some((rt, docker)) = engine() else { return };
+    rt.block_on(ensure_image(&docker)).expect("pull test image");
+
+    let name = format!("tmop-test-exec-{}", suffix());
+    let _cleanup = Cleanup { rt: &rt, docker: docker.clone(), names: vec![name.clone()] };
+    rt.block_on(create_and_start(&docker, &name)).expect("create and start container");
+
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let opts = ExecOptions { command: None, user: None, cols: 80, rows: 24 };
+    let mut session = ExecSession::start(&engine_for(&rt, &docker, false), &name, opts, collecting_sink(&out)).expect("start");
+    let state = wait_state(&session, |s| matches!(s, TransportState::Running) || is_ended(s));
+    assert_eq!(state, TransportState::Running, "session did not start: {}", output_text(&out));
+
+    session.write(b"echo ready\r");
+    assert!(wait_output(&out, "\nready"), "no output from the shell: {}", output_text(&out));
+
+    session.close();
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // `ps` runs without a shell so that the checker adds no `sh` process of its own. The
+    // remaining `sh` processes are PID 1 (`sh -c sleep 60`) and the interactive shell, if alive.
+    let listing = rt.block_on(exec_stdout(&docker, &name, &["ps", "-o", "pid,comm"]));
+    let count = listing.lines().skip(1).filter(|line| line.split_whitespace().nth(1) == Some("sh")).count();
+    eprintln!("sh processes in the container after close: {count}\n{listing}");
+    assert_eq!(count, 1, "the interactive shell is still running:\n{listing}");
 }

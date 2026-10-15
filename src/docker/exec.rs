@@ -18,13 +18,20 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 /// Longest time an engine request may take before the session gives up on it.
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Time the shell gets to exit after close before the tasks are aborted.
+const CLOSE_GRACE: Duration = Duration::from_millis(300);
 const TIMED_OUT: &str = "The engine did not answer in time";
 const NO_SHELL: &str = "No shell found in the container (neither bash nor sh)";
+/// Ctrl+C: clears a partial line or interrupts the foreground program.
+const ETX: u8 = 0x03;
+/// Ctrl+D: ends the shell when its line is empty.
+const EOT: u8 = 0x04;
 
 /// How to start an interactive session in a container.
 #[derive(Clone, Debug, Default)]
@@ -97,6 +104,7 @@ pub struct ExecSession {
     resize: UnboundedSender<(u16, u16)>,
     tasks: Vec<JoinHandle<()>>,
     sink: Sink,
+    runtime: Handle,
     closed: bool,
 }
 
@@ -122,7 +130,7 @@ impl ExecSession {
             input_rx,
             resize_rx,
         ));
-        Ok(ExecSession { state, shell, input, resize, tasks: vec![task], sink, closed: false })
+        Ok(ExecSession { state, shell, input, resize, tasks: vec![task], sink, runtime: engine.runtime.clone(), closed: false })
     }
 
     /// The program that was started ("bash", "sh" or the first custom argument), once known.
@@ -152,8 +160,23 @@ impl Transport for ExecSession {
         if matches!(*lock(&self.state), TransportState::Ended(_)) {
             return;
         }
-        for task in self.tasks.drain(..) {
-            task.abort();
+        let tasks = std::mem::take(&mut self.tasks);
+        if matches!(*lock(&self.state), TransportState::Running) {
+            // Dropping the stream does not end the shell in the container. Ctrl+C clears a
+            // partial line or stops a program, Ctrl+D ends an empty shell. The tasks live on
+            // for a moment so that the writer can deliver both bytes first.
+            let _ = self.input.send(vec![ETX]);
+            let _ = self.input.send(vec![EOT]);
+            self.runtime.spawn(async move {
+                tokio::time::sleep(CLOSE_GRACE).await;
+                for task in tasks {
+                    task.abort();
+                }
+            });
+        } else {
+            for task in tasks {
+                task.abort();
+            }
         }
         *lock(&self.state) = TransportState::Ended("Closed".to_string());
         self.sink.notify();
@@ -255,12 +278,16 @@ async fn attach(
     opts: &ExecOptions,
     shell: &Mutex<Option<String>>,
 ) -> Result<(String, StartExecResults), String> {
-    let cmd = match &opts.command {
-        Some(cmd) => cmd.clone(),
+    // The text shown when the program is missing from the container.
+    let (cmd, missing) = match &opts.command {
+        Some(cmd) => {
+            let missing = format!("Command not found: {}", cmd.first().map_or("", String::as_str));
+            (cmd.clone(), missing)
+        }
         None => {
-            let program = probe_shell(docker, container).await?;
+            let program = probe_shell(docker, container, opts.user.as_deref()).await?;
             *lock(shell) = Some(program.to_string());
-            vec![program.to_string()]
+            (vec![program.to_string()], NO_SHELL.to_string())
         }
     };
     let options = CreateExecOptions::<String> {
@@ -273,24 +300,26 @@ async fn attach(
         env: Some(vec!["TERM=xterm-256color".to_string()]),
         ..Default::default()
     };
-    let created = request(docker.create_exec(container, options)).await?;
+    let created = request(docker.create_exec(container, options)).await.map_err(|e| missing_text(e, &missing))?;
     let start = StartExecOptions { detach: false, tty: true, output_capacity: None };
-    let started = request(docker.start_exec(&created.id, Some(start))).await?;
+    let started = request(docker.start_exec(&created.id, Some(start))).await.map_err(|e| missing_text(e, &missing))?;
     Ok((created.id, started))
 }
 
 /// Returns "bash" when the container has it, "sh" when only sh exists, and an error when
 /// neither can be run.
-async fn probe_shell(docker: &Docker, container: &str) -> Result<&'static str, String> {
+async fn probe_shell(docker: &Docker, container: &str, user: Option<&str>) -> Result<&'static str, String> {
     let options = CreateExecOptions::<String> {
         attach_stdout: Some(true),
         attach_stderr: Some(true),
+        user: user.map(str::to_string),
         // Exit 1 means sh ran but bash is missing; busybox' `command -v` alone exits 127 then.
         cmd: Some(vec!["sh".into(), "-c".into(), "if command -v bash >/dev/null 2>&1; then exit 0; else exit 1; fi".into()]),
         ..Default::default()
     };
-    let created = request(docker.create_exec(container, options)).await?;
-    if let StartExecResults::Attached { mut output, .. } = request(docker.start_exec(&created.id, None)).await? {
+    let created = request(docker.create_exec(container, options)).await.map_err(|e| missing_text(e, NO_SHELL))?;
+    let started = request(docker.start_exec(&created.id, None)).await.map_err(|e| missing_text(e, NO_SHELL))?;
+    if let StartExecResults::Attached { mut output, .. } = started {
         let drain = async { while output.next().await.is_some() {} };
         if tokio::time::timeout(ENGINE_TIMEOUT, drain).await.is_err() {
             return Err(TIMED_OUT.to_string());
@@ -310,6 +339,16 @@ async fn request<T>(fut: impl Future<Output = Result<T, BollardError>>) -> Resul
     match tokio::time::timeout(ENGINE_TIMEOUT, fut).await {
         Ok(result) => result.map_err(|e| err_text(&e)),
         Err(_) => Err(TIMED_OUT.to_string()),
+    }
+}
+
+/// `missing` when the engine says the program does not exist in the container, else the engine's text.
+fn missing_text(error: String, missing: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("executable file not found") || lower.contains("no such file or directory") {
+        missing.to_string()
+    } else {
+        error
     }
 }
 

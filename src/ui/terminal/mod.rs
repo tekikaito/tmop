@@ -139,6 +139,13 @@ impl TerminalView {
         }
     }
 
+    /// Presets the grid the emulator was created with, so the first [`TerminalView::show`]
+    /// does not resize it again when the size matches.
+    pub fn with_grid(mut self, grid: (usize, usize)) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+
     /// Last computed grid size in cells, `(cols, rows)`.
     pub fn grid(&self) -> Option<(usize, usize)> {
         self.grid
@@ -157,7 +164,7 @@ impl TerminalView {
         let font = theme::mono(self.font_size);
         let (cell_w, row_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let inner = rect.shrink(PAD);
-        let (cols, rows) = grid_size(inner, cell_w, row_h);
+        let (cols, rows) = grid_for(ui, rect);
         if self.grid != Some((cols, rows)) {
             lock(emulator).resize(cols, rows);
             transport.resize(cols as u16, rows as u16);
@@ -442,6 +449,14 @@ fn terminal_bg(pal: &Palette) -> Color32 {
 fn luma(c: Color32) -> u32 {
     let [r, g, b, _] = c.to_srgba_unmultiplied();
     r as u32 + g as u32 + b as u32
+}
+
+/// Character cells that fit in the widget `rect` at the default font, as [`TerminalView::show`]
+/// computes them. Use it to open a session at the size the view will show.
+pub fn grid_for(ui: &egui::Ui, rect: Rect) -> (usize, usize) {
+    let font = theme::mono(DEFAULT_FONT_SIZE);
+    let (cell_w, row_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    grid_size(rect.shrink(PAD), cell_w, row_h)
 }
 
 /// Character cells that fit in `inner`, at least [`MIN_GRID`] in each direction.

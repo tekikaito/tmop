@@ -820,6 +820,8 @@ fn remove_host(app: &mut App, name: &str) {
     if was_active {
         let fallback = super::resolve_name(&app.docker.contexts, "");
         let ro = app.settings.docker_contexts.get(&fallback).map(|c| c.read_only).unwrap_or(false);
+        // Shell sessions belong to the removed host's engine.
+        app.docker.ui.detail.close_terminals();
         if let Some(b) = app.docker.backend() {
             b.send(Command::SetReadOnly(ro));
             b.send(Command::SwitchContext(fallback.clone()));

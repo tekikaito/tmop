@@ -199,6 +199,10 @@ impl DockerState {
         self.ui.toasts.drain(..excess);
         let now = Instant::now();
         self.ui.toasts.retain(|t| now.duration_since(t.at) < toast_ttl(t.kind));
+        if !page_open {
+            // No terminal session is shown off the page.
+            self.ui.detail.terminals.set_visible(None);
+        }
         if self.page_open != Some(page_open) {
             if self.page_open == Some(true) && !page_open {
                 // Leaving the page stops the log follow and releases any volume helper.
@@ -442,6 +446,10 @@ impl App {
                 self.docker.notify_enabled = notif;
             }
             if ro_changed {
+                if ro {
+                    // Shells cannot take input on a read-only host, so their sessions end.
+                    self.docker.ui.detail.close_terminals();
+                }
                 if let Some(b) = &self.docker.backend {
                     b.send(Command::SetReadOnly(ro));
                 }
