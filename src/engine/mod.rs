@@ -2,12 +2,17 @@
 
 pub mod asset;
 pub mod config;
+pub mod manager;
 pub mod pathenv;
 pub mod proxy;
 pub mod rewrite;
 pub mod wslconfig;
 #[cfg(windows)]
 pub mod http;
+#[cfg(windows)]
+pub mod ports;
+#[cfg(windows)]
+pub mod relay;
 #[cfg(windows)]
 pub mod winreg;
 #[cfg(windows)]
