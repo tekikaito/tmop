@@ -321,6 +321,12 @@ pub use win::Collector;
 #[cfg(not(windows))]
 pub struct Collector;
 #[cfg(not(windows))]
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#[cfg(not(windows))]
 impl Collector {
     pub fn new() -> Self {
         Collector

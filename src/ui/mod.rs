@@ -19,7 +19,9 @@ pub mod widgets;
 use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::pro::{bench::Bench, recorder::Recorder};
-use crate::process::{self, Action, Column, Priority, ProcessRow};
+#[cfg(windows)]
+use crate::process;
+use crate::process::{Action, Column, Priority, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
