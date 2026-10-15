@@ -16,6 +16,7 @@ pub mod table;
 pub mod theme;
 pub mod widgets;
 
+use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{self, Action, Column, Priority, ProcessRow};
@@ -182,10 +183,11 @@ pub enum Device {
     Disk,
     Network,
     Thermal,
+    Docker,
 }
 
 impl Device {
-    pub const ALL: [Device; 6] = [Device::Cpu, Device::Memory, Device::Gpu, Device::Disk, Device::Network, Device::Thermal];
+    pub const ALL: [Device; 7] = [Device::Cpu, Device::Memory, Device::Gpu, Device::Disk, Device::Network, Device::Thermal, Device::Docker];
     pub fn key(self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
@@ -194,6 +196,7 @@ impl Device {
             Device::Network => "network",
             Device::Gpu => "gpu",
             Device::Thermal => "thermal",
+            Device::Docker => "docker",
         }
     }
     pub fn title(self) -> &'static str {
@@ -204,6 +207,7 @@ impl Device {
             Device::Network => "Network",
             Device::Gpu => "GPU",
             Device::Thermal => "Thermals",
+            Device::Docker => "Docker",
         }
     }
     pub fn icon(self) -> Icon {
@@ -214,10 +218,14 @@ impl Device {
             Device::Network => Icon::Network,
             Device::Gpu => Icon::Gpu,
             Device::Thermal => Icon::Thermal,
+            Device::Docker => Icon::Container,
         }
     }
     pub fn color(self) -> Color32 {
-        theme::metric_color(self.key())
+        match self {
+            Device::Docker => Color32::from_rgb(36, 150, 237),
+            _ => theme::metric_color(self.key()),
+        }
     }
 }
 
@@ -283,7 +291,7 @@ pub struct FrameData<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct Launch {
     pub start_page: Option<Page>,
-    /// cpu, memory, gpu, disk, network or thermal
+    /// cpu, memory, gpu, disk, network, thermal or docker
     pub start_device: Option<String>,
     pub popout_only: bool,
     /// Start recording at launch: (folder, seconds).
@@ -327,6 +335,8 @@ pub struct App {
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
     pub docker: docker::DockerState,
+    /// Docker series for the Performance page, refreshed when the backend has new stats.
+    pub perf_docker: performance::DockerPerfCache,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
@@ -350,6 +360,7 @@ impl App {
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
             docker,
+            perf_docker: performance::DockerPerfCache::default(),
             settings,
             settings_dirty: false,
             catalog,
@@ -1072,6 +1083,8 @@ impl App {
         self.shortcuts(ctx);
         self.icons.poll(ctx);
         self.docker.poll(self.page == Page::Docker);
+        self.docker.refresh_snap();
+        self.refresh_docker_perf();
         if self.page == Page::Docker && !self.docker.visible(&self.settings) {
             self.page = Page::Summary;
         }
@@ -1090,6 +1103,7 @@ impl App {
         if snap.seq != self.last_seq {
             self.last_seq = snap.seq;
             self.last_sample_at = now;
+            self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(&snap, &rows);
             let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(&rows, dt);
