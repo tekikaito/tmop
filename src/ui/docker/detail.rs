@@ -241,7 +241,9 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
         app.docker.ui.detail.terminals.retain(&alive);
     }
     if let Some((id, options)) = app.docker.ui.detail.terminals.take_pending(&app.docker.ui.snap.containers) {
+        // The containers table keeps its own selection and writes it back every frame, so it must agree.
         app.docker.ui.selected_container = Some(id.clone());
+        app.docker.ui.containers.selected = Some(id.clone());
         app.docker.ui.detail.tab = DetailTab::Terminal;
         app.docker.ui.tab = Tab::Containers;
         open_terminal(app, ui, &id, options);
