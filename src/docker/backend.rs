@@ -228,6 +228,8 @@ pub enum PruneKind {
 #[derive(Debug)]
 pub enum Command {
     SwitchContext(String),
+    /// Replaces the contexts the worker resolves names against; the active session is kept.
+    SetContexts(Vec<Context>),
     Refresh,
     SetPageOpen(bool),
     SetReadOnly(bool),
@@ -670,6 +672,9 @@ fn handle_command(link: &mut Link, inner: &Arc<Inner>, tx: &UnboundedSender<Inte
             link.want = name;
             reset_for_switch(inner);
             start_attempt(link, inner, tx);
+        }
+        Command::SetContexts(contexts) => {
+            lock(&inner.shared).contexts = contexts;
         }
         Command::Refresh => {
             if let Some(s) = link.session.as_ref() {

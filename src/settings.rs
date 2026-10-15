@@ -63,6 +63,8 @@ pub struct Settings {
     pub docker_active_context: String,
     /// Per-context Docker options, keyed by context name.
     pub docker_contexts: BTreeMap<String, DockerContextSettings>,
+    /// Hosts added in TMOP; shown in the host picker next to the Docker CLI contexts.
+    pub docker_hosts: Vec<DockerHost>,
     /// Any other keys (e.g. `diskLights.*`) are preserved verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -111,6 +113,7 @@ impl Default for Settings {
             docker_hide_page: false,
             docker_active_context: String::new(),
             docker_contexts: BTreeMap::new(),
+            docker_hosts: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -131,6 +134,15 @@ impl Default for DockerContextSettings {
     fn default() -> Self {
         Self { read_only: false, notifications: true }
     }
+}
+
+/// A Docker host added in TMOP. `host` is a Docker host string (`ssh://user@server`, `tcp://server:2375`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerHost {
+    pub name: String,
+    pub host: String,
+    pub description: String,
 }
 
 /// Sampling cadence: "Fast — 4/sec", "High — 2/sec",
@@ -379,6 +391,11 @@ mod tests {
     #[test]
     fn docker_settings_roundtrip() {
         let mut s = Settings { docker_hide_page: true, docker_active_context: "work".into(), ..Default::default() };
+        s.docker_hosts.push(DockerHost {
+            name: "tmop-test-host".into(),
+            host: "ssh://nobody@example.invalid".into(),
+            description: String::new(),
+        });
         s.docker_contexts
             .insert("work".into(), DockerContextSettings { read_only: true, notifications: false });
         s.docker_contexts.insert("desktop-linux".into(), DockerContextSettings::default());
@@ -390,6 +407,7 @@ mod tests {
         assert_eq!(back, s);
         assert!(back.docker_hide_page);
         assert_eq!(back.docker_active_context, "work");
+        assert_eq!(back.docker_hosts, s.docker_hosts);
         assert!(!back.docker_contexts["work"].notifications);
         assert!(back.docker_contexts["desktop-linux"].notifications);
     }
@@ -401,6 +419,7 @@ mod tests {
         assert!(!s.docker_hide_page);
         assert!(s.docker_active_context.is_empty());
         assert!(s.docker_contexts.is_empty());
+        assert!(s.docker_hosts.is_empty());
         let (s, _) = Settings::from_json(r#"{"schemaVersion":12,"dockerContexts":{"x":{"readOnly":true}}}"#).unwrap();
         assert!(s.docker_contexts["x"].read_only);
         assert!(s.docker_contexts["x"].notifications, "missing notifications defaults to true");
