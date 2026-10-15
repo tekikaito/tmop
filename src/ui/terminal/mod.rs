@@ -4,12 +4,15 @@
 //! The pure helpers (colour resolution, run building, grid sizing) take no egui context
 //! and are covered by the unit tests at the bottom of the file.
 
+mod altgr;
+
 use crate::terminal::emulator::{Flags, NamedColor};
 use crate::terminal::{
     encode_key, encode_paste, encode_text, CellColor, CellInfo, CursorShape, Emulator, KeyModes, SelectionKind, Transport, TransportState,
 };
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets;
+use altgr::altgr_char;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Event, EventFilter, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -183,8 +186,10 @@ impl TerminalView {
         let mut out = Vec::new();
         {
             let mut emu = lock(emulator);
+            let modes = KeyModes { app_cursor: emu.app_cursor(), app_keypad: emu.app_keypad() };
 
-            // Mouse wheel: scrolls the history; fractional lines accumulate.
+            // Mouse wheel: scrolls the history, or sends arrow keys on the alternate screen
+            // (less, vim, ...). Fractional lines accumulate.
             if resp.hovered() {
                 let dy = ui.input(|i| i.smooth_scroll_delta.y);
                 if dy != 0.0 {
@@ -192,7 +197,11 @@ impl TerminalView {
                     let whole = self.wheel_lines.trunc();
                     if whole != 0.0 {
                         self.wheel_lines -= whole;
-                        emu.scroll(whole as i32);
+                        if emu.alt_screen() && !emu.mouse_mode() {
+                            out.extend(wheel_arrows(whole as i32, modes));
+                        } else {
+                            emu.scroll(whole as i32);
+                        }
                     }
                 }
             }
@@ -222,7 +231,6 @@ impl TerminalView {
 
             // Keyboard and paste, only while focused.
             if focused {
-                let modes = KeyModes { app_cursor: emu.app_cursor(), app_keypad: emu.app_keypad() };
                 let bracketed = emu.bracketed_paste();
                 let events = ui.input(|i| i.events.clone());
                 let mods = ui.input(|i| i.modifiers);
@@ -232,16 +240,26 @@ impl TerminalView {
                         Event::Paste(text) => out.extend(encode_paste(text, bracketed)),
                         Event::Copy => interrupt_or_copy(ui, &mut emu, mods.shift, &mut out),
                         Event::Cut => {
-                            if mods.ctrl && !mods.shift {
+                            // Shift+Delete arrives as a cut on Windows; without Ctrl it is a forward delete.
+                            if !mods.ctrl {
+                                out.extend(encode_key(Key::Delete, Modifiers::NONE, modes).unwrap_or_default());
+                            } else if !mods.shift {
                                 out.push(CAN);
                             }
                         }
-                        Event::Key { key, pressed: true, modifiers, .. } => {
+                        Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                             let ctrl = modifiers.ctrl || modifiers.command;
-                            // Windows reports AltGr as Ctrl+Alt. The character then arrives
-                            // without text, so the letter key must not become ESC+Ctrl+letter.
-                            if ctrl && modifiers.alt && is_letter(*key) {
-                                continue;
+                            // Windows reports AltGr as Ctrl+Alt, and egui-winit sends no text for it.
+                            // The character comes from the layout; other keys still go through encode_key,
+                            // and letters without an AltGr character are dropped so they never become ESC+Ctrl+letter.
+                            if ctrl && modifiers.alt {
+                                if let Some(c) = altgr_char(physical_key.unwrap_or(*key)) {
+                                    out.extend(encode_text(&c.to_string(), Modifiers::NONE));
+                                    continue;
+                                }
+                                if is_letter(*key) {
+                                    continue;
+                                }
                             }
                             match key {
                                 Key::C if ctrl => interrupt_or_copy(ui, &mut emu, modifiers.shift, &mut out),
@@ -335,7 +353,10 @@ impl TerminalView {
 
         if let Some(cur) = cursor {
             let origin = pos2(inner.min.x + cur.col as f32 * cell_w, inner.min.y + cur.row as f32 * row_h);
-            let under = cells.iter().find(|c| c.row == cur.row && c.col == cur.col);
+            let cols = self.grid.map_or(0, |(c, _)| c);
+            let under = cell_index(cur.row, cur.col, cols, cells.len())
+                .and_then(|i| cells.get(i))
+                .filter(|c| c.row == cur.row && c.col == cur.col);
             let width = if under.is_some_and(|c| c.wide) { 2.0 * cell_w } else { cell_w };
             let cell_rect = Rect::from_min_size(origin, vec2(width, row_h));
             match cur.shape {
@@ -435,6 +456,22 @@ fn cell_at(p: Pos2, inner: Rect, cell_w: f32, row_h: f32, cols: usize, rows: usi
     let col = ((p.x - inner.min.x) / cell_w.max(1.0)).floor().clamp(0.0, (cols - 1) as f32) as usize;
     let row = ((p.y - inner.min.y) / row_h.max(1.0)).floor().clamp(0.0, (rows - 1) as f32) as usize;
     (col, row)
+}
+
+/// Arrow keys for `lines` of wheel movement, three per line: up for a positive count.
+fn wheel_arrows(lines: i32, modes: KeyModes) -> Vec<u8> {
+    let key = if lines > 0 { Key::ArrowUp } else { Key::ArrowDown };
+    let arrow = encode_key(key, Modifiers::NONE, modes).unwrap_or_default();
+    arrow.repeat(3 * lines.unsigned_abs() as usize)
+}
+
+/// Index of row `row`, column `col` in a row-major grid of `cols` columns and `len` cells.
+fn cell_index(row: usize, col: usize, cols: usize, len: usize) -> Option<usize> {
+    if col >= cols {
+        return None;
+    }
+    let index = row.checked_mul(cols)?.checked_add(col)?;
+    (index < len).then_some(index)
 }
 
 fn is_letter(key: Key) -> bool {
@@ -717,5 +754,25 @@ mod tests {
         assert_eq!(grid_size(Rect::from_min_size(pos2(0.0, 0.0), vec2(3.0, 3.0)), 8.0, 16.0), (MIN_GRID, MIN_GRID));
         assert_eq!(cell_at(pos2(10.0 + 17.0, 10.0 + 33.0), inner, 8.0, 16.0, 80, 24), (2, 2));
         assert_eq!(cell_at(pos2(-500.0, 9999.0), inner, 8.0, 16.0, 80, 24), (0, 23));
+    }
+
+    #[test]
+    fn cell_index_is_row_major_and_bounded() {
+        assert_eq!(cell_index(0, 0, 80, 80 * 24), Some(0));
+        assert_eq!(cell_index(2, 3, 80, 80 * 24), Some(163));
+        assert_eq!(cell_index(23, 79, 80, 80 * 24), Some(1919));
+        assert_eq!(cell_index(24, 0, 80, 80 * 24), None);
+        assert_eq!(cell_index(0, 80, 80, 80 * 24), None);
+        assert_eq!(cell_index(0, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn wheel_sends_three_arrows_per_line() {
+        let normal = KeyModes::default();
+        assert_eq!(wheel_arrows(1, normal), b"\x1b[A\x1b[A\x1b[A".to_vec());
+        assert_eq!(wheel_arrows(-2, normal), b"\x1b[B".repeat(6));
+        let app = KeyModes { app_cursor: true, app_keypad: false };
+        assert_eq!(wheel_arrows(1, app), b"\x1bOA\x1bOA\x1bOA".to_vec());
+        assert!(wheel_arrows(0, normal).is_empty());
     }
 }
