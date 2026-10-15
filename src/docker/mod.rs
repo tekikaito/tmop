@@ -10,6 +10,7 @@
 
 pub mod backend;
 pub mod client;
+pub mod exec;
 pub mod files;
 pub mod logs;
 pub mod notify;
