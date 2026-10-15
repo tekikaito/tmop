@@ -1,19 +1,30 @@
 //! Engine object tables for the Docker page: containers, stacks, images, volumes and networks.
 //!
 //! All tables share [`draw_table`], which filters, sorts, draws the rows and keeps the
-//! selection in step with the tab's `selected_*` field.
+//! selection in step with the tab's `selected_*` field. Each tab has a toolbar above its
+//! table and a context menu on its rows; both are built from the same [`Act`] lists. A
+//! chosen [`Intent`] is carried out by [`act`] once the frame is drawn.
 
+use super::dialogs::{self, PendingAction};
+use super::wizards::Wizard;
 use super::{now_unix, DockerUi, Snap, Tab};
-use crate::docker::model::{format_age, format_bytes, Container, ContainerState, EngineStatus};
+use crate::docker::backend::{ContainerAction, NoticeKind, PruneKind};
+use crate::docker::model::{format_age, format_bytes, Container, ContainerState, EngineStatus, Image, Network, Stack, Volume};
+use crate::docker::stack::{local_compose_file, open_in_editor, StackAction};
 use crate::process::format_rate;
 use crate::ui::icons::IconCache;
 use crate::ui::kit;
 use crate::ui::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
 use crate::ui::theme::Palette;
-use crate::ui::{App, FrameData};
-use eframe::egui::{self, Color32, Rect};
+use crate::ui::{widgets, App, FrameData};
+use eframe::egui::{self, pos2, Color32, Rect};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// Height of the toolbar above each table.
+const TOOLBAR_H: f32 = 34.0;
 
 const COLS_CONTAINERS: [Col; 9] = [
     Col::text("Name", 160.0),
@@ -45,18 +56,55 @@ const COLS_NETWORKS: [Col; 6] = [
     Col::text("Stack", 120.0),
 ];
 
+/// What a toolbar button or menu item asks for. Carried out by [`act`].
+#[derive(Clone, Debug)]
+enum Intent {
+    /// Runs the action, after a confirmation when it needs one.
+    Run(PendingAction),
+    /// Opens a wizard.
+    Wizard(Wizard),
+    /// Opens a compose file in the editor.
+    OpenFile(PathBuf),
+}
+
+/// One toolbar button or menu line. `reason` explains why it cannot run; `None` means enabled.
+enum Act {
+    Sep,
+    Item { label: &'static str, reason: Option<&'static str>, intent: Option<Intent> },
+}
+
+fn item(label: &'static str, reason: Option<&'static str>, intent: Option<Intent>) -> Act {
+    Act::Item { label, reason, intent }
+}
+
 /// Draws the table of the current tab (not the engine tab).
 pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
     let pal = fd.pal;
     let d = &mut app.docker.ui;
     let icons = &mut app.icons;
-    match d.tab {
+    let intent = match d.tab {
         Tab::Containers => containers(d, icons, ui, rect, &pal),
         Tab::Stacks => stacks(d, icons, ui, rect, &pal),
         Tab::Images => images(d, icons, ui, rect, &pal),
         Tab::Volumes => volumes(d, icons, ui, rect, &pal),
         Tab::Networks => networks(d, icons, ui, rect, &pal),
-        Tab::Engine => {}
+        Tab::Engine => None,
+    };
+    if let Some(intent) = intent {
+        act(app, intent);
+    }
+}
+
+/// Carries out a chosen toolbar or menu intent.
+fn act(app: &mut App, intent: Intent) {
+    match intent {
+        Intent::Run(action) => dialogs::request(app, action),
+        Intent::Wizard(wizard) => app.docker.ui.dialogs.wizards.open = Some(wizard),
+        Intent::OpenFile(path) => {
+            if let Err(e) = open_in_editor(&path) {
+                app.docker.ui.toast(NoticeKind::Error, e);
+            }
+        }
     }
 }
 
@@ -87,6 +135,10 @@ fn busy_label<'a>(busy: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&
     keys.iter().find_map(|k| busy.get(*k)).map(|s| s.as_str())
 }
 
+fn is_busy(snap: &Snap, keys: &[&str]) -> bool {
+    busy_label(&snap.busy, keys).is_some()
+}
+
 fn with_busy(name: &str, busy: Option<&str>) -> String {
     match busy {
         Some(label) => format!("{name} ({label}...)"),
@@ -103,7 +155,64 @@ fn state_color(s: ContainerState, pal: &Palette) -> Color32 {
     }
 }
 
-/// Shared table drawing: filter, sort, empty states, selection sync.
+/// Why an action cannot run: read-only host, busy object, or no row chosen.
+fn blocked(snap: &Snap, selected: bool, busy: bool) -> Option<&'static str> {
+    read_only_reason(snap).or(busy.then_some("This object is busy")).or((!selected).then_some("Select a row first"))
+}
+
+/// Why an action that changes the host cannot run.
+fn read_only_reason(snap: &Snap) -> Option<&'static str> {
+    snap.read_only.then_some("This host is read-only")
+}
+
+/// Draws a toolbar button. Returns true when it was clicked; a disabled button shows `reason`.
+fn tool(ui: &mut egui::Ui, pal: &Palette, label: &str, reason: Option<&str>) -> bool {
+    let resp = ui.add_enabled_ui(reason.is_none(), |ui| widgets::button(ui, label, pal, None)).inner;
+    match reason {
+        Some(text) => resp.on_disabled_hover_text(text).clicked(),
+        None => resp.clicked(),
+    }
+}
+
+/// Draws the toolbar in `rect`. Returns the intent of the clicked button.
+fn toolbar(ui: &mut egui::Ui, rect: Rect, pal: &Palette, acts: Vec<Act>) -> Option<Intent> {
+    let mut out = None;
+    kit::row_ui(ui, rect, |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for a in acts {
+            match a {
+                Act::Sep => ui.add_space(12.0),
+                Act::Item { label, reason, intent } => {
+                    if tool(ui, pal, label, reason) {
+                        out = intent;
+                    }
+                }
+            }
+        }
+    });
+    out
+}
+
+/// Draws the entries of a context menu. Returns the intent of the clicked entry.
+fn menu_ui(ui: &mut egui::Ui, acts: Vec<Act>) -> Option<Intent> {
+    let mut out = None;
+    for a in acts {
+        match a {
+            Act::Sep => {
+                ui.separator();
+            }
+            Act::Item { label, reason, intent } => {
+                if ui.add_enabled(reason.is_none(), egui::Button::new(label)).clicked() {
+                    out = intent;
+                    ui.close_menu();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Shared table drawing: filter, sort, empty states, selection sync, context menus.
 #[allow(clippy::too_many_arguments)]
 fn draw_table<T>(
     ui: &mut egui::Ui,
@@ -120,28 +229,70 @@ fn draw_table<T>(
     cell: impl Fn(&T, usize) -> Cell,
     icons: &mut IconCache,
     empty: &str,
-) {
+    acts_of: &dyn Fn(&T) -> Vec<Act>,
+) -> Option<Intent> {
     if items.is_empty() {
         kit::empty_state(ui.painter(), rect, pal, empty);
         *selected = None;
-        return;
+        return None;
     }
     let mut order: Vec<usize> = (0..items.len()).filter(|&i| keep(&items[i])).collect();
     state.sort(items, &mut order, &cmp);
     if order.is_empty() {
         kit::empty_state(ui.painter(), rect, pal, "No matches for the filter");
-        return;
+        return None;
     }
     let key_of = |i: usize| key(&items[i]);
     let cell_of = |i: usize, col: usize| cell(&items[i], col);
-    let activated = table::show(ui, rect, id, pal, cols, &order, state, &key_of, &cell_of, icons);
+    let chosen: RefCell<Option<Intent>> = RefCell::new(None);
+    let menu = |i: usize, ui: &mut egui::Ui| {
+        if let Some(intent) = menu_ui(ui, acts_of(&items[i])) {
+            *chosen.borrow_mut() = Some(intent);
+        }
+    };
+    let activated = table::show_with_menu(ui, rect, id, pal, cols, &order, state, &key_of, &cell_of, icons, Some(&menu));
     if let Some(i) = activated {
         state.selected = Some(key_of(i));
     }
     *selected = state.selected.clone();
+    chosen.into_inner()
 }
 
-fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+/// Splits the tab rect into the toolbar strip and the table below it.
+fn split_bar(rect: Rect) -> (Rect, Rect) {
+    let bar = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + TOOLBAR_H));
+    let table = Rect::from_min_max(pos2(rect.left(), rect.top() + TOOLBAR_H), rect.max);
+    (bar, table)
+}
+
+fn container_acts(snap: &Snap, c: Option<&Container>) -> Vec<Act> {
+    let busy = c.is_some_and(|c| is_busy(snap, &[c.id.as_str(), c.name.as_str()]));
+    let base = blocked(snap, c.is_some(), busy);
+    let running = c.is_some_and(|c| c.state.is_running());
+    let paused = c.is_some_and(|c| c.state == ContainerState::Paused);
+    let on = |action: ContainerAction| c.map(|c| Intent::Run(PendingAction::Container { id: c.id.clone(), name: c.name.clone(), action }));
+    let not_running = (!running && !paused).then_some("Not running");
+    vec![
+        item("Start", base.or(running.then_some("Already running")), on(ContainerAction::Start)),
+        item("Stop", base.or(not_running), on(ContainerAction::Stop)),
+        item("Restart", base.or(not_running), on(ContainerAction::Restart)),
+        if paused {
+            item("Unpause", base, on(ContainerAction::Unpause))
+        } else {
+            item("Pause", base.or((!running).then_some("Not running")), on(ContainerAction::Pause))
+        },
+        item("Remove...", base, on(ContainerAction::Remove { force: running, volumes: false })),
+        Act::Sep,
+        item(
+            "Run image...",
+            read_only_reason(snap),
+            Some(Intent::Wizard(Wizard::RunImage { image: c.map(|c| c.image.clone()).unwrap_or_default() })),
+        ),
+        item("Prune stopped...", read_only_reason(snap), Some(Intent::Run(PendingAction::Prune(PruneKind::Containers)))),
+    ]
+}
+
+fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
     let DockerUi { snap, filter, containers: state, selected_container, .. } = d;
     let snap: &Snap = snap;
     let now = now_unix();
@@ -150,9 +301,12 @@ fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: 
     let cpu = |c: &Container| stat(c).filter(|_| c.state.is_running()).map(|s| s.cpu_pct as f64).unwrap_or(-1.0);
     let mem = |c: &Container| stat(c).filter(|_| c.state.is_running()).map(|s| s.mem_used as f64).unwrap_or(-1.0);
     let net = |c: &Container| stat(c).filter(|_| c.state.is_running()).map(|s| s.net_rx_bps + s.net_tx_bps).unwrap_or(-1.0);
-    draw_table(
+    let selected = selected_container.as_ref().and_then(|id| snap.containers.iter().find(|c| &c.id == id));
+    let (bar, table_rect) = split_bar(rect);
+    let from_bar = toolbar(ui, bar, pal, container_acts(snap, selected));
+    let from_menu = draw_table(
         ui,
-        rect,
+        table_rect,
         "docker-containers",
         pal,
         &COLS_CONTAINERS,
@@ -208,16 +362,46 @@ fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: 
         },
         icons,
         empty_text(snap, "No containers"),
+        &|c: &Container| container_acts(snap, Some(c)),
     );
+    from_bar.or(from_menu)
 }
 
-fn stacks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+fn stack_acts(snap: &Snap, s: Option<&Stack>) -> Vec<Act> {
+    let busy = s.is_some_and(|s| s.containers.iter().any(|id| snap.busy.contains_key(id)));
+    let base = blocked(snap, s.is_some(), busy);
+    let run = |action: StackAction| s.map(|s| Intent::Run(PendingAction::Stack { name: s.name.clone(), action }));
+    let running = s.map_or(0, |s| s.running);
+    let local = s.and_then(local_compose_file);
+    vec![
+        item("Start", base, run(StackAction::Start)),
+        item("Stop", base.or((running == 0).then_some("Nothing is running")), run(StackAction::Stop)),
+        item("Restart", base, run(StackAction::Restart)),
+        item("Down...", base, run(StackAction::Down { volumes: false })),
+        Act::Sep,
+        item(
+            "Up from compose file...",
+            read_only_reason(snap),
+            Some(Intent::Wizard(Wizard::ComposeUp { stack: s.map(|s| s.name.clone()) })),
+        ),
+        item(
+            "Open compose file",
+            if s.is_none() { Some("Select a row first") } else { local.is_none().then_some("No compose file on this machine") },
+            local.map(Intent::OpenFile),
+        ),
+    ]
+}
+
+fn stacks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
     let DockerUi { snap, filter, stacks: state, selected_stack, .. } = d;
     let snap: &Snap = snap;
     let f: &str = filter.as_str();
-    draw_table(
+    let selected = selected_stack.as_ref().and_then(|name| snap.stacks.iter().find(|s| &s.name == name));
+    let (bar, table_rect) = split_bar(rect);
+    let from_bar = toolbar(ui, bar, pal, stack_acts(snap, selected));
+    let from_menu = draw_table(
         ui,
-        rect,
+        table_rect,
         "docker-stacks",
         pal,
         &COLS_STACKS,
@@ -242,17 +426,43 @@ fn stacks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect
         },
         icons,
         empty_text(snap, "No Compose stacks"),
+        &|s: &Stack| stack_acts(snap, Some(s)),
     );
+    from_bar.or(from_menu)
 }
 
-fn images(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+fn image_acts(snap: &Snap, i: Option<&Image>) -> Vec<Act> {
+    let busy = i.is_some_and(|i| is_busy(snap, &[i.id.as_str()]));
+    let base = blocked(snap, i.is_some(), busy);
+    let name = i.map(|i| i.display_name());
+    let on = |intent: fn(String, String) -> PendingAction| {
+        i.map(|i| Intent::Run(intent(i.id.clone(), i.display_name())))
+    };
+    vec![
+        item("Pull image...", read_only_reason(snap), Some(Intent::Wizard(Wizard::PullImage))),
+        item(
+            "Run...",
+            base,
+            name.as_ref().map(|n| Intent::Wizard(Wizard::RunImage { image: n.clone() })),
+        ),
+        item("Remove...", base, on(|id, name| PendingAction::Image { id, name })),
+        Act::Sep,
+        item("Prune dangling...", read_only_reason(snap), Some(Intent::Run(PendingAction::Prune(PruneKind::Images)))),
+        item("Prune unused...", read_only_reason(snap), Some(Intent::Run(PendingAction::Prune(PruneKind::ImagesAll)))),
+    ]
+}
+
+fn images(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
     let DockerUi { snap, filter, images: state, selected_image, .. } = d;
     let snap: &Snap = snap;
     let now = now_unix();
     let f: &str = filter.as_str();
-    draw_table(
+    let selected = selected_image.as_ref().and_then(|id| snap.images.iter().find(|i| &i.id == id));
+    let (bar, table_rect) = split_bar(rect);
+    let from_bar = toolbar(ui, bar, pal, image_acts(snap, selected));
+    let from_menu = draw_table(
         ui,
-        rect,
+        table_rect,
         "docker-images",
         pal,
         &COLS_IMAGES,
@@ -292,16 +502,37 @@ fn images(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect
         },
         icons,
         empty_text(snap, "No images"),
+        &|i: &Image| image_acts(snap, Some(i)),
     );
+    from_bar.or(from_menu)
 }
 
-fn volumes(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+fn volume_acts(snap: &Snap, v: Option<&Volume>) -> Vec<Act> {
+    let busy = v.is_some_and(|v| is_busy(snap, &[v.name.as_str()]));
+    let base = blocked(snap, v.is_some(), busy);
+    let name = v.map(|v| v.name.clone());
+    vec![
+        item("Remove...", base, name.clone().map(|name| Intent::Run(PendingAction::Volume { name }))),
+        item(
+            "Export...",
+            v.is_none().then_some("Select a row first"),
+            name.map(|volume| Intent::Wizard(Wizard::ExportVolume { volume })),
+        ),
+        item("Import...", read_only_reason(snap), Some(Intent::Wizard(Wizard::ImportVolume { volume: v.map(|v| v.name.clone()) }))),
+        item("Prune...", read_only_reason(snap), Some(Intent::Run(PendingAction::Prune(PruneKind::Volumes)))),
+    ]
+}
+
+fn volumes(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
     let DockerUi { snap, filter, volumes: state, selected_volume, .. } = d;
     let snap: &Snap = snap;
     let f: &str = filter.as_str();
-    draw_table(
+    let selected = selected_volume.as_ref().and_then(|name| snap.volumes.iter().find(|v| &v.name == name));
+    let (bar, table_rect) = split_bar(rect);
+    let from_bar = toolbar(ui, bar, pal, volume_acts(snap, selected));
+    let from_menu = draw_table(
         ui,
-        rect,
+        table_rect,
         "docker-volumes",
         pal,
         &COLS_VOLUMES,
@@ -338,16 +569,31 @@ fn volumes(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rec
         },
         icons,
         empty_text(snap, "No volumes"),
+        &|v: &Volume| volume_acts(snap, Some(v)),
     );
+    from_bar.or(from_menu)
 }
 
-fn networks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+fn network_acts(snap: &Snap, n: Option<&Network>) -> Vec<Act> {
+    let busy = n.is_some_and(|n| is_busy(snap, &[n.id.as_str(), n.name.as_str()]));
+    let base = blocked(snap, n.is_some(), busy);
+    let builtin = n.is_some_and(|n| n.is_builtin()).then_some("Built-in networks cannot be removed");
+    vec![
+        item("Remove...", base.or(builtin), n.map(|n| Intent::Run(PendingAction::Network { id: n.id.clone(), name: n.name.clone() }))),
+        item("Prune...", read_only_reason(snap), Some(Intent::Run(PendingAction::Prune(PruneKind::Networks)))),
+    ]
+}
+
+fn networks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
     let DockerUi { snap, filter, networks: state, selected_network, .. } = d;
     let snap: &Snap = snap;
     let f: &str = filter.as_str();
-    draw_table(
+    let selected = selected_network.as_ref().and_then(|id| snap.networks.iter().find(|n| &n.id == id));
+    let (bar, table_rect) = split_bar(rect);
+    let from_bar = toolbar(ui, bar, pal, network_acts(snap, selected));
+    let from_menu = draw_table(
         ui,
-        rect,
+        table_rect,
         "docker-networks",
         pal,
         &COLS_NETWORKS,
@@ -384,5 +630,7 @@ fn networks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Re
         },
         icons,
         empty_text(snap, "No networks"),
+        &|n: &Network| network_acts(snap, Some(n)),
     );
+    from_bar.or(from_menu)
 }
