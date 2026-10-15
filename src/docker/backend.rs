@@ -248,6 +248,50 @@ pub struct Engine {
     pub read_only: bool,
 }
 
+/// Result slot for a one-off engine task started from the UI thread.
+///
+/// The future runs on the worker runtime; the UI polls [`Task::take`] once per frame.
+/// Dropping the handle does not cancel the task, so actions always run to completion.
+pub struct Task<T> {
+    slot: Arc<Mutex<Option<T>>>,
+    handle: JoinHandle<()>,
+    started: Instant,
+}
+
+impl<T: Send + 'static> Task<T> {
+    /// Spawns `fut` on `runtime` and returns the handle used to collect its result.
+    pub fn spawn<F>(runtime: &Handle, fut: F) -> Task<T>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+    {
+        let slot = Arc::new(Mutex::new(None));
+        let sink = slot.clone();
+        let handle = runtime.spawn(async move {
+            let value = fut.await;
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(value);
+        });
+        Task { slot, handle, started: Instant::now() }
+    }
+
+    /// Returns the result once it is available; later calls return `None` again.
+    pub fn take(&mut self) -> Option<T> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Cancels the task; the slot stays empty.
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
 /// Handle to the worker. Dropping it asks the worker to stop; the thread is not joined.
 pub struct Backend {
     pub shared: Arc<Mutex<Shared>>,
