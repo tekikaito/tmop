@@ -13,6 +13,7 @@ pub mod processes;
 pub mod settings_page;
 pub mod summary;
 pub mod table;
+pub mod terminal;
 pub mod theme;
 pub mod widgets;
 
