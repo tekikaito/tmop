@@ -81,6 +81,8 @@ pub struct Snap {
     pub events: Vec<EngineEvent>,
     /// Time of the newest engine event, used to detect new events.
     pub last_event: Option<Instant>,
+    /// When the container list was last read since the engine connected; `None` until then.
+    pub last_list_at: Option<Instant>,
 }
 
 /// UI state of the Docker page.
@@ -252,6 +254,7 @@ fn snap_of(s: &Shared) -> Snap {
         read_only: s.read_only,
         events: s.events.iter().rev().take(EVENTS_SHOWN).cloned().collect(),
         last_event: s.events.back().map(|e| e.at),
+        last_list_at: s.last_list_at,
     }
 }
 

@@ -405,3 +405,38 @@ fn drop_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     p.add(egui::Shape::convex_polygon(vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x + 4.0, c.y - 2.0), pos2(c.x, c.y + 2.5)], pal.text, Stroke::NONE));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listed(id: &str, name: &str) -> Container {
+        Container { id: id.to_string(), name: name.to_string(), ..Container::default() }
+    }
+
+    #[test]
+    fn drop_unmatched_keeps_a_request_while_the_list_is_not_read() {
+        let mut sessions = TerminalSessions::default();
+        sessions.request("tmop-test-rt-v2".to_string(), None);
+        assert_eq!(sessions.drop_unmatched(&[], false), None);
+        assert!(sessions.pending.is_some());
+    }
+
+    #[test]
+    fn drop_unmatched_keeps_a_request_for_a_listed_container() {
+        let mut sessions = TerminalSessions::default();
+        sessions.request("tmop-test-rt-v2".to_string(), None);
+        let containers = [listed("0123456789ab", "other"), listed("fedcba987654", "tmop-test-rt-v2")];
+        assert_eq!(sessions.drop_unmatched(&containers, true), None);
+        assert!(sessions.pending.is_some());
+    }
+
+    #[test]
+    fn drop_unmatched_drops_a_request_missing_from_a_read_list() {
+        let mut sessions = TerminalSessions::default();
+        sessions.request("missing".to_string(), None);
+        let containers = [listed("0123456789ab", "other")];
+        assert_eq!(sessions.drop_unmatched(&containers, true), Some("missing".to_string()));
+        assert!(sessions.pending.is_none());
+    }
+}

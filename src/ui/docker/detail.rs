@@ -241,10 +241,9 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
         let alive: HashSet<&str> = app.docker.ui.snap.containers.iter().map(|c| c.id.as_str()).collect();
         app.docker.ui.detail.terminals.retain(&alive);
     }
-    let loaded = app.docker.ui.snap.status == EngineStatus::Connected && (!app.docker.ui.snap.containers.is_empty() || app.docker.ui.last_list_seq > 0);
-    if let Some(name) = app.docker.ui.detail.terminals.drop_unmatched(&app.docker.ui.snap.containers, loaded) {
-        app.docker.ui.toast(NoticeKind::Error, format!("Container {name} not found for the terminal request"));
-    }
+    // A list read since connecting: `list_seq` is bumped on every reset, so it cannot tell "not read yet".
+    let loaded = app.docker.ui.snap.status == EngineStatus::Connected && app.docker.ui.snap.last_list_at.is_some();
+    // Take first: a request whose container is listed must open, never be reported as missing.
     if let Some((id, options)) = app.docker.ui.detail.terminals.take_pending(&app.docker.ui.snap.containers) {
         // The containers table keeps its own selection and writes it back every frame, so it must agree.
         app.docker.ui.selected_container = Some(id.clone());
@@ -254,6 +253,9 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
         // The session opens at the size its terminal body will have, so the first frame does not resize it.
         let grid = grid_for(ui, body_rect(detail_split(inner)[2]));
         open_terminal(app, ui, &id, options, grid);
+    }
+    if let Some(name) = app.docker.ui.detail.terminals.drop_unmatched(&app.docker.ui.snap.containers, loaded) {
+        app.docker.ui.toast(NoticeKind::Error, format!("Container {name} not found for the terminal request"));
     }
     app.docker.ui.detail.terminals.pump();
 
