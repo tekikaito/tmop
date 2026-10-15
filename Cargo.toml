@@ -31,6 +31,7 @@ tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "time", "io
 futures-util = "0.3.34"
 tar = "0.4.46"
 bytes = "1.12.1"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "pollster", "common-controls-v6"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58.0"
