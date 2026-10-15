@@ -10,6 +10,12 @@
 
 pub mod backend;
 pub mod client;
+pub mod files;
+pub mod logs;
+pub mod notify;
+pub mod run;
+pub mod stack;
+
 pub mod context;
 pub mod model;
 
