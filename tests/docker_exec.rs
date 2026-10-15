@@ -6,7 +6,7 @@
 mod common;
 
 use bollard::models::ContainerCreateBody;
-use bollard::query_parameters::CreateContainerOptionsBuilder;
+use bollard::query_parameters::{CreateContainerOptionsBuilder, StopContainerOptionsBuilder};
 use bollard::Docker;
 use common::{ensure_image, engine, remove_container, suffix, TEST_IMAGE};
 use std::sync::{Arc, Mutex};
@@ -153,4 +153,44 @@ fn read_only_engine_refuses_exec() {
         Ok(_) => panic!("read-only engine started an exec session"),
         Err(e) => assert!(e.contains("read-only"), "unexpected error: {e}"),
     }
+}
+
+#[test]
+fn stopping_the_container_ends_the_session() {
+    let Some((rt, docker)) = engine() else { return };
+    rt.block_on(ensure_image(&docker)).expect("pull test image");
+
+    let name = format!("tmop-test-exec-{}", suffix());
+    let _cleanup = Cleanup { rt: &rt, docker: docker.clone(), names: vec![name.clone()] };
+    rt.block_on(create_and_start(&docker, &name)).expect("create and start container");
+
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let opts = ExecOptions { command: None, user: None, cols: 80, rows: 24 };
+    let mut session = ExecSession::start(&engine_for(&rt, &docker, false), &name, opts, collecting_sink(&out)).expect("start");
+
+    let state = wait_state(&session, |s| matches!(s, TransportState::Running) || is_ended(s));
+    assert_eq!(state, TransportState::Running, "session did not start: {}", output_text(&out));
+
+    session.write(b"echo alive\r");
+    // The typed line is echoed back as "echo alive", so match only the shell's own line break before "alive".
+    assert!(wait_output(&out, "\nalive"), "no output from the shell: {}", output_text(&out));
+
+    let stop = StopContainerOptionsBuilder::default().t(1).build();
+    rt.block_on(docker.stop_container(&name, Some(stop))).expect("stop container");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let state = loop {
+        let state = session.state();
+        if is_ended(&state) || Instant::now() >= deadline {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    session.close();
+
+    let TransportState::Ended(text) = &state else {
+        panic!("session did not end after the container stopped: {state:?}");
+    };
+    eprintln!("Ended text after stop: {text}");
+    assert!(wait_output(&out, "[session ended:"), "no end marker in output: {}", output_text(&out));
 }
