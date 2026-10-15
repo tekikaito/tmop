@@ -25,6 +25,7 @@ use super::{App, FrameData, STATUS_H};
 use crate::docker::backend::{Backend, Command, EngineEvent, NoticeKind, Shared};
 use crate::docker::context::{default_contexts, docker_dir, Context};
 use crate::docker::model::{Container, EngineInfo, EngineStatus, Image, Network, Stack, StatsSample, Totals, Volume};
+use crate::docker::notify;
 use crate::settings::Settings;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Id, Layout, Order, Rect, RichText, Sense, Stroke};
 use std::collections::BTreeMap;
@@ -127,6 +128,8 @@ pub struct DockerState {
     pub installed: bool,
     /// Engine status as of the last [`DockerState::poll`].
     pub last_status: EngineStatus,
+    /// Desktop notifications for alerts, from the active context's setting.
+    pub notify_enabled: bool,
     page_open: Option<bool>,
 }
 
@@ -138,9 +141,18 @@ impl DockerState {
         let active = settings.docker_active_context.clone();
         let resolved = resolve_name(&contexts, &active);
         let read_only = settings.docker_contexts.get(&resolved).map(|c| c.read_only).unwrap_or(false);
+        let notify_enabled = settings.docker_contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
         let repaint = ctx.clone();
         let backend = Backend::start(contexts.clone(), active, read_only, move || repaint.request_repaint());
-        Self { backend: Some(backend), contexts, ui: DockerUi::default(), installed, last_status: EngineStatus::Unknown, page_open: None }
+        Self {
+            backend: Some(backend),
+            contexts,
+            ui: DockerUi::default(),
+            installed,
+            last_status: EngineStatus::Unknown,
+            notify_enabled,
+            page_open: None,
+        }
     }
 
     /// The worker handle, when one is running.
@@ -148,20 +160,38 @@ impl DockerState {
         self.backend.as_ref()
     }
 
+    /// Takes the notification setting of the context now in `settings.docker_active_context`.
+    pub fn note_context_switch(&mut self, settings: &Settings) {
+        let resolved = resolve_name(&self.contexts, &settings.docker_active_context);
+        self.notify_enabled = settings.docker_contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
+    }
+
     /// Whether the Docker page is listed in the navigation.
     pub fn visible(&self, settings: &Settings) -> bool {
         !settings.docker_hide_page && (self.installed || self.last_status == EngineStatus::Connected)
     }
 
-    /// Once per frame: caches the engine status, moves notices into toasts, drops expired
-    /// toasts, and tells the worker when the page is open.
+    /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as
+    /// toasts and desktop notifications, drops expired toasts, and tells the worker when the
+    /// page is open.
     pub fn poll(&mut self, page_open: bool) {
         let Some(b) = &self.backend else { return };
-        {
+        let alerts: Vec<_> = {
             let mut s = lock(&b.shared);
             self.last_status = s.status;
             while let Some(n) = s.notices.pop_front() {
                 self.ui.toasts.push(Toast { kind: n.kind, text: n.text, at: Instant::now() });
+            }
+            s.alerts.drain(..).collect()
+        };
+        for alert in alerts {
+            let (title, body) = notify::alert_text(&alert);
+            self.ui.toast(NoticeKind::Info, format!("{title}: {body}"));
+            if self.notify_enabled {
+                // The toast call blocks for a moment, so it runs off the UI thread.
+                std::thread::spawn(move || {
+                    let _ = notify::send(&title, &body);
+                });
             }
         }
         let excess = self.ui.toasts.len().saturating_sub(MAX_TOASTS);
@@ -290,11 +320,12 @@ impl App {
         let active = self.active_name();
         let mut switch_to: Option<String> = None;
         let mut refresh = false;
+        let mut add_host = false;
         let contexts = &self.docker.contexts;
         let filter = &mut self.docker.ui.filter;
         // The controls on the right keep their width; the picker and status are clipped before them.
-        let left = Rect::from_min_max(rect.min, pos2(rect.right() - 300.0, rect.bottom()));
-        let right = Rect::from_min_max(pos2(rect.right() - 300.0, rect.top()), rect.max);
+        let left = Rect::from_min_max(rect.min, pos2(rect.right() - 420.0, rect.bottom()));
+        let right = Rect::from_min_max(pos2(rect.right() - 420.0, rect.top()), rect.max);
         kit::row_ui(ui, left, |ui| {
             ui.set_clip_rect(left);
             ui.label(RichText::new("Host").font(theme::ui(13.0)).color(pal.text_dim));
@@ -337,6 +368,9 @@ impl App {
                 if widgets::button(ui, "Refresh", pal, Some(Icon::Refresh)).clicked() {
                     refresh = true;
                 }
+                if widgets::button(ui, "Add host...", pal, None).clicked() {
+                    add_host = true;
+                }
             });
         });
 
@@ -349,11 +383,15 @@ impl App {
             }
             self.settings.docker_active_context = name;
             self.settings_dirty = true;
+            self.docker.note_context_switch(&self.settings);
         }
         if refresh {
             if let Some(b) = &self.docker.backend {
                 b.send(Command::Refresh);
             }
+        }
+        if add_host {
+            self.docker.ui.dialogs.wizards.open = Some(wizards::Wizard::AddHost);
         }
     }
 
@@ -390,6 +428,9 @@ impl App {
                 e.notifications = notif;
             }
             self.settings_dirty = true;
+            if notif_changed {
+                self.docker.notify_enabled = notif;
+            }
             if ro_changed {
                 if let Some(b) = &self.docker.backend {
                     b.send(Command::SetReadOnly(ro));
