@@ -4,11 +4,13 @@
 //! Engine work runs as [`Task`]s on the worker runtime and log follows as [`LogSession`]s.
 //! Both are stopped or cancelled when the selection changes or the engine goes away.
 
+use super::terminal_tab::{terminal_tab, TerminalSessions};
 use super::{DockerUi, Snap, Tab};
 use crate::docker::backend::{err_text, Backend, Engine, NoticeKind, Task};
+use crate::docker::exec::ExecOptions;
 use crate::docker::files::{self, Entry, Target, VolumeBrowser};
 use crate::docker::logs::{self, LogBuffer, LogSession, Stream, DEFAULT_TAIL};
-use crate::docker::model::{format_bytes, Container, StatsSample};
+use crate::docker::model::{format_bytes, Container, EngineStatus, StatsSample};
 use crate::metrics::Series;
 use crate::process::format_rate;
 use crate::ui::icons::IconCache;
@@ -19,13 +21,14 @@ use crate::ui::widgets::{self, Graph, GraphLine, Icon};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, pos2, text::LayoutJob, text::TextFormat, vec2, Align, Align2, Layout, Rect, RichText, Sense, Stroke};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Height of the toolbars of the logs, inspect and files tabs.
-const TOOLBAR_H: f32 = 26.0;
+pub(super) const TOOLBAR_H: f32 = 26.0;
 /// Height of the line under the files toolbar and the logs footer.
 const LINE_H: f32 = 16.0;
 /// Width of the key/value column of the stats tab.
@@ -37,7 +40,7 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 
 const FILES_COLS: [Col; 5] = [Col::text("Name", 300.0), Col::num("Size", 90.0), Col::text("Mode", 110.0), Col::text("Modified", 150.0), Col::text("Link", 200.0)];
 
-type Toasts = Vec<(NoticeKind, String)>;
+pub(super) type Toasts = Vec<(NoticeKind, String)>;
 
 /// Tab of the detail area.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,6 +50,7 @@ pub enum DetailTab {
     Inspect,
     Stats,
     Files,
+    Terminal,
 }
 
 impl DetailTab {
@@ -56,6 +60,7 @@ impl DetailTab {
             DetailTab::Inspect => "Inspect",
             DetailTab::Stats => "Stats",
             DetailTab::Files => "Files",
+            DetailTab::Terminal => "Terminal",
         }
     }
 }
@@ -73,7 +78,7 @@ impl Subject {
     /// Tabs that apply to this subject, in strip order.
     fn tabs(&self) -> &'static [DetailTab] {
         match self {
-            Subject::Container(_) => &[DetailTab::Logs, DetailTab::Inspect, DetailTab::Stats, DetailTab::Files],
+            Subject::Container(_) => &[DetailTab::Logs, DetailTab::Inspect, DetailTab::Stats, DetailTab::Files, DetailTab::Terminal],
             Subject::Stack(_) => &[DetailTab::Logs],
             Subject::Volume(_) => &[DetailTab::Files],
             Subject::None => &[],
@@ -164,11 +169,18 @@ pub struct DetailState {
     inspect: InspectState,
     stats: StatsState,
     files: FilesState,
+    pub terminals: TerminalSessions,
 }
 
 impl DetailState {
+    /// Ends every terminal session. Call it when the engine changes; sessions belong to the engine.
+    pub fn close_terminals(&mut self) {
+        self.terminals.close_all();
+    }
+
     /// Stops the log follow, cancels pending reads and closes the volume helper.
     /// Call it when the Docker page is left; the area also calls it when nothing is selected.
+    /// Terminal sessions are kept.
     pub fn close(&mut self, engine: Option<&Engine>) {
         self.logs.session = None;
         self.logs.session_key.clear();
@@ -224,6 +236,17 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
     p.line_segment([pos2(rect.left(), rect.top()), pos2(rect.right(), rect.top())], Stroke::new(1.0_f32, pal.panel_stroke));
     let inner = Rect::from_min_max(pos2(rect.left() + 4.0, rect.top() + 6.0), pos2(rect.right() - 4.0, rect.bottom() - 4.0));
 
+    if app.docker.ui.snap.status == EngineStatus::Connected {
+        let alive: HashSet<&str> = app.docker.ui.snap.containers.iter().map(|c| c.id.as_str()).collect();
+        app.docker.ui.detail.terminals.retain(&alive);
+    }
+    if let Some((id, options)) = app.docker.ui.detail.terminals.take_pending(&app.docker.ui.snap.containers) {
+        app.docker.ui.selected_container = Some(id.clone());
+        app.docker.ui.detail.tab = DetailTab::Terminal;
+        app.docker.ui.tab = Tab::Containers;
+        open_terminal(app, ui, &id, options);
+    }
+
     let page_tab = app.docker.ui.tab;
     let subject = subject_of(&app.docker.ui);
     let engine = app.docker.backend().and_then(|b| b.engine());
@@ -247,6 +270,10 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
         _ => None,
     };
     let read_only = app.docker.ui.snap.read_only;
+    let marked: &[DetailTab] = match &subject {
+        Subject::Container(id) if app.docker.ui.detail.terminals.has_sessions(id) => &[DetailTab::Terminal],
+        _ => &[],
+    };
 
     let mut toasts: Toasts = Vec::new();
     let ctx = ui.ctx().clone();
@@ -260,7 +287,7 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
     let name_rect = widgets::text(&p, pos2(split[0].left(), split[0].center().y), Align2::LEFT_CENTER, &title, theme::semibold(14.0), pal.text);
     widgets::text(&p, pos2(name_rect.right() + 12.0, split[0].center().y), Align2::LEFT_CENTER, &sub, theme::ui(12.5), pal.text_dim);
 
-    let clicked = tab_strip(ui, split[1], &pal, allowed, tab);
+    let clicked = tab_strip(ui, split[1], &pal, allowed, marked, tab);
     let tab = clicked.unwrap_or(tab);
     state.tab = tab;
 
@@ -286,10 +313,26 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
             stats_tab(app, ui, content, fd, running, sample, graphs);
         }
         DetailTab::Files => files_tab(&mut state.files, &engine, &subject, running, read_only, &mut app.icons, ui, content, &pal, &mut toasts),
+        DetailTab::Terminal => {
+            if let Subject::Container(id) = &subject {
+                terminal_tab(&mut state.terminals, &engine, id, &title, running, read_only, &ctx, ui, content, &pal, &mut toasts);
+            }
+        }
     }
 
     for (kind, text) in toasts {
         app.docker.ui.toast(kind, text);
+    }
+}
+
+/// Opens a terminal session for a container chosen by the start-up request; errors become toasts.
+fn open_terminal(app: &mut App, ui: &egui::Ui, id: &str, options: ExecOptions) {
+    let Some(engine) = app.docker.backend().and_then(|b| b.engine()) else {
+        app.docker.ui.toast(NoticeKind::Error, "Engine not reachable");
+        return;
+    };
+    if let Err(e) = app.docker.ui.detail.terminals.open(&engine, ui.ctx(), id, options) {
+        app.docker.ui.toast(NoticeKind::Error, e);
     }
 }
 
@@ -354,7 +397,7 @@ fn describe(subject: &Subject, snap: &Snap) -> (String, String) {
 }
 
 /// Hand-drawn tab strip; returns the tab clicked this frame.
-fn tab_strip(ui: &egui::Ui, rect: Rect, pal: &Palette, tabs: &[DetailTab], current: DetailTab) -> Option<DetailTab> {
+fn tab_strip(ui: &egui::Ui, rect: Rect, pal: &Palette, tabs: &[DetailTab], marked: &[DetailTab], current: DetailTab) -> Option<DetailTab> {
     let font = theme::ui(13.0);
     let mut next = None;
     let mut x = rect.left();
@@ -372,6 +415,9 @@ fn tab_strip(ui: &egui::Ui, rect: Rect, pal: &Palette, tabs: &[DetailTab], curre
         }
         let color = if selected { pal.text } else { pal.text_dim };
         p.text(r.center(), Align2::CENTER_CENTER, t.label(), font.clone(), color);
+        if marked.contains(t) {
+            p.circle_filled(pos2(r.right() - 7.0, r.top() + 7.0), 3.0, pal.ok);
+        }
         if resp.clicked() {
             next = Some(*t);
         }

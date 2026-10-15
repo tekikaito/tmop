@@ -15,6 +15,7 @@ pub mod detail;
 pub mod dialogs;
 pub mod engine_tab;
 pub mod tables;
+pub mod terminal_tab;
 pub mod wizards;
 
 use super::kit::{self, GAP, MARGIN};
@@ -386,6 +387,7 @@ impl App {
                 // Release the helper and log session on the old host before the switch.
                 let engine = b.engine();
                 self.docker.ui.detail.close(engine.as_ref());
+                self.docker.ui.detail.close_terminals();
                 b.send(Command::SetReadOnly(ro));
                 b.send(Command::SwitchContext(name.clone()));
             }

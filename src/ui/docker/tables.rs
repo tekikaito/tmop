@@ -293,6 +293,7 @@ fn container_acts(snap: &Snap, c: Option<&Container>) -> Vec<Act> {
 }
 
 fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Option<Intent> {
+    let with_terminal = d.detail.terminals.container_ids();
     let DockerUi { snap, filter, containers: state, selected_container, .. } = d;
     let snap: &Snap = snap;
     let now = now_unix();
@@ -334,7 +335,10 @@ fn containers(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: 
             let dash = || Cell::new("-").dim(pal);
             match col {
                 0 => {
-                    let cell = Cell::new(with_busy(&c.name, busy));
+                    let mut cell = Cell::new(with_busy(&c.name, busy));
+                    if with_terminal.contains(&c.id) {
+                        cell = cell.dot(pal.accent);
+                    }
                     if busy.is_some() {
                         cell.dim(pal)
                     } else {
