@@ -7,7 +7,6 @@ use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -45,9 +44,6 @@ const KEEPALIVE_FAILURES: u32 = 3;
 /// First and largest wait before retrying a failed creation of the next pipe instance.
 const PIPE_RETRY_MIN: Duration = Duration::from_millis(250);
 const PIPE_RETRY_MAX: Duration = Duration::from_secs(5);
-/// How long a finished connection waits for the client to read the rest of the response.
-const PIPE_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
-const PIPE_DRAIN_POLL: Duration = Duration::from_millis(5);
 const ENGINE_SCRIPT: &str = "/usr/local/bin/tmop-engine";
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
@@ -370,116 +366,41 @@ async fn handle(mut pipe: NamedPipeServer, upstream: Arc<dyn Upstream>, log: Arc
             return;
         }
     };
-    let (done, upstream_eof) = oneshot::channel();
-    let up = EofWatch { inner: up, done: Some(done) };
+    let (done, response_done) = oneshot::channel();
+    let client = ResponseWatch { inner: &mut pipe, done: Some(done) };
     let l = log.clone();
     let on_log = move |m: &str| l.line(m);
     {
-        let relay = relay_connection(&mut pipe, up, &MountRewriter, &on_log);
-        // Named pipes do not turn a write-side shutdown into EOF for the client, so once the engine
-        // closes its side the relay stops even if the client keeps its end open.
+        let relay = relay_connection(client, up, &MountRewriter, &on_log);
+        // Named pipes do not turn a write-side shutdown into EOF, so once the response has been written
+        // the request side is dropped even if the client keeps its end open.
         tokio::select! {
             res = relay => {
                 if let Err(e) = res {
                     log.line(&format!("connection ended: {e}"));
                 }
             }
-            _ = upstream_eof => {}
+            _ = response_done => {}
         }
     }
-    drain_and_disconnect(&mut pipe).await;
+    // Dropping the server end gives the client end of stream after the bytes it has not read yet.
+    // DisconnectNamedPipe would discard those bytes.
 }
 
-/// Waits until the client has read everything written to the pipe, then disconnects it.
-/// Disconnecting earlier would discard response bytes the client has not read yet.
-async fn drain_and_disconnect(pipe: &mut NamedPipeServer) {
-    // tokio's named pipe layer returns from `write` before the queued overlapped write has reached
-    // the pipe, so an empty write (which waits for the queued one) comes first.
-    if tokio::time::timeout(PIPE_FLUSH_TIMEOUT, pipe.write(&[])).await.is_ok() {
-        let raw = pipe.as_raw_handle() as usize;
-        // FlushFileBuffers returns at once on these overlapped handles, so the unread bytes are polled.
-        let deadline = Instant::now() + PIPE_FLUSH_TIMEOUT;
-        while outbound_bytes(raw).is_some_and(|n| n > 0) && Instant::now() < deadline {
-            tokio::time::sleep(PIPE_DRAIN_POLL).await;
-        }
-    }
-    let _ = pipe.disconnect();
-}
-
-/// `FILE_PIPE_LOCAL_INFORMATION`, declared here because the Wdk windows features are not enabled.
-#[repr(C)]
-#[derive(Default)]
-struct PipeLocalInfo {
-    named_pipe_type: u32,
-    named_pipe_configuration: u32,
-    maximum_instances: u32,
-    current_instances: u32,
-    inbound_quota: u32,
-    read_data_available: u32,
-    outbound_quota: u32,
-    write_quota_available: u32,
-    named_pipe_state: u32,
-    named_pipe_end: u32,
-}
-
-/// `IO_STATUS_BLOCK` (the status and information words are both pointer-sized).
-#[repr(C)]
-struct IoStatusBlock {
-    status: usize,
-    information: usize,
-}
-
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtQueryInformationFile(file: *mut c_void, iosb: *mut IoStatusBlock, info: *mut c_void, length: u32, class: u32) -> i32;
-}
-
-/// `FilePipeLocalInformation`
-const FILE_PIPE_LOCAL_INFORMATION: u32 = 24;
-
-/// Bytes written on the server end that the client has not read yet, or `None` when the query fails
-/// (for example after the client has closed its end).
-fn outbound_bytes(raw: usize) -> Option<u32> {
-    let mut info = PipeLocalInfo::default();
-    let mut iosb = IoStatusBlock { status: 0, information: 0 };
-    // SAFETY: `info` and `iosb` are valid for the sizes passed, and `raw` is the open handle of a
-    // pipe server end that the caller keeps alive.
-    let status = unsafe {
-        NtQueryInformationFile(
-            raw as *mut c_void,
-            &mut iosb,
-            &mut info as *mut PipeLocalInfo as *mut c_void,
-            std::mem::size_of::<PipeLocalInfo>() as u32,
-            FILE_PIPE_LOCAL_INFORMATION,
-        )
-    };
-    (status >= 0).then(|| info.outbound_quota.saturating_sub(info.write_quota_available))
-}
-
-/// Reports the first end-of-stream seen on the wrapped upstream.
-struct EofWatch<S> {
+/// Reports when the response side shuts the client down, which the proxy does only after the last
+/// upstream byte has been written.
+struct ResponseWatch<S> {
     inner: S,
     done: Option<oneshot::Sender<()>>,
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for EofWatch<S> {
+impl<S: AsyncRead + Unpin> AsyncRead for ResponseWatch<S> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        let had_room = buf.remaining() > 0;
-        let before = buf.filled().len();
-        let res = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = res {
-            if had_room && buf.filled().len() == before {
-                if let Some(done) = this.done.take() {
-                    let _ = done.send(());
-                }
-            }
-        }
-        res
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for EofWatch<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for ResponseWatch<S> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
@@ -489,7 +410,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for EofWatch<S> {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        let res = Pin::new(&mut this.inner).poll_shutdown(cx);
+        if res.is_ready() {
+            if let Some(done) = this.done.take() {
+                let _ = done.send(());
+            }
+        }
+        res
     }
 }
 
@@ -840,7 +768,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "open: the last ~43 bytes of a >64 KiB reply are lost after upstream EOF (see report)"]
     async fn pipe_delivers_response_larger_than_pipe_buffer() {
         // Upstream closes right after the reply: every byte must still reach the client.
         let body: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
