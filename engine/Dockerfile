@@ -2,19 +2,27 @@
 #
 # TMOP engine WSL2 rootfs. Built by engine/build.sh; the final stage is exported as a tar.
 # Build context is the engine/ directory.
+#
+# Base images are pinned by the digest of their multi-arch index. Tool versions and the
+# docker/cli source hash are the defaults below; build.sh only overrides them when set.
 
 ARG DOCKER_CLI_TAG=v28.5.2
+ARG DOCKER_CLI_SHA256=5864ccdfceef3a9e8ddb29b4a555d5b82a551b5258067aac164b6156c6cfdc08
 ARG COMPOSE_TAG=v2.40.3
 
 # Cross-compiles the Windows Docker CLI and fetches the Windows compose plugin.
 # Runs on the build machine's native platform and targets Windows for TARGETARCH.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS wincli
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS wincli
 ARG TARGETARCH
 ARG DOCKER_CLI_TAG
+ARG DOCKER_CLI_SHA256
 ARG COMPOSE_TAG
 WORKDIR /src
 RUN apk add --no-cache ca-certificates \
- && wget -qO- "https://github.com/docker/cli/archive/refs/tags/${DOCKER_CLI_TAG}.tar.gz" | tar -xz --strip-components=1 \
+ && wget -qO /tmp/docker-cli.tar.gz "https://github.com/docker/cli/archive/refs/tags/${DOCKER_CLI_TAG}.tar.gz" \
+ && echo "${DOCKER_CLI_SHA256}  /tmp/docker-cli.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/docker-cli.tar.gz --strip-components=1 \
+ && rm -f /tmp/docker-cli.tar.gz \
  && mkdir -p /out \
  && cp vendor.mod go.mod \
  && CGO_ENABLED=0 GOOS=windows GOARCH="${TARGETARCH}" go build -mod=vendor -modfile=vendor.mod -trimpath \
@@ -27,7 +35,7 @@ RUN case "${TARGETARCH}" in amd64) cpu=x86_64;; arm64) cpu=aarch64;; *) echo "un
  && wget -qO /tmp/expected.sha256 "${base}/${f}.sha256" \
  && echo "$(awk '{print $1}' /tmp/expected.sha256)  /out/docker-compose.exe" | sha256sum -c -
 
-FROM alpine:3.21
+FROM alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
 ARG TARGETARCH
 ARG TMOP_TAG=dev
 

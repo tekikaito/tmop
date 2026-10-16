@@ -10,7 +10,7 @@
 #   status                   print "running" (exit 0) or "stopped" (exit 1)
 #   limits <cpus> <mem_mb>   persist limits to /etc/tmop/limits and apply them now (0 = unlimited)
 #   upgrade <tar|tar.gz>     replace the rootfs, keeping Docker data, limits and temp dirs
-#   ip                       print the IPv4 address of eth0
+#   ip                       print the distro's IPv4 address (never loopback or link-local)
 #   version                  print the engine version tag
 #   windows-cli-dir          print the directory holding the Windows docker CLI for this arch
 #
@@ -54,12 +54,25 @@ write_file() {
 #  - v2 (unified): /sys/fs/cgroup/cgroup.controllers exists. The engine lives in
 #    /sys/fs/cgroup/tmop-engine and limits are cpu.max and memory.max.
 #  - v1 (legacy): one hierarchy per controller, /sys/fs/cgroup/<controller>/tmop-engine.
-#    Limits are cpu.cfs_period_us / cpu.cfs_quota_us and memory.limit_in_bytes.
+#    A controller may share a combined hierarchy such as cpu,cpuacct/. Limits are
+#    cpu.cfs_period_us / cpu.cfs_quota_us and memory.limit_in_bytes.
 # A limit of 0 means unlimited: "max" on v2, -1 on v1.
 # ---------------------------------------------------------------------------
 
 is_v2() {
     [ -f /sys/fs/cgroup/cgroup.controllers ]
+}
+
+# v1: prints the hierarchy directory that holds controller $1, either its own
+# (/sys/fs/cgroup/cpu) or a combined one (/sys/fs/cgroup/cpu,cpuacct). Fails if neither exists.
+v1_ctrl_dir() {
+    for d in "/sys/fs/cgroup/$1" /sys/fs/cgroup/*,*; do
+        [ -d "$d" ] || continue
+        case ",${d##*/}," in
+            *",$1,"*) echo "$d"; return 0 ;;
+        esac
+    done
+    return 1
 }
 
 # Mounts the cgroup hierarchy if WSL did not already do so. Tries unified first.
@@ -141,13 +154,19 @@ apply_limits() {
         write_file "/sys/fs/cgroup/$CG/cpu.max" "$cpu_max"
         write_file "/sys/fs/cgroup/$CG/memory.max" "$mem_max"
     else
-        if [ -d "/sys/fs/cgroup/cpu/$CG" ]; then
-            # The period must be written before the quota.
-            write_file "/sys/fs/cgroup/cpu/$CG/cpu.cfs_period_us" 100000
-            write_file "/sys/fs/cgroup/cpu/$CG/cpu.cfs_quota_us" "$cpu_quota_v1"
+        cpu_d=$(v1_ctrl_dir cpu)
+        mem_d=$(v1_ctrl_dir memory)
+        if [ -z "$cpu_d" ] && [ -z "$mem_d" ]; then
+            echo "tmop-engine: warning: no cpu or memory cgroup hierarchy found, limits not applied" >&2
+            return 0
         fi
-        if [ -d "/sys/fs/cgroup/memory/$CG" ]; then
-            write_file "/sys/fs/cgroup/memory/$CG/memory.limit_in_bytes" "$mem_bytes_v1"
+        if [ -n "$cpu_d" ] && [ -d "$cpu_d/$CG" ]; then
+            # The period must be written before the quota.
+            write_file "$cpu_d/$CG/cpu.cfs_period_us" 100000
+            write_file "$cpu_d/$CG/cpu.cfs_quota_us" "$cpu_quota_v1"
+        fi
+        if [ -n "$mem_d" ] && [ -d "$mem_d/$CG" ]; then
+            write_file "$mem_d/$CG/memory.limit_in_bytes" "$mem_bytes_v1"
         fi
     fi
 }
@@ -317,9 +336,10 @@ cmd_upgrade() {
     stop_all
 
     # Paths that must survive the extraction. Archives may store names with or without
-    # a leading "./", so both spellings are excluded. An excluded directory is skipped with its contents.
+    # a leading "./", so both spellings are excluded. An excluded directory is skipped with
+    # its contents, which busybox tar honors for both spellings.
     set --
-    for p in var/lib/docker etc/tmop/limits tmp run proc sys dev mnt; do
+    for p in var/lib/docker var/lib/containerd var/log/tmop etc/tmop/limits tmp run proc sys dev mnt; do
         set -- "$@" --exclude="$p" --exclude="./$p"
     done
     case "$file" in
@@ -334,10 +354,31 @@ cmd_upgrade() {
     exec "$ENGINE" start
 }
 
+# Prints $1 if it is a usable address. Loopback, link-local and 0.x are rejected.
+# Mirrored networking has no eth0, so the address may only show up through the route or the
+# hostname probe. If those return only loopback or link-local addresses, ip exits 1 with no output.
+usable_ip() {
+    case "$1" in
+        ''|127.*|169.254.*|0.*|*[!0-9.]*) return 1 ;;
+    esac
+    echo "$1"
+}
+
+# Prints the distro's IPv4 address. Tries the source address of the default route first,
+# then eth0, then the hostname lookup. Exits 1 with nothing on stdout if none is usable.
 cmd_ip() {
-    addr=$(ip -4 -o addr show eth0 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p' | head -n 1)
-    [ -n "$addr" ] || addr=$(hostname -i 2>/dev/null | awk '{ print $1 }')
-    [ -n "$addr" ] || die "no IPv4 address found"
+    addr=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')
+    addr=$(usable_ip "$addr") || addr=
+    if [ -z "$addr" ]; then
+        addr=$(ip -4 -o addr show eth0 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/.*/\1/p' | head -n 1)
+        addr=$(usable_ip "$addr") || addr=
+    fi
+    if [ -z "$addr" ]; then
+        for cand in $(hostname -i 2>/dev/null); do
+            addr=$(usable_ip "$cand") && break
+        done
+    fi
+    [ -n "$addr" ] || die "no usable IPv4 address found"
     echo "$addr"
 }
 

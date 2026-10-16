@@ -4,11 +4,8 @@
 # Usage: engine/build.sh <tag> <x64|arm64> <out dir>
 # Writes tmop-engine-<tag>-<arch>.tar.gz and its .sha256 into <out dir>.
 # Runs on Linux CI and in Git Bash with Docker Desktop.
+# DOCKER_CLI_TAG and COMPOSE_TAG override the pins in the Dockerfile when set.
 set -euo pipefail
-
-# Pinned Windows CLI and compose versions. Keep in sync with the ARG defaults in Dockerfile.
-DOCKER_CLI_TAG=v28.5.2
-COMPOSE_TAG=v2.40.3
 
 usage() {
     echo "usage: engine/build.sh <tag> <x64|arm64> <out dir>" >&2
@@ -43,11 +40,17 @@ else
     dest=$tar_file
 fi
 
+build_args=(--build-arg "TMOP_TAG=$tag")
+if [ -n "${DOCKER_CLI_TAG:-}" ]; then
+    build_args+=(--build-arg "DOCKER_CLI_TAG=$DOCKER_CLI_TAG")
+fi
+if [ -n "${COMPOSE_TAG:-}" ]; then
+    build_args+=(--build-arg "COMPOSE_TAG=$COMPOSE_TAG")
+fi
+
 docker buildx build \
     --platform "$platform" \
-    --build-arg "TMOP_TAG=$tag" \
-    --build-arg "DOCKER_CLI_TAG=$DOCKER_CLI_TAG" \
-    --build-arg "COMPOSE_TAG=$COMPOSE_TAG" \
+    "${build_args[@]}" \
     --output "type=tar,dest=$dest" \
     -f "$engine_dir/Dockerfile" \
     "$engine_dir"
