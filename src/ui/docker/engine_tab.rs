@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 const EVENT_ROW_H: f32 = 18.0;
 const MIB: u64 = 1024 * 1024;
-/// Share of the right column given to the TMOP engine card.
-const ENGINE_CARD_SHARE: f32 = 0.55;
+/// Height of the recent events card; the TMOP engine card takes the rest of the right column.
+const EVENTS_H: f32 = 200.0;
 /// Indent of the help text under a switch, so it lines up after the toggle.
 const HELP_INDENT: f32 = 44.0;
 
@@ -84,7 +84,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
     }
 
     // Recent events on top, the TMOP engine card below.
-    let right = kit::vsplit(cols[1], &[-1.0, (cols[1].height() - GAP) * ENGINE_CARD_SHARE], GAP);
+    let right = kit::vsplit(cols[1], &[EVENTS_H, -1.0], GAP);
     let events = kit::titled_card(&p, right[0], &pal, bloom, "Recent events", "");
     if snap.events.is_empty() {
         kit::empty_state(&p, events, &pal, "No events yet");

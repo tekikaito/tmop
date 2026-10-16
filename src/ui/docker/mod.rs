@@ -394,11 +394,13 @@ impl App {
         self.host_row(ui, rows[0], &pal);
         self.tab_strip(ui, rows[1], &pal, &active);
         if self.docker.ui.tab == Tab::Engine {
-            engine_tab::show(self, ui, rows[2], fd);
+            // The engine tab has no detail area, so its content takes that row too.
+            self.docker.ui.detail.terminals.set_visible(None);
+            engine_tab::show(self, ui, rows[2].union(rows[3]), fd);
         } else {
             tables::show(self, ui, rows[2], fd);
+            detail::detail_area(self, ui, rows[3], fd);
         }
-        detail::detail_area(self, ui, rows[3], fd);
         dialogs::show(self, ui.ctx(), fd);
     }
 
