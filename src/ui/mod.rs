@@ -425,7 +425,11 @@ impl App {
             app.docker.ui.tab = tab;
         }
         match launch.engine_test.as_deref() {
-            Some("setup") => app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.engine_data_dir)),
+            Some("setup") => {
+                // Same as the wizard: the engine's context becomes the active one once it runs.
+                app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.engine_data_dir));
+                app.docker.switch_to_engine_when_ready = true;
+            }
             Some("wizard") => docker::engine_wizard::open(&mut app.docker),
             Some("start") => app.docker.engine.start(),
             Some("stop") => app.docker.engine.stop(),
