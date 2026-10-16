@@ -1340,6 +1340,48 @@ mod tests {
         assert_eq!(mgr.status().phase, Phase::NotInstalled);
     }
 
+    /// Setters against the running engine: ports flag, limits (checked inside the distro) and
+    /// `.wslconfig` merge with backups. Needs the same overrides as above and an installed, running
+    /// engine; `TMOP_WSLCONFIG` must point at a scratch file. Run with `-- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "real WSL distro: needs the TMOP_ENGINE_* test overrides and a running engine"]
+    fn real_setters_on_running_engine() {
+        use crate::engine::wsl;
+        let ov = Overrides::from_env();
+        let dir = ov.data_dir.clone().expect("TMOP_ENGINE_DATA_DIR is set");
+        let wslconfig = wslconfig_path().expect("TMOP_WSLCONFIG is set");
+        let mut mgr = EngineManager::new(dir.clone(), false, Arc::new(|| {}));
+        wait_idle(&mut mgr, Duration::from_secs(60));
+        assert_eq!(mgr.status().phase, Phase::Running, "error: {:?}", mgr.status().error);
+
+        mgr.set_ports_local_only(true);
+        wait_idle(&mut mgr, Duration::from_secs(30));
+        assert!(EngineConfig::load(&dir).expect("engine.json").ports_local_only);
+        mgr.set_ports_local_only(false);
+        wait_idle(&mut mgr, Duration::from_secs(30));
+        assert!(!EngineConfig::load(&dir).expect("engine.json").ports_local_only);
+
+        mgr.set_limits(Limits { cpus: 2, memory_mb: 1024 });
+        wait_idle(&mut mgr, Duration::from_secs(60));
+        assert_eq!(mgr.status().error, None);
+        let limits = wsl::exec(&ov.distro, &["/bin/cat", "/etc/tmop/limits"], QUICK_TIMEOUT).expect("cat limits");
+        assert!(limits.stdout.contains("CPUS=2") && limits.stdout.contains("MEMORY_MB=1024"), "limits: {}", limits.stdout);
+        assert_eq!(EngineConfig::load(&dir).expect("engine.json").limits, Limits { cpus: 2, memory_mb: 1024 });
+        mgr.set_limits(Limits::default());
+        wait_idle(&mut mgr, Duration::from_secs(60));
+
+        let _ = fs::remove_file(&wslconfig);
+        let first = mgr.apply_wslconfig(Some(4), Some(2)).expect("apply to a missing file");
+        assert_eq!(first, wslconfig);
+        assert_eq!(fs::read_to_string(&wslconfig).unwrap(), "[wsl2]\r\nmemory=4GB\r\nprocessors=2\r\n");
+        let second = mgr.apply_wslconfig(Some(6), None).expect("apply to an existing file");
+        assert_ne!(second, wslconfig);
+        assert!(second.exists(), "backup written");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "[wsl2]\r\nmemory=4GB\r\nprocessors=2\r\n");
+        assert_eq!(fs::read_to_string(&wslconfig).unwrap(), "[wsl2]\r\nmemory=6GB\r\n");
+    }
+
     fn wait_idle(mgr: &mut EngineManager, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while (mgr.status().busy || mgr.status().phase == Phase::Installing) && Instant::now() < deadline {
