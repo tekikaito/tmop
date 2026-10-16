@@ -65,6 +65,10 @@ pub struct Settings {
     pub docker_contexts: BTreeMap<String, DockerContextSettings>,
     /// Hosts added in TMOP; shown in the host picker next to the Docker CLI contexts.
     pub docker_hosts: Vec<DockerHost>,
+    /// Data folder of TMOP's own Docker engine; empty means `%LOCALAPPDATA%\TMOP\engine`.
+    pub engine_data_dir: String,
+    /// Looks for a newer engine release when the Docker page starts.
+    pub engine_update_check: bool,
     /// Any other keys (e.g. `diskLights.*`) are preserved verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -114,6 +118,8 @@ impl Default for Settings {
             docker_active_context: String::new(),
             docker_contexts: BTreeMap::new(),
             docker_hosts: Vec::new(),
+            engine_data_dir: String::new(),
+            engine_update_check: true,
             extra: BTreeMap::new(),
         }
     }
@@ -410,6 +416,28 @@ mod tests {
         assert_eq!(back.docker_hosts, s.docker_hosts);
         assert!(!back.docker_contexts["work"].notifications);
         assert!(back.docker_contexts["desktop-linux"].notifications);
+    }
+
+    #[test]
+    fn engine_settings_roundtrip() {
+        let s = Settings { engine_data_dir: r"D:\tmop-engine".into(), engine_update_check: false, ..Default::default() };
+        let json = s.to_json();
+        assert!(json.contains("\"engineDataDir\":\"D:\\\\tmop-engine\""));
+        assert!(json.contains("\"engineUpdateCheck\":false"));
+        let (back, outcome) = Settings::from_json(&json).unwrap();
+        assert!(matches!(outcome, LoadOutcome::Loaded));
+        assert_eq!(back, s);
+        assert_eq!(back.engine_data_dir, r"D:\tmop-engine");
+        assert!(!back.engine_update_check);
+    }
+
+    #[test]
+    fn engine_settings_default_when_absent() {
+        let (s, _) = Settings::from_json(SAMPLE).unwrap();
+        assert!(s.engine_data_dir.is_empty());
+        assert!(s.engine_update_check, "update check is on by default");
+        assert!(!s.extra.contains_key("engineDataDir"));
+        assert!(Settings::default().engine_update_check);
     }
 
     #[test]

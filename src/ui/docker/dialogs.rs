@@ -2,7 +2,7 @@
 //! actions that run as tasks on the worker. [`request`] is the entry point for every action
 //! chosen from a toolbar or a context menu; [`show`] runs once per frame at the end of the page.
 
-use super::{wizards, Snap};
+use super::{engine_wizard, wizards, Snap};
 use crate::docker::backend::{Command, ContainerAction, NoticeKind, PruneKind, Task};
 use crate::docker::stack::{stack_action, StackAction};
 use crate::ui::theme::Palette;
@@ -302,4 +302,5 @@ pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
     }
     confirm_window(app, ctx, &fd.pal);
     wizards::show(app, ctx, fd);
+    engine_wizard::show(app, ctx, fd);
 }

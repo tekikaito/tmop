@@ -6,6 +6,8 @@
 //!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
 //!   TMOP --docker-terminal=<container>[;<command>]
 //!                         open a terminal session in a container on the Docker page
+//!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
+//!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)

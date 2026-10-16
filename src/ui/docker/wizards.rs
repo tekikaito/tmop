@@ -407,7 +407,7 @@ fn default_project(path: &Path) -> String {
     clean.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_string()
 }
 
-fn label(ui: &mut egui::Ui, text: &str, pal: &Palette) {
+pub(super) fn label(ui: &mut egui::Ui, text: &str, pal: &Palette) {
     ui.label(RichText::new(text).font(theme::ui(13.0)).color(pal.text_dim));
 }
 
@@ -419,7 +419,7 @@ fn note(ui: &mut egui::Ui, text: &str, pal: &Palette) {
     ui.label(RichText::new(text).font(theme::ui(12.5)).color(pal.warn));
 }
 
-fn single<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<'a> {
+pub(super) fn single<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text).hint_text(hint).desired_width(width).font(theme::ui(13.0))
 }
 
@@ -428,7 +428,7 @@ fn multi<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<
 }
 
 /// Button that is clicked only when `enabled`. Disabled buttons look the same as enabled ones.
-fn enabled_button(ui: &mut egui::Ui, label: &str, pal: &Palette, enabled: bool) -> bool {
+pub(super) fn enabled_button(ui: &mut egui::Ui, label: &str, pal: &Palette, enabled: bool) -> bool {
     let clicked = ui.add_enabled_ui(enabled, |ui| widgets::button(ui, label, pal, None).clicked()).inner;
     clicked && enabled
 }

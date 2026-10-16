@@ -305,6 +305,10 @@ pub struct Launch {
     pub disk_scan: Option<std::path::PathBuf>,
     /// Container (name or id prefix) to open a terminal session in at start-up, with an optional command (used for runtime checks).
     pub docker_terminal: Option<(String, Option<String>)>,
+    /// Docker page tab at start-up: engine, containers, stacks, images, volumes or networks.
+    pub docker_tab: Option<String>,
+    /// Test-only engine operation at start-up: setup, wizard, start, stop, restart, remove or update.
+    pub engine_test: Option<String>,
 }
 
 struct Pending {
@@ -416,6 +420,19 @@ impl App {
         }
         if let Some((container, command)) = launch.docker_terminal {
             app.docker.ui.detail.terminals.request(container, command);
+        }
+        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id) {
+            app.docker.ui.tab = tab;
+        }
+        match launch.engine_test.as_deref() {
+            Some("setup") => app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.engine_data_dir)),
+            Some("wizard") => docker::engine_wizard::open(&mut app.docker),
+            Some("start") => app.docker.engine.start(),
+            Some("stop") => app.docker.engine.stop(),
+            Some("restart") => app.docker.engine.restart(),
+            Some("remove") => app.docker.engine.remove(),
+            Some("update") => app.docker.engine.update(),
+            _ => {}
         }
         app.palette().apply(&cc.egui_ctx);
         app
@@ -1090,6 +1107,7 @@ impl App {
         }
         self.shortcuts(ctx);
         self.icons.poll(ctx);
+        self.engine_poll();
         self.docker.poll(self.page == Page::Docker);
         self.docker.refresh_snap();
         self.refresh_docker_perf();

@@ -2,8 +2,9 @@
 
 TMOP shows what your Windows PC is doing: how busy the processor, memory, disk, network and
 graphics card are, which programs are running, and much more. It is free and needs no installation.
-TMOP itself sends no data and makes no internet requests. If you use the Docker page, your Docker
-engine downloads only what you ask it to (for example an image you pull).
+TMOP itself sends no data. Its only internet requests go to GitHub: downloading TMOP's own Docker engine when
+you set it up, and checking for a newer engine release (switch the check off on the Docker page's
+*Engine* tab). A Docker engine downloads only what you ask it to (for example an image you pull).
 
 ![TMOP overview](docs/screenshots/summary.png)
 
@@ -35,7 +36,7 @@ once.
 - **See which programs start with Windows, which apps are installed** and a lot more in the menu
   on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.
-- **Manage your Docker containers:** if Docker Desktop is installed, a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them.
+- **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. It works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (on Windows it needs WSL 2).
 
 ## Update or remove
 
@@ -47,7 +48,7 @@ once.
 ## Good to know
 
 - TMOP runs on Windows 10 and 11. Versions for Linux and Mac are planned.
-- The Docker page appears only when Docker is installed; you can hide it in *Settings*.
+- The Docker page appears when Docker is installed or TMOP's own engine can run on this PC; you can hide it in *Settings*.
 - TMOP is an independent project. It is inspired by *Task Manager TMOG* but is not connected to
   TMOG or its makers.
 - Free and open source under the [GPL-3.0](LICENSE) license. To build it yourself, install

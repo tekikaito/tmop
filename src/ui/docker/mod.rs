@@ -14,6 +14,7 @@
 pub mod detail;
 pub mod dialogs;
 pub mod engine_tab;
+pub mod engine_wizard;
 pub mod tables;
 pub mod terminal_tab;
 pub mod wizards;
@@ -27,10 +28,12 @@ use crate::docker::backend::{Backend, Command, EngineEvent, NoticeKind, Shared};
 use crate::docker::context::{docker_dir, Context};
 use crate::docker::model::{Container, EngineInfo, EngineStatus, Image, Network, Stack, StatsSample, Totals, Volume};
 use crate::docker::notify;
+use crate::engine::manager::{self, EngineManager, Phase};
+use crate::engine::Overrides;
 use crate::settings::Settings;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Id, Layout, Order, Rect, RichText, Sense, Stroke};
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Toasts shown at once; older ones are dropped first.
@@ -108,6 +111,8 @@ pub struct DockerUi {
     pub toasts: Vec<Toast>,
     pub detail: detail::DetailState,
     pub dialogs: dialogs::DialogState,
+    pub engine_tab: engine_tab::EngineTabState,
+    pub engine_wizard: engine_wizard::EngineWizard,
     pub last_list_seq: u64,
     pub last_stats_seq: u64,
     pub snap: Snap,
@@ -133,6 +138,10 @@ pub struct DockerState {
     pub last_status: EngineStatus,
     /// Desktop notifications for alerts, from the active context's setting.
     pub notify_enabled: bool,
+    /// TMOP's own Docker engine: state machine and worker.
+    pub engine: EngineManager,
+    /// Set by the setup wizard; the engine's context becomes the active one once it runs.
+    pub switch_to_engine_when_ready: bool,
     page_open: Option<bool>,
 }
 
@@ -147,6 +156,12 @@ impl DockerState {
         let notify_enabled = settings.docker_contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
         let repaint = ctx.clone();
         let backend = Backend::start(contexts.clone(), active, read_only, move || repaint.request_repaint());
+        let engine_repaint = ctx.clone();
+        let engine = EngineManager::new(
+            Overrides::from_env().data_dir(&settings.engine_data_dir),
+            settings.engine_update_check,
+            Arc::new(move || engine_repaint.request_repaint()),
+        );
         Self {
             backend: Some(backend),
             contexts,
@@ -154,6 +169,8 @@ impl DockerState {
             installed,
             last_status: EngineStatus::Unknown,
             notify_enabled,
+            engine,
+            switch_to_engine_when_ready: false,
             page_open: None,
         }
     }
@@ -171,7 +188,9 @@ impl DockerState {
 
     /// Whether the Docker page is listed in the navigation.
     pub fn visible(&self, settings: &Settings) -> bool {
-        !settings.docker_hide_page && (self.installed || self.last_status == EngineStatus::Connected)
+        // The engine is offered wherever it can run, so it can be set up from here.
+        let engine_supported = cfg!(windows);
+        !settings.docker_hide_page && (self.installed || self.last_status == EngineStatus::Connected || engine_supported)
     }
 
     /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as
@@ -277,6 +296,19 @@ pub fn resolve_name(contexts: &[Context], name: &str) -> String {
     contexts.iter().find(|c| c.current).map(|c| c.name.clone()).unwrap_or_else(|| "default".into())
 }
 
+/// Tab named by `--docker-tab=<id>`: `engine`, `containers`, `stacks`, `images`, `volumes` or `networks`.
+pub fn tab_from_id(id: &str) -> Option<Tab> {
+    match id {
+        "containers" => Some(Tab::Containers),
+        "stacks" => Some(Tab::Stacks),
+        "images" => Some(Tab::Images),
+        "volumes" => Some(Tab::Volumes),
+        "networks" => Some(Tab::Networks),
+        "engine" => Some(Tab::Engine),
+        _ => None,
+    }
+}
+
 /// Unix time in seconds, for age labels.
 pub fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -295,6 +327,46 @@ fn short(s: &str, n: usize) -> String {
 }
 
 impl App {
+    /// Once per frame, before [`DockerState::poll`]: engine toasts, context list refresh, and the
+    /// switch to the engine's context once a setup started from the wizard is running.
+    pub fn engine_poll(&mut self) {
+        for event in self.docker.engine.poll() {
+            match event {
+                manager::Event::Toast { kind, text } => self.docker.ui.toast(kind, text),
+                manager::Event::ContextsChanged => {
+                    let contexts = wizards::merged_contexts(&self.settings);
+                    if let Some(b) = &self.docker.backend {
+                        b.send(Command::SetContexts(contexts.clone()));
+                    }
+                    self.docker.contexts = contexts;
+                }
+            }
+        }
+        let status = self.docker.engine.status();
+        match status.phase {
+            // `busy` is set as soon as the setup is queued; a stale phase before that must not clear the flag.
+            Phase::Failed | Phase::NotInstalled if !status.busy => self.docker.switch_to_engine_when_ready = false,
+            // The context is listed only after the engine has been started, so wait for it.
+            Phase::Running if self.docker.switch_to_engine_when_ready && self.docker.contexts.iter().any(|c| c.name == status.context_name) => {
+                self.docker.switch_to_engine_when_ready = false;
+                let name = status.context_name;
+                let ro = self.settings.docker_contexts.get(&name).map(|c| c.read_only).unwrap_or(false);
+                if let Some(b) = &self.docker.backend {
+                    // Release the helper and log session on the old host before the switch.
+                    let engine = b.engine();
+                    self.docker.ui.detail.close(engine.as_ref());
+                    self.docker.ui.detail.close_terminals();
+                    b.send(Command::SetReadOnly(ro));
+                    b.send(Command::SwitchContext(name.clone()));
+                }
+                self.settings.docker_active_context = name;
+                self.settings_dirty = true;
+                self.docker.note_context_switch(&self.settings);
+            }
+            _ => {}
+        }
+    }
+
     /// The Docker page: host row, tab strip, the selected tab's table and the detail area.
     pub fn docker_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
