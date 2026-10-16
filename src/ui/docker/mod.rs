@@ -338,6 +338,22 @@ impl App {
                     if let Some(b) = &self.docker.backend {
                         b.send(Command::SetContexts(contexts.clone()));
                     }
+                    // The engine was removed while its context was in use: fall back like an unset choice.
+                    let engine_ctx = self.docker.engine.status().context_name;
+                    if self.settings.docker_active_context == engine_ctx && !contexts.iter().any(|c| c.name == engine_ctx) {
+                        let fallback = resolve_name(&contexts, "");
+                        let ro = self.settings.docker_contexts.get(&fallback).map(|c| c.read_only).unwrap_or(false);
+                        if let Some(b) = &self.docker.backend {
+                            let engine = b.engine();
+                            self.docker.ui.detail.close(engine.as_ref());
+                            self.docker.ui.detail.close_terminals();
+                            b.send(Command::SetReadOnly(ro));
+                            b.send(Command::SwitchContext(fallback.clone()));
+                        }
+                        self.settings.docker_active_context = fallback;
+                        self.settings_dirty = true;
+                        self.docker.note_context_switch(&self.settings);
+                    }
                     self.docker.contexts = contexts;
                 }
             }
