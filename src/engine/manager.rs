@@ -10,7 +10,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
@@ -33,6 +33,16 @@ const AUTOSTART_NAME: &str = "TMOP engine relay";
 const ENGINE_BIN: &str = "/usr/local/bin/tmop-engine";
 /// `engine.json` key recording that we copied the compose plugin ourselves.
 const COMPOSE_FLAG: &str = "installedComposePlugin";
+/// Install location of the distro and download folder inside the data dir. Named so they do not
+/// collide with a user's own `rootfs` or `Downloads` folder.
+const ROOTFS_DIR: &str = "engine-rootfs";
+const DOWNLOADS_DIR: &str = "engine-downloads";
+/// Entries a previous attempt may have left in the data dir; anything else blocks a setup there.
+const OWN_ENTRIES: [&str; 3] = [ROOTFS_DIR, DOWNLOADS_DIR, "relay.log"];
+/// Description written into the context `meta.json`; a context with another one is not ours.
+const CONTEXT_DESCRIPTION: &str = "TMOP engine";
+/// `netsh` arguments that delete the inbound rule added by [`EngineManager::add_firewall_rule`].
+const FIREWALL_DELETE_ARGS: &str = r#"advfirewall firewall delete rule name="TMOP engine ports""#;
 const MIB: u64 = 1024 * 1024;
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -229,12 +239,12 @@ impl EngineManager {
             update_check,
         });
         let tx = spawn_worker(&shared);
-        let failed_to_start = tx.is_none() && cfg!(windows);
         let manager = EngineManager { shared, tx };
-        if failed_to_start {
-            manager.shared.toast(NoticeKind::Error, "Could not start the engine worker thread");
-        } else {
+        // Without a worker (non-Windows) there is nothing to probe; only a failed Windows spawn is an error.
+        if manager.tx.is_some() {
             manager.queue(Op::Probe);
+        } else if cfg!(windows) {
+            manager.shared.toast(NoticeKind::Error, "Could not start the engine worker thread");
         }
         manager
     }
@@ -260,7 +270,10 @@ impl EngineManager {
     }
 
     /// Full install into `data_dir`: download (or `TMOP_ENGINE_TARBALL`), verify, import, start,
-    /// create the Docker context. Failures end in `Phase::Failed` with `error` set.
+    /// create the Docker context. The folder must be empty or hold only leftovers of an earlier
+    /// attempt; a folder with an `engine.json` is started instead. A failure after the import is
+    /// rolled back (distro unregistered, rootfs and `engine.json` deleted) and ends in
+    /// `Phase::NotInstalled` with `error` set; other failures end in `Phase::Failed`.
     pub fn setup(&self, data_dir: PathBuf) {
         self.queue(Op::Setup(data_dir));
     }
@@ -270,7 +283,8 @@ impl EngineManager {
         self.queue(Op::Start);
     }
 
-    /// Stops the relay, dockerd and the distro.
+    /// Stops the relay, dockerd and the distro. Refused when the engine is not installed.
+    /// `Err` from the worker when the relay survives two stop signals (the distro is then left running).
     pub fn stop(&self) {
         self.queue(Op::Stop);
     }
@@ -280,13 +294,16 @@ impl EngineManager {
         self.queue(Op::Restart);
     }
 
-    /// Stops and unregisters the distro, undoes the CLI and context changes, deletes the data files.
+    /// Removes the engine: best-effort steps (relay, default-docker settings, autostart, firewall
+    /// rule, distro, context, files), errors collected into one toast. Files are only deleted when
+    /// `engine.json` exists and parses, and the distro is gone. Without it only the status is reset.
     pub fn remove(&self) {
         self.queue(Op::Remove);
     }
 
-    /// Downloads the release for this version and upgrade the engine in place, keeping containers,
-    /// images and volumes.
+    /// Upgrades the engine to this build's release, keeping containers, images and volumes.
+    /// Skipped with "already up to date" when the installed version matches (unless
+    /// `TMOP_ENGINE_TARBALL` is set). A stopped engine stays stopped.
     pub fn update(&self) {
         self.queue(Op::Update);
     }
@@ -317,20 +334,21 @@ impl EngineManager {
     }
 
     /// Writes `memory` and `processors` into `[wsl2]` of the `.wslconfig` (`TMOP_WSLCONFIG`
-    /// overrides the path). Runs synchronously. Returns the backup path, or the config path itself
-    /// when there was no file to back up. WSL must be restarted by the user for it to apply.
-    pub fn apply_wslconfig(&self, memory_gb: Option<u32>, processors: Option<u32>) -> Result<PathBuf, String> {
+    /// overrides the path). Runs synchronously. Returns the backup path, or `None` when there was
+    /// no file to back up. WSL must be restarted by the user for it to apply.
+    pub fn apply_wslconfig(&self, memory_gb: Option<u32>, processors: Option<u32>) -> Result<Option<PathBuf>, String> {
         if !cfg!(windows) {
             return Err(UNSUPPORTED.into());
         }
         let path = wslconfig_path()?;
-        let backup = wslconfig::apply(&path, memory_gb, processors, unix_now())?;
-        Ok(backup.unwrap_or(path))
+        wslconfig::apply(&path, memory_gb, processors, unix_now())
     }
 
-    /// Queues the UAC-elevated `netsh` rule that lets other machines reach the published ports.
-    /// `Err` only when it cannot be queued.
+    /// Queues the UAC-elevated `netsh` rule that lets other machines reach the published ports and
+    /// records it in `engine.json`, so [`remove`](Self::remove) deletes it again. `Err` when the engine
+    /// is not installed or the request cannot be queued; a declined prompt is a toast.
     pub fn add_firewall_rule(&self) -> Result<(), String> {
+        self.check_installed()?;
         self.submit(Op::FirewallRule)
     }
 
@@ -424,9 +442,82 @@ fn docker_dir_path() -> Result<PathBuf, String> {
     crate::docker::context::docker_dir().ok_or_else(|| "cannot find the Docker config folder".to_string())
 }
 
-/// Refuses filesystem roots and empty paths, so a bad data dir can never widen the delete.
+/// True when `dir` may hold the engine: see [`is_safe_data_dir_in`] for the rules.
 fn is_safe_data_dir(dir: &Path) -> bool {
-    !dir.as_os_str().is_empty() && dir.parent().is_some()
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    is_safe_data_dir_in(dir, profile.as_deref(), local_app_data.as_deref())
+}
+
+/// Refuses a data dir that could hold anything but ours: a relative path, a drive root or a single
+/// folder below it, the user profile itself and `%LOCALAPPDATA%` itself. Path comparison ignores
+/// case and trailing separators, as Windows does.
+fn is_safe_data_dir_in(dir: &Path, profile: Option<&Path>, local_app_data: Option<&Path>) -> bool {
+    if !dir.is_absolute() {
+        return false;
+    }
+    let folders = dir.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    if folders < 2 {
+        return false;
+    }
+    ![profile, local_app_data].into_iter().flatten().any(|p| same_path(dir, p))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_ascii_lowercase();
+    norm(a) == norm(b)
+}
+
+/// `Ok` when `dir` is missing, empty, or holds only [`OWN_ENTRIES`]. Any other entry (including an
+/// `engine.json` that does not parse) means the folder belongs to someone else.
+fn check_setup_dir(dir: &Path) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !OWN_ENTRIES.iter().any(|own| own.eq_ignore_ascii_case(&name)) {
+            return Err("Choose an empty folder or the previous engine folder".into());
+        }
+    }
+    Ok(())
+}
+
+/// True when the installed version is the one `target` names.
+pub fn installed_matches(installed: &str, target: &str) -> bool {
+    !installed.is_empty() && installed == target
+}
+
+/// Sends a stop signal and waits up to `RELAY_STOP_TIMEOUT` for the relay to exit; signals once more
+/// when it is still alive. `Err` when it survives both rounds.
+fn signal_until_gone(mut signal: impl FnMut(), mut gone: impl FnMut(Duration) -> bool) -> Result<(), String> {
+    for _ in 0..2 {
+        signal();
+        if gone(RELAY_STOP_TIMEOUT) {
+            return Ok(());
+        }
+    }
+    Err("relay did not stop".into())
+}
+
+/// Records one best-effort step's failure; the caller keeps going.
+fn collect(errors: &mut Vec<String>, result: Result<(), String>) {
+    if let Err(e) = result {
+        errors.push(e);
+    }
+}
+
+/// `Ok` when no step failed, else all messages joined.
+fn join_errors(errors: &[String]) -> Result<(), String> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 /// `tmop-engine-<tag>-<arch>.tar.gz` (or `.tar`) to its release tag, e.g.
@@ -448,21 +539,52 @@ pub fn context_meta_dir(docker_dir: &Path, name: &str) -> PathBuf {
 pub fn context_meta_json(name: &str, pipe: &str) -> String {
     json!({
         "Name": name,
-        "Metadata": {"Description": "TMOP engine"},
+        "Metadata": {"Description": CONTEXT_DESCRIPTION},
         "Endpoints": {"docker": {"Host": format!("npipe:////./pipe/{pipe}"), "SkipTLSVerify": false}}
     })
     .to_string()
 }
 
+/// `Metadata.Description` of a context `meta.json`; `None` when it does not parse.
+fn meta_description(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    v["Metadata"]["Description"].as_str().map(str::to_string)
+}
+
+/// `Ok` when the context slot is free or already holds the engine's context; `Err` when another
+/// Docker context has the name.
+fn check_context_slot(docker_dir: &Path, name: &str) -> Result<(), String> {
+    let file = context_meta_dir(docker_dir, name).join("meta.json");
+    match fs::read_to_string(&file) {
+        Ok(text) if meta_description(&text).as_deref() != Some(CONTEXT_DESCRIPTION) => {
+            Err(format!("a Docker context named {name} already exists"))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+/// Writes the engine's context. Refuses to overwrite a context with another description.
 fn write_context(docker_dir: &Path, name: &str, pipe: &str) -> Result<(), String> {
+    check_context_slot(docker_dir, name)?;
     let dir = context_meta_dir(docker_dir, name);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let file = dir.join("meta.json");
     fs::write(&file, context_meta_json(name, pipe)).map_err(|e| format!("cannot write {}: {e}", file.display()))
 }
 
+/// Deletes the context folder, but only when its `meta.json` carries the engine's description.
+/// Any other context (or none) is left alone and counts as success.
 fn remove_context(docker_dir: &Path, name: &str) -> Result<(), String> {
-    remove_dir_if_exists(&context_meta_dir(docker_dir, name))
+    let dir = context_meta_dir(docker_dir, name);
+    let file = dir.join("meta.json");
+    match fs::read_to_string(&file) {
+        Ok(text) if meta_description(&text).as_deref() == Some(CONTEXT_DESCRIPTION) => remove_dir_if_exists(&dir),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
 }
 
 /// A JSON object from `json`; blank input is an empty object; anything else is `None`.
@@ -587,8 +709,12 @@ mod ops {
                 }
             }
             Op::FirewallRule => {
+                let dir = data_dir(sh);
+                let mut cfg = load_config(sh)?;
                 let exe = std::env::current_exe().map_err(|e| format!("cannot find TMOP.exe: {e}"))?;
                 winreg::run_elevated("netsh.exe", &pathenv::firewall_rule_args(&exe).join(" "))?;
+                cfg.firewall_rule = true;
+                cfg.save(&dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
                 sh.toast(NoticeKind::Info, "Approve the Windows prompt to add the firewall rule");
                 Ok(())
             }
@@ -684,18 +810,30 @@ mod ops {
         Ok(())
     }
 
-    /// Stops the relay (waiting up to 10 s), then dockerd and the distro. The caller sets the phase.
-    fn stop_engine(ov: &Overrides) -> Result<(), String> {
+    /// Signals the relay to exit and waits for it (see [`signal_until_gone`]). `Err` when it stays alive.
+    fn stop_relay(ov: &Overrides) -> Result<(), String> {
         let stop = NamedEvent::create(&relay_name("stop_", &ov.pipe))?;
-        stop.set();
-        let _ = wait_relay_gone(&ov.pipe, RELAY_STOP_TIMEOUT);
+        let result = signal_until_gone(|| stop.set(), |timeout| wait_relay_gone(&ov.pipe, timeout));
         drop(stop);
+        result
+    }
+
+    /// Stops dockerd and terminates the distro; does nothing when the distro is not running.
+    /// Both steps are attempted even when the first fails.
+    fn stop_distro(ov: &Overrides) -> Result<(), String> {
         if !wsl::is_running(&ov.distro) {
             return Ok(());
         }
         let stopped = engine_exec(ov, &["stop"], STOP_TIMEOUT).map(|_| ());
         let terminated = wsl::terminate(&ov.distro);
         stopped.and(terminated)
+    }
+
+    /// Stops the relay, then dockerd and the distro. A relay that survives is an error and the
+    /// distro keeps running. The caller sets the phase.
+    fn stop_engine(ov: &Overrides) -> Result<(), String> {
+        stop_relay(ov)?;
+        stop_distro(ov)
     }
 
     fn write_engine_context(sh: &Shared) -> Result<(), String> {
@@ -781,7 +919,7 @@ mod ops {
             return Ok(Some(Source { tag, path: path.clone(), owned: false }));
         }
         let tag = version_tag();
-        let dst = dir.join("downloads").join(asset::asset_name(&tag, arch()));
+        let dst = dir.join(DOWNLOADS_DIR).join(asset::asset_name(&tag, arch()));
         sh.progress("Downloading engine", 0, 0);
         let expected = http::fetch_text(&asset::sha_url(&tag, arch()), SHA_MAX_BYTES)
             .and_then(|t| asset::parse_sha256_file(&t).ok_or_else(|| "the checksum file is malformed".to_string()))?;
@@ -817,11 +955,11 @@ mod ops {
             src.path.clone()
         } else {
             sh.progress("Unpacking", 0, 0);
-            let tar = dir.join("downloads").join("rootfs.tar");
+            let tar = dir.join(DOWNLOADS_DIR).join("rootfs.tar");
             asset::gunzip_to(&src.path, &tar, |_| {}).map_err(|e| format!("could not unpack the engine: {e}"))?;
             tar
         };
-        let rootfs = dir.join("rootfs");
+        let rootfs = dir.join(ROOTFS_DIR);
         sh.progress("Importing into WSL", 0, 0);
         // Not registered (checked by the caller), so anything here is left over from an earlier attempt.
         remove_dir_if_exists(&rootfs)?;
@@ -833,12 +971,27 @@ mod ops {
         imported
     }
 
+    /// Installs into `requested` (or the override). Refuses unsafe folders and folders with foreign
+    /// files before anything is changed. A folder with `engine.json` and a registered distro is
+    /// started instead.
     fn setup(sh: &Shared, requested: PathBuf) -> Result<(), String> {
         let ov = &sh.overrides;
         let dir = ov.data_dir.clone().unwrap_or(requested);
-        if EngineConfig::load(&dir).is_some() {
-            return Err("TMOP engine is already set up here; remove it first".into());
+        if !is_safe_data_dir(&dir) {
+            return Err(format!("refusing to use {} as the engine folder", dir.display()));
         }
+        if let Some(cfg) = EngineConfig::load(&dir) {
+            if !wsl::is_registered(&ov.distro) {
+                return Err("TMOP engine is already set up here; remove it first".into());
+            }
+            sh.update(|s| {
+                s.data_dir = dir.clone();
+                s.installed_version = Some(cfg.engine_version.clone());
+            });
+            return start(sh);
+        }
+        check_setup_dir(&dir)?;
+        check_context_slot(&docker_dir_path()?, &ov.context)?;
         sh.cancel.store(false, Ordering::SeqCst);
         sh.update(|s| {
             s.phase = Phase::Installing;
@@ -852,7 +1005,7 @@ mod ops {
         if wsl::is_registered(&ov.distro) {
             return Err(format!("a WSL distro named {} already exists; remove it first", ov.distro));
         }
-        fs::create_dir_all(dir.join("downloads")).map_err(|e| format!("cannot create the downloads folder: {e}"))?;
+        fs::create_dir_all(dir.join(DOWNLOADS_DIR)).map_err(|e| format!("cannot create the downloads folder: {e}"))?;
 
         let Some(src) = acquire(sh, &dir)? else {
             sh.update(|s| {
@@ -877,12 +1030,20 @@ mod ops {
             return Ok(());
         }
 
-        EngineConfig::new(&src.tag, arch(), &ov.distro).save(&dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
-        sh.update(|s| s.installed_version = Some(src.tag.clone()));
-        sh.progress("Starting engine", 0, 0);
-        start_engine(ov, true)?;
-        sh.progress("Creating Docker context", 0, 0);
-        write_engine_context(sh)?;
+        if let Err(e) = finish_setup(sh, &dir, &src.tag) {
+            let message = match rollback_import(sh, &dir) {
+                Ok(()) => e,
+                Err(rollback) => format!("{e} (rollback also failed: {rollback})"),
+            };
+            sh.update(|s| {
+                s.phase = Phase::NotInstalled;
+                s.error = Some(message.clone());
+                s.progress = None;
+                s.installed_version = None;
+            });
+            sh.toast(NoticeKind::Error, message);
+            return Ok(());
+        }
         sh.update(|s| {
             s.phase = Phase::Running;
             s.progress = None;
@@ -890,6 +1051,32 @@ mod ops {
         });
         sh.toast(NoticeKind::Success, "TMOP engine is set up and running");
         Ok(())
+    }
+
+    /// Steps after the import: engine.json, start (with relay), Docker context.
+    fn finish_setup(sh: &Shared, dir: &Path, tag: &str) -> Result<(), String> {
+        let ov = &sh.overrides;
+        EngineConfig::new(tag, arch(), &ov.distro).save(dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
+        sh.update(|s| s.installed_version = Some(tag.to_string()));
+        sh.progress("Starting engine", 0, 0);
+        start_engine(ov, true)?;
+        sh.progress("Creating Docker context", 0, 0);
+        write_engine_context(sh)
+    }
+
+    /// Undoes an import whose setup failed afterwards: stops the relay and the distro, unregisters
+    /// the distro and deletes the rootfs and engine.json. Errors are collected and returned together.
+    fn rollback_import(sh: &Shared, dir: &Path) -> Result<(), String> {
+        let ov = &sh.overrides;
+        let mut errors = Vec::new();
+        collect(&mut errors, stop_relay(ov));
+        collect(&mut errors, stop_distro(ov));
+        if wsl::is_registered(&ov.distro) {
+            collect(&mut errors, wsl::unregister(&ov.distro));
+        }
+        collect(&mut errors, remove_dir_if_exists(&dir.join(ROOTFS_DIR)));
+        collect(&mut errors, remove_file_if_exists(&dir.join(crate::engine::config::FILE_NAME)));
+        join_errors(&errors)
     }
 
     fn start(sh: &Shared) -> Result<(), String> {
@@ -911,6 +1098,7 @@ mod ops {
 
     fn stop(sh: &Shared) -> Result<(), String> {
         let ov = &sh.overrides;
+        load_config(sh)?;
         sh.update(|s| {
             s.phase = Phase::Stopping;
             s.error = None;
@@ -943,50 +1131,93 @@ mod ops {
         Ok(())
     }
 
+    /// Removes everything the engine put on this PC. Each step is best effort and its failure is
+    /// collected. The files go only when the distro is gone, and `engine.json` (the marker) is
+    /// deleted last, after the other files, so a partial removal can be retried.
     fn remove(sh: &Shared) -> Result<(), String> {
-        let ov = &sh.overrides;
         let dir = data_dir(sh);
         if !is_safe_data_dir(&dir) {
             return Err(format!("refusing to delete {}", dir.display()));
         }
-        let mut cfg = EngineConfig::load(&dir);
+        let Some(mut cfg) = EngineConfig::load(&dir) else {
+            // Without our marker nothing in the folder is known to be ours.
+            reset_status(sh, None);
+            sh.toast(NoticeKind::Info, "nothing to remove");
+            return Ok(());
+        };
+        // The distro recorded at setup, so a changed override cannot point at another distro.
+        let distro = if cfg.distro.is_empty() { sh.overrides.distro.clone() } else { cfg.distro.clone() };
+        let ov = &Overrides { distro, ..sh.overrides.clone() };
         sh.update(|s| {
             s.phase = Phase::Removing;
             s.error = None;
         });
-        // Best effort: a failed stop must not keep the engine from being removed.
-        let _ = stop_engine(ov);
+        let mut errors = Vec::new();
+        collect(&mut errors, stop_relay(ov));
+        collect(&mut errors, disable_default_docker(sh, &mut cfg));
+        collect(&mut errors, winreg::run_key_remove(AUTOSTART_NAME));
+        if cfg.firewall_rule {
+            collect(&mut errors, winreg::run_elevated("netsh.exe", FIREWALL_DELETE_ARGS));
+        }
+        collect(&mut errors, stop_distro(ov));
         if wsl::is_registered(&ov.distro) {
-            wsl::unregister(&ov.distro)?;
+            collect(&mut errors, wsl::unregister(&ov.distro));
         }
-        if let Some(cfg) = cfg.as_mut() {
-            disable_default_docker(sh, cfg)?;
+        match docker_dir_path() {
+            Ok(docker) => collect(&mut errors, remove_context(&docker, &ov.context)),
+            Err(e) => errors.push(e),
         }
-        if let Ok(docker) = docker_dir_path() {
-            remove_context(&docker, &ov.context)?;
+        if wsl::is_registered(&ov.distro) {
+            errors.push(format!("the WSL distro {} is still registered; its files were kept", ov.distro));
+        } else {
+            let files_before = errors.len();
+            collect(&mut errors, remove_dir_if_exists(&dir.join(ROOTFS_DIR)));
+            collect(&mut errors, remove_dir_if_exists(&dir.join(DOWNLOADS_DIR)));
+            collect(&mut errors, remove_file_if_exists(&dir.join("relay.log")));
+            if errors.len() == files_before {
+                collect(&mut errors, remove_file_if_exists(&dir.join(crate::engine::config::FILE_NAME)));
+            }
         }
-        winreg::run_key_remove(AUTOSTART_NAME)?;
-        remove_dir_if_exists(&dir.join("rootfs"))?;
-        remove_dir_if_exists(&dir.join("downloads"))?;
-        remove_file_if_exists(&dir.join(crate::engine::config::FILE_NAME))?;
-        remove_file_if_exists(&dir.join("relay.log"))?;
-        sh.update(|s| {
-            let context_name = s.context_name.clone();
-            let data_dir = s.data_dir.clone();
-            *s = Status { phase: Phase::NotInstalled, wsl: s.wsl.clone(), context_name, data_dir, ..Default::default() };
-        });
         sh.push(Event::ContextsChanged);
-        sh.toast(NoticeKind::Success, "TMOP engine removed");
+        if errors.is_empty() {
+            reset_status(sh, None);
+            sh.toast(NoticeKind::Success, "TMOP engine removed");
+            return Ok(());
+        }
+        let message = join_errors(&errors).unwrap_err();
+        let marker_left = dir.join(crate::engine::config::FILE_NAME).exists();
+        reset_status(sh, Some(message.clone()));
+        if marker_left {
+            sh.update(|s| {
+                s.phase = Phase::Failed;
+                s.installed_version = Some(cfg.engine_version.clone());
+            });
+        }
+        sh.toast(NoticeKind::Error, format!("TMOP engine removal did not finish: {message}"));
         Ok(())
     }
 
+    /// Back to "not installed" with the OS and settings fields the UI reads kept.
+    fn reset_status(sh: &Shared, error: Option<String>) {
+        sh.update(|s| {
+            let context_name = s.context_name.clone();
+            let data_dir = s.data_dir.clone();
+            *s = Status { phase: Phase::NotInstalled, wsl: s.wsl.clone(), context_name, data_dir, error, ..Default::default() };
+        });
+    }
+
+    /// Upgrades in place. Skipped when the installed version is this build's (unless the tarball
+    /// override is set). A Stopped engine is stopped again afterwards and no relay is started.
     fn update(sh: &Shared) -> Result<(), String> {
-        let ov = &sh.overrides;
         let dir = data_dir(sh);
         let mut cfg = load_config(sh)?;
         let before = sh.lock().status.phase;
         if !matches!(before, Phase::Running | Phase::Stopped) {
             return Err("the engine must be running or stopped to update".into());
+        }
+        if sh.overrides.tarball.is_none() && installed_matches(&cfg.engine_version, &version_tag()) {
+            sh.toast(NoticeKind::Info, "Engine is already up to date");
+            return Ok(());
         }
         sh.cancel.store(false, Ordering::SeqCst);
         sh.update(|s| {
@@ -1001,23 +1232,39 @@ mod ops {
             sh.toast(NoticeKind::Info, "Engine update cancelled");
             return Ok(());
         };
-        let applied = apply_upgrade(sh, &src);
+        let applied = record_and_upgrade(sh, &dir, &mut cfg, &src, before);
         if src.owned {
             let _ = fs::remove_file(&src.path);
         }
         applied?;
-        cfg.engine_version = src.tag.clone();
-        cfg.save(&dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
-        ensure_relay(ov)?;
+        let relay = relay_running(&sh.overrides.pipe);
         sh.update(|s| {
-            s.phase = Phase::Running;
+            s.phase = before;
             s.progress = None;
             s.installed_version = Some(src.tag.clone());
             s.update_available = None;
-            s.relay_running = true;
+            s.relay_running = relay;
         });
         sh.toast(NoticeKind::Success, format!("TMOP engine updated to {}", src.tag));
         Ok(())
+    }
+
+    /// Writes the new version to engine.json, then upgrades the distro. A failed upgrade restores
+    /// the old version so the next update is not skipped as "up to date".
+    fn record_and_upgrade(sh: &Shared, dir: &Path, cfg: &mut EngineConfig, src: &Source, before: Phase) -> Result<(), String> {
+        let ov = &sh.overrides;
+        let previous = std::mem::replace(&mut cfg.engine_version, src.tag.clone());
+        cfg.save(dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
+        if let Err(e) = apply_upgrade(sh, src) {
+            cfg.engine_version = previous;
+            let _ = cfg.save(dir);
+            return Err(e);
+        }
+        if before == Phase::Stopped {
+            stop_engine(ov)
+        } else {
+            ensure_relay(ov)
+        }
     }
 
     /// Copies the tarball into the distro and runs `tmop-engine upgrade` on it.
@@ -1081,10 +1328,13 @@ mod ops {
         fs::copy(&src, dst).map(|_| ()).map_err(|e| format!("could not copy {file} from the engine: {e}"))
     }
 
+    /// Installs the CLI, switches the Docker context and adds the bin dir to the user PATH. The
+    /// PATH is changed last: if the config files cannot be written, neither they nor the PATH change.
     fn enable_default_docker(sh: &Shared) -> Result<(), String> {
         let ov = &sh.overrides;
         let dir = data_dir(sh);
-        let mut cfg = load_config(sh)?;
+        let original = load_config(sh)?;
+        let mut cfg = original.clone();
         let docker = docker_dir_path()?;
         let config_file = docker.join("config.json");
         let text = read_text_or_empty(&config_file)?;
@@ -1110,23 +1360,38 @@ mod ops {
             cfg.extra.insert(COMPOSE_FLAG.into(), Value::Bool(true));
         }
 
-        let path = winreg::read_user_path()?;
-        let (new_path, changed) = pathenv::add_path_entry(&path, &bin.to_string_lossy());
-        if changed {
-            winreg::write_user_path(&new_path)?;
-        }
-
         let (json, previous) = set_current_context(&text, &ov.context);
         if previous.as_deref() != Some(ov.context.as_str()) {
             cfg.previous_context = previous;
         }
-        if json != text {
-            fs::create_dir_all(&docker).map_err(|e| format!("cannot create {}: {e}", docker.display()))?;
-            fs::write(&config_file, json).map_err(|e| format!("cannot write {}: {e}", config_file.display()))?;
+        cfg.default_docker = true;
+        let config_changed = json != text;
+        let saved = (|| -> Result<(), String> {
+            if config_changed {
+                fs::create_dir_all(&docker).map_err(|e| format!("cannot create {}: {e}", docker.display()))?;
+                fs::write(&config_file, &json).map_err(|e| format!("cannot write {}: {e}", config_file.display()))?;
+            }
+            cfg.save(&dir).map_err(|e| format!("cannot write engine.json: {e}"))
+        })();
+        if let Err(e) = saved {
+            restore_docker_config(&config_file, &text, config_changed);
+            let _ = original.save(&dir);
+            return Err(e);
         }
 
-        cfg.default_docker = true;
-        cfg.save(&dir).map_err(|e| format!("cannot write engine.json: {e}"))?;
+        let path_changed = winreg::read_user_path().and_then(|path| {
+            let (new_path, changed) = pathenv::add_path_entry(&path, &bin.to_string_lossy());
+            if changed {
+                winreg::write_user_path(&new_path)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = path_changed {
+            restore_docker_config(&config_file, &text, config_changed);
+            let _ = original.save(&dir);
+            return Err(e);
+        }
+
         let is_up = engine_is_up(ov);
         sh.update(|s| {
             s.default_docker = true;
@@ -1137,6 +1402,19 @@ mod ops {
         sh.push(Event::ContextsChanged);
         sh.toast(NoticeKind::Success, "TMOP is now the default docker command; open new terminals to use it");
         Ok(())
+    }
+
+    /// Puts the Docker `config.json` back to `text` when it was changed. Empty text means the file
+    /// did not exist, so it is removed.
+    fn restore_docker_config(file: &Path, text: &str, changed: bool) {
+        if !changed {
+            return;
+        }
+        if text.is_empty() {
+            let _ = fs::remove_file(file);
+        } else {
+            let _ = fs::write(file, text);
+        }
     }
 
     /// Undoes [`enable_default_docker`] for the given config; the config is updated in memory only.
@@ -1289,10 +1567,154 @@ mod tests {
     }
 
     #[test]
-    fn safe_data_dir_refuses_roots_and_empty() {
-        assert!(!is_safe_data_dir(Path::new("")));
-        assert!(!is_safe_data_dir(Path::new(std::path::MAIN_SEPARATOR_STR)));
-        assert!(is_safe_data_dir(&temp_dir("safe").join("engine")));
+    fn safe_data_dir_refuses_empty_and_relative() {
+        assert!(!is_safe_data_dir_in(Path::new(""), None, None));
+        assert!(!is_safe_data_dir_in(Path::new(std::path::MAIN_SEPARATOR_STR), None, None));
+        assert!(!is_safe_data_dir_in(Path::new("engine"), None, None));
+        let dir = temp_dir("safe").join("engine");
+        assert!(is_safe_data_dir_in(&dir, None, None));
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn safe_data_dir_refuses_drive_roots_and_single_folders() {
+        let (root, single, deep) = if cfg!(windows) {
+            (r"C:\", r"C:\Temp", r"D:\TMOP\engine")
+        } else {
+            ("/", "/tmp", "/srv/tmop/engine")
+        };
+        assert!(!is_safe_data_dir_in(Path::new(root), None, None));
+        assert!(!is_safe_data_dir_in(Path::new(single), None, None));
+        assert!(is_safe_data_dir_in(Path::new(deep), None, None));
+    }
+
+    #[test]
+    fn safe_data_dir_refuses_profile_and_local_app_data_themselves() {
+        let base = temp_dir("profile");
+        let profile = base.join("home");
+        let local = base.join("local");
+        let trailing = PathBuf::from(format!("{}{}", profile.display(), std::path::MAIN_SEPARATOR));
+        let upper = PathBuf::from(profile.display().to_string().to_uppercase());
+        assert!(!is_safe_data_dir_in(&profile, Some(&profile), Some(&local)));
+        assert!(!is_safe_data_dir_in(&trailing, Some(&profile), Some(&local)));
+        assert!(!is_safe_data_dir_in(&upper, Some(&profile), Some(&local)));
+        assert!(!is_safe_data_dir_in(&local, Some(&profile), Some(&local)));
+        assert!(is_safe_data_dir_in(&profile.join("engine"), Some(&profile), Some(&local)));
+        assert!(is_safe_data_dir_in(&local.join("TMOP").join("engine"), Some(&profile), Some(&local)));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn setup_dir_accepts_missing_empty_and_own_leftovers() {
+        let base = temp_dir("setupdir-ok");
+        assert!(check_setup_dir(&base.join("missing")).is_ok());
+        fs::create_dir_all(base.join("empty")).unwrap();
+        assert!(check_setup_dir(&base.join("empty")).is_ok());
+        let leftovers = base.join("left");
+        fs::create_dir_all(leftovers.join(ROOTFS_DIR)).unwrap();
+        fs::create_dir_all(leftovers.join("ENGINE-DOWNLOADS")).unwrap();
+        fs::write(leftovers.join("relay.log"), "x").unwrap();
+        assert!(check_setup_dir(&leftovers).is_ok());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn setup_dir_refuses_foreign_entries_and_a_marker() {
+        let base = temp_dir("setupdir-no");
+        let foreign = base.join("foreign");
+        fs::create_dir_all(foreign.join("Downloads")).unwrap();
+        let msg = "Choose an empty folder or the previous engine folder";
+        assert_eq!(check_setup_dir(&foreign).unwrap_err(), msg);
+
+        let marker = base.join("marker");
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(marker.join("engine.json"), "{}").unwrap();
+        assert_eq!(check_setup_dir(&marker).unwrap_err(), msg);
+
+        let mixed = base.join("mixed");
+        fs::create_dir_all(mixed.join(ROOTFS_DIR)).unwrap();
+        fs::write(mixed.join("notes.txt"), "x").unwrap();
+        assert_eq!(check_setup_dir(&mixed).unwrap_err(), msg);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn context_slot_refuses_a_foreign_context_and_keeps_it() {
+        let docker = temp_dir("ctx-foreign");
+        let file = context_meta_dir(&docker, "tmop").join("meta.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let foreign = r#"{"Name":"tmop","Metadata":{"Description":"my own"}}"#;
+        fs::write(&file, foreign).unwrap();
+        assert_eq!(check_context_slot(&docker, "tmop"), Err("a Docker context named tmop already exists".into()));
+        assert_eq!(write_context(&docker, "tmop", "tmop_engine").unwrap_err(), "a Docker context named tmop already exists");
+        assert_eq!(fs::read_to_string(&file).unwrap(), foreign);
+        remove_context(&docker, "tmop").unwrap();
+        assert!(file.exists(), "a context with another description is not deleted");
+
+        fs::write(&file, "not json").unwrap();
+        assert!(write_context(&docker, "tmop", "tmop_engine").is_err(), "unparsable meta is not ours");
+        let _ = fs::remove_dir_all(&docker);
+    }
+
+    #[test]
+    fn context_slot_replaces_and_deletes_only_our_own() {
+        let docker = temp_dir("ctx-own");
+        let file = context_meta_dir(&docker, "tmop").join("meta.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, context_meta_json("tmop", "old_pipe")).unwrap();
+        write_context(&docker, "tmop", "tmop_engine").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), context_meta_json("tmop", "tmop_engine"));
+        remove_context(&docker, "tmop").unwrap();
+        assert!(!context_meta_dir(&docker, "tmop").exists());
+        remove_context(&docker, "tmop").unwrap();
+        let _ = fs::remove_dir_all(&docker);
+    }
+
+    #[test]
+    fn signal_until_gone_signals_at_most_twice() {
+        let (mut signals, mut waits) = (0, 0);
+        let result = signal_until_gone(|| signals += 1, |t| {
+            assert_eq!(t, RELAY_STOP_TIMEOUT);
+            waits += 1;
+            true
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!((signals, waits), (1, 1));
+
+        let (mut signals, mut waits) = (0, 0);
+        let result = signal_until_gone(|| signals += 1, |_| {
+            waits += 1;
+            waits == 2
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!((signals, waits), (2, 2));
+
+        let (mut signals, mut waits) = (0, 0);
+        let result = signal_until_gone(|| signals += 1, |_| {
+            waits += 1;
+            false
+        });
+        assert_eq!(result, Err("relay did not stop".into()));
+        assert_eq!((signals, waits), (2, 2));
+    }
+
+    #[test]
+    fn installed_matches_needs_the_same_non_empty_version() {
+        assert!(installed_matches("v0.1.0", "v0.1.0"));
+        assert!(!installed_matches("", "v0.1.0"));
+        assert!(!installed_matches("v0.0.9", "v0.1.0"));
+    }
+
+    #[test]
+    fn new_on_a_plain_dir_reports_no_error() {
+        let mut mgr = EngineManager::new(temp_dir("noerr"), false, Arc::new(|| {}));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            events.extend(mgr.poll());
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!events.iter().any(|e| matches!(e, Event::Toast { kind: NoticeKind::Error, .. })), "events: {events:?}");
     }
 
     #[test]
@@ -1373,9 +1795,9 @@ mod tests {
 
         let _ = fs::remove_file(&wslconfig);
         let first = mgr.apply_wslconfig(Some(4), Some(2)).expect("apply to a missing file");
-        assert_eq!(first, wslconfig);
+        assert_eq!(first, None, "no backup for a missing file");
         assert_eq!(fs::read_to_string(&wslconfig).unwrap(), "[wsl2]\r\nmemory=4GB\r\nprocessors=2\r\n");
-        let second = mgr.apply_wslconfig(Some(6), None).expect("apply to an existing file");
+        let second = mgr.apply_wslconfig(Some(6), None).expect("apply to an existing file").expect("backup path");
         assert_ne!(second, wslconfig);
         assert!(second.exists(), "backup written");
         assert_eq!(fs::read_to_string(&second).unwrap(), "[wsl2]\r\nmemory=4GB\r\nprocessors=2\r\n");

@@ -59,7 +59,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
                     .color(pal.text),
             );
             ui.label(
-                RichText::new("Containers, images and volumes are stored in the data folder below. Choose another drive if C: is small.")
+                RichText::new("Containers, images and volumes are stored in the data folder below, which must be empty or a previous engine folder. Choose another drive if C: is small.")
                     .font(theme::ui(12.5))
                     .color(pal.text_dim),
             );

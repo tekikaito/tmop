@@ -37,6 +37,10 @@ pub struct EngineConfig {
     /// Docker context that was active before "Use TMOP as default Docker", restored on undo.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_context: Option<String>,
+    /// The inbound firewall rule for the published ports was added (by the user's UAC approval);
+    /// [`remove`](crate::engine::manager) deletes it again only when this is set.
+    #[serde(default)]
+    pub firewall_rule: bool,
     /// Any other keys are preserved verbatim.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -56,6 +60,7 @@ impl Default for EngineConfig {
             default_docker: false,
             autostart: false,
             previous_context: None,
+            firewall_rule: false,
             extra: BTreeMap::new(),
         }
     }
@@ -119,11 +124,24 @@ mod tests {
     }
 
     #[test]
+    fn firewall_flag_defaults_to_false_when_missing() {
+        let dir = temp_dir("firewall");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE_NAME), r#"{"schemaVersion":1,"engineVersion":"v0.1.0"}"#).unwrap();
+        assert!(!EngineConfig::load(&dir).expect("config loads").firewall_rule);
+        let mut cfg = EngineConfig::load(&dir).unwrap();
+        cfg.firewall_rule = true;
+        cfg.save(&dir).unwrap();
+        assert!(EngineConfig::load(&dir).unwrap().firewall_rule);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn writes_camel_case_keys() {
         let dir = temp_dir("keys");
         EngineConfig::new("v0.1.0", "arm64", "tmop-engine").save(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
-        for key in ["schemaVersion", "engineVersion", "installedAt", "portsLocalOnly", "memoryMb", "defaultDocker"] {
+        for key in ["schemaVersion", "engineVersion", "installedAt", "portsLocalOnly", "memoryMb", "defaultDocker", "firewallRule"] {
             assert!(text.contains(&format!("\"{key}\"")), "missing {key}");
         }
         assert!(!text.contains("previousContext"), "absent option is not written");

@@ -348,7 +348,8 @@ fn installed_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette, st: &Status) 
                 let memory = (tab.wsl_memory_gb > 0).then_some(tab.wsl_memory_gb);
                 let processors = (tab.wsl_processors > 0).then_some(tab.wsl_processors);
                 match app.docker.engine.apply_wslconfig(memory, processors) {
-                    Ok(backup) => app.docker.ui.toast(NoticeKind::Success, format!("Saved .wslconfig (backup: {})", backup.display())),
+                    Ok(Some(backup)) => app.docker.ui.toast(NoticeKind::Success, format!("Saved .wslconfig (backup: {})", backup.display())),
+                    Ok(None) => app.docker.ui.toast(NoticeKind::Success, "Saved .wslconfig"),
                     Err(e) => app.docker.ui.toast(NoticeKind::Error, e),
                 }
             }
