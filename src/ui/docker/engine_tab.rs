@@ -223,9 +223,10 @@ fn progress_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette, st: &Status) {
 fn installed_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette, st: &Status) {
     let running = st.phase == Phase::Running;
     let relay = if st.relay_running { "relay running" } else { "relay not running" };
+    // The stored version is the release tag, which already starts with `v`.
     let version = st.installed_version.clone().unwrap_or_default();
     let state = if running { "running" } else { "stopped" };
-    let line = format!("Engine v{version} - {state} - {relay} - context `{}`", st.context_name);
+    let line = format!("Engine {version} - {state} - {relay} - context `{}`", st.context_name);
     ui.label(RichText::new(line).font(theme::ui(12.5)).color(pal.text));
     let busy = st.busy;
     ui.horizontal_wrapped(|ui| {
