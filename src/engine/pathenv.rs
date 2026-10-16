@@ -65,7 +65,14 @@ pub fn firewall_rule_args(exe: &Path) -> Vec<String> {
         "action=allow".into(),
         format!("program=\"{}\"", exe.display()),
         "enable=yes".into(),
+        "protocol=TCP".into(),
+        "profile=private,domain".into(),
     ]
+}
+
+/// `netsh` arguments that remove the rule added by [`firewall_rule_args`].
+pub fn firewall_delete_args() -> Vec<String> {
+    vec!["advfirewall".into(), "firewall".into(), "delete".into(), "rule".into(), "name=\"TMOP engine ports\"".into()]
 }
 
 #[cfg(test)]
@@ -150,7 +157,12 @@ mod tests {
         let args = firewall_rule_args(Path::new(r"C:\TMOP\TMOP.exe"));
         assert_eq!(
             args.join(" "),
-            r#"advfirewall firewall add rule name="TMOP engine ports" dir=in action=allow program="C:\TMOP\TMOP.exe" enable=yes"#
+            r#"advfirewall firewall add rule name="TMOP engine ports" dir=in action=allow program="C:\TMOP\TMOP.exe" enable=yes protocol=TCP profile=private,domain"#
         );
+    }
+
+    #[test]
+    fn firewall_delete_args_name_the_same_rule() {
+        assert_eq!(firewall_delete_args().join(" "), r#"advfirewall firewall delete rule name="TMOP engine ports""#);
     }
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH};
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
@@ -209,11 +209,15 @@ async fn close(listener: Listener) {
 }
 
 async fn accept_loop(listener: TcpListener, target: SocketAddr, log: Log) {
+    // Connection tasks live in this set: aborting the listener drops it and closes their sockets.
+    let mut conns = JoinSet::new();
     loop {
+        // Reap finished connections so the set does not grow without bound.
+        while conns.try_join_next().is_some() {}
         match listener.accept().await {
             Ok((mut client, _)) => {
                 let log = log.clone();
-                tokio::spawn(async move {
+                conns.spawn(async move {
                     match TcpStream::connect(target).await {
                         Ok(mut upstream) => {
                             let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
@@ -312,6 +316,38 @@ mod tests {
         fwd.reconcile(Ipv4Addr::new(127, 0, 0, 2), &[], &[Ipv4Addr::LOCALHOST]).await;
         assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err(), "port must be closed after an empty reconcile");
         assert!(logs.lock().unwrap().iter().any(|l| l.starts_with("forwarding 127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn clear_closes_established_connections() {
+        let port = free_port();
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.2", port)).await.unwrap();
+        // Echoes once, then holds the connection until the forwarder closes its side.
+        let fake = tokio::spawn(async move {
+            let (mut s, _) = upstream.accept().await.unwrap();
+            let mut buf = [0u8; 5];
+            s.read_exact(&mut buf).await.unwrap();
+            s.write_all(&buf).await.unwrap();
+            let mut rest = Vec::new();
+            let _ = s.read_to_end(&mut rest).await;
+        });
+
+        let mut fwd = Forwarder::new(Arc::new(|_: &str| {}));
+        fwd.reconcile(Ipv4Addr::new(127, 0, 0, 2), &[port], &[Ipv4Addr::LOCALHOST]).await;
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut echo = [0u8; 5];
+        tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut echo)).await.expect("timed out").unwrap();
+
+        fwd.clear().await;
+        // The session must end: the client sees EOF or a reset, not an open socket.
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(10), client.read(&mut byte)).await.expect("session stayed open") {
+            Ok(0) | Err(_) => {}
+            Ok(n) => panic!("unexpected {n} bytes after clear"),
+        }
+        // The upstream side must be closed as well.
+        tokio::time::timeout(Duration::from_secs(10), fake).await.expect("upstream stayed open").unwrap();
     }
 
     #[tokio::test]

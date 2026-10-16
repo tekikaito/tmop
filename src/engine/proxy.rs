@@ -91,8 +91,13 @@ where
     while let Some(raw) = read_head(&mut client).await? {
         let head = parse_head(&raw).ok_or_else(|| invalid("malformed request head"))?;
         if head.chunked {
-            upstream.write_all(&raw).await?;
-            copy_chunked(&mut client, &mut upstream).await?;
+            // Only rewrite candidates are buffered; other chunked bodies stream through as they are.
+            if matches!(needs_rewrite(&head.method, &head.path), RewriteKind::None) {
+                upstream.write_all(&raw).await?;
+                copy_chunked(&mut client, &mut upstream).await?;
+            } else {
+                forward_chunked(&mut client, &mut upstream, &raw, &head, MAX_BUFFERED_BODY, rewriter, log).await?;
+            }
         } else if let Some(len) = head.content_length {
             forward_sized(&mut client, &mut upstream, &raw, &head, len, rewriter, log).await?;
         } else {
@@ -172,10 +177,116 @@ where
                 }
             }
         }
-        // chunk data plus its trailing CRLF
-        let copied = tokio::io::copy(&mut (&mut *client).take(size + 2), upstream).await?;
-        if copied != size + 2 {
+        copy_chunk_data(client, upstream, size).await?;
+    }
+}
+
+/// Copies one chunk's data and the CRLF after it.
+async fn copy_chunk_data<R, W>(client: &mut R, upstream: &mut W, size: u64) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let total = chunk_total(size)?;
+    let copied = tokio::io::copy(&mut (&mut *client).take(total), upstream).await?;
+    if copied != total {
+        return Err(eof("client closed inside chunk data"));
+    }
+    Ok(())
+}
+
+/// Size of a chunk's data plus its CRLF. A size that cannot be represented is invalid data.
+fn chunk_total(size: u64) -> io::Result<u64> {
+    size.checked_add(2).ok_or_else(|| invalid("chunk size overflows"))
+}
+
+/// Outcome of [`buffer_chunked`].
+enum Buffered {
+    /// The whole body was read: `wire` holds it as sent, `body` the decoded data.
+    Complete,
+    /// The decoded data would pass the limit at the chunk of this size. `wire` holds the bytes read
+    /// before it and `line` its size line; the chunk data is still unread.
+    Overflow { size: u64, line: Vec<u8> },
+}
+
+/// Forwards a chunked body on a rewrite-candidate path. The body is buffered (up to `limit` decoded
+/// bytes) and rewritten, then sent with a Content-Length. A larger body is forwarded unchanged.
+async fn forward_chunked<R, W>(
+    client: &mut R,
+    upstream: &mut W,
+    raw: &[u8],
+    head: &Head,
+    limit: u64,
+    rewriter: &dyn Rewriter,
+    log: &dyn Fn(&str),
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut wire = Vec::new();
+    let mut body = Vec::new();
+    match buffer_chunked(client, &mut wire, &mut body, limit).await? {
+        Buffered::Complete => match rewriter.rewrite(&head.method, &head.path, &body) {
+            Some(new) => {
+                log(&format!("rewrote request body of {} {}", head.method, head.path));
+                upstream.write_all(&render_head(head, Some(new.len() as u64))).await?;
+                upstream.write_all(&new).await?;
+            }
+            None => {
+                upstream.write_all(raw).await?;
+                upstream.write_all(&wire).await?;
+            }
+        },
+        Buffered::Overflow { size, line } => {
+            upstream.write_all(raw).await?;
+            upstream.write_all(&wire).await?;
+            upstream.write_all(&line).await?;
+            copy_chunk_data(client, upstream, size).await?;
+            copy_chunked(client, upstream).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads a chunked body into `wire` (bytes as sent) and `body` (decoded data), stopping once the
+/// decoded data would pass `limit`.
+async fn buffer_chunked<R: AsyncBufRead + Unpin>(client: &mut R, wire: &mut Vec<u8>, body: &mut Vec<u8>, limit: u64) -> io::Result<Buffered> {
+    loop {
+        let mut line = Vec::new();
+        if read_line_limited(client, &mut line, MAX_HEAD).await? == 0 {
+            return Err(eof("client closed inside chunked body"));
+        }
+        let size = chunk_size(&line).ok_or_else(|| invalid("malformed chunk size"))?;
+        if size == 0 {
+            wire.extend_from_slice(&line);
+            read_trailer(client, wire).await?;
+            return Ok(Buffered::Complete);
+        }
+        if (body.len() as u64).saturating_add(size) > limit {
+            return Ok(Buffered::Overflow { size, line });
+        }
+        wire.extend_from_slice(&line);
+        let total = chunk_total(size)?;
+        let start = wire.len();
+        let read = (&mut *client).take(total).read_to_end(wire).await?;
+        if read as u64 != total {
             return Err(eof("client closed inside chunk data"));
+        }
+        body.extend_from_slice(&wire[start..start + size as usize]);
+    }
+}
+
+/// Appends trailer lines to `out`, through the blank line that ends a chunked body.
+async fn read_trailer<R: AsyncBufRead + Unpin>(client: &mut R, out: &mut Vec<u8>) -> io::Result<()> {
+    loop {
+        let start = out.len();
+        if read_line_limited(client, out, MAX_HEAD).await? == 0 {
+            return Err(eof("client closed inside chunked trailer"));
+        }
+        let line = &out[start..];
+        if line == b"\r\n" || line == b"\n" {
+            return Ok(());
         }
     }
 }
@@ -288,12 +399,15 @@ pub fn parse_head(head: &[u8]) -> Option<Head> {
     let mut upgrade = false;
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("content-length") {
-            if content_length.is_none() {
-                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-                    return None;
-                }
-                content_length = Some(value.parse::<u64>().ok()?);
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
             }
+            let len = value.parse::<u64>().ok()?;
+            // Repeated Content-Length headers are accepted only when they agree.
+            if content_length.is_some_and(|prev| prev != len) {
+                return None;
+            }
+            content_length = Some(len);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             chunked |= value.split(',').any(|t| t.trim().eq_ignore_ascii_case("chunked"));
         } else if name.eq_ignore_ascii_case("connection") {
@@ -316,13 +430,14 @@ pub fn parse_head(head: &[u8]) -> Option<Head> {
 /// Renders an HTTP/1.1 request head with `Content-Length` set to `content_length`.
 ///
 /// `None` keeps the headers as they were. `Some(n)` replaces the first Content-Length in place
-/// (or appends one) and drops any other.
+/// (or appends one) and drops any other. For a chunked head it also drops Transfer-Encoding.
 pub fn render_head(head: &Head, content_length: Option<u64>) -> Vec<u8> {
     let mut out = format!("{} {} HTTP/1.1\r\n", head.method, head.path);
     let mut wrote_length = false;
     for (name, value) in &head.headers {
         if let Some(len) = content_length {
-            if name.eq_ignore_ascii_case("content-length") {
+            let framing = name.eq_ignore_ascii_case("content-length") || (head.chunked && name.eq_ignore_ascii_case("transfer-encoding"));
+            if framing {
                 if !wrote_length {
                     out.push_str(&format!("Content-Length: {len}\r\n"));
                     wrote_length = true;
@@ -578,5 +693,85 @@ mod tests {
         client.write_all(&big).await.unwrap();
         let res = relay_connection(relay_client, relay_up, &rewriter, &log).await;
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn conflicting_content_length_is_rejected() {
+        assert_eq!(parse_head(b"POST /x HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"), None);
+        let h = parse_head(b"POST /x HTTP/1.1\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\n").unwrap();
+        assert_eq!(h.content_length, Some(5));
+    }
+
+    #[tokio::test]
+    async fn chunked_container_create_is_rewritten_with_content_length() {
+        let body = r#"{"Image":"alpine","HostConfig":{"Binds":["C:\\Users\\me\\proj:/app:ro"]}}"#;
+        let (a, b) = body.split_at(20);
+        let req = format!(
+            "POST /v1.47/containers/create?name=x HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+            a.len(),
+            b.len()
+        );
+        let (mut client, relay_client) = duplex(1 << 16);
+        let (relay_up, fake_up) = duplex(1 << 16);
+        let rewriter = MountRewriter;
+        let log = |_: &str| {};
+        let fake = async move {
+            let (fr, mut fw) = tokio::io::split(fake_up);
+            let mut fr = BufReader::new(fr);
+            let raw = read_head(&mut fr).await.unwrap().unwrap();
+            assert!(!String::from_utf8_lossy(&raw).to_ascii_lowercase().contains("transfer-encoding"));
+            let head = parse_head(&raw).unwrap();
+            assert!(!head.chunked);
+            let len = head.content_length.unwrap();
+            let mut got = vec![0u8; len as usize];
+            fr.read_exact(&mut got).await.unwrap();
+            let text = String::from_utf8(got).unwrap();
+            assert!(text.contains(r#""/mnt/c/Users/me/proj:/app:ro""#), "{text}");
+            assert_eq!(len, text.len() as u64);
+            fw.write_all(RESP).await.unwrap();
+            let mut rest = Vec::new();
+            fr.read_to_end(&mut rest).await.unwrap();
+            assert!(rest.is_empty());
+        };
+        let client_fut = async {
+            client.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = vec![0u8; RESP.len()];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, RESP);
+            drop(client);
+        };
+        let (res, _, _) = tokio::time::timeout(TEST_TIMEOUT, async { tokio::join!(relay_connection(relay_client, relay_up, &rewriter, &log), client_fut, fake) }).await.expect("relay test timed out");
+        res.unwrap();
+    }
+
+    #[tokio::test]
+    async fn chunked_candidate_body_is_forwarded_unchanged_when_not_rewritten_or_too_big() {
+        let raw: &[u8] = b"POST /containers/create HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let head = parse_head(raw).unwrap();
+        let log = |_: &str| {};
+        // Over the limit: the first chunk is buffered, the second streams through.
+        let rest: &[u8] = b"3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n";
+        let mut up = Vec::new();
+        forward_chunked(&mut BufReader::new(rest), &mut up, raw, &head, 4, &MountRewriter, &log).await.unwrap();
+        assert_eq!(up, [raw, rest].concat());
+        // Within the limit but not a JSON create body: the rewriter declines, so the bytes are kept.
+        let rest: &[u8] = b"3\r\nabc\r\n0\r\n\r\n";
+        let mut up = Vec::new();
+        forward_chunked(&mut BufReader::new(rest), &mut up, raw, &head, 1024, &MountRewriter, &log).await.unwrap();
+        assert_eq!(up, [raw, rest].concat());
+    }
+
+    #[tokio::test]
+    async fn chunk_size_overflow_is_an_error() {
+        // The plain path and the rewrite-candidate path both reject the size without panicking.
+        for path in ["/x", "/containers/create"] {
+            let req = format!("POST {path} HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n");
+            let (mut client, relay_client) = duplex(1 << 16);
+            let (relay_up, _fake_up) = duplex(1 << 16);
+            client.write_all(req.as_bytes()).await.unwrap();
+            let log = |_: &str| {};
+            let res = tokio::time::timeout(TEST_TIMEOUT, relay_connection(relay_client, relay_up, &MountRewriter, &log)).await.expect("relay test timed out");
+            assert_eq!(res.unwrap_err().kind(), io::ErrorKind::InvalidData, "{path}");
+        }
     }
 }

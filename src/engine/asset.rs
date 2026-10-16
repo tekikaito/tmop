@@ -3,13 +3,15 @@
 
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::engine::RELEASE_REPO;
 
 /// Read size for hashing and copying.
 const CHUNK: usize = 64 * 1024;
+/// Largest decompressed engine tarball accepted.
+const MAX_UNPACKED: u64 = 4 * 1024 * 1024 * 1024;
 
 /// `tmop-engine-<tag>-<arch>.tar.gz`
 pub fn asset_name(tag: &str, arch: &str) -> String {
@@ -100,11 +102,20 @@ fn write_part(src: &Path, part: &Path, progress: &mut dyn FnMut(u64)) -> io::Res
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.to_ascii_lowercase().ends_with(".gz"));
     if gz {
-        io::copy(&mut flate2::read::GzDecoder::new(&mut input), &mut out)?;
+        copy_limited(flate2::read::MultiGzDecoder::new(&mut input), &mut out, MAX_UNPACKED)?;
     } else {
         io::copy(&mut input, &mut out)?;
     }
     out.sync_all()
+}
+
+/// Copies at most `limit` bytes from `src` to `dst`. Output beyond `limit` is an error.
+fn copy_limited(src: impl Read, dst: &mut impl Write, limit: u64) -> io::Result<u64> {
+    let copied = io::copy(&mut src.take(limit.saturating_add(1)), dst)?;
+    if copied > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("archive expands beyond {limit} bytes")));
+    }
+    Ok(copied)
 }
 
 /// Reader wrapper that reports the bytes read through it.
@@ -173,7 +184,6 @@ mod tests {
     use super::*;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-    use std::io::Write;
 
     const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
@@ -260,6 +270,31 @@ mod tests {
         assert!(read > 0);
         assert!(!dir.join("engine.tar.part").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gunzip_reads_concatenated_members() {
+        let dir = temp_dir("multi");
+        let src = dir.join("multi.tar.gz");
+        let mut bytes = Vec::new();
+        for part in [&b"first "[..], &b"second"[..]] {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(part).unwrap();
+            bytes.extend(enc.finish().unwrap());
+        }
+        fs::write(&src, &bytes).unwrap();
+        let dst = dir.join("multi.tar");
+        gunzip_to(&src, &dst, |_| {}).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"first second");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_limited_rejects_output_past_the_cap() {
+        let mut out = Vec::new();
+        assert_eq!(copy_limited(&b"0123456789"[..], &mut out, 10).unwrap(), 10);
+        let err = copy_limited(&b"0123456789x"[..], &mut Vec::new(), 10).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

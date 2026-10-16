@@ -8,8 +8,10 @@ const SECTION: &str = "wsl2";
 
 /// Merges the `[wsl2]` memory/processors settings into `existing`.
 ///
-/// `None` removes the key. Line endings follow the input (CRLF when undetectable).
+/// `None` removes the key. Line endings follow the input (CRLF when undetectable). A leading UTF-8
+/// BOM is dropped, so the first section header is still recognised and no BOM is written back.
 pub fn merge(existing: &str, memory_gb: Option<u32>, processors: Option<u32>) -> String {
+    let existing = existing.strip_prefix('\u{feff}').unwrap_or(existing);
     let nl = if existing.contains('\n') && !existing.contains("\r\n") { "\n" } else { "\r\n" };
     let wanted: [(&str, Option<String>); 2] = [
         ("memory", memory_gb.map(|gb| format!("{gb}GB"))),
@@ -186,6 +188,13 @@ mod tests {
         let out = merge(input, Some(3), Some(2));
         assert_eq!(out, "[user]\r\nname=a\r\n\r\n[wsl2]\r\nprocessors=2\r\nmemory=3GB\r\n");
         assert!(!out.replace("\r\n", "").contains('\n'));
+    }
+
+    #[test]
+    fn leading_bom_is_ignored_and_not_written_back() {
+        let out = merge("\u{feff}[wsl2]\r\nmemory=1GB\r\n", Some(2), None);
+        assert_eq!(out, "[wsl2]\r\nmemory=2GB\r\n");
+        assert_eq!(merge("\u{feff}[experimental]\n", Some(4), None), "[experimental]\n\n[wsl2]\nmemory=4GB\n");
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! wsl.exe wrappers for the engine distro: version check, distro listing, import and removal,
 //! command execution with binary-safe stdio, and the elevated WSL install.
 //!
-//! wsl.exe writes UTF-16LE when its stdout is redirected; `--exec` passes the Linux program's
-//! bytes through unchanged. [`decode_output`] handles both. Output is never parsed from help text.
+//! wsl.exe's own output is UTF-16LE when its stdout is redirected, and [`decode_output`] handles
+//! it. Output of `--exec` programs is UTF-8 text and is only checked for UTF-8, never rewritten.
+//! Output is never parsed from help text.
 
 use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +18,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const LONG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Upper bound for quick status queries and `--terminate`.
 const SHORT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long output readers may still run after the child exits. A reader that is still blocked
+/// then (a grandchild holds the pipe open) is abandoned, and its output is lost.
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 /// Captured result of a wsl.exe run, with both streams decoded by [`decode_output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,10 +50,10 @@ pub struct DistroEntry {
     pub default: bool,
 }
 
-/// Decodes wsl.exe or Linux output to a `String`.
+/// Decodes wsl.exe's own output to a `String`.
 ///
 /// NUL bytes at odd positions (or more than a quarter NULs) mean UTF-16LE; otherwise UTF-8.
-/// A leading BOM is removed and CRLF becomes LF.
+/// A leading BOM is removed and CRLF becomes LF. Do not use this for `--exec` output.
 pub fn decode_output(bytes: &[u8]) -> String {
     let text = if looks_utf16le(bytes) {
         let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
@@ -74,9 +79,32 @@ fn wsl_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("wsl.exe"))
 }
 
+/// Bytes captured from a run, before decoding.
+struct RawOutput {
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl RawOutput {
+    /// For wsl.exe's own output: UTF-16LE or UTF-8, see [`decode_output`].
+    fn into_wsl(self) -> WslOutput {
+        WslOutput { status: self.status, stdout: decode_output(&self.stdout), stderr: decode_output(&self.stderr) }
+    }
+
+    /// For `--exec` output: UTF-8 with invalid bytes replaced. Nothing else is changed.
+    fn into_exec(self) -> WslOutput {
+        WslOutput {
+            status: self.status,
+            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+        }
+    }
+}
+
 /// Runs wsl.exe with `args` and captures its output.
 pub fn run(args: &[&str], timeout: Duration) -> Result<WslOutput, String> {
-    run_cmd(args, None, timeout).map_err(|e| e.to_string())
+    run_cmd(args, None, timeout).map(RawOutput::into_wsl).map_err(|e| e.to_string())
 }
 
 /// Failure to run wsl.exe at all, as opposed to a non-zero exit code.
@@ -97,7 +125,7 @@ impl std::fmt::Display for RunError {
     }
 }
 
-fn run_cmd(args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Result<WslOutput, RunError> {
+fn run_cmd(args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Result<RawOutput, RunError> {
     let mut cmd = Command::new(wsl_path());
     cmd.args(args)
         .creation_flags(CREATE_NO_WINDOW)
@@ -106,7 +134,9 @@ fn run_cmd(args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Result<Wsl
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(RunError::Spawn)?;
 
-    let feeder = match (stdin, child.stdin.take()) {
+    // The feeder is not joined: once the child has exited its write fails, and a grandchild that
+    // holds stdin open must not block this call.
+    let _feeder = match (stdin, child.stdin.take()) {
         (Some(data), Some(mut pipe)) => {
             let data = data.to_vec();
             Some(thread::spawn(move || {
@@ -133,27 +163,31 @@ fn run_cmd(args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Result<Wsl
         }
         thread::sleep(Duration::from_millis(20));
     };
-    if let Some(feeder) = feeder {
-        let _ = feeder.join();
-    }
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
-    Ok(WslOutput {
+    let grace = Instant::now() + READER_GRACE;
+    Ok(RawOutput {
         status: status.code().unwrap_or(-1),
-        stdout: decode_output(&stdout),
-        stderr: decode_output(&stderr),
+        stdout: collect(out_reader, grace),
+        stderr: collect(err_reader, grace),
     })
 }
 
-/// Drains a child pipe on its own thread so a full pipe buffer cannot stall the child.
-fn pipe_reader(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
+/// Drains a child pipe on its own thread so a full pipe buffer cannot stall the child. The bytes
+/// are sent on the returned channel once the pipe closes.
+fn pipe_reader(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(mut pipe) = pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
-        buf
-    })
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// The bytes from a reader, or empty when it has not finished by `deadline` (it is abandoned).
+fn collect(rx: mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap_or_default()
 }
 
 /// Like [`run`], but a non-zero exit code is an error that carries the output text.
@@ -185,7 +219,7 @@ fn is_version(token: &str) -> bool {
 
 /// Checks that WSL is installed and new enough. Returns the version, such as `2.4.13.0`.
 pub fn check() -> Result<String, WslProblem> {
-    let out = match run_cmd(&["--version"], None, SHORT_TIMEOUT) {
+    let out = match run_cmd(&["--version"], None, SHORT_TIMEOUT).map(RawOutput::into_wsl) {
         Ok(out) => out,
         Err(RunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(WslProblem::NotInstalled),
         Err(e) => return Err(WslProblem::Failed(e.to_string())),
@@ -284,14 +318,15 @@ fn exec_args<'a>(distro: &'a str, argv: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
-/// Runs `argv` inside the distro without a shell. Stdout is raw bytes decoded as UTF-8.
+/// Runs `argv` inside the distro without a shell. Stdout and stderr are UTF-8 text (invalid bytes
+/// replaced) with no line-ending changes.
 pub fn exec(distro: &str, argv: &[&str], timeout: Duration) -> Result<WslOutput, String> {
-    run_cmd(&exec_args(distro, argv), None, timeout).map_err(|e| e.to_string())
+    run_cmd(&exec_args(distro, argv), None, timeout).map(RawOutput::into_exec).map_err(|e| e.to_string())
 }
 
 /// Like [`exec`], writing `stdin_bytes` to the program's stdin and then closing it.
 pub fn exec_input(distro: &str, argv: &[&str], stdin_bytes: &[u8], timeout: Duration) -> Result<WslOutput, String> {
-    run_cmd(&exec_args(distro, argv), Some(stdin_bytes), timeout).map_err(|e| e.to_string())
+    run_cmd(&exec_args(distro, argv), Some(stdin_bytes), timeout).map(RawOutput::into_exec).map_err(|e| e.to_string())
 }
 
 /// Starts `argv` in the distro with piped stdin and stdout (stderr discarded), killed when dropped.
@@ -396,6 +431,31 @@ mod tests {
         assert_eq!(extract_version(text).as_deref(), Some("2.4.13.0"));
         assert_eq!(extract_version("Kernelversion: 5.15.167.4-1"), None);
         assert_eq!(extract_version("WSL-Version: 2.4.13"), Some("2.4.13".into()));
+    }
+
+    #[test]
+    fn exec_output_is_utf8_without_crlf_rewrite() {
+        let raw = RawOutput { status: 0, stdout: b"a\r\nb\xff".to_vec(), stderr: b"\x00x".to_vec() };
+        let out = raw.into_exec();
+        assert_eq!(out.stdout, "a\r\nb\u{fffd}");
+        assert_eq!(out.stderr, "\u{0}x");
+    }
+
+    #[test]
+    fn wsl_output_is_decoded_from_utf16() {
+        let raw = RawOutput { status: 1, stdout: vec![0x4b, 0x00, 0x0d, 0x00, 0x0a, 0x00], stderr: Vec::new() };
+        let out = raw.into_wsl();
+        assert_eq!((out.status, out.stdout.as_str()), (1, "K\n"));
+    }
+
+    #[test]
+    fn reader_output_is_abandoned_after_the_grace_deadline() {
+        // Sender kept alive but never sending: the reader never finishes.
+        let (_tx, rx) = mpsc::channel::<Vec<u8>>();
+        let start = Instant::now();
+        assert!(collect(rx, Instant::now() + Duration::from_millis(50)).is_empty());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(collect(pipe_reader(Some(&b"xyz"[..])), Instant::now() + Duration::from_secs(5)), b"xyz");
     }
 
     #[test]

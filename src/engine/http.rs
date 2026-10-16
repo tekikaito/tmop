@@ -1,5 +1,6 @@
 //! WinHTTP client for the engine downloads and the update check: GET to a file with progress and
-//! cancellation, bounded text fetch, and HEAD status. Redirects are followed, proxies are automatic.
+//! cancellation, bounded text fetch, and HEAD status. Redirects are followed except https-to-http
+//! downgrades, and proxies are automatic.
 
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -12,7 +13,7 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData,
     WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
     WINHTTP_FLAG_SECURE, WINHTTP_INTERNET_SCHEME_HTTP, WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPTION_REDIRECT_POLICY,
-    WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 use crate::pro::winutil::wide;
@@ -120,7 +121,8 @@ fn send(url: &str, verb: &str) -> Result<(Transfer, u32), String> {
         if request.0.is_null() {
             return Err(win_error("WinHttpOpenRequest", windows::core::Error::from_win32()));
         }
-        let policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.to_ne_bytes();
+        // Follow redirects, but never downgrade an https download to plain http.
+        let policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP.to_ne_bytes();
         WinHttpSetOption(Some(request.0), WINHTTP_OPTION_REDIRECT_POLICY, Some(&policy))
             .map_err(|e| win_error("WinHttpSetOption", e))?;
 
