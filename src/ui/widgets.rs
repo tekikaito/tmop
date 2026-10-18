@@ -1020,15 +1020,16 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> Response {
         resp.mark_changed();
     }
     let t = ui.ctx().animate_bool(resp.id, *on);
-    let off = if pal.dark { Color32::from_rgb(0x4A, 0x4A, 0x4A) } else { Color32::from_rgb(0xB0, 0xB0, 0xB0) };
-    let bg = mix(off, pal.accent, t);
+    let bg = mix(pal.control_stroke, pal.accent, t);
     let p = ui.painter();
     p.rect_filled(rect, 9.0, bg);
     if resp.hovered() {
         p.rect_stroke(rect, 9.0, Stroke::new(1.0_f32, lighten(bg, 0.25)));
     }
     let knob_x = rect.left() + 9.0 + t * (rect.width() - 18.0);
+    // The ring keeps the knob visible on a light track (High Contrast's white control border).
     p.circle_filled(pos2(knob_x, rect.center().y), 6.0, Color32::from_rgb(0xE4, 0xE4, 0xE4));
+    p.circle_stroke(pos2(knob_x, rect.center().y), 6.0, Stroke::new(1.0_f32, with_alpha(pal.control, 0.6)));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

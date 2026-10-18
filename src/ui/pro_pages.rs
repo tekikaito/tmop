@@ -225,10 +225,11 @@ impl App {
         let clock = super::fmt_clock(self.recorder.elapsed().unwrap_or_default());
         let h = 26.0;
         let lcd = Rect::from_min_size(pos2(inner.left() + 110.0, inner.top()), vec2(widgets::seven_segment_width(&clock, h) + 20.0, h + 12.0));
-        p.rect_filled(lcd, 4.0, Color32::from_rgb(0x0A, 0x16, 0x26));
-        p.rect_stroke(lcd, 4.0, Stroke::new(1.0_f32, Color32::from_rgb(0x1A, 0x2C, 0x44)));
-        let lit = if recording { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { Color32::from_rgb(0x9C, 0xB8, 0xD8) };
-        widgets::seven_segment(&p, lcd.min + vec2(10.0, 6.0), &clock, h, lit, Color32::from_rgb(0x16, 0x26, 0x3A), if recording { fd.bloom } else { 0.0 });
+        let lcd_pal = pal.lcd();
+        p.rect_filled(lcd, 4.0, lcd_pal.bg);
+        p.rect_stroke(lcd, 4.0, Stroke::new(1.0_f32, lcd_pal.rim));
+        let lit = if recording { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { lcd_pal.lit };
+        widgets::seven_segment(&p, lcd.min + vec2(10.0, 6.0), &clock, h, lit, lcd_pal.unlit, if recording { fd.bloom } else { 0.0 });
         let status = match (self.recorder.recording_path(), &self.recorder.last_error) {
             (Some(path), _) => format!("Recording {} samples to {}", self.recorder.recorded_rows(), path.display()),
             (None, Some(e)) => e.clone(),

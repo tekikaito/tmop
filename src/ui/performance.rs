@@ -1,7 +1,7 @@
 //! Performance page: device list on the left, detail graphs and statistics on the right
 //! (title, segmented utilization bar, per-core graph grid, stats).
 
-use super::theme::{self, metric_color, mix, with_alpha};
+use super::theme::{self, metric_color, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, draw_icon, led_gradient_row, led_row, Graph, GraphLine, Icon, LedStyle};
 use super::{App, Device, FrameData};
 use crate::metrics::Series;
@@ -9,10 +9,11 @@ use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Stroke};
 
 const LIST_W: f32 = 236.0;
-/// Light blue used for the headline value.
-const VALUE_BLUE: Color32 = Color32::from_rgb(0x4F, 0xB4, 0xFF);
-const CELL_BORDER: Color32 = Color32::from_rgb(0x31, 0xD1, 0xFF);
-const CELL_BG: Color32 = Color32::from_rgb(0x22, 0x27, 0x23);
+
+/// Background of the per-core graph cells and the memory composition bar.
+fn cell_bg(pal: &Palette) -> Color32 {
+    mix(pal.graph_bg(), pal.body, 0.5)
+}
 
 impl App {
     fn cpus_expanded(&self) -> bool {
@@ -94,7 +95,7 @@ impl App {
             g.markers = false;
             g.line_width = 1.4;
             g.fill = 0.10;
-            g.background = Some(if selected { Color32::from_rgb(0x25, 0x3F, 0x77) } else { mix(pal.card, Color32::BLACK, 0.1) });
+            g.background = Some(if selected { pal.selection } else { mix(pal.card, Color32::BLACK, 0.1) });
             g.border = Some(if selected { with_alpha(c, 0.9) } else { with_alpha(pal.card_stroke, 0.9) });
             draw_graph(p, thumb, &g);
             if resp.clicked() {
@@ -115,7 +116,7 @@ impl App {
         let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), pos2(rect.right() - 128.0, rect.top() + 60.0));
         let segs = ((bar.width() / 9.0).floor() as usize).clamp(20, 200);
         led_gradient_row(p, bar, segs, frac, colors, fd.bloom);
-        p.text(pos2(rect.right(), bar.center().y + 1.0), Align2::RIGHT_CENTER, value, theme::semibold(21.0), VALUE_BLUE);
+        p.text(pos2(rect.right(), bar.center().y + 1.0), Align2::RIGHT_CENTER, value, theme::semibold(21.0), pal.accent);
         rect.top() + 64.0
     }
 
@@ -170,7 +171,7 @@ impl App {
         let label = if expanded { "% Utilization by logical processor" } else { "% Utilization over time" };
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, label, theme::ui(12.0), pal.text_dim);
         let toggle_text = if expanded { "CPUs Expanded  \u{02C5}" } else { "CPUs Overall  \u{02C5}" };
-        let tr = p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, toggle_text, theme::ui(12.0), VALUE_BLUE);
+        let tr = p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, toggle_text, theme::ui(12.0), pal.accent);
         if ui.interact(tr.expand(3.0), ui.id().with("cpus-expanded"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             self.settings.window.performance_cpus_expanded = !expanded;
             self.settings_dirty = true;
@@ -186,22 +187,22 @@ impl App {
             for (i, sr) in fd.hist.per_core.iter().enumerate() {
                 let (c, r) = (i % cols, i / cols);
                 let cell = Rect::from_min_size(pos2(rect.left() + c as f32 * (cw + gap), y + r as f32 * (ch + gap)), vec2(cw, ch));
-                p.rect_filled(cell, 3.0, CELL_BG);
+                p.rect_filled(cell, 3.0, cell_bg(&pal));
                 let mut lines = vec![GraphLine { series: sr, color: green, range: (0.0, 100.0) }];
                 if let Some(k) = fd.hist.per_core_kernel.get(i) {
                     lines.push(GraphLine { series: k, color: Color32::from_rgb(0xFF, 0x6B, 0x5E), range: (0.0, 100.0) });
                 }
                 let mut g = self.graph(lines, fd);
                 g.background = None;
-                g.grid = Some(with_alpha(Color32::from_rgb(0x3A, 0x44, 0x3C), 0.9));
+                g.grid = Some(with_alpha(pal.grid, 0.9));
                 g.px_per_update = (self.settings.graphs.pixels_per_update as f32 / 2.0).max(2.0);
                 g.line_width = 1.6;
                 g.fill = 0.10;
                 draw_graph(&p, cell.shrink2(vec2(4.0, 4.0)).with_min_y(cell.top() + 18.0), &g);
                 if fd.bloom > 0.0 {
-                    p.rect_stroke(cell.expand(1.0), 4.0, Stroke::new(2.0_f32, with_alpha(CELL_BORDER, 0.12 * fd.bloom)));
+                    p.rect_stroke(cell.expand(1.0), 4.0, Stroke::new(2.0_f32, with_alpha(pal.accent, 0.12 * fd.bloom)));
                 }
-                p.rect_stroke(cell, 3.0, Stroke::new(1.0_f32, CELL_BORDER));
+                p.rect_stroke(cell, 3.0, Stroke::new(1.0_f32, pal.accent));
                 p.text(cell.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, format!("CPU {i}"), theme::ui(11.5), pal.text_dim);
             }
         } else {
@@ -271,7 +272,7 @@ impl App {
         let total = s.memory.total.max(1) as f32;
         let used = s.memory.total.saturating_sub(s.memory.available) as f32;
         let cached = (s.memory.cached as f32).min(s.memory.available as f32);
-        p.rect_filled(bar, 3.0, CELL_BG);
+        p.rect_filled(bar, 3.0, cell_bg(&pal));
         let wu = bar.width() * used / total;
         let wc = bar.width() * cached / total;
         p.rect_filled(Rect::from_min_size(bar.min, vec2(wu, bar.height())), 3.0, with_alpha(purple, 0.55));

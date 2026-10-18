@@ -163,7 +163,7 @@ pub const HIGH_CONTRAST: Palette = Palette {
     panel: Color32::from_rgb(0x0A, 0x0A, 0x0A),
     panel_stroke: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     hover: Color32::from_rgb(0x30, 0x30, 0x30),
-    selection: Color32::from_rgb(0x1A, 0xEB, 0xFF),
+    selection: Color32::from_rgb(0x1A, 0x4F, 0xBF),
     accent: Color32::from_rgb(0xFF, 0xFF, 0x00),
     text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     text_dim: Color32::from_rgb(0xE6, 0xE6, 0xE6),
@@ -392,7 +392,7 @@ impl Palette {
 
     /// Process-row heat shading (busy rows tinted towards it).
     pub fn heat(&self) -> Color32 {
-        mix(self.ok, self.body, 0.3)
+        mix(self.ok, self.body, 0.4)
     }
 
     pub fn lcd(&self) -> Lcd {

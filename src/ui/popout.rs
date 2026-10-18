@@ -757,14 +757,12 @@ fn skin_color(c: Color32) -> Color {
     Color::rgba(r, g, b, a)
 }
 
-/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`.
+/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`
+/// (further, in steps, until it reads at 4.5:1 on the palette's surface).
 fn classic_accent(pal: &Palette, q: Quadrant) -> Color32 {
     let c = theme::metric_color(q.key());
-    if pal.dark {
-        lighten(c, 0.35)
-    } else {
-        dim(c, 0.55)
-    }
+    let shift = |t: f32| if pal.dark { lighten(c, 0.35 + t) } else { dim(c, 0.55 - t) };
+    (0..=6).map(|i| shift(i as f32 * 0.1)).find(|a| theme::contrast(*a, pal.card) >= theme::MIN_CONTRAST).unwrap_or_else(|| shift(0.6))
 }
 
 /// Classic drawn in the application's own colours (`pal`).
@@ -809,8 +807,7 @@ mod tests {
     #[test]
     fn process_rows_are_readable() {
         let mut skins: Vec<Skin> = crate::skin::built_in().into_iter().filter(|s| s.id != "classic").collect();
-        skins.push(classic_skin(&theme::DARK));
-        skins.push(classic_skin(&theme::LIGHT));
+        skins.extend(crate::palette::built_in().iter().map(|p| classic_skin(&p.palette)));
         for s in &skins {
             let p = paint(s, 1.0);
             for t in [0.0, 0.5, 1.0] {
@@ -825,7 +822,7 @@ mod tests {
 
     #[test]
     fn classic_follows_the_app_palette_and_is_readable() {
-        for pal in [theme::DARK, theme::LIGHT] {
+        for pal in crate::palette::built_in().into_iter().map(|p| p.palette) {
             let s = classic_skin(&pal);
             let tile = s.surfaces.as_ref().unwrap().tile.as_ref().unwrap().top().unwrap();
             assert_eq!(tile, skin_color(pal.card));

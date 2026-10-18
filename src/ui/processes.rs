@@ -12,7 +12,6 @@ use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichT
 use std::collections::{HashMap, HashSet};
 
 const ROW_H: f32 = 26.0;
-const HEAT: Color32 = Color32::from_rgb(0x3A, 0x8E, 0x48);
 const INDENT: f32 = 18.0;
 
 /// Per-page state.
@@ -505,7 +504,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
         let p = ui.painter();
         if !cx.selected && (heat > 0.03 || (active && c.numeric() && c != Column::Pid)) {
             let t = if heat > 0.03 { 0.30 + 0.70 * heat } else { 0.22 };
-            p.rect_filled(rect.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, HEAT, t));
+            p.rect_filled(rect.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, pal.heat(), t));
         }
         p.line_segment([pos2(rect.right() - 0.5, rect.top()), pos2(rect.right() - 0.5, rect.bottom())], Stroke::new(1.0_f32, with_alpha(pal.panel_stroke, 0.45)));
     }

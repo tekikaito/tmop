@@ -163,14 +163,14 @@ impl App {
         p.text(pos2(x_cpu, hy), Align2::RIGHT_CENTER, "CPU", hf.clone(), pal.text_dim);
         p.text(pos2(x_mem, hy), Align2::RIGHT_CENTER, "Memory", hf, pal.text_dim);
         let top_cpu = rows.first().map(|r| r.cpu_pct).unwrap_or(0.0).max(1.0);
-        let green = Color32::from_rgb(0x39, 0x8A, 0x46);
+        let heat = pal.heat();
         let mut clicked = None;
         for (i, r) in rows.iter().take(n).enumerate() {
             let y0 = list_top + i as f32 * row_h;
             let rr = Rect::from_min_size(pos2(inner.left(), y0), vec2(inner.width(), row_h - 1.0));
             if r.cpu_pct > 0.0 {
                 let t = (0.35 + 0.65 * (r.cpu_pct / top_cpu)).min(1.0);
-                p.rect_filled(rr, 2.0, mix(pal.card, green, t));
+                p.rect_filled(rr, 2.0, mix(pal.card, heat, t));
             }
             let cy = rr.center().y;
             p.text(pos2(x_pid, cy), Align2::RIGHT_CENTER, r.pid.to_string(), theme::ui(12.0), pal.text_dim);

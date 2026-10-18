@@ -588,7 +588,7 @@ impl App {
                 } else if resp.hovered() {
                     p.rect_filled(rect, 4.0, pal.hover);
                 }
-                let fg = if selected { Color32::WHITE } else { pal.text };
+                let fg = if selected { pal.on_selection() } else { pal.text };
                 draw_icon(p, Rect::from_center_size(pos2(rect.left() + 26.0, rect.center().y), vec2(16.0, 16.0)), page.icon(), fg);
                 p.text(pos2(rect.left() + 50.0, rect.center().y), Align2::LEFT_CENTER, page.title(), theme::ui(13.0), fg);
                 if resp.clicked() {
@@ -684,17 +684,18 @@ impl App {
             let h = 15.0;
             let cw = widgets::seven_segment_width(&clock, h);
             let lcd = Rect::from_min_size(pos2(r.right() - 14.0 - cw - 14.0, r.center().y - 11.0), vec2(cw + 14.0, 22.0));
-            p.rect_filled(lcd, 3.0, Color32::from_rgb(0x0A, 0x16, 0x26));
-            p.rect_stroke(lcd, 3.0, Stroke::new(1.0_f32, Color32::from_rgb(0x1A, 0x2C, 0x44)));
-            let lit = if rec { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { Color32::from_rgb(0x9C, 0xB8, 0xD8) };
-            widgets::seven_segment(p, pos2(lcd.left() + 7.0, lcd.top() + 3.5), &clock, h, lit, Color32::from_rgb(0x16, 0x26, 0x3A), if rec { self.bloom() } else { 0.0 });
+            let lcd_pal = pal.lcd();
+            p.rect_filled(lcd, 3.0, lcd_pal.bg);
+            p.rect_stroke(lcd, 3.0, Stroke::new(1.0_f32, lcd_pal.rim));
+            let lit = if rec { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { lcd_pal.lit };
+            widgets::seven_segment(p, pos2(lcd.left() + 7.0, lcd.top() + 3.5), &clock, h, lit, lcd_pal.unlit, if rec { self.bloom() } else { 0.0 });
             let lap = pos2(lcd.left() - 18.0, r.center().y);
-            p.circle_filled(lap, 3.5, Color32::from_rgb(0x36, 0x36, 0x36));
+            p.circle_filled(lap, 3.5, pal.control_stroke);
             let stop = Rect::from_center_size(pos2(lap.x - 34.0, r.center().y), vec2(24.0, 20.0));
             let stop_resp = ui.interact(stop, ui.id().with("status-stop"), Sense::click());
             let p = ui.painter();
-            p.rect_filled(stop, 3.0, if stop_resp.hovered() && rec { pal.hover } else { Color32::from_rgb(0x26, 0x26, 0x26) });
-            p.rect_filled(Rect::from_center_size(stop.center(), vec2(9.0, 9.0)), 1.0, if rec { pal.text } else { Color32::from_rgb(0x3A, 0x3A, 0x3A) });
+            p.rect_filled(stop, 3.0, if stop_resp.hovered() && rec { pal.hover } else { pal.control });
+            p.rect_filled(Rect::from_center_size(stop.center(), vec2(9.0, 9.0)), 1.0, if rec { pal.text } else { pal.control_stroke });
             p.line_segment([pos2(stop.right() + 9.5, r.top() + 6.0), pos2(stop.right() + 9.5, r.bottom() - 6.0)], Stroke::new(1.0_f32, pal.panel_stroke));
             let ball = pos2(stop.left() - 26.0, r.center().y);
             let rec_resp = ui.interact(Rect::from_center_size(ball, vec2(22.0, 22.0)), ui.id().with("status-rec"), Sense::click());

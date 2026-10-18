@@ -87,8 +87,6 @@ impl TableState {
     }
 }
 
-pub const HEAT: Color32 = Color32::from_rgb(0x3A, 0x8E, 0x48);
-
 /// Draws the table in `rect`. `order` lists the item indices to show (already filtered
 /// and sorted); `key` gives each item a stable key for selection; `cell(item, col)`
 /// returns the content. Returns the item index that was double-clicked, if any.
@@ -162,7 +160,7 @@ pub fn show(
                             let content = cell(item, ci);
                             let p = ui.painter();
                             if !is_sel && content.heat > 0.01 {
-                                p.rect_filled(r.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, HEAT, 0.25 + 0.75 * content.heat));
+                                p.rect_filled(r.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, pal.heat(), 0.25 + 0.75 * content.heat));
                             }
                             p.line_segment([pos2(r.right() - 0.5, r.top()), pos2(r.right() - 0.5, r.bottom())], Stroke::new(1.0_f32, with_alpha(pal.panel_stroke, 0.5)));
                             let color = content.color.unwrap_or(pal.text);
