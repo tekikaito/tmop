@@ -6,6 +6,7 @@
 //!   TMOP --page=<id>      start on summary|performance|processes|settings
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
+//!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
 
 use tmop::metrics::Collector;
@@ -126,6 +127,18 @@ mod scr {
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Task Manager replacement: the elevated helper and restore switches run without a window.
+    if let Some(code) = tmop::taskmgr::run_switches(&args) {
+        std::process::exit(code);
+    }
+    // Started in place of Task Manager: a running TMOP window takes it over if there is one.
+    let taskmgr = tmop::taskmgr::taskmgr_launch(&args);
+    if let Some(l) = &taskmgr {
+        if tmop::taskmgr::hand_off(l.page.unwrap_or("")) {
+            return Ok(());
+        }
+    }
+
     #[cfg(feature = "screensaver")]
     {
         let looks_like_scr = args.first().map(|a| a.starts_with('/') || a == "-s" || a == "-p" || a == "-c").unwrap_or(false)
@@ -144,7 +157,7 @@ fn main() -> eframe::Result<()> {
     let value = |names: &[&str]| args.iter().find_map(|a| names.iter().find_map(|n| a.strip_prefix(n)).map(|v| v.to_string()));
     let popout_only = args.iter().any(|a| a == "--popout");
     let launch = Launch {
-        start_page: value(&["--page=", "--start-page="]).map(|p| Page::from_id(&p)),
+        start_page: value(&["--page=", "--start-page="]).map(|p| Page::from_id(&p)).or_else(|| taskmgr.as_ref().and_then(|l| l.page).map(Page::from_id)),
         start_device: value(&["--device=", "--start-device="]),
         popout_only,
         record: if args.iter().any(|a| a == "--record" || a.starts_with("--record=")) {
