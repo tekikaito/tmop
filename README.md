@@ -10,7 +10,17 @@ you set it up, and checking for a newer engine release (switch the check off on 
 
 ## Get TMOP
 
-1. Open the **[download page](https://github.com/tekikaito/tmop/releases/latest)**.
+**[Download TMOP](https://tekikaito.github.io/tmop/)**: the page picks the right version for
+your PC. Or install it with one command in PowerShell. That adds TMOP to the Start menu, keeps
+it up to date when you run the command again, and lets you remove it in *Settings → Apps*:
+
+```powershell
+irm https://tekikaito.github.io/tmop/install.ps1 | iex
+```
+
+To download it by hand instead:
+
+1. Open the **[release page](https://github.com/tekikaito/tmop/releases/latest)**.
 2. Under **Assets**, click **`TMOP-…-windows-x64.zip`**.
    (Only if your PC has an ARM processor, for example a Snapdragon laptop, take
    `TMOP-…-windows-arm64.zip` instead. Not sure? Choose x64.)
@@ -58,6 +68,8 @@ Windows asks for administrator permission, and the change applies to every user 
 
 ## Update or remove
 
+- **Installed with the PowerShell command?** Run the command again to update; remove TMOP in
+  *Settings → Apps → Installed apps* (that also hands Ctrl+Shift+Esc back to Task Manager).
 - **Update:** download the newest version as above and replace your old TMOP.exe with it.
   Your settings are kept. Keep the new TMOP.exe in the same place if TMOP opens instead of
   Task Manager.

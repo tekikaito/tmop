@@ -52,9 +52,12 @@ pub async fn ensure_image(docker: &Docker) -> Result<(), String> {
     Ok(())
 }
 
-/// Unique suffix for test object names.
+/// Unique suffix for test object names. The counter keeps tests that start in the same
+/// millisecond (they run in parallel) from getting the same name.
 pub fn suffix() -> String {
-    format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0))
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{}-{n}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0))
 }
 
 /// Removes a container (force), ignoring errors.
