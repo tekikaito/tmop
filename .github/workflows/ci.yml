@@ -72,8 +72,9 @@ jobs:
           docker version
           docker info --format '{{.ServerVersion}}'
 
+      # The full suite runs in the Windows jobs; here only the tests that need a Docker engine.
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --test docker_exec --test docker_files --test docker_logs --test docker_run
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings

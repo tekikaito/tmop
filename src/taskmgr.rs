@@ -263,6 +263,7 @@ impl Inbox {
         self.0.lock().ok().and_then(|mut g| g.take())
     }
 
+    #[cfg(windows)]
     fn put(&self, page: String) {
         if let Ok(mut g) = self.0.lock() {
             *g = Some(page);

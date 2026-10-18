@@ -14,7 +14,8 @@ use tmop::docker::{client, context};
 /// Image used for throwaway test containers.
 pub const TEST_IMAGE: &str = "busybox:stable";
 
-/// Connects to the first reachable local context, or returns `None` (test skipped).
+/// Connects to the first reachable local context running Linux containers ([`TEST_IMAGE`]
+/// is a Linux image), or returns `None` (test skipped).
 pub fn engine() -> Option<(tokio::runtime::Runtime, Docker)> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().ok()?;
     for ctx in context::default_contexts() {
@@ -24,14 +25,17 @@ pub fn engine() -> Option<(tokio::runtime::Runtime, Docker)> {
         let Ok(conn) = client::connect(&ctx.endpoint) else { continue };
         let docker = conn.docker.clone();
         let probe = docker.clone();
-        let ok = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(3), probe.ping()).await.map(|r| r.is_ok()).unwrap_or(false)
+        let os = rt.block_on(async {
+            let info = tokio::time::timeout(Duration::from_secs(3), probe.info()).await.ok()?.ok()?;
+            info.os_type
         });
-        if ok {
-            return Some((rt, docker));
+        match os.as_deref() {
+            Some("linux") => return Some((rt, docker)),
+            Some(other) => eprintln!("skipped context {}: engine runs {other} containers", ctx.name),
+            None => {}
         }
     }
-    eprintln!("skipped: no Docker engine reachable");
+    eprintln!("skipped: no Docker engine with Linux containers reachable");
     None
 }
 
