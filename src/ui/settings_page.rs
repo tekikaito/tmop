@@ -128,8 +128,14 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
             }
             match families {
                 Some(list) => {
+                    // Fonts load by name ignoring case, so a saved "arial" is the listed "Arial".
+                    let current = a.display_font.to_lowercase();
                     for f in list {
-                        changed |= ui.selectable_value(&mut a.display_font, f.clone(), f).changed();
+                        let selected = f.to_lowercase() == current;
+                        if ui.selectable_label(selected, f).clicked() && !selected {
+                            a.display_font = f.clone();
+                            changed = true;
+                        }
                     }
                 }
                 None => {
@@ -138,7 +144,7 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
             }
         });
     });
-    hint(ui, pal, "Page titles, large values and the Classic popout's title. Other text stays Segoe UI.");
+    hint(ui, pal, "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Segoe UI.");
     changed
 }
 
