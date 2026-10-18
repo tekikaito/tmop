@@ -274,7 +274,7 @@ impl App {
                 self.status = "The recording folder must be an absolute path".into();
             } else if d != self.recorder.dir {
                 self.recorder.dir = d.clone();
-                self.settings.extra.insert("recordingFolder".into(), serde_json::Value::String(d.display().to_string()));
+                self.settings.general.recording_folder = d.display().to_string();
                 self.settings_dirty = true;
                 self.pro.recordings_listed = false;
             }
@@ -767,7 +767,7 @@ impl App {
             }
         }
         if stop {
-            if self.settings.disk_space_suppress_stop_confirm {
+            if self.settings.general.disk_space_suppress_stop_confirm {
                 self.pro.scanner.cancel();
             } else {
                 self.pro.disk_confirm_stop = true;
@@ -789,7 +789,7 @@ impl App {
                 });
             });
             if dont_ask {
-                self.settings.disk_space_suppress_stop_confirm = true;
+                self.settings.general.disk_space_suppress_stop_confirm = true;
                 self.settings_dirty = true;
             }
             if let Some(a) = answer {

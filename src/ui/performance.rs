@@ -16,7 +16,7 @@ const CELL_BG: Color32 = Color32::from_rgb(0x22, 0x27, 0x23);
 
 impl App {
     fn cpus_expanded(&self) -> bool {
-        self.settings.extra.get("performanceCpusExpanded").and_then(|v| v.as_bool()).unwrap_or(true)
+        self.settings.window.performance_cpus_expanded
     }
 
     pub fn performance_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
@@ -89,7 +89,7 @@ impl App {
             g.phase = fd.phase;
             g.glide = fd.glide;
             g.regions = 1;
-            g.smooth = self.settings.smooth_graph_curves;
+            g.smooth = self.settings.graphs.smooth_curves;
             g.bloom = fd.bloom * 0.5;
             g.markers = false;
             g.line_width = 1.4;
@@ -172,7 +172,7 @@ impl App {
         let toggle_text = if expanded { "CPUs Expanded  \u{02C5}" } else { "CPUs Overall  \u{02C5}" };
         let tr = p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, toggle_text, theme::ui(12.0), VALUE_BLUE);
         if ui.interact(tr.expand(3.0), ui.id().with("cpus-expanded"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            self.settings.extra.insert("performanceCpusExpanded".into(), serde_json::Value::Bool(!expanded));
+            self.settings.window.performance_cpus_expanded = !expanded;
             self.settings_dirty = true;
         }
         y += 19.0;
@@ -194,7 +194,7 @@ impl App {
                 let mut g = self.graph(lines, fd);
                 g.background = None;
                 g.grid = Some(with_alpha(Color32::from_rgb(0x3A, 0x44, 0x3C), 0.9));
-                g.px_per_update = (self.settings.graph_pixels_per_update as f32 / 2.0).max(2.0);
+                g.px_per_update = (self.settings.graphs.pixels_per_update as f32 / 2.0).max(2.0);
                 g.line_width = 1.6;
                 g.fill = 0.10;
                 draw_graph(&p, cell.shrink2(vec2(4.0, 4.0)).with_min_y(cell.top() + 18.0), &g);

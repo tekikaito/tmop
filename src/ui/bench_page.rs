@@ -52,7 +52,10 @@ impl App {
             ui.ctx().request_repaint();
         }
         if self.bench_ui.folder.is_empty() {
-            self.bench_ui.folder = self.settings.extra.get("benchmarkFolder").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| std::env::temp_dir().display().to_string());
+            self.bench_ui.folder = match self.settings.general.benchmark_folder.as_str() {
+                "" => std::env::temp_dir().display().to_string(),
+                f => f.to_string(),
+            };
         }
         let running = self.bench.is_running();
         let prog = self.bench.progress();
@@ -70,7 +73,7 @@ impl App {
             }
             let r = widgets::search_box(ui, &mut self.bench_ui.folder, "Folder for the disk test file", 300.0, &pal);
             if r.changed() {
-                self.settings.extra.insert("benchmarkFolder".into(), serde_json::Value::String(self.bench_ui.folder.clone()));
+                self.settings.general.benchmark_folder = self.bench_ui.folder.clone();
                 self.settings_dirty = true;
             }
             ui.label(RichText::new("Disk test folder").font(theme::ui(12.5)).color(pal.text_dim));
@@ -101,7 +104,7 @@ impl App {
                 let mut g = widgets::Graph::new(vec![GraphLine { series: &s, color: c, range: (0.0, top) }]);
                 g.px_per_update = (split[0].width() / (t.budget().as_secs_f32() * 10.0)).max(2.0);
                 g.bloom = fd.bloom;
-                g.smooth = self.settings.smooth_graph_curves;
+                g.smooth = self.settings.graphs.smooth_curves;
                 g.grid = Some(pal.grid);
                 g.background = Some(pal.graph_bg());
                 g.border = Some(c);

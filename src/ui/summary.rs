@@ -122,7 +122,7 @@ impl App {
         }
         let mut g = self.graph(lines, fd);
         g.border = Some(green);
-        g.dashed = self.settings.dashed_summary_graph_lines;
+        g.dashed = self.settings.graphs.dashed_summary;
         draw_graph(p, graph, &g);
         for (t, frac) in [("100%", 1.0), ("50%", 0.5), ("0%", 0.0)] {
             p.text(pos2(graph.left() - 6.0, graph.bottom() - graph.height() * frac), Align2::RIGHT_CENTER, t, theme::ui(11.5), green);
@@ -150,7 +150,7 @@ impl App {
         let list_top = inner.top() + LED_PANEL_H + 24.0;
         let n = ((inner.bottom() - list_top) / row_h).floor().max(0.0) as usize;
         led_panel(p, Rect::from_min_size(inner.min, vec2(inner.width(), LED_PANEL_H)), &format!("TOP {n} CPU PROCESSES"), "", &pal, fd.bloom);
-        let mut rows: Vec<&crate::process::ProcessRow> = fd.rows.iter().filter(|r| r.pid != 0 && (self.settings.show_self_in_reports || r.pid != std::process::id())).collect();
+        let mut rows: Vec<&crate::process::ProcessRow> = fd.rows.iter().filter(|r| r.pid != 0 && (self.settings.general.show_self_in_reports || r.pid != std::process::id())).collect();
         rows.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal).then(b.private_working_set.cmp(&a.private_working_set)));
         let hy = inner.top() + LED_PANEL_H + 12.0;
         let x_pid = inner.left() + 52.0;
@@ -212,7 +212,7 @@ impl App {
         let (lo, hi) = widgets::eased_range(ui.ctx(), "summary-memory", visible_range(&fd.hist.memory_bytes, 600));
         let mut g = self.graph(vec![GraphLine { series: &fd.hist.memory_bytes, color: purple, range: (lo, hi) }], fd);
         g.border = Some(with_alpha(purple, 0.8));
-        g.dashed = self.settings.dashed_summary_graph_lines;
+        g.dashed = self.settings.graphs.dashed_summary;
         draw_graph(p, graph, &g);
         p.text(pos2(graph.left() + 4.0, graph.top() + 2.0), Align2::LEFT_TOP, format_bytes(hi as f64), theme::ui(11.0), purple);
         p.text(pos2(graph.left() + 4.0, graph.bottom() - 2.0), Align2::LEFT_BOTTOM, format_bytes(lo as f64), theme::ui(11.0), purple);

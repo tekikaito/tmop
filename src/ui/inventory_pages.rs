@@ -270,7 +270,7 @@ impl App {
             io: f64,
             apps: usize,
         }
-        let full = self.settings.show_full_account_name;
+        let full = self.settings.general.show_full_account_name;
         let mut by: HashMap<(String, u32), U> = HashMap::new();
         for r in fd.rows.iter().filter(|r| r.pid != 0) {
             let raw = r.user.clone().unwrap_or_else(|| "(unavailable)".into());

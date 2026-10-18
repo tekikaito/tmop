@@ -169,7 +169,7 @@ fn main() -> eframe::Result<()> {
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
     if let Some(skin) = value(&["--popout-skin="]) {
-        settings.popout_skin = skin;
+        settings.popout.skin = skin;
     }
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title(format!("{} \u{2013} {}", tmop::APP_NAME, tmop::APP_LONG_NAME))
@@ -178,7 +178,7 @@ fn main() -> eframe::Result<()> {
         .with_maximized(args.iter().any(|a| a == "--maximized"));
     if popout_only {
         let skins = tmop::skin::scan(&tmop::skin::default_skin_dirs());
-        let skin = skins.get(&settings.popout_skin).cloned().unwrap_or_else(tmop::skin::Skin::classic);
+        let skin = skins.get(&settings.popout.skin).cloned().unwrap_or_else(tmop::skin::Skin::classic);
         viewport = viewport
             .with_title(format!("TMOP \u{2014} {}", skin.name))
             .with_inner_size(tmop::ui::popout::desired_size(&skin))

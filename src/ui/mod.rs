@@ -329,16 +329,16 @@ impl App {
         let popout_only = launch.popout_only;
         theme::install_fonts(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
-        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graph_history_multiplier), move || ctx.request_repaint());
+        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
-        let page = launch.start_page.unwrap_or_else(|| Page::from_id(&settings.default_page));
+        let page = launch.start_page.unwrap_or_else(|| Page::from_id(&settings.general.default_page));
         let device = launch.start_device.as_deref().and_then(|d| Device::ALL.into_iter().find(|x| x.key() == d)).unwrap_or(Device::Cpu);
         // A normal settings load needs no message.
         let mut status = if status.ends_with("(Loaded)") { String::new() } else { status };
         if !catalog.errors.is_empty() {
             status = format!("{} skin(s) failed to load", catalog.errors.len());
         }
-        let settings_popout_on = settings.extra.get("popoutMode").and_then(|v| v.as_str()).map(|m| m != "off").unwrap_or(false);
+        let settings_popout_on = settings.popout.mode != "off";
         let app = Self {
             settings,
             settings_dirty: false,
@@ -370,8 +370,8 @@ impl App {
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
         let mut app = app;
-        if let Some(dir) = app.settings.extra.get("recordingFolder").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-            app.recorder.dir = std::path::PathBuf::from(dir);
+        if !app.settings.general.recording_folder.is_empty() {
+            app.recorder.dir = std::path::PathBuf::from(&app.settings.general.recording_folder);
         }
         if let Some((dir, secs)) = launch.record {
             if let Some(d) = dir {
@@ -393,7 +393,7 @@ impl App {
     }
 
     pub fn palette(&self) -> Palette {
-        match self.settings.theme.as_str() {
+        match self.settings.appearance.theme.as_str() {
             "light" => theme::LIGHT,
             "dark" => theme::DARK,
             _ => {
@@ -408,8 +408,8 @@ impl App {
     }
 
     pub fn bloom(&self) -> f32 {
-        if self.settings.visual_bloom {
-            (self.settings.visual_bloom_level.min(10) as f32 / 10.0).max(0.1)
+        if self.settings.appearance.bloom {
+            (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1)
         } else {
             0.0
         }
@@ -418,18 +418,18 @@ impl App {
     /// A graph configured from the settings (history compression, smoothing, bloom).
     pub fn graph<'a>(&self, lines: Vec<GraphLine<'a>>, fd: &FrameData<'_>) -> Graph<'a> {
         let mut lines = lines;
-        if !self.settings.color_keyed_graphs {
+        if !self.settings.graphs.color_keyed {
             // Without colour keying every trace uses one neutral blue, later traces dimmer.
             for (i, l) in lines.iter_mut().enumerate() {
                 l.color = theme::dim(Color32::from_rgb(0x4F, 0xB4, 0xFF), 1.0 - 0.3 * i.min(2) as f32);
             }
         }
         let mut g = Graph::new(lines);
-        g.px_per_update = self.settings.graph_pixels_per_update.clamp(2, 64) as f32;
+        g.px_per_update = self.settings.graphs.pixels_per_update.clamp(2, 64) as f32;
         g.phase = fd.phase;
         g.glide = fd.glide;
-        g.regions = widgets::regions_for(self.settings.graph_history_multiplier, self.settings.compressed_graph_time);
-        g.smooth = self.settings.smooth_graph_curves;
+        g.regions = widgets::regions_for(self.settings.graphs.history_multiplier, self.settings.graphs.compressed_time);
+        g.smooth = self.settings.graphs.smooth_curves;
         g.bloom = fd.bloom;
         g.grid = Some(fd.pal.grid);
         g.background = Some(fd.pal.graph_bg());
@@ -492,7 +492,7 @@ impl App {
     }
 
     pub fn current_skin(&self) -> skin::Skin {
-        match self.catalog.get(&self.settings.popout_skin) {
+        match self.catalog.get(&self.settings.popout.skin) {
             Some(s) if s.source != skin::SkinSource::BuiltIn || s.id != "classic" => s.clone(),
             _ => popout::classic_skin(&self.palette()),
         }
@@ -646,7 +646,7 @@ impl App {
                 parts.push((format!("IP {ip}"), pal.accent));
             }
             parts.push((format!("Generation {}", snap.seq), pal.text_dim));
-            if self.settings.uptime_visible {
+            if self.settings.window.uptime_visible {
                 parts.push((format!("Up {}", fmt_hms(snap.uptime)), pal.text_dim));
             }
             if !self.status_seen.0.is_empty() && self.status_seen.1.elapsed() < Duration::from_secs(10) {
@@ -729,7 +729,7 @@ impl App {
         let question = match action {
             Action::EndTask => Some(format!("Force quit {} ({})? Unsaved data will be lost.", row.name, row.pid)),
             Action::EndTree => Some(format!("End the process tree of {} ({})? All descendant processes will also be asked to end.", row.name, row.pid)),
-            Action::Efficiency(true) if self.settings.confirm_efficiency_mode => {
+            Action::Efficiency(true) if self.settings.general.confirm_efficiency_mode => {
                 Some(format!("Turn on efficiency mode for {}? It lowers its priority and may make it less responsive.", row.name))
             }
             Action::SetPriority(Priority::Realtime) => Some("Realtime priority can make the system unresponsive. Continue?".into()),
@@ -816,7 +816,7 @@ impl App {
 
     /// `popoutMode`: `off`, `desktop`, `normal` or `topMost`.
     pub fn popout_mode(&self) -> String {
-        self.settings.extra.get("popoutMode").and_then(|v| v.as_str()).unwrap_or("off").to_string()
+        self.settings.popout.mode.clone()
     }
 
     /// Opens or closes the popout and records it in `popoutMode`.
@@ -825,14 +825,14 @@ impl App {
         let mode = self.popout_mode();
         let new_mode = match (open, mode.as_str()) {
             (false, _) => "off".to_string(),
-            (true, "off") => self.settings.extra.get("popoutLastMode").and_then(|v| v.as_str()).unwrap_or("topMost").to_string(),
+            (true, "off") => self.settings.popout.last_mode.clone(),
             (true, m) => m.to_string(),
         };
         if new_mode != "off" {
-            self.settings.extra.insert("popoutLastMode".into(), serde_json::Value::String(new_mode.clone()));
+            self.settings.popout.last_mode = new_mode.clone();
         }
         if new_mode != mode {
-            self.settings.extra.insert("popoutMode".into(), serde_json::Value::String(new_mode));
+            self.settings.popout.mode = new_mode;
             self.settings_dirty = true;
         }
     }
@@ -842,12 +842,12 @@ impl App {
         let skin = self.current_skin();
         let mut close = false;
         let mut new_skin: Option<String> = None;
-        let opacity_setting = self.settings.popout_opacity as f32;
+        let opacity_setting = self.settings.popout.opacity as f32;
         let fahrenheit = self.settings.fahrenheit();
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::TRANSPARENT)).show(ctx, |ui| {
             let rect = ui.max_rect();
             let hovered = ctx.input(|i| i.pointer.hover_pos().map(|p| rect.contains(p)).unwrap_or(false));
-            let op = if self.settings.popout_opaque_on_hover && hovered { 1.0 } else { opacity_setting };
+            let op = if self.settings.popout.opaque_on_hover && hovered { 1.0 } else { opacity_setting };
             // Registered before the chrome so the close/chevron/drag areas stay on top of it.
             let menu = ui.interact(rect, ui.id().with("popout-menu"), Sense::click());
             let ev = popout::draw(ui, rect, &skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
@@ -889,7 +889,7 @@ impl App {
             close = true;
         }
         if let Some(id) = new_skin {
-            self.settings.popout_skin = id;
+            self.settings.popout.skin = id;
             self.settings_dirty = true;
             self.popout_textures = popout::Textures::default();
             let size = popout::desired_size(&self.current_skin());
@@ -1072,7 +1072,7 @@ impl App {
         self.shortcuts(ctx);
         self.icons.poll(ctx);
         let (snap, mut hist, rows) = self.snapshot();
-        let cap = history_capacity(self.settings.graph_history_multiplier);
+        let cap = history_capacity(self.settings.graphs.history_multiplier);
         if hist.capacity() != cap {
             if let Ok(mut g) = self.sampler.shared.lock() {
                 std::sync::Arc::make_mut(&mut g.history).resize(cap);
@@ -1091,19 +1091,19 @@ impl App {
             self.pro.inv.history.update(&rows, dt);
         }
         let interval = self.settings.update_speed().interval();
-        let hf = self.settings.high_frequency_visuals;
+        let hf = self.settings.appearance.high_frequency_visuals;
         let phase = match interval {
             Some(iv) if hf => (now.duration_since(self.last_sample_at).as_secs_f32() / iv.as_secs_f32()).clamp(0.0, 1.0),
             _ => 0.0,
         };
         self.smooth.step(&snap, dt, hf);
-        if self.applied_top != Some(self.settings.always_on_top) {
-            let level = if self.settings.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+        if self.applied_top != Some(self.settings.window.always_on_top) {
+            let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
-            self.applied_top = Some(self.settings.always_on_top);
+            self.applied_top = Some(self.settings.window.always_on_top);
         }
         let smooth = self.smooth.clone();
-        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.show_self_in_reports };
+        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports };
 
         if self.popout_only {
             if self.popout_ui(ctx, &fd) {
@@ -1146,7 +1146,7 @@ impl App {
         // Frame pacing. egui shortens every delay by its predicted frame time, which would
         // double the rate (or pin it to the monitor's refresh), so add that back to get the
         // configured visualFrameRate.
-        let fps = self.settings.visual_frame_rate.clamp(10, 240) as f32;
+        let fps = self.settings.appearance.frame_rate.clamp(10, 240) as f32;
         let wait = if hf && interval.is_some() { Duration::from_secs_f32(1.0 / fps) } else { Duration::from_millis(500) };
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));

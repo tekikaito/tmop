@@ -1,109 +1,184 @@
-//! Settings (`settings.json`, schemaVersion 12, compatible with TMOG's file).
+//! Settings (`settings.json`): TMOP's own schema, grouped by section.
 //!
-//! * the file is a JSON object with `schemaVersion`; a missing/other version means
-//!   "settings definition changed; all settings reset to defaults";
-//! * values are type-checked ("must be boolean", "must be an unsigned integer", ...);
+//! * the file is a JSON object `{ "version": 1, "general": {..}, "window": {..},
+//!   "appearance": {..}, "graphs": {..}, "popout": {..} }` with camelCase keys;
+//! * an older `version` is upgraded step by step (1→2→…) by [`MIGRATIONS`];
+//! * a file without `version` is TMOG's format (`schemaVersion` 12, also what TMOP 0.1 wrote) and
+//!   is converted by [`migrate_v12`]; TMOG keys TMOP doesn't implement are dropped;
+//! * unknown keys are dropped with a warning; values are type-checked ("expected a boolean", ...);
 //! * writes go through a temporary file (`.tmp.`) and a corrupt file is set aside (`.corrupt.`).
 //!
-//! TMOP stores its own copy at `%LOCALAPPDATA%\TMOP\settings.json` and can
-//! import TMOG's file from `%LOCALAPPDATA%\TMOG\Task Manager\settings.json` (read-only).
+//! TMOP stores its file at `%LOCALAPPDATA%\TMOP\settings.json` and can import TMOG's file
+//! from `%LOCALAPPDATA%\TMOG\Task Manager\settings.json` (read-only).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: u32 = 12;
+/// The schema version this build reads and writes.
+pub const VERSION: u32 = 1;
+
+/// `MIGRATIONS[i]` upgrades a version `i + 1` file to version `i + 2`.
+const MIGRATIONS: &[fn(&mut Map<String, Value>)] = &[];
+
+/// Maps whose keys are data (column ids, metric ids), not settings, so they are not checked.
+const FREE_MAPS: &[&str] = &["window.processTableColumnWidths", "graphs.metricColors"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    pub schema_version: u32,
-    pub theme: String,
+    pub version: u32,
+    pub general: General,
+    pub window: Window,
+    pub appearance: Appearance,
+    pub graphs: Graphs,
+    pub popout: Popout,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct General {
+    /// An [`UpdateSpeed`] token.
+    pub update_speed: String,
+    /// A page id (`summary`, `processes`, ...).
+    pub default_page: String,
+    /// `celsius` or `fahrenheit`.
     pub temperature_unit: String,
-    pub application_font: String,
-    pub application_language: String,
-    pub visual_bloom: bool,
-    pub visual_bloom_level: u32,
-    pub color_keyed_graphs: bool,
-    pub dashed_summary_graph_lines: bool,
-    pub smooth_graph_curves: bool,
-    pub high_frequency_visuals: bool,
-    pub visual_frame_rate: u32,
     pub show_self_in_reports: bool,
     pub per_core_cpu_statistics: bool,
-    pub default_page: String,
-    pub update_speed: String,
-    pub graph_pixels_per_update: u32,
-    pub compressed_graph_time: bool,
-    pub graph_history_multiplier: u32,
-    pub always_on_top: bool,
-    pub hide_when_minimized: bool,
-    pub show_full_account_name: bool,
-    pub show_all_account_history: bool,
     pub confirm_efficiency_mode: bool,
     pub disk_space_suppress_stop_confirm: bool,
+    pub show_full_account_name: bool,
+    /// Empty means the default recordings folder.
+    pub recording_folder: String,
+    /// Empty means the temporary folder.
+    pub benchmark_folder: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Window {
+    pub always_on_top: bool,
     pub uptime_visible: bool,
-    pub popout_opacity: f64,
-    pub popout_opaque_on_hover: bool,
-    /// Kept for schema compatibility; the rewrite never contacts an update server.
-    pub check_for_updates_on_start: bool,
-    /// Kept for schema compatibility; ignored.
-    pub auto_update_on_start: bool,
-    pub show_settings_as_dialog: bool,
+    pub process_tree: bool,
     pub process_table_hidden_columns: Vec<String>,
     pub process_table_column_widths: BTreeMap<String, u32>,
-    pub main_window_placement: String,
-    pub popout_bounds_by_skin: String,
-    pub popout_skin: String,
-    /// Any other keys (e.g. `diskLights.*`) are preserved verbatim.
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    pub performance_cpus_expanded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Appearance {
+    /// `system`, `dark` or `light`.
+    pub theme: String,
+    pub display_font: String,
+    pub bloom: bool,
+    pub bloom_level: u32,
+    pub high_frequency_visuals: bool,
+    pub frame_rate: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Graphs {
+    pub color_keyed: bool,
+    pub smooth_curves: bool,
+    pub dashed_summary: bool,
+    pub compressed_time: bool,
+    pub history_multiplier: u32,
+    pub pixels_per_update: u32,
+    /// Metric id → `#rrggbb` override. Not used yet.
+    pub metric_colors: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Popout {
+    /// A skin id from the catalog.
+    pub skin: String,
+    pub opacity: f64,
+    pub opaque_on_hover: bool,
+    /// `off`, `desktop`, `normal` or `topMost`.
+    pub mode: String,
+    /// The mode to reopen with after `off`.
+    pub last_mode: String,
 }
 
 impl Default for Settings {
-    /// Defaults.
     fn default() -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
-            theme: "system".into(),
+            version: VERSION,
+            general: General::default(),
+            window: Window::default(),
+            appearance: Appearance::default(),
+            graphs: Graphs::default(),
+            popout: Popout::default(),
+        }
+    }
+}
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            update_speed: "medium".into(),
+            default_page: "summary".into(),
             temperature_unit: "celsius".into(),
-            application_font: "Michroma".into(),
-            application_language: String::new(),
-            visual_bloom: true,
-            visual_bloom_level: 7,
-            color_keyed_graphs: true,
-            dashed_summary_graph_lines: false,
-            smooth_graph_curves: true,
-            high_frequency_visuals: true,
-            visual_frame_rate: 60,
             show_self_in_reports: false,
             per_core_cpu_statistics: false,
-            default_page: "summary".into(),
-            update_speed: "medium".into(),
-            graph_pixels_per_update: 16,
-            compressed_graph_time: true,
-            graph_history_multiplier: 15,
-            always_on_top: false,
-            hide_when_minimized: false,
-            show_full_account_name: false,
-            show_all_account_history: false,
             confirm_efficiency_mode: true,
             disk_space_suppress_stop_confirm: false,
+            show_full_account_name: false,
+            recording_folder: String::new(),
+            benchmark_folder: String::new(),
+        }
+    }
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            always_on_top: false,
             uptime_visible: true,
-            popout_opacity: 1.0,
-            popout_opaque_on_hover: true,
-            check_for_updates_on_start: false,
-            auto_update_on_start: false,
-            show_settings_as_dialog: false,
+            process_tree: true,
             process_table_hidden_columns: Vec::new(),
             process_table_column_widths: BTreeMap::new(),
-            main_window_placement: String::new(),
-            popout_bounds_by_skin: String::new(),
-            popout_skin: "classic".into(),
-            extra: BTreeMap::new(),
+            performance_cpus_expanded: true,
         }
+    }
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            display_font: "Michroma".into(),
+            bloom: true,
+            bloom_level: 7,
+            high_frequency_visuals: true,
+            frame_rate: 60,
+        }
+    }
+}
+
+impl Default for Graphs {
+    fn default() -> Self {
+        Self {
+            color_keyed: true,
+            smooth_curves: true,
+            dashed_summary: false,
+            compressed_time: true,
+            history_multiplier: 15,
+            pixels_per_update: 16,
+            metric_colors: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for Popout {
+    fn default() -> Self {
+        Self { skin: "classic".into(), opacity: 1.0, opaque_on_hover: true, mode: "off".into(), last_mode: "topMost".into() }
     }
 }
 
@@ -168,32 +243,74 @@ impl UpdateSpeed {
 pub enum LoadOutcome {
     Loaded,
     Missing,
-    /// schemaVersion missing or different: reset to defaults.
-    ResetSchema(Option<u64>),
-    /// Unreadable/invalid JSON or wrong value types; file set aside as `.corrupt.`.
+    /// Converted from TMOG's format (`schemaVersion` 12).
+    MigratedV12,
+    /// Upgraded from an older TMOP `version`.
+    Upgraded(u32),
+    /// Unreadable/invalid JSON, no version or wrong value types; file set aside as `.corrupt.`.
     Corrupt(String),
+}
+
+/// The result of reading settings.
+#[derive(Debug)]
+pub struct Load {
+    pub settings: Settings,
+    pub outcome: LoadOutcome,
+    /// Unknown keys that were dropped, as dotted paths (`graphs.foo`).
+    pub unknown_keys: Vec<String>,
+}
+
+impl Load {
+    fn defaults(outcome: LoadOutcome) -> Self {
+        Self { settings: Settings::default(), outcome, unknown_keys: Vec::new() }
+    }
+
+    /// One line for the status bar: `<what> (<outcome>)`, plus any dropped keys.
+    pub fn describe(&self, what: &str) -> String {
+        let mut s = format!("{what} ({:?})", self.outcome);
+        if !self.unknown_keys.is_empty() {
+            s += &format!("; ignored unknown keys: {}", self.unknown_keys.join(", "));
+        }
+        s
+    }
 }
 
 impl Settings {
     pub fn update_speed(&self) -> UpdateSpeed {
-        UpdateSpeed::from_token(&self.update_speed)
+        UpdateSpeed::from_token(&self.general.update_speed)
     }
 
     pub fn fahrenheit(&self) -> bool {
-        self.temperature_unit.eq_ignore_ascii_case("fahrenheit")
+        self.general.temperature_unit.eq_ignore_ascii_case("fahrenheit")
     }
 
-    /// Parses settings JSON; a different schemaVersion resets to defaults.
-    pub fn from_json(text: &str) -> Result<(Self, LoadOutcome), String> {
+    /// Parses settings JSON of any known version, migrating it to [`VERSION`].
+    pub fn from_json(text: &str) -> Result<Load, String> {
         let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let obj = v.as_object().ok_or("settings root must be an object")?;
-        let ver = obj.get("schemaVersion").and_then(Value::as_u64);
-        if ver != Some(SCHEMA_VERSION as u64) {
-            return Ok((Self::default(), LoadOutcome::ResetSchema(ver)));
-        }
-        let mut s: Settings = serde_json::from_value(v).map_err(|e| e.to_string())?;
-        s.popout_opacity = s.popout_opacity.clamp(0.1, 1.0);
-        Ok((s, LoadOutcome::Loaded))
+        let Value::Object(mut obj) = v else { return Err("settings root must be an object".into()) };
+        let outcome = match obj.get("version").map(Value::as_u64) {
+            Some(Some(ver)) if ver == VERSION as u64 => LoadOutcome::Loaded,
+            Some(Some(ver)) if ver >= 1 && ver < VERSION as u64 => {
+                for step in &MIGRATIONS[ver as usize - 1..] {
+                    step(&mut obj);
+                }
+                LoadOutcome::Upgraded(ver as u32)
+            }
+            Some(Some(ver)) => return Err(format!("unsupported settings version {ver}")),
+            Some(None) => return Err("version must be an unsigned integer".into()),
+            None if obj.contains_key("schemaVersion") => {
+                obj = migrate_v12(&obj);
+                LoadOutcome::MigratedV12
+            }
+            None => return Err("settings file has no version".into()),
+        };
+        obj.insert("version".into(), VERSION.into());
+        let mut unknown_keys = Vec::new();
+        let Value::Object(shape) = serde_json::to_value(Settings::default()).expect("settings serialize") else { unreachable!() };
+        strip_unknown(&mut obj, &shape, "", &mut unknown_keys);
+        let mut settings: Settings = serde_json::from_value(Value::Object(obj)).map_err(|e| e.to_string())?;
+        settings.popout.opacity = settings.popout.opacity.clamp(0.1, 1.0);
+        Ok(Load { settings, outcome, unknown_keys })
     }
 
     pub fn to_json(&self) -> String {
@@ -201,10 +318,10 @@ impl Settings {
     }
 
     /// Loads from `path`, never failing: falls back to defaults.
-    pub fn load(path: &Path) -> (Self, LoadOutcome) {
+    pub fn load(path: &Path) -> Load {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(_) => return (Self::default(), LoadOutcome::Missing),
+            Err(_) => return Load::defaults(LoadOutcome::Missing),
         };
         match Self::from_json(&text) {
             Ok(r) => r,
@@ -216,7 +333,7 @@ impl Settings {
                 let mut bad = path.as_os_str().to_owned();
                 bad.push(format!(".corrupt.{stamp}"));
                 let _ = std::fs::rename(path, PathBuf::from(bad));
-                (Self::default(), LoadOutcome::Corrupt(e))
+                Load::defaults(LoadOutcome::Corrupt(e))
             }
         }
     }
@@ -232,6 +349,79 @@ impl Settings {
         std::fs::write(&tmp, self.to_json())?;
         std::fs::rename(&tmp, path)
     }
+}
+
+/// TMOG `schemaVersion` 12 key → TMOP `section.key`. TMOP 0.1 wrote the same format and kept
+/// its own extra keys (`popoutMode`, `recordingFolder`, ...) at the top level. Other keys are dropped.
+const V12_KEYS: &[(&str, &str)] = &[
+    ("updateSpeed", "general.updateSpeed"),
+    ("defaultPage", "general.defaultPage"),
+    ("temperatureUnit", "general.temperatureUnit"),
+    ("showSelfInReports", "general.showSelfInReports"),
+    ("perCoreCpuStatistics", "general.perCoreCpuStatistics"),
+    ("confirmEfficiencyMode", "general.confirmEfficiencyMode"),
+    ("diskSpaceSuppressStopConfirm", "general.diskSpaceSuppressStopConfirm"),
+    ("showFullAccountName", "general.showFullAccountName"),
+    ("recordingFolder", "general.recordingFolder"),
+    ("benchmarkFolder", "general.benchmarkFolder"),
+    ("alwaysOnTop", "window.alwaysOnTop"),
+    ("uptimeVisible", "window.uptimeVisible"),
+    ("processTreeEnabled", "window.processTree"),
+    ("processTableHiddenColumns", "window.processTableHiddenColumns"),
+    ("processTableColumnWidths", "window.processTableColumnWidths"),
+    ("performanceCpusExpanded", "window.performanceCpusExpanded"),
+    ("theme", "appearance.theme"),
+    ("applicationFont", "appearance.displayFont"),
+    ("visualBloom", "appearance.bloom"),
+    ("visualBloomLevel", "appearance.bloomLevel"),
+    ("highFrequencyVisuals", "appearance.highFrequencyVisuals"),
+    ("visualFrameRate", "appearance.frameRate"),
+    ("colorKeyedGraphs", "graphs.colorKeyed"),
+    ("smoothGraphCurves", "graphs.smoothCurves"),
+    ("dashedSummaryGraphLines", "graphs.dashedSummary"),
+    ("compressedGraphTime", "graphs.compressedTime"),
+    ("graphHistoryMultiplier", "graphs.historyMultiplier"),
+    ("graphPixelsPerUpdate", "graphs.pixelsPerUpdate"),
+    ("popoutSkin", "popout.skin"),
+    ("popoutOpacity", "popout.opacity"),
+    ("popoutOpaqueOnHover", "popout.opaqueOnHover"),
+    ("popoutMode", "popout.mode"),
+    ("popoutLastMode", "popout.lastMode"),
+];
+
+/// Converts a TMOG-format object to a version 1 object.
+fn migrate_v12(old: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    out.insert("version".into(), 1.into());
+    for (from, to) in V12_KEYS {
+        if let Some(v) = old.get(*from) {
+            let (section, key) = to.split_once('.').expect("section.key");
+            let sec = out.entry(section).or_insert_with(|| Value::Object(Map::new()));
+            if let Value::Object(sec) = sec {
+                sec.insert(key.into(), v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Removes the keys of `obj` that `shape` (the serialized defaults) doesn't have, recording
+/// their dotted paths in `unknown`. Values of the wrong type are left for serde to reject.
+fn strip_unknown(obj: &mut Map<String, Value>, shape: &Map<String, Value>, prefix: &str, unknown: &mut Vec<String>) {
+    obj.retain(|k, v| {
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        match (shape.get(k), v) {
+            (None, _) => {
+                unknown.push(path);
+                false
+            }
+            (Some(Value::Object(sub)), Value::Object(m)) if !FREE_MAPS.contains(&path.as_str()) => {
+                strip_unknown(m, sub, &path, unknown);
+                true
+            }
+            _ => true,
+        }
+    });
 }
 
 /// One-time move of the pre-rename data folder (`%LOCALAPPDATA%\tmog-rs`: settings, skins,
@@ -258,96 +448,147 @@ fn local_app_data() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
 }
 
+/// Reads TMOG's settings file and converts it (never modifies it).
+pub fn import_tmog() -> Result<Load, String> {
+    std::fs::read_to_string(tmog_path()).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t))
+}
+
 /// Loads TMOP's settings; on first run imports TMOG's file if present.
 pub fn load_or_import() -> (Settings, String) {
     let own = default_path();
-    if own.exists() {
-        let (s, outcome) = Settings::load(&own);
-        return (s, format!("settings: {} ({outcome:?})", own.display()));
+    let (load, line) = if own.exists() {
+        let load = Settings::load(&own);
+        let line = load.describe(&format!("settings: {}", own.display()));
+        (load, line)
+    } else if tmog_path().exists() {
+        let load = import_tmog().unwrap_or_else(|e| Load::defaults(LoadOutcome::Corrupt(e)));
+        let _ = load.settings.save(&own);
+        let line = load.describe(&format!("settings imported from {}", tmog_path().display()));
+        (load, line)
+    } else {
+        return (Settings::default(), "settings: defaults".into());
+    };
+    if !load.unknown_keys.is_empty() {
+        eprintln!("{line}");
     }
-    let theirs = tmog_path();
-    if theirs.exists() {
-        let (s, outcome) = match std::fs::read_to_string(&theirs).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t)) {
-            Ok(r) => r,
-            Err(e) => (Settings::default(), LoadOutcome::Corrupt(e)),
-        };
-        let _ = s.save(&own);
-        return (s, format!("settings imported from {} ({outcome:?})", theirs.display()));
-    }
-    (Settings::default(), "settings: defaults".into())
+    (load.settings, line)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A TMOG `schemaVersion` 12 file as TMOG and TMOP 0.1 wrote it.
     const SAMPLE: &str = r#"{"schemaVersion":12,"theme":"system","temperatureUnit":"celsius","applicationFont":"Michroma","applicationLanguage":"","visualBloom":true,"visualBloomLevel":7,"colorKeyedGraphs":true,"dashedSummaryGraphLines":false,"smoothGraphCurves":true,"highFrequencyVisuals":true,"visualFrameRate":60,"showSelfInReports":false,"perCoreCpuStatistics":false,"defaultPage":"summary","updateSpeed":"medium","graphPixelsPerUpdate":16,"compressedGraphTime":true,"graphHistoryMultiplier":15,"alwaysOnTop":false,"hideWhenMinimized":false,"showFullAccountName":false,"showAllAccountHistory":false,"confirmEfficiencyMode":true,"diskSpaceSuppressStopConfirm":false,"uptimeVisible":true,"popoutOpacity":1,"popoutOpaqueOnHover":true,"checkForUpdatesOnStart":true,"autoUpdateOnStart":false,"showSettingsAsDialog":false,"processTableHiddenColumns":[],"processTableColumnWidths":{},"diskLights.colors":"disk-71ca69de6ab42773=red","diskLights.durationMs":"35","diskLights.initialized":"true","diskLights.monitored":"disk-71ca69de6ab42773","diskLights.order":"disk-71ca69de6ab42773","mainWindowPlacement":"0,0,1920,1080,52,52,1372,881,1","popoutBoundsBySkin":"","popoutSkin":"com.tmog.console"}"#;
 
-    #[test]
-    fn parses_sample_file_and_roundtrips_keys() {
-        let (s, outcome) = Settings::from_json(SAMPLE).unwrap();
-        assert!(matches!(outcome, LoadOutcome::Loaded));
-        assert_eq!(s.update_speed(), UpdateSpeed::High);
-        assert_eq!(s.popout_skin, "com.tmog.console");
-        assert_eq!(s.extra.get("diskLights.durationMs"), Some(&Value::String("35".into())));
-        // Every key survives a round trip.
-        let original: serde_json::Map<String, Value> = serde_json::from_str(SAMPLE).unwrap();
-        let again: serde_json::Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
-        for k in original.keys() {
-            assert!(again.contains_key(k), "lost key {k}");
-        }
-        let (s2, _) = Settings::from_json(&s.to_json()).unwrap();
-        assert_eq!(s, s2);
+    fn parse(text: &str) -> Load {
+        Settings::from_json(text).unwrap()
     }
 
     #[test]
-    fn schema_mismatch_resets() {
-        let (s, outcome) = Settings::from_json(r#"{"schemaVersion":11,"theme":"dark"}"#).unwrap();
-        assert!(matches!(outcome, LoadOutcome::ResetSchema(Some(11))));
-        assert_eq!(s, Settings::default());
-        assert!(matches!(Settings::from_json("{}").unwrap().1, LoadOutcome::ResetSchema(None)));
+    fn migrates_v12_sample() {
+        let load = parse(SAMPLE);
+        assert!(matches!(load.outcome, LoadOutcome::MigratedV12));
+        assert!(load.unknown_keys.is_empty(), "dropped TMOG keys are not warnings: {:?}", load.unknown_keys);
+        let s = load.settings;
+        assert_eq!(s.version, VERSION);
+        assert_eq!(s.update_speed(), UpdateSpeed::High);
+        assert_eq!(s.popout.skin, "com.tmog.console");
+        assert_eq!(s.popout.opacity, 1.0);
+        assert_eq!(s.appearance.display_font, "Michroma");
+        assert!(s.graphs.color_keyed && s.graphs.smooth_curves && !s.graphs.dashed_summary);
+        // Unimplemented TMOG keys are gone from the written file.
+        let out: Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
+        let keys: Vec<&str> = out.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout"]);
+        assert!(!s.to_json().contains("diskLights"));
+    }
+
+    #[test]
+    fn migrates_v12_values_and_tmop_extras() {
+        let v12 = r#"{"schemaVersion":12,"theme":"light","applicationFont":"Consolas","colorKeyedGraphs":false,"smoothGraphCurves":false,"dashedSummaryGraphLines":true,"popoutSkin":"neon","popoutOpacity":0.5,"popoutMode":"desktop","popoutLastMode":"normal","recordingFolder":"D:\\rec","benchmarkFolder":"D:\\bench","processTreeEnabled":false,"performanceCpusExpanded":false,"processTableColumnWidths":{"cpu":80},"alwaysOnTop":true}"#;
+        let s = parse(v12).settings;
+        assert_eq!((s.appearance.theme.as_str(), s.appearance.display_font.as_str()), ("light", "Consolas"));
+        assert!(!s.graphs.color_keyed && !s.graphs.smooth_curves && s.graphs.dashed_summary);
+        assert_eq!((s.popout.skin.as_str(), s.popout.opacity), ("neon", 0.5));
+        assert_eq!((s.popout.mode.as_str(), s.popout.last_mode.as_str()), ("desktop", "normal"));
+        assert_eq!((s.general.recording_folder.as_str(), s.general.benchmark_folder.as_str()), ("D:\\rec", "D:\\bench"));
+        assert!(!s.window.process_tree && !s.window.performance_cpus_expanded && s.window.always_on_top);
+        assert_eq!(s.window.process_table_column_widths.get("cpu"), Some(&80));
+        // A TMOG file with another schemaVersion is converted the same way, never reset.
+        let s = parse(r#"{"schemaVersion":11,"theme":"dark"}"#).settings;
+        assert_eq!(s.appearance.theme, "dark");
+    }
+
+    #[test]
+    fn v1_round_trips() {
+        let mut s = Settings::default();
+        s.general.update_speed = "high".into();
+        s.window.process_table_hidden_columns = vec!["handles".into()];
+        s.window.process_table_column_widths.insert("name".into(), 240);
+        s.appearance.theme = "dark".into();
+        s.graphs.metric_colors.insert("cpu".into(), "#4fb4ff".into());
+        s.popout.mode = "topMost".into();
+        let load = parse(&s.to_json());
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings, s);
+    }
+
+    #[test]
+    fn unknown_keys_are_dropped_with_a_warning() {
+        let load = parse(r#"{"version":1,"foo":1,"graphs":{"colorKeyed":false,"bar":true},"window":{"processTableColumnWidths":{"cpu":80}},"schemaVersion":12}"#);
+        assert_eq!(load.unknown_keys, ["foo", "graphs.bar", "schemaVersion"]);
+        assert!(!load.settings.graphs.color_keyed);
+        // Free maps keep their keys.
+        assert_eq!(load.settings.window.process_table_column_widths.get("cpu"), Some(&80));
+        assert!(load.describe("settings").ends_with("ignored unknown keys: foo, graphs.bar, schemaVersion"));
+        assert!(!load.settings.to_json().contains("foo"));
     }
 
     #[test]
     fn type_errors_are_rejected() {
+        assert!(Settings::from_json(r#"{"version":1,"window":{"alwaysOnTop":"yes"}}"#).is_err());
+        assert!(Settings::from_json(r#"{"version":1,"graphs":true}"#).is_err());
+        assert!(Settings::from_json(r#"{"version":"1"}"#).is_err());
         assert!(Settings::from_json(r#"{"schemaVersion":12,"alwaysOnTop":"yes"}"#).is_err());
+        assert!(Settings::from_json("{}").is_err());
         assert!(Settings::from_json("[]").is_err());
     }
 
     #[test]
     fn missing_keys_take_defaults() {
-        let (s, _) = Settings::from_json(r#"{"schemaVersion":12,"theme":"dark"}"#).unwrap();
-        assert_eq!(s.theme, "dark");
-        assert_eq!(s.graph_history_multiplier, 15);
+        let s = parse(r#"{"version":1,"appearance":{"theme":"dark"}}"#).settings;
+        assert_eq!(s.appearance.theme, "dark");
+        assert_eq!(s.appearance.display_font, "Michroma");
+        assert_eq!(s.graphs.history_multiplier, 15);
+        assert_eq!(s.popout, Popout::default());
     }
 
     #[test]
     fn save_and_load_file() {
         let dir = std::env::temp_dir().join(format!("tmop-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
-        let s = Settings {
-            update_speed: "high".into(),
-            process_table_hidden_columns: vec!["handles".into()],
-            ..Default::default()
-        };
+        let mut s = Settings::default();
+        s.general.update_speed = "high".into();
+        s.window.process_table_hidden_columns = vec!["handles".into()];
         s.save(&path).unwrap();
-        let (loaded, outcome) = Settings::load(&path);
-        assert!(matches!(outcome, LoadOutcome::Loaded));
-        assert_eq!(loaded, s);
+        let load = Settings::load(&path);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert_eq!(load.settings, s);
         std::fs::write(&path, "{ not json").unwrap();
-        let (fallback, outcome) = Settings::load(&path);
-        assert!(matches!(outcome, LoadOutcome::Corrupt(_)));
-        assert_eq!(fallback, Settings::default());
+        let load = Settings::load(&path);
+        assert!(matches!(load.outcome, LoadOutcome::Corrupt(_)));
+        assert_eq!(load.settings, Settings::default());
         assert!(!path.exists(), "corrupt file should have been set aside");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn installed_tmog_settings_parse_when_present() {
-        let p = tmog_path();
-        let Ok(text) = std::fs::read_to_string(&p) else { return };
-        let (_, outcome) = Settings::from_json(&text).expect("TMOG settings should parse");
-        assert!(matches!(outcome, LoadOutcome::Loaded | LoadOutcome::ResetSchema(_)));
+        let Ok(text) = std::fs::read_to_string(tmog_path()) else { return };
+        let load = Settings::from_json(&text).expect("TMOG settings should parse");
+        assert!(matches!(load.outcome, LoadOutcome::MigratedV12));
     }
 
     #[test]

@@ -89,13 +89,13 @@ fn push_entry(i: usize, depth: usize, t: &TreeCtx<'_>, entries: &mut Vec<Entry>,
 
 impl App {
     fn tree_enabled(&self) -> bool {
-        self.settings.extra.get("processTreeEnabled").and_then(|v| v.as_bool()).unwrap_or(true)
+        self.settings.window.process_tree
     }
 
     /// CPU % as displayed: share of the whole machine, or of one core with "Per Core CPU
     /// Statistics" (TMOP's reading of that setting).
     pub fn shown_cpu(&self, pct: f32, logical: usize) -> f32 {
-        if self.settings.per_core_cpu_statistics {
+        if self.settings.general.per_core_cpu_statistics {
             pct * logical.max(1) as f32
         } else {
             pct
@@ -133,7 +133,7 @@ impl App {
             });
         });
         if let Some(t) = set_tree {
-            self.settings.extra.insert("processTreeEnabled".into(), serde_json::Value::Bool(t));
+            self.settings.window.process_tree = t;
             self.settings_dirty = true;
         }
         if refresh {
@@ -149,7 +149,7 @@ impl App {
         let visible: Vec<usize> = (0..rows.len())
             .filter(|i| {
                 let r = &rows[*i];
-                (self.settings.show_self_in_reports || r.pid != std::process::id())
+                (self.settings.general.show_self_in_reports || r.pid != std::process::id())
                     && (f.is_empty()
                         || r.name.to_lowercase().contains(&f)
                         || r.pid.to_string() == f
@@ -226,8 +226,8 @@ impl App {
         let mut resized: Vec<(Column, f32)> = Vec::new();
         let selected = self.selected;
         let logical = fd.snap.cpu.logical_count;
-        let per_core = self.settings.per_core_cpu_statistics;
-        let widths: Vec<f32> = cols.iter().map(|c| self.settings.process_table_column_widths.get(c.id()).map(|w| *w as f32).unwrap_or(c.default_width())).collect();
+        let per_core = self.settings.general.per_core_cpu_statistics;
+        let widths: Vec<f32> = cols.iter().map(|c| self.settings.window.process_table_column_widths.get(c.id()).map(|w| *w as f32).unwrap_or(c.default_width())).collect();
         let icons = &mut self.icons;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(table_rect), |ui| {
             ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
@@ -323,7 +323,7 @@ impl App {
                 });
         });
         for (c, w) in resized {
-            self.settings.process_table_column_widths.insert(c.id().to_string(), w.round() as u32);
+            self.settings.window.process_table_column_widths.insert(c.id().to_string(), w.round() as u32);
             self.settings_dirty = true;
         }
         if let Some(c) = sort_click {
@@ -449,7 +449,7 @@ impl App {
         if c == Column::Name {
             return true;
         }
-        let hidden = &self.settings.process_table_hidden_columns;
+        let hidden = &self.settings.window.process_table_hidden_columns;
         let shown_marker = format!("+{}", c.id());
         if c.hidden_by_default() {
             hidden.contains(&shown_marker)
@@ -460,7 +460,7 @@ impl App {
 
     /// Default-hidden columns are enabled with a `+id` entry (design choice).
     pub fn set_column_visible(&mut self, c: Column, visible: bool) {
-        let hidden = &mut self.settings.process_table_hidden_columns;
+        let hidden = &mut self.settings.window.process_table_hidden_columns;
         let id = c.id().to_string();
         let plus = format!("+{id}");
         hidden.retain(|h| *h != id && *h != plus);

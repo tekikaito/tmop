@@ -3,7 +3,7 @@
 use super::theme::{self, Palette};
 use super::widgets::{self, draw_icon, Icon};
 use super::{App, FrameData, Page};
-use crate::settings::{self, Settings, UpdateSpeed};
+use crate::settings::{self, UpdateSpeed};
 use crate::skin;
 use eframe::egui::{self, pos2, vec2, Align2, RichText, Stroke};
 
@@ -70,19 +70,19 @@ impl App {
                 let s = &mut self.settings;
                 section(ui, &pal, Icon::Apps, "Appearance", |ui| {
                     row(ui, &pal, "Theme", |ui| {
-                        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(title_case(&s.theme)).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(title_case(&s.appearance.theme)).show_ui(ui, |ui| {
                             for t in ["system", "dark", "light"] {
-                                changed |= ui.selectable_value(&mut s.theme, t.to_string(), title_case(t)).changed();
+                                changed |= ui.selectable_value(&mut s.appearance.theme, t.to_string(), title_case(t)).changed();
                             }
                         });
                     });
                     row(ui, &pal, "Temperature", |ui| {
                         egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
-                            changed |= ui.selectable_value(&mut s.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
-                            changed |= ui.selectable_value(&mut s.temperature_unit, "fahrenheit".into(), "Fahrenheit (\u{b0}F)").changed();
+                            changed |= ui.selectable_value(&mut s.general.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
+                            changed |= ui.selectable_value(&mut s.general.temperature_unit, "fahrenheit".into(), "Fahrenheit (\u{b0}F)").changed();
                         });
                     });
-                    let mut mode = s.extra.get("popoutMode").and_then(|v| v.as_str()).unwrap_or("off").to_string();
+                    let mut mode = s.popout.mode.clone();
                     row(ui, &pal, "Popout", |ui| {
                         egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(title_case(&mode)).show_ui(ui, |ui| {
                             for m in ["off", "desktop", "normal", "topMost"] {
@@ -93,63 +93,63 @@ impl App {
                         });
                     });
                     row(ui, &pal, "Popout skin", |ui| {
-                        let current = catalog_names.iter().find(|(id, _)| *id == s.popout_skin).map(|(_, n)| n.clone()).unwrap_or_else(|| s.popout_skin.clone());
+                        let current = catalog_names.iter().find(|(id, _)| *id == s.popout.skin).map(|(_, n)| n.clone()).unwrap_or_else(|| s.popout.skin.clone());
                         egui::ComboBox::from_id_salt("skin").width(200.0).selected_text(current).show_ui(ui, |ui| {
                             for (id, name) in &catalog_names {
-                                changed |= ui.selectable_value(&mut s.popout_skin, id.clone(), name).changed();
+                                changed |= ui.selectable_value(&mut s.popout.skin, id.clone(), name).changed();
                             }
                         });
                     });
                     row(ui, &pal, "Opacity", |ui| {
-                        let mut pct = (s.popout_opacity * 100.0).round();
+                        let mut pct = (s.popout.opacity * 100.0).round();
                         if ui.add(egui::Slider::new(&mut pct, 20.0..=100.0).show_value(false)).changed() {
-                            s.popout_opacity = pct / 100.0;
+                            s.popout.opacity = pct / 100.0;
                             changed = true;
                         }
                         ui.label(RichText::new(format!("{pct:.0}%")).font(theme::ui(12.5)).color(pal.text_dim));
                     });
-                    changed |= toggle_row(ui, &pal, &mut s.popout_opaque_on_hover, "Full Strength on Mouse Over");
+                    changed |= toggle_row(ui, &pal, &mut s.popout.opaque_on_hover, "Full Strength on Mouse Over");
                     hint(ui, &pal, "A faded popout stays out of the way of the desktop behind it, and comes back to full strength while the pointer is over it.");
                     row(ui, &pal, "High Frequency Visuals", |ui| {
-                        let label = if s.high_frequency_visuals { format!("{} fps", s.visual_frame_rate) } else { "Off".into() };
+                        let label = if s.appearance.high_frequency_visuals { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
                         egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(label).show_ui(ui, |ui| {
-                            if ui.selectable_label(!s.high_frequency_visuals, "Off").clicked() {
-                                s.high_frequency_visuals = false;
+                            if ui.selectable_label(!s.appearance.high_frequency_visuals, "Off").clicked() {
+                                s.appearance.high_frequency_visuals = false;
                                 changed = true;
                             }
                             for fps in [30u32, 60, 120] {
-                                if ui.selectable_label(s.high_frequency_visuals && s.visual_frame_rate == fps, format!("{fps} fps")).clicked() {
-                                    s.high_frequency_visuals = true;
-                                    s.visual_frame_rate = fps;
+                                if ui.selectable_label(s.appearance.high_frequency_visuals && s.appearance.frame_rate == fps, format!("{fps} fps")).clicked() {
+                                    s.appearance.high_frequency_visuals = true;
+                                    s.appearance.frame_rate = fps;
                                     changed = true;
                                 }
                             }
                         });
                     });
                     hint(ui, &pal, "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use.");
-                    changed |= toggle_row(ui, &pal, &mut s.visual_bloom, "Visual bloom");
+                    changed |= toggle_row(ui, &pal, &mut s.appearance.bloom, "Visual bloom");
                     row(ui, &pal, "Bloom level", |ui| {
-                        changed |= ui.add(egui::Slider::new(&mut s.visual_bloom_level, 1..=10).show_value(false)).changed();
-                        ui.label(RichText::new(format!("{}", s.visual_bloom_level)).font(theme::ui(12.5)).color(pal.text_dim));
+                        changed |= ui.add(egui::Slider::new(&mut s.appearance.bloom_level, 1..=10).show_value(false)).changed();
+                        ui.label(RichText::new(format!("{}", s.appearance.bloom_level)).font(theme::ui(12.5)).color(pal.text_dim));
                     });
                 });
                 section(ui, &pal, Icon::Chart, "Graphs", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.color_keyed_graphs, "Color Keyed Graphs");
-                    changed |= toggle_row(ui, &pal, &mut s.dashed_summary_graph_lines, "Use dashed lines on summary graph");
-                    changed |= toggle_row(ui, &pal, &mut s.smooth_graph_curves, "Smooth Graph Curves");
-                    changed |= toggle_row(ui, &pal, &mut s.compressed_graph_time, "Compress Older History");
+                    changed |= toggle_row(ui, &pal, &mut s.graphs.color_keyed, "Color Keyed Graphs");
+                    changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graph");
+                    changed |= toggle_row(ui, &pal, &mut s.graphs.smooth_curves, "Smooth Graph Curves");
+                    changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress Older History");
                     row(ui, &pal, "History multiplier", |ui| {
-                        egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graph_history_multiplier)).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graphs.history_multiplier)).show_ui(ui, |ui| {
                             for m in [1u32, 3, 7, 15] {
-                                changed |= ui.selectable_value(&mut s.graph_history_multiplier, m, format!("{m}\u{d7} history")).changed();
+                                changed |= ui.selectable_value(&mut s.graphs.history_multiplier, m, format!("{m}\u{d7} history")).changed();
                             }
                         });
                     });
                     hint(ui, &pal, "Older time is compressed smoothly. At 15\u{d7}, the live quarter on the right tracks the grid 1:1 and older time is compressed progressively, so the whole graph holds 15\u{d7} history.");
                     row(ui, &pal, "Pixels per update", |ui| {
-                        egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graph_pixels_per_update.to_string()).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graphs.pixels_per_update.to_string()).show_ui(ui, |ui| {
                             for px in [4u32, 8, 12, 16, 24, 32] {
-                                changed |= ui.selectable_value(&mut s.graph_pixels_per_update, px, px.to_string()).changed();
+                                changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, px.to_string()).changed();
                             }
                         });
                     });
@@ -166,34 +166,34 @@ impl App {
                         egui::ComboBox::from_id_salt("speed").width(200.0).selected_text(cur.label()).show_ui(ui, |ui| {
                             for sp in UpdateSpeed::ALL {
                                 if ui.selectable_label(cur == sp, sp.label()).clicked() {
-                                    s.update_speed = sp.token().into();
+                                    s.general.update_speed = sp.token().into();
                                     changed = true;
                                 }
                             }
                         });
                     });
                     row(ui, &pal, "Default start page", |ui| {
-                        let cur = Page::from_id(&s.default_page).title();
+                        let cur = Page::from_id(&s.general.default_page).title();
                         egui::ComboBox::from_id_salt("page").width(200.0).selected_text(cur).show_ui(ui, |ui| {
                             for p in Page::NAV.iter().chain([Page::Settings].iter()) {
-                                changed |= ui.selectable_value(&mut s.default_page, p.id().to_string(), p.title()).changed();
+                                changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), p.title()).changed();
                             }
                         });
                     });
-                    changed |= toggle_row(ui, &pal, &mut s.show_self_in_reports, "Show TMOP in Reports");
-                    changed |= toggle_row(ui, &pal, &mut s.per_core_cpu_statistics, "Per Core CPU Statistics");
+                    changed |= toggle_row(ui, &pal, &mut s.general.show_self_in_reports, "Show TMOP in Reports");
+                    changed |= toggle_row(ui, &pal, &mut s.general.per_core_cpu_statistics, "Per Core CPU Statistics");
                     let mut never = false;
                     toggle_row(ui, &pal, &mut never, "Check for Updates on App Start");
                     hint(ui, &pal, "Disabled: TMOP never contacts the network.");
                 });
                 section(ui, &pal, Icon::Popout, "Window management", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.always_on_top, "Always on top");
-                    changed |= toggle_row(ui, &pal, &mut s.uptime_visible, "Show up time in the status bar");
+                    changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
+                    changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
                 });
                 section(ui, &pal, Icon::Gear, "Other options", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.confirm_efficiency_mode, "Ask before applying Efficiency mode");
-                    changed |= toggle_row(ui, &pal, &mut s.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
-                    changed |= toggle_row(ui, &pal, &mut s.show_full_account_name, "Show full account name");
+                    changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
+                    changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
+                    changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
                 });
                 section(ui, &pal, Icon::Record, "Skins and files", |ui| {
                     ui.horizontal(|ui| {
@@ -227,7 +227,7 @@ impl App {
         match popout_change {
             Some("off") => self.set_popout(false),
             Some(m) => {
-                self.settings.extra.insert("popoutMode".into(), serde_json::Value::String(m.into()));
+                self.settings.popout.mode = m.into();
                 self.settings_dirty = true;
                 self.set_popout(true);
             }
@@ -238,11 +238,11 @@ impl App {
             self.status = format!("{} skins, {} errors", self.catalog.skins.len(), self.catalog.errors.len());
         }
         if import {
-            match std::fs::read_to_string(settings::tmog_path()).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t)) {
-                Ok((s, outcome)) => {
-                    self.settings = s;
+            match settings::import_tmog() {
+                Ok(load) => {
+                    self.status = load.describe("Imported TMOG settings");
+                    self.settings = load.settings;
                     self.settings_dirty = true;
-                    self.status = format!("Imported TMOG settings ({outcome:?})");
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),
             }
