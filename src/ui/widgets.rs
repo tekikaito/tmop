@@ -5,8 +5,6 @@ use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
 use crate::metrics::Series;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Rounding, Sense, Shape, Stroke, Ui, Vec2};
 
-pub use super::theme::metric_color;
-
 // ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
@@ -684,9 +682,10 @@ impl LedStyle {
     pub fn new(lit: Color32, bloom: f32) -> Self {
         Self { lit, unlit_factor: 0.22, positional: None, bloom, rounding: 1.5, gap: 2.0, rim: true }
     }
-    /// Green → yellow → red by position (CPU load meters).
+    /// Green → yellow → red by position (CPU load meters). A severity ramp, so it keeps fixed
+    /// colours whatever the metric colours are.
     pub fn traffic(bloom: f32) -> Self {
-        Self { positional: Some([metric_color("cpu"), metric_color("yellow"), metric_color("clock")]), ..Self::new(metric_color("cpu"), bloom) }
+        Self { positional: Some([theme::GREEN, theme::YELLOW, theme::RED]), ..Self::new(theme::GREEN, bloom) }
     }
     fn color_at(&self, t: f32) -> Color32 {
         match self.positional {
@@ -1020,15 +1019,16 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> Response {
         resp.mark_changed();
     }
     let t = ui.ctx().animate_bool(resp.id, *on);
-    let off = if pal.dark { Color32::from_rgb(0x4A, 0x4A, 0x4A) } else { Color32::from_rgb(0xB0, 0xB0, 0xB0) };
-    let bg = mix(off, pal.accent, t);
+    let bg = mix(pal.control_stroke, pal.accent, t);
     let p = ui.painter();
     p.rect_filled(rect, 9.0, bg);
     if resp.hovered() {
         p.rect_stroke(rect, 9.0, Stroke::new(1.0_f32, lighten(bg, 0.25)));
     }
     let knob_x = rect.left() + 9.0 + t * (rect.width() - 18.0);
+    // The ring keeps the knob visible on a light track (High Contrast's white control border).
     p.circle_filled(pos2(knob_x, rect.center().y), 6.0, Color32::from_rgb(0xE4, 0xE4, 0xE4));
+    p.circle_stroke(pos2(knob_x, rect.center().y), 6.0, Stroke::new(1.0_f32, with_alpha(pal.control, 0.6)));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1038,16 +1038,23 @@ pub fn button(ui: &mut Ui, label: &str, pal: &Palette, icon: Option<Icon>) -> Re
     let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text).size().x + 24.0 + if icon.is_some() { 20.0 } else { 0.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     let p = ui.painter();
-    let bg = if resp.is_pointer_button_down_on() { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
+    let enabled = ui.is_enabled();
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    let bg = if !enabled { pal.control } else if pressed { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
+    let fg = if pressed { pal.on_selection() } else if enabled { pal.text } else { pal.text_faint };
     p.rect_filled(rect, 4.0, bg);
     p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke));
     let mut x = rect.left() + 12.0;
     if let Some(i) = icon {
-        draw_icon(p, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), i, pal.text);
+        draw_icon(p, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), i, fg);
         x += 20.0;
     }
-    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, label, font, pal.text);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
+    if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
 }
 
 /// Text field with a hint, in the application style.

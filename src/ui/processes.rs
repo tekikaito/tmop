@@ -3,7 +3,7 @@
 
 use super::icons::IconCache;
 use super::summary::proc_icon;
-use super::theme::{self, metric_color, mix, with_alpha, Palette};
+use super::theme::{self, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, GraphLine, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
@@ -12,7 +12,6 @@ use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichT
 use std::collections::{HashMap, HashSet};
 
 const ROW_H: f32 = 26.0;
-const HEAT: Color32 = Color32::from_rgb(0x3A, 0x8E, 0x48);
 const INDENT: f32 = 18.0;
 
 /// Per-page state.
@@ -89,13 +88,13 @@ fn push_entry(i: usize, depth: usize, t: &TreeCtx<'_>, entries: &mut Vec<Entry>,
 
 impl App {
     fn tree_enabled(&self) -> bool {
-        self.settings.extra.get("processTreeEnabled").and_then(|v| v.as_bool()).unwrap_or(true)
+        self.settings.window.process_tree
     }
 
     /// CPU % as displayed: share of the whole machine, or of one core with "Per Core CPU
     /// Statistics" (TMOP's reading of that setting).
     pub fn shown_cpu(&self, pct: f32, logical: usize) -> f32 {
-        if self.settings.per_core_cpu_statistics {
+        if self.settings.general.per_core_cpu_statistics {
             pct * logical.max(1) as f32
         } else {
             pct
@@ -133,7 +132,7 @@ impl App {
             });
         });
         if let Some(t) = set_tree {
-            self.settings.extra.insert("processTreeEnabled".into(), serde_json::Value::Bool(t));
+            self.settings.window.process_tree = t;
             self.settings_dirty = true;
         }
         if refresh {
@@ -149,7 +148,7 @@ impl App {
         let visible: Vec<usize> = (0..rows.len())
             .filter(|i| {
                 let r = &rows[*i];
-                (self.settings.show_self_in_reports || r.pid != std::process::id())
+                (self.settings.general.show_self_in_reports || r.pid != std::process::id())
                     && (f.is_empty()
                         || r.name.to_lowercase().contains(&f)
                         || r.pid.to_string() == f
@@ -226,8 +225,8 @@ impl App {
         let mut resized: Vec<(Column, f32)> = Vec::new();
         let selected = self.selected;
         let logical = fd.snap.cpu.logical_count;
-        let per_core = self.settings.per_core_cpu_statistics;
-        let widths: Vec<f32> = cols.iter().map(|c| self.settings.process_table_column_widths.get(c.id()).map(|w| *w as f32).unwrap_or(c.default_width())).collect();
+        let per_core = self.settings.general.per_core_cpu_statistics;
+        let widths: Vec<f32> = cols.iter().map(|c| self.settings.window.process_table_column_widths.get(c.id()).map(|w| *w as f32).unwrap_or(c.default_width())).collect();
         let icons = &mut self.icons;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(table_rect), |ui| {
             ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
@@ -323,7 +322,7 @@ impl App {
                 });
         });
         for (c, w) in resized {
-            self.settings.process_table_column_widths.insert(c.id().to_string(), w.round() as u32);
+            self.settings.window.process_table_column_widths.insert(c.id().to_string(), w.round() as u32);
             self.settings_dirty = true;
         }
         if let Some(c) = sort_click {
@@ -409,14 +408,14 @@ impl App {
         if let (Some(cpu), Some(mem)) = (&self.proc.sel_cpu, &self.proc.sel_mem) {
             let top_cpu = widgets::eased(ui.ctx(), "process-cpu", cpu.max().max(1.0) * 1.2);
             let (lo, hi) = widgets::eased_range(ui.ctx(), "process-memory", super::summary::visible_range(mem, 240));
-            let mut g = self.graph(vec![GraphLine { series: cpu, color: metric_color("cpu"), range: (0.0, top_cpu) }, GraphLine { series: mem, color: metric_color("memory"), range: (lo, hi) }], fd);
+            let mut g = self.graph(vec![GraphLine { series: cpu, color: fd.metric("cpu"), range: (0.0, top_cpu) }, GraphLine { series: mem, color: fd.metric("memory"), range: (lo, hi) }], fd);
             g.regions = 1;
             g.px_per_update = 4.0;
             g.border = Some(pal.card_stroke);
             g.line_width = 1.6;
             draw_graph(&p, g_rect, &g);
-            p.text(g_rect.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, "CPU", theme::ui(11.0), metric_color("cpu"));
-            p.text(g_rect.left_top() + vec2(36.0, 4.0), Align2::LEFT_TOP, "Memory", theme::ui(11.0), metric_color("memory"));
+            p.text(g_rect.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, "CPU", theme::ui(11.0), fd.metric("cpu"));
+            p.text(g_rect.left_top() + vec2(36.0, 4.0), Align2::LEFT_TOP, "Memory", theme::ui(11.0), fd.metric("memory"));
         }
         let buttons = Rect::from_min_max(pos2(cols[2].left(), cols[2].bottom() - 68.0), cols[2].max);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(buttons).layout(Layout::top_down(Align::Min)), |ui| {
@@ -449,7 +448,7 @@ impl App {
         if c == Column::Name {
             return true;
         }
-        let hidden = &self.settings.process_table_hidden_columns;
+        let hidden = &self.settings.window.process_table_hidden_columns;
         let shown_marker = format!("+{}", c.id());
         if c.hidden_by_default() {
             hidden.contains(&shown_marker)
@@ -460,7 +459,7 @@ impl App {
 
     /// Default-hidden columns are enabled with a `+id` entry (design choice).
     pub fn set_column_visible(&mut self, c: Column, visible: bool) {
-        let hidden = &mut self.settings.process_table_hidden_columns;
+        let hidden = &mut self.settings.window.process_table_hidden_columns;
         let id = c.id().to_string();
         let plus = format!("+{id}");
         hidden.retain(|h| *h != id && *h != plus);
@@ -505,13 +504,13 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
         let p = ui.painter();
         if !cx.selected && (heat > 0.03 || (active && c.numeric() && c != Column::Pid)) {
             let t = if heat > 0.03 { 0.30 + 0.70 * heat } else { 0.22 };
-            p.rect_filled(rect.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, HEAT, t));
+            p.rect_filled(rect.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, pal.heat(), t));
         }
         p.line_segment([pos2(rect.right() - 0.5, rect.top()), pos2(rect.right() - 0.5, rect.bottom())], Stroke::new(1.0_f32, with_alpha(pal.panel_stroke, 0.45)));
     }
     let font = theme::ui(12.5);
     let dimmed = matches!(c, Column::Pid | Column::User | Column::Priority | Column::Architecture | Column::CommandLine | Column::Path | Column::Description);
-    let color = if cx.selected || !dimmed { pal.text } else { pal.text_dim };
+    let color = if cx.selected { pal.on_selection() } else if dimmed { pal.text_dim } else { pal.text };
     let mut toggled = false;
     match c {
         Column::Name => {
@@ -548,8 +547,8 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
         Column::Status => {
             let c = match r.status {
                 Status::Running => color,
-                Status::Suspended => metric_color("gpu"),
-                Status::NotResponding => metric_color("clock"),
+                Status::Suspended => theme::BLUE,
+                Status::NotResponding => theme::RED,
             };
             widgets::text_fit(ui.painter(), pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, r.status.label(), font, c, rect.width() - 10.0);
         }

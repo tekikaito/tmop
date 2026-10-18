@@ -116,6 +116,72 @@ pub fn reveal(path: &std::path::Path) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// What a [`file_dialog`] asks for.
+#[derive(Clone, Debug)]
+pub struct FileDialog {
+    /// Save (pick a new or existing file name) rather than open an existing file.
+    pub save: bool,
+    pub title: String,
+    /// File-type filter, e.g. `("TMOP palette", "tmoptheme")`.
+    pub filter: (String, String),
+    /// Suggested file name (save only).
+    pub file_name: String,
+    /// HWND of the window that owns the dialog (0 for none). The dialog opens above it and is
+    /// modal to it.
+    pub owner: isize,
+}
+
+/// Shows a native open/save dialog on its own thread (so the UI keeps running). The receiver
+/// gets the chosen path, or `None` if the dialog was cancelled or couldn't be shown.
+pub fn file_dialog(d: FileDialog) -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_dialog(&d));
+    });
+    rx
+}
+
+#[cfg(windows)]
+fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
+    use windows::core::{Interface, HSTRING, PCWSTR};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{FileOpenDialog, FileSaveDialog, IFileDialog, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, SIGDN_FILESYSPATH};
+    unsafe {
+        let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let run = || -> windows::core::Result<std::path::PathBuf> {
+            let clsid = if d.save { &FileSaveDialog } else { &FileOpenDialog };
+            let dialog: IFileDialog = CoCreateInstance::<_, windows::core::IUnknown>(clsid, None, CLSCTX_INPROC_SERVER)?.cast()?;
+            dialog.SetTitle(&HSTRING::from(d.title.as_str()))?;
+            let (name, spec, ext) = (HSTRING::from(format!("{} (*.{})", d.filter.0, d.filter.1)), HSTRING::from(format!("*.{}", d.filter.1)), HSTRING::from(d.filter.1.as_str()));
+            dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: PCWSTR(name.as_ptr()), pszSpec: PCWSTR(spec.as_ptr()) }])?;
+            dialog.SetDefaultExtension(&ext)?;
+            let mut opts = dialog.GetOptions()? | FOS_FORCEFILESYSTEM;
+            if d.save {
+                opts |= FOS_OVERWRITEPROMPT;
+                dialog.SetFileName(&HSTRING::from(d.file_name.as_str()))?;
+            }
+            dialog.SetOptions(opts)?;
+            dialog.Show(HWND(d.owner as *mut _))?;
+            let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let s = path.to_string();
+            CoTaskMemFree(Some(path.0 as *const _));
+            Ok(std::path::PathBuf::from(s.map_err(|_| windows::core::Error::from_win32())?))
+        };
+        let out = run().ok();
+        if init.is_ok() {
+            CoUninitialize();
+        }
+        out
+    }
+}
+
+#[cfg(not(windows))]
+fn run_file_dialog(_: &FileDialog) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Hue-cycled neon colours for categorical marks (treemap cells, legends).
 pub fn category_color(i: usize) -> Color32 {
     const C: [Color32; 8] = [

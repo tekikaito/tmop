@@ -2013,9 +2013,11 @@ dependencies = [
 name = "tmop"
 version = "0.1.1"
 dependencies = [
+ "ab_glyph",
  "eframe",
  "egui_extras",
  "png",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "windows",

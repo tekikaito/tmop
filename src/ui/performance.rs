@@ -1,7 +1,7 @@
 //! Performance page: device list on the left, detail graphs and statistics on the right
 //! (title, segmented utilization bar, per-core graph grid, stats).
 
-use super::theme::{self, metric_color, mix, with_alpha};
+use super::theme::{self, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, draw_icon, led_gradient_row, led_row, Graph, GraphLine, Icon, LedStyle};
 use super::{App, Device, FrameData};
 use crate::metrics::Series;
@@ -9,14 +9,15 @@ use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Stroke};
 
 const LIST_W: f32 = 236.0;
-/// Light blue used for the headline value.
-const VALUE_BLUE: Color32 = Color32::from_rgb(0x4F, 0xB4, 0xFF);
-const CELL_BORDER: Color32 = Color32::from_rgb(0x31, 0xD1, 0xFF);
-const CELL_BG: Color32 = Color32::from_rgb(0x22, 0x27, 0x23);
+
+/// Background of the per-core graph cells and the memory composition bar.
+fn cell_bg(pal: &Palette) -> Color32 {
+    mix(pal.graph_bg(), pal.body, 0.5)
+}
 
 impl App {
     fn cpus_expanded(&self) -> bool {
-        self.settings.extra.get("performanceCpusExpanded").and_then(|v| v.as_bool()).unwrap_or(true)
+        self.settings.window.performance_cpus_expanded
     }
 
     pub fn performance_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
@@ -62,7 +63,7 @@ impl App {
             } else if resp.hovered() {
                 p.rect_filled(r, 4.0, pal.hover);
             }
-            let c = d.color();
+            let c = fd.metric(d.key());
             draw_icon(p, Rect::from_center_size(pos2(r.left() + 20.0, r.center().y), vec2(15.0, 15.0)), d.icon(), c);
             let (name, sub1, sub2, series, range): (String, String, String, &Series, (f32, f32)) = match d {
                 Device::Cpu => ("CPU".into(), format!("{:.1}%", s.cpu.total_pct), format!("{} logical processors", s.cpu.logical_count), &fd.hist.cpu, (0.0, 100.0)),
@@ -80,21 +81,22 @@ impl App {
             };
             let tx = r.left() + 42.0;
             let tw = r.right() - 90.0 - tx;
-            widgets::text_fit(p, pos2(tx, r.top() + 13.0), Align2::LEFT_CENTER, &name, theme::display(14.0), pal.text, tw);
-            widgets::text_fit(p, pos2(tx, r.top() + 31.0), Align2::LEFT_CENTER, &sub1, theme::ui(11.5), pal.text, tw);
-            widgets::text_fit(p, pos2(tx, r.top() + 45.0), Align2::LEFT_CENTER, &sub2, theme::ui(11.5), pal.text, tw);
+            let fg = if selected { pal.on_selection() } else { pal.text };
+            widgets::text_fit(p, pos2(tx, r.top() + 13.0), Align2::LEFT_CENTER, &name, theme::display(14.0), fg, tw);
+            widgets::text_fit(p, pos2(tx, r.top() + 31.0), Align2::LEFT_CENTER, &sub1, theme::ui(11.5), fg, tw);
+            widgets::text_fit(p, pos2(tx, r.top() + 45.0), Align2::LEFT_CENTER, &sub2, theme::ui(11.5), fg, tw);
             let thumb = Rect::from_min_size(pos2(r.right() - 82.0, r.top() + 7.0), vec2(76.0, 44.0));
             let mut g = Graph::new(vec![GraphLine { series, color: c, range }]);
             g.px_per_update = 1.5;
             g.phase = fd.phase;
             g.glide = fd.glide;
             g.regions = 1;
-            g.smooth = self.settings.smooth_graph_curves;
+            g.smooth = self.settings.graphs.smooth_curves;
             g.bloom = fd.bloom * 0.5;
             g.markers = false;
             g.line_width = 1.4;
             g.fill = 0.10;
-            g.background = Some(if selected { Color32::from_rgb(0x25, 0x3F, 0x77) } else { mix(pal.card, Color32::BLACK, 0.1) });
+            g.background = Some(if selected { pal.selection } else { mix(pal.card, Color32::BLACK, 0.1) });
             g.border = Some(if selected { with_alpha(c, 0.9) } else { with_alpha(pal.card_stroke, 0.9) });
             draw_graph(p, thumb, &g);
             if resp.clicked() {
@@ -115,7 +117,7 @@ impl App {
         let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 44.0), pos2(rect.right() - 128.0, rect.top() + 60.0));
         let segs = ((bar.width() / 9.0).floor() as usize).clamp(20, 200);
         led_gradient_row(p, bar, segs, frac, colors, fd.bloom);
-        p.text(pos2(rect.right(), bar.center().y + 1.0), Align2::RIGHT_CENTER, value, theme::semibold(21.0), VALUE_BLUE);
+        p.text(pos2(rect.right(), bar.center().y + 1.0), Align2::RIGHT_CENTER, value, theme::semibold(21.0), pal.accent);
         rect.top() + 64.0
     }
 
@@ -151,7 +153,7 @@ impl App {
     fn cpu_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let green = metric_color("cpu");
+        let green = fd.metric("cpu");
         if self.pro.cpu_details.is_none() {
             self.pro.cpu_details = Some(crate::pro::inventory::cpu_details());
         }
@@ -161,7 +163,7 @@ impl App {
         }
         let det = self.pro.cpu_details.clone().unwrap_or_default();
         let name = if s.cpu.name.is_empty() { "CPU".to_string() } else { s.cpu.name.clone() };
-        let mut y = self.detail_title(ui, rect, &name, &format!("{:.1}%", s.cpu.total_pct), fd.smooth.cpu / 100.0, [green, metric_color("yellow"), metric_color("clock")], fd);
+        let mut y = self.detail_title(ui, rect, &name, &format!("{:.1}%", s.cpu.total_pct), fd.smooth.cpu / 100.0, [green, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, format!("{} logical processors", s.cpu.logical_count), theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -170,9 +172,9 @@ impl App {
         let label = if expanded { "% Utilization by logical processor" } else { "% Utilization over time" };
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, label, theme::ui(12.0), pal.text_dim);
         let toggle_text = if expanded { "CPUs Expanded  \u{02C5}" } else { "CPUs Overall  \u{02C5}" };
-        let tr = p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, toggle_text, theme::ui(12.0), VALUE_BLUE);
+        let tr = p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, toggle_text, theme::ui(12.0), pal.accent);
         if ui.interact(tr.expand(3.0), ui.id().with("cpus-expanded"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            self.settings.extra.insert("performanceCpusExpanded".into(), serde_json::Value::Bool(!expanded));
+            self.settings.window.performance_cpus_expanded = !expanded;
             self.settings_dirty = true;
         }
         y += 19.0;
@@ -186,27 +188,27 @@ impl App {
             for (i, sr) in fd.hist.per_core.iter().enumerate() {
                 let (c, r) = (i % cols, i / cols);
                 let cell = Rect::from_min_size(pos2(rect.left() + c as f32 * (cw + gap), y + r as f32 * (ch + gap)), vec2(cw, ch));
-                p.rect_filled(cell, 3.0, CELL_BG);
+                p.rect_filled(cell, 3.0, cell_bg(&pal));
                 let mut lines = vec![GraphLine { series: sr, color: green, range: (0.0, 100.0) }];
                 if let Some(k) = fd.hist.per_core_kernel.get(i) {
                     lines.push(GraphLine { series: k, color: Color32::from_rgb(0xFF, 0x6B, 0x5E), range: (0.0, 100.0) });
                 }
                 let mut g = self.graph(lines, fd);
                 g.background = None;
-                g.grid = Some(with_alpha(Color32::from_rgb(0x3A, 0x44, 0x3C), 0.9));
-                g.px_per_update = (self.settings.graph_pixels_per_update as f32 / 2.0).max(2.0);
+                g.grid = Some(with_alpha(pal.grid, 0.9));
+                g.px_per_update = (self.settings.graphs.pixels_per_update as f32 / 2.0).max(2.0);
                 g.line_width = 1.6;
                 g.fill = 0.10;
                 draw_graph(&p, cell.shrink2(vec2(4.0, 4.0)).with_min_y(cell.top() + 18.0), &g);
                 if fd.bloom > 0.0 {
-                    p.rect_stroke(cell.expand(1.0), 4.0, Stroke::new(2.0_f32, with_alpha(CELL_BORDER, 0.12 * fd.bloom)));
+                    p.rect_stroke(cell.expand(1.0), 4.0, Stroke::new(2.0_f32, with_alpha(pal.accent, 0.12 * fd.bloom)));
                 }
-                p.rect_stroke(cell, 3.0, Stroke::new(1.0_f32, CELL_BORDER));
+                p.rect_stroke(cell, 3.0, Stroke::new(1.0_f32, pal.accent));
                 p.text(cell.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, format!("CPU {i}"), theme::ui(11.5), pal.text_dim);
             }
         } else {
             let gr = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), graph_bottom));
-            let mut g = self.graph(vec![GraphLine { series: &fd.hist.cpu, color: green, range: (0.0, 100.0) }, GraphLine { series: &fd.hist.kernel, color: metric_color("kernel"), range: (0.0, 100.0) }], fd);
+            let mut g = self.graph(vec![GraphLine { series: &fd.hist.cpu, color: green, range: (0.0, 100.0) }, GraphLine { series: &fd.hist.kernel, color: fd.metric("kernel"), range: (0.0, 100.0) }], fd);
             g.border = Some(green);
             g.fill = 0.08;
             draw_graph(&p, gr, &g);
@@ -250,8 +252,8 @@ impl App {
     fn memory_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let purple = metric_color("memory");
-        let mut y = self.detail_title(ui, rect, "Memory", &format!("{:.1}%", s.memory.used_pct), fd.smooth.memory / 100.0, [purple, theme::lighten(purple, 0.2), metric_color("clock")], fd);
+        let purple = fd.metric("memory");
+        let mut y = self.detail_title(ui, rect, "Memory", &format!("{:.1}%", s.memory.used_pct), fd.smooth.memory / 100.0, [purple, theme::lighten(purple, 0.2), theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, format!("{} total physical memory", format_bytes(s.memory.total as f64)), theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -271,7 +273,7 @@ impl App {
         let total = s.memory.total.max(1) as f32;
         let used = s.memory.total.saturating_sub(s.memory.available) as f32;
         let cached = (s.memory.cached as f32).min(s.memory.available as f32);
-        p.rect_filled(bar, 3.0, CELL_BG);
+        p.rect_filled(bar, 3.0, cell_bg(&pal));
         let wu = bar.width() * used / total;
         let wc = bar.width() * cached / total;
         p.rect_filled(Rect::from_min_size(bar.min, vec2(wu, bar.height())), 3.0, with_alpha(purple, 0.55));
@@ -298,8 +300,8 @@ impl App {
     fn gpu_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let blue = metric_color("gpu");
-        let mut y = self.detail_title(ui, rect, "GPU", &if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "N/A".into() }, fd.smooth.gpu / 100.0, [blue, theme::lighten(blue, 0.3), metric_color("clock")], fd);
+        let blue = fd.metric("gpu");
+        let mut y = self.detail_title(ui, rect, "GPU", &if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "N/A".into() }, fd.smooth.gpu / 100.0, [blue, theme::lighten(blue, 0.3), theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Busiest engine of the busiest adapter (PDH GPU Engine counters)", theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -329,8 +331,8 @@ impl App {
     fn disk_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let green = metric_color("disk");
-        let mut y = self.detail_title(ui, rect, "Disk", &format!("{:.1}%", s.disk.active_pct), fd.smooth.disk / 100.0, [green, metric_color("yellow"), metric_color("clock")], fd);
+        let green = fd.metric("disk");
+        let mut y = self.detail_title(ui, rect, "Disk", &format!("{:.1}%", s.disk.active_pct), fd.smooth.disk / 100.0, [green, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Active time (all physical disks)", theme::ui(12.0), pal.text_dim);
         y += 19.0;
@@ -347,7 +349,7 @@ impl App {
         p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, format!("Read  \u{2022}  Write    scale {}", format_rate(m as f64)), theme::ui(11.5), pal.text_dim);
         y += 18.0;
         let g2 = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), rect.bottom() - 110.0));
-        let mut g = self.graph(vec![GraphLine { series: &fd.hist.disk_read, color: green, range: (0.0, m) }, GraphLine { series: &fd.hist.disk_write, color: metric_color("thermal"), range: (0.0, m) }], fd);
+        let mut g = self.graph(vec![GraphLine { series: &fd.hist.disk_read, color: green, range: (0.0, m) }, GraphLine { series: &fd.hist.disk_write, color: theme::ORANGE, range: (0.0, m) }], fd);
         g.border = Some(with_alpha(green, 0.7));
         draw_graph(&p, g2, &g);
         y = g2.bottom() + 14.0;
@@ -358,15 +360,15 @@ impl App {
     fn network_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let blue = metric_color("network");
-        let mut y = self.detail_title(ui, rect, "Network", &format_rate(s.network.rx_bps + s.network.tx_bps), fd.smooth.net / 100.0, [blue, theme::lighten(blue, 0.3), metric_color("clock")], fd);
+        let blue = fd.metric("network");
+        let mut y = self.detail_title(ui, rect, "Network", &format_rate(s.network.rx_bps + s.network.tx_bps), fd.smooth.net / 100.0, [blue, theme::lighten(blue, 0.3), theme::RED], fd);
         let p = ui.painter().clone();
         let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Throughput (GetIfTable2, all adapters)", theme::ui(12.0), pal.text_dim);
         p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, format!("Receive  \u{2022}  Send    scale {}", format_rate(m as f64)), theme::ui(11.5), pal.text_dim);
         y += 19.0;
         let gr = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), rect.bottom() - 110.0));
-        let mut g = self.graph(vec![GraphLine { series: &fd.hist.net_rx, color: blue, range: (0.0, m) }, GraphLine { series: &fd.hist.net_tx, color: metric_color("thermal"), range: (0.0, m) }], fd);
+        let mut g = self.graph(vec![GraphLine { series: &fd.hist.net_rx, color: blue, range: (0.0, m) }, GraphLine { series: &fd.hist.net_tx, color: theme::ORANGE, range: (0.0, m) }], fd);
         g.border = Some(blue);
         g.fill = 0.10;
         draw_graph(&p, gr, &g);
@@ -383,8 +385,8 @@ impl App {
     fn thermal_detail(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let s = fd.snap;
-        let orange = metric_color("thermal");
-        let mut y = self.detail_title(ui, rect, "Thermals", &s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("N/A".into()), fd.smooth.thermal / 110.0, [metric_color("cpu"), metric_color("yellow"), metric_color("clock")], fd);
+        let orange = fd.metric("thermal");
+        let mut y = self.detail_title(ui, rect, "Thermals", &s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("N/A".into()), fd.smooth.thermal / 110.0, [theme::GREEN, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "ACPI thermal zones (firmware sensors, not the CPU package)", theme::ui(12.0), pal.text_dim);
         y += 19.0;

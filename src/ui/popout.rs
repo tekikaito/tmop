@@ -6,7 +6,7 @@
 
 use super::icons::IconCache;
 use super::summary::proc_icon;
-use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
+use super::theme::{self, dim, lighten, mix, with_alpha, MetricColors, Palette};
 use super::widgets::{self, draw_graph, draw_icon, ellipse_points, fill_vertical_gradient, polygon_points, rounded_rect_points, GraphLine, Icon, LedStyle};
 use super::FrameData;
 use crate::metrics::Series;
@@ -114,6 +114,17 @@ fn font(spec: Option<&FontSpec>, default_pt: f32, default_weight: FontWeight) ->
             FontWeight::Semibold | FontWeight::Medium => theme::semibold(size),
             _ => theme::ui(size),
         },
+    }
+}
+
+/// The header title's font. Classic, drawn in the application's style, uses the display font
+/// (`appearance.displayFont`); other skins keep their own typography.
+fn title_font(skin: &Skin, spec: Option<&FontSpec>) -> FontId {
+    let f = font(spec, 11.0, FontWeight::Bold);
+    if skin.source == SkinSource::BuiltIn && skin.id == "classic" {
+        theme::display(f.size)
+    } else {
+        f
     }
 }
 
@@ -268,10 +279,11 @@ fn paint(skin: &Skin, op: f32) -> Paint {
     }
 }
 
-/// (accent, lit, unlit) for a quadrant.
-fn accent(skin: &Skin, q: Quadrant, op: f32) -> (Color32, Color32, Color32) {
+/// (accent, lit, unlit) for a quadrant: the skin's channel, else the user's metric colour, else
+/// [`channel_default`].
+fn accent(skin: &Skin, q: Quadrant, op: f32, metrics: &MetricColors) -> (Color32, Color32, Color32) {
     let ch = skin.channel(q);
-    let fallback = channel_default(q);
+    let fallback = metrics.custom(q.key()).unwrap_or_else(|| channel_default(q));
     let accent = ch.accent.map(|c| c32(c, op)).unwrap_or(with_alpha(fallback, op));
     let lit = ch.lit.map(|c| c32(c, op)).unwrap_or(accent);
     let unlit = ch.unlit.map(|c| c32(c, op)).unwrap_or(dim(lit, 0.21));
@@ -451,7 +463,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let hide_title = skin.header.as_ref().and_then(|h| h.hide_title).unwrap_or(false);
     if !hide_title {
         let title = skin.header.as_ref().and_then(|h| h.title.clone()).unwrap_or_else(|| DEFAULT_TITLE.to_string());
-        let tf = font(typo.title.as_ref(), 11.0, FontWeight::Bold);
+        let tf = title_font(skin, typo.title.as_ref());
         let tracking = typo.title_tracking.unwrap_or(0.0);
         if tracking > 0.05 {
             let mut cx = x;
@@ -512,7 +524,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         let col = i % l.columns;
         let row = i / l.columns;
         let cell = Rect::from_min_size(pos2(meters.left() + 8.0 + col as f32 * l.tile.x, meters.top() + 7.0 + row as f32 * l.tile.y), l.tile);
-        let (acc, lit, unlit) = accent(skin, r.quadrant, opacity);
+        let (acc, lit, unlit) = accent(skin, r.quadrant, opacity, &fd.metric_colors);
         let mut led = LedStyle::new(lit, bloom);
         led.unlit_factor = 1.0;
         led.rim = true;
@@ -568,7 +580,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         tile_bg(strip);
         let cores = &fd.smooth.per_core;
         if !cores.is_empty() {
-            let (acc, lit, unlit) = accent(skin, Quadrant::Cpu, opacity);
+            let (acc, lit, unlit) = accent(skin, Quadrant::Cpu, opacity, &fd.metric_colors);
             let n = cores.len();
             let w = 4.5;
             let pitch = 6.0;
@@ -757,18 +769,16 @@ fn skin_color(c: Color32) -> Color {
     Color::rgba(r, g, b, a)
 }
 
-/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`.
-fn classic_accent(pal: &Palette, q: Quadrant) -> Color32 {
-    let c = theme::metric_color(q.key());
-    if pal.dark {
-        lighten(c, 0.35)
-    } else {
-        dim(c, 0.55)
-    }
+/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`
+/// (further, in steps, until it reads at 4.5:1 on the palette's surface).
+fn classic_accent(pal: &Palette, metrics: &MetricColors, q: Quadrant) -> Color32 {
+    let c = metrics.get(q.key());
+    let shift = |t: f32| if pal.dark { lighten(c, 0.35 + t) } else { dim(c, 0.55 - t) };
+    (0..=6).map(|i| shift(i as f32 * 0.1)).find(|a| theme::contrast(*a, pal.card) >= theme::MIN_CONTRAST).unwrap_or_else(|| shift(0.6))
 }
 
-/// Classic drawn in the application's own colours (`pal`).
-pub fn classic_skin(pal: &Palette) -> Skin {
+/// Classic drawn in the application's own colours (`pal`, `metrics`).
+pub fn classic_skin(pal: &Palette, metrics: &MetricColors) -> Skin {
     let mut skin = Skin::classic();
     let solid = |c: Color32| Some(Fill::Solid(skin_color(c)));
     skin.surfaces = Some(Surfaces {
@@ -792,7 +802,7 @@ pub fn classic_skin(pal: &Palette) -> Skin {
     });
     if let Some(m) = skin.meters.as_mut() {
         for q in Quadrant::ALL {
-            let accent = skin_color(classic_accent(pal, q));
+            let accent = skin_color(classic_accent(pal, metrics, q));
             let unlit = skin_color(pal.grid);
             m.channels.insert(q.key().into(), Channel { accent: Some(accent), lit: None, unlit: Some(unlit) });
         }
@@ -809,8 +819,7 @@ mod tests {
     #[test]
     fn process_rows_are_readable() {
         let mut skins: Vec<Skin> = crate::skin::built_in().into_iter().filter(|s| s.id != "classic").collect();
-        skins.push(classic_skin(&theme::DARK));
-        skins.push(classic_skin(&theme::LIGHT));
+        skins.extend(crate::palette::built_in().iter().map(|p| classic_skin(&p.palette, &MetricColors::default())));
         for s in &skins {
             let p = paint(s, 1.0);
             for t in [0.0, 0.5, 1.0] {
@@ -823,10 +832,41 @@ mod tests {
         }
     }
 
+    /// A metric colour override reaches Classic's accent for that metric only, and skins that
+    /// leave a channel unset fall back to it.
+    #[test]
+    fn metric_overrides_reach_popout_accents() {
+        let mut g = crate::settings::Graphs::default();
+        g.metric_colors.insert("cpu".into(), "#2040FF".into());
+        let m = MetricColors::from_settings(&g);
+        let pal = theme::DARK;
+        let (base, custom) = (classic_skin(&pal, &MetricColors::default()), classic_skin(&pal, &m));
+        assert_ne!(base.channel(Quadrant::Cpu).accent, custom.channel(Quadrant::Cpu).accent);
+        assert_eq!(base.channel(Quadrant::Disk).accent, custom.channel(Quadrant::Disk).accent);
+        let bare = Skin { meters: None, ..Skin::classic() };
+        assert_eq!(accent(&bare, Quadrant::Cpu, 1.0, &m).0, Color32::from_rgb(0x20, 0x40, 0xFF));
+        assert_eq!(accent(&bare, Quadrant::Disk, 1.0, &m).0, channel_default(Quadrant::Disk));
+    }
+
+    /// Classic's title is in the display font; other skins, and a user skin that reuses the
+    /// id `classic`, keep their own typography.
+    #[test]
+    fn only_classic_uses_the_display_font() {
+        let classic = classic_skin(&theme::DARK, &MetricColors::default());
+        assert_eq!(title_font(&classic, None), theme::display(11.0 * PT));
+        let mut user = classic.clone();
+        user.source = SkinSource::File(PathBuf::from("classic.tmogskin"));
+        assert_eq!(title_font(&user, None), theme::bold(11.0 * PT));
+        for s in crate::skin::built_in().into_iter().filter(|s| s.id != "classic") {
+            let typo = s.typography.clone().unwrap_or_default();
+            assert_eq!(title_font(&s, typo.title.as_ref()), font(typo.title.as_ref(), 11.0, FontWeight::Bold), "{}", s.id);
+        }
+    }
+
     #[test]
     fn classic_follows_the_app_palette_and_is_readable() {
-        for pal in [theme::DARK, theme::LIGHT] {
-            let s = classic_skin(&pal);
+        for pal in crate::palette::built_in().into_iter().map(|p| p.palette) {
+            let s = classic_skin(&pal, &MetricColors::default());
             let tile = s.surfaces.as_ref().unwrap().tile.as_ref().unwrap().top().unwrap();
             assert_eq!(tile, skin_color(pal.card));
             let ink = s.ink.as_ref().unwrap();
