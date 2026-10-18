@@ -431,7 +431,7 @@ impl App {
         let mut popout_change: Option<&'static str> = None;
         let current_palette = self.palette_id();
         let font_missing = self.display_font.1;
-        let font_families = self.font_list.get(ui.ctx());
+        let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
         // The columns are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -443,7 +443,7 @@ impl App {
                 let (pals, pui) = (&mut self.palettes, &mut self.palette_ui);
                 section(ui, &pal, Icon::Apps, "Appearance", |ui| {
                     changed |= palette_controls(ui, &pal, s, pals, pui, &current_palette);
-                    changed |= display_font_row(ui, &pal, &mut s.appearance, font_families, font_missing);
+                    changed |= display_font_row(ui, &pal, &mut s.appearance, font_families.as_deref(), font_missing);
                     row(ui, &pal, "Temperature", |ui| {
                         egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
                             changed |= ui.selectable_value(&mut s.general.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
@@ -563,6 +563,9 @@ impl App {
                     changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
                     changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                     changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
+                });
+                section(ui, &pal, Icon::Wrench, "Task Manager", |ui| {
+                    self.replace_section(ui, &pal, |ui, on| toggle_row(ui, &pal, on, "Open TMOP instead of Windows Task Manager"), |ui, t| hint(ui, &pal, t));
                 });
                 section(ui, &pal, Icon::Record, "Skins and files", |ui| {
                     ui.horizontal(|ui| {

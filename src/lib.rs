@@ -8,6 +8,7 @@ pub mod process;
 pub mod screensaver;
 pub mod settings;
 pub mod skin;
+pub mod taskmgr;
 pub mod ui;
 pub mod update;
 
