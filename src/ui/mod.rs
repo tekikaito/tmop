@@ -23,7 +23,7 @@ use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
 use std::time::{Duration, Instant};
-use theme::Palette;
+use theme::{MetricColors, Palette};
 use widgets::{draw_icon, Graph, GraphLine, Icon};
 
 pub const SIDEBAR_W: f32 = 216.0;
@@ -210,9 +210,6 @@ impl Device {
             Device::Thermal => Icon::Thermal,
         }
     }
-    pub fn color(self) -> Color32 {
-        theme::metric_color(self.key())
-    }
 }
 
 /// Values eased between data updates ("Smooth graph motion and gauge needles").
@@ -264,6 +261,8 @@ pub struct FrameData<'a> {
     pub rows: &'a [ProcessRow],
     pub smooth: &'a Smooth,
     pub pal: Palette,
+    /// Metric colours with the user's overrides (see [`FrameData::metric`]).
+    pub metric_colors: MetricColors,
     pub bloom: f32,
     pub phase: f32,
     /// Graphs glide the newest sample in over the update interval (high-frequency visuals on).
@@ -271,6 +270,13 @@ pub struct FrameData<'a> {
     pub time: f64,
     /// `showSelfInReports`: list TMOP itself in process lists.
     pub show_self: bool,
+}
+
+impl FrameData<'_> {
+    /// The colour of metric `key` (`cpu`, `memory`, ...; see [`MetricColors`]).
+    pub fn metric(&self, key: &str) -> Color32 {
+        self.metric_colors.get(key)
+    }
 }
 
 /// Command-line launch options.
@@ -428,6 +434,11 @@ impl App {
         self.palettes.get(&self.palette_id()).map(|p| p.palette).unwrap_or(theme::DARK)
     }
 
+    /// Metric colours from `graphs.metricColors` (the built-in ones without colour keying).
+    pub fn metric_colors(&self) -> MetricColors {
+        MetricColors::from_settings(&self.settings.graphs)
+    }
+
     pub fn bloom(&self) -> f32 {
         if self.settings.appearance.bloom {
             (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1)
@@ -515,7 +526,7 @@ impl App {
     pub fn current_skin(&self) -> skin::Skin {
         match self.catalog.get(&self.settings.popout.skin) {
             Some(s) if s.source != skin::SkinSource::BuiltIn || s.id != "classic" => s.clone(),
-            _ => popout::classic_skin(&self.palette()),
+            _ => popout::classic_skin(&self.palette(), &self.metric_colors()),
         }
     }
 
@@ -1133,7 +1144,7 @@ impl App {
             self.applied_top = Some(self.settings.window.always_on_top);
         }
         let smooth = self.smooth.clone();
-        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports };
+        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports };
 
         if self.popout_only {
             if self.popout_ui(ctx, &fd) {

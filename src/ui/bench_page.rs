@@ -3,7 +3,7 @@
 
 use super::kit::{empty_state, hsplit, titled_card, vsplit, GAP, MARGIN};
 use super::table::{self, cmp_f, Cell, Col, TableState};
-use super::theme::{self, metric_color, with_alpha};
+use super::theme::{self, with_alpha};
 use super::widgets::{self, card, draw_graph, led_row, GraphLine, Icon, LedStyle};
 use super::{App, FrameData};
 use crate::metrics::Series;
@@ -11,11 +11,11 @@ use crate::pro::bench::{BenchResult, Test};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense};
 use std::path::PathBuf;
 
-fn test_color(t: Test) -> Color32 {
+fn test_color(fd: &FrameData<'_>, t: Test) -> Color32 {
     match t.group() {
-        "cpu" => metric_color("cpu"),
-        "memory" => metric_color("memory"),
-        _ => metric_color("thermal"),
+        "cpu" => fd.metric("cpu"),
+        "memory" => fd.metric("memory"),
+        _ => fd.metric("thermal"),
     }
 }
 
@@ -99,7 +99,7 @@ impl App {
                 for v in &prog.live {
                     s.push(*v);
                 }
-                let c = test_color(t);
+                let c = test_color(fd, t);
                 let top = s.max().max(1e-3) * 1.15;
                 let mut g = widgets::Graph::new(vec![GraphLine { series: &s, color: c, range: (0.0, top) }]);
                 g.px_per_update = (split[0].width() / (t.budget().as_secs_f32() * 10.0)).max(2.0);
@@ -122,9 +122,9 @@ impl App {
         let done = Test::ALL.len() - prog.queue.len() - prog.running.map(|_| 1).unwrap_or(0);
         let overall = if running { (done as f32 + prog.fraction) / total } else { 0.0 };
         p.text(side.left_top(), Align2::LEFT_TOP, "Test progress", theme::ui(12.0), pal.text_dim);
-        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 20.0), vec2(side.width(), 12.0)), 24, prog.fraction, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(metric_color("gpu"), fd.bloom) });
+        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 20.0), vec2(side.width(), 12.0)), 24, prog.fraction, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(fd.metric("gpu"), fd.bloom) });
         p.text(side.left_top() + vec2(0.0, 44.0), Align2::LEFT_TOP, "Queue", theme::ui(12.0), pal.text_dim);
-        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 64.0), vec2(side.width(), 12.0)), 24, if running { overall } else { 0.0 }, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(metric_color("cpu"), fd.bloom) });
+        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 64.0), vec2(side.width(), 12.0)), 24, if running { overall } else { 0.0 }, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(fd.metric("cpu"), fd.bloom) });
         let next = if prog.queue.is_empty() { if running { "Last test".to_string() } else { String::new() } } else { format!("Next: {}", prog.queue.iter().map(|t| t.title()).collect::<Vec<_>>().join(", ")) };
         let gal = p.layout(next, theme::ui(12.0), pal.text_dim, side.width());
         p.galley(side.left_top() + vec2(0.0, 90.0), gal, pal.text_dim);
@@ -134,7 +134,7 @@ impl App {
         let mut cards: Vec<Rect> = hsplit(grid[0], &[1.0; 4], GAP);
         cards.extend(hsplit(grid[1], &[1.0; 4], GAP).into_iter().take(3));
         for (t, r) in Test::ALL.iter().zip(cards) {
-            let c = test_color(*t);
+            let c = test_color(fd, *t);
             let latest = self.bench.latest(*t).cloned();
             let best = self.bench.best(*t);
             let is_running = prog.running == Some(*t);
@@ -194,7 +194,7 @@ impl App {
                 let r = &hist[i];
                 match col {
                     0 => Cell::new(&r.when).dim(&pal),
-                    1 => Cell::new(r.test.title()).dot(test_color(r.test)),
+                    1 => Cell::new(r.test.title()).dot(test_color(fd, r.test)),
                     2 => Cell::new(format!("{} {}", format_value(r.test, r.value), r.test.unit())),
                     _ => Cell::new(&r.detail).dim(&pal),
                 }

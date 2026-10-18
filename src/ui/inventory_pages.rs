@@ -4,7 +4,7 @@
 use super::kit::{empty_state, header_toolbar, hsplit, kv_list, stat_row, titled_card, vsplit, GAP, MARGIN};
 use super::pro_pages::driver_like_page;
 use super::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
-use super::theme::{self, metric_color};
+use super::theme;
 use super::widgets::{self, Icon};
 use super::{App, FrameData};
 use crate::pro::inventory::{Sections, Service, StartupApp};
@@ -102,10 +102,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Windows".into(), get("Operating system", "Version"), format!("{} build {}", get("Operating system", "Edition"), get("Operating system", "OS build")), metric_color("gpu"), None),
-                ("Processor".into(), format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get("Processor and memory", "Processor") } else { s.cpu.name.clone() }, metric_color("cpu"), Some(fd.smooth.cpu / 100.0)),
-                ("Memory".into(), format_bytes(s.memory.total as f64), format!("{} installed", get("Processor and memory", "Installed memory")), metric_color("memory"), Some(fd.smooth.memory / 100.0)),
-                ("Up time".into(), super::fmt_hms(s.uptime), get("Device", "Computer name"), metric_color("thermal"), None),
+                ("Windows".into(), get("Operating system", "Version"), format!("{} build {}", get("Operating system", "Edition"), get("Operating system", "OS build")), fd.metric("gpu"), None),
+                ("Processor".into(), format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get("Processor and memory", "Processor") } else { s.cpu.name.clone() }, fd.metric("cpu"), Some(fd.smooth.cpu / 100.0)),
+                ("Memory".into(), format_bytes(s.memory.total as f64), format!("{} installed", get("Processor and memory", "Installed memory")), fd.metric("memory"), Some(fd.smooth.memory / 100.0)),
+                ("Up time".into(), super::fmt_hms(s.uptime), get("Device", "Computer name"), fd.metric("thermal"), None),
             ],
         );
         let n = sections.len().max(1);
@@ -152,10 +152,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Observed".into(), super::fmt_hms(since), "Resource use since TMOP started".into(), metric_color("gpu"), None),
-                ("CPU time".into(), format_cpu_time(total_cpu), format!("{} applications", list.len()), metric_color("cpu"), None),
-                ("I/O".into(), format_bytes(total_io), "Read + write, all processes".into(), metric_color("thermal"), None),
-                ("Busiest".into(), top.map(|t| t.name.clone()).unwrap_or_default(), top.map(|t| format_cpu_time(t.cpu_time)).unwrap_or_default(), metric_color("clock"), top.map(|t| t.cpu_time as f32 / total_cpu.max(1) as f32)),
+                ("Observed".into(), super::fmt_hms(since), "Resource use since TMOP started".into(), fd.metric("gpu"), None),
+                ("CPU time".into(), format_cpu_time(total_cpu), format!("{} applications", list.len()), fd.metric("cpu"), None),
+                ("I/O".into(), format_bytes(total_io), "Read + write, all processes".into(), fd.metric("thermal"), None),
+                ("Busiest".into(), top.map(|t| t.name.clone()).unwrap_or_default(), top.map(|t| format_cpu_time(t.cpu_time)).unwrap_or_default(), fd.metric("clock"), top.map(|t| t.cpu_time as f32 / total_cpu.max(1) as f32)),
             ],
         );
         let st = &self.pro.inv.history_table;
@@ -219,10 +219,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Enabled".into(), enabled.to_string(), format!("of {} startup entries", list.len()), metric_color("cpu"), Some(enabled as f32 / n)),
-                ("Disabled".into(), (list.len() - enabled).to_string(), "Turned off in Windows settings".into(), metric_color("thermal"), Some((list.len() - enabled) as f32 / n)),
-                ("Registry".into(), (list.len() - folder).to_string(), "Run keys".into(), metric_color("gpu"), None),
-                ("Startup folders".into(), folder.to_string(), "Shortcuts in Startup".into(), metric_color("memory"), None),
+                ("Enabled".into(), enabled.to_string(), format!("of {} startup entries", list.len()), fd.metric("cpu"), Some(enabled as f32 / n)),
+                ("Disabled".into(), (list.len() - enabled).to_string(), "Turned off in Windows settings".into(), fd.metric("thermal"), Some((list.len() - enabled) as f32 / n)),
+                ("Registry".into(), (list.len() - folder).to_string(), "Run keys".into(), fd.metric("gpu"), None),
+                ("Startup folders".into(), folder.to_string(), "Shortcuts in Startup".into(), fd.metric("memory"), None),
             ],
         );
         if list.is_empty() {
@@ -245,7 +245,7 @@ impl App {
             match col {
                 0 => Cell::new(&a.name).icon(Some(crate::pro::inventory::command_path(&a.command).as_str())),
                 1 => Cell::new(&a.publisher).dim(&pal),
-                2 => Cell::new(if a.enabled { "Enabled" } else { "Disabled" }).dot(if a.enabled { metric_color("cpu") } else { pal.text_faint }),
+                2 => Cell::new(if a.enabled { "Enabled" } else { "Disabled" }).dot(if a.enabled { fd.metric("cpu") } else { pal.text_faint }),
                 3 => Cell::new(&a.location).dim(&pal),
                 _ => Cell::new(&a.command).dim(&pal),
             }
@@ -291,10 +291,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Accounts".into(), list.len().to_string(), "Distinct account / session pairs".into(), metric_color("gpu"), None),
-                ("Signed in".into(), interactive.to_string(), "Sessions with app windows".into(), metric_color("cpu"), None),
-                ("Busiest".into(), top.map(|t| format!("{:.1}%", t.cpu)).unwrap_or_default(), top.map(|t| t.user.clone()).unwrap_or_default(), metric_color("clock"), top.map(|t| t.cpu / 100.0)),
-                ("Processes".into(), fd.rows.len().to_string(), format!("{} with windows", fd.rows.iter().filter(|r| r.has_window).count()), metric_color("memory"), None),
+                ("Accounts".into(), list.len().to_string(), "Distinct account / session pairs".into(), fd.metric("gpu"), None),
+                ("Signed in".into(), interactive.to_string(), "Sessions with app windows".into(), fd.metric("cpu"), None),
+                ("Busiest".into(), top.map(|t| format!("{:.1}%", t.cpu)).unwrap_or_default(), top.map(|t| t.user.clone()).unwrap_or_default(), fd.metric("clock"), top.map(|t| t.cpu / 100.0)),
+                ("Processes".into(), fd.rows.len().to_string(), format!("{} with windows", fd.rows.iter().filter(|r| r.has_window).count()), fd.metric("memory"), None),
             ],
         );
         let st = &self.pro.inv.users_table;
@@ -313,7 +313,7 @@ impl App {
         let cell = |i: usize, col: usize| -> Cell {
             let u = &list[i];
             match col {
-                0 => Cell::new(&u.user).dot(if u.session > 0 && u.apps > 0 { metric_color("cpu") } else { pal.text_faint }),
+                0 => Cell::new(&u.user).dot(if u.session > 0 && u.apps > 0 { fd.metric("cpu") } else { pal.text_faint }),
                 1 => Cell::new(u.session.to_string()).dim(&pal),
                 2 => Cell::new(u.procs.to_string()),
                 3 => Cell::new(format!("{:.1}%", u.cpu)).heat(u.cpu / 25.0),
@@ -342,7 +342,7 @@ impl App {
         let rows = vsplit(area, &[118.0, -1.0], GAP);
         let p = ui.painter().clone();
         let list: &[Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
-        driver_like_page(ui, &p, rows, &pal, fd.bloom, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons);
+        driver_like_page(ui, &p, rows, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons);
         let _ = theme::ui(12.0);
         let _ = Align2::LEFT_TOP;
     }

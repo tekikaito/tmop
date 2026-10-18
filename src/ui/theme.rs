@@ -507,11 +507,6 @@ pub fn default_metric_color(key: &str) -> Color32 {
     }
 }
 
-/// Metric accent colours (built-in only).
-pub fn metric_color(key: &str) -> Color32 {
-    default_metric_color(key)
-}
-
 /// The colours that identify a metric:[`default_metric_color`] with the `graphs.metricColors`
 /// overrides applied. Resolved once per frame (see [`super::FrameData::metric`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

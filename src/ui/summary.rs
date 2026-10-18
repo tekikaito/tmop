@@ -1,7 +1,7 @@
 //! Summary page: system LED meters, CPU overview graph, top processes, memory and
 //! the device tiles.
 
-use super::theme::{self, metric_color, mix, with_alpha};
+use super::theme::{self, mix, with_alpha};
 use super::widgets::{self, card, draw_graph, led_column, led_panel, led_row, GraphLine, Icon, LedStyle, LED_PANEL_H};
 use super::{App, Device, FrameData, Page};
 use crate::metrics::Series;
@@ -49,29 +49,29 @@ impl App {
         let s = fd.snap;
         let temp = s.thermal.max_c();
         let cols: [MeterColumn<'_>; 4] = [
-            ("CPU", metric_color("cpu"), Some(fd.smooth.cpu / 100.0), format!("{:.1}%", s.cpu.total_pct), LedStyle::traffic(fd.bloom), Device::Cpu),
+            ("CPU", fd.metric("cpu"), Some(fd.smooth.cpu / 100.0), format!("{:.1}%", s.cpu.total_pct), LedStyle::traffic(&fd.metric_colors, fd.bloom), Device::Cpu),
             (
                 "Clock",
-                metric_color("clock"),
+                fd.metric("clock"),
                 s.cpu.max_mhz.filter(|m| *m > 0).map(|m| fd.smooth.clock / m as f32),
                 s.cpu.current_mhz.map(|m| format!("{:.1}G", m as f32 / 1000.0)).unwrap_or("\u{2014}".into()),
-                LedStyle::new(metric_color("clock"), fd.bloom),
+                LedStyle::new(fd.metric("clock"), fd.bloom),
                 Device::Cpu,
             ),
             (
                 "Temp",
-                metric_color("thermal"),
+                fd.metric("thermal"),
                 temp.map(|_c| fd.smooth.thermal / 100.0),
                 temp.map(|c| self.temp(c).replace(' ', "")).unwrap_or("\u{2014}".into()),
-                LedStyle::new(metric_color("thermal"), fd.bloom),
+                LedStyle::new(fd.metric("thermal"), fd.bloom),
                 Device::Thermal,
             ),
             (
                 "GPU",
-                metric_color("gpu"),
+                fd.metric("gpu"),
                 s.gpu.available.then_some(fd.smooth.gpu / 100.0),
                 if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "\u{2014}".into() },
-                LedStyle::new(metric_color("gpu"), fd.bloom),
+                LedStyle::new(fd.metric("gpu"), fd.bloom),
                 Device::Gpu,
             ),
         ];
@@ -103,9 +103,9 @@ impl App {
         led_panel(p, Rect::from_min_size(inner.min, vec2(inner.width(), LED_PANEL_H)), "CPU OVERVIEW", &format!("{:.1}%", s.cpu.total_pct), &pal, fd.bloom);
         let mut x = inner.left() + 2.0;
         let ly = inner.top() + LED_PANEL_H + 14.0;
-        let green = metric_color("cpu");
-        let red = metric_color("kernel");
-        let orange = metric_color("thermal");
+        let green = fd.metric("cpu");
+        let red = fd.metric("kernel");
+        let orange = fd.metric("thermal");
         let has_temp = !s.thermal.zones.is_empty();
         let mut legend = vec![("Utilization", green), ("Kernel", red)];
         if has_temp {
@@ -200,7 +200,7 @@ impl App {
         card(p, rect, &pal);
         let inner = rect.shrink(8.0);
         let s = fd.snap;
-        let purple = metric_color("memory");
+        let purple = fd.metric("memory");
         let used = s.memory.total.saturating_sub(s.memory.available);
         p.text(pos2(inner.left() + 58.0, inner.top() + 10.0), Align2::LEFT_CENTER, "Memory Utilization", theme::display(14.0), pal.text);
         p.text(pos2(inner.right() - 2.0, inner.top() + 10.0), Align2::RIGHT_CENTER, format!("{} / {}", format_bytes(used as f64), format_bytes(s.memory.total as f64)), theme::ui(12.0), pal.text_dim);
@@ -265,7 +265,7 @@ impl App {
         let w = (rect.width() - GAP * (n - 1.0)) / n;
         for (i, (dev, title, value, sub, sub_r, frac)) in tiles.iter().enumerate() {
             let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + GAP), rect.top()), vec2(w, rect.height()));
-            let c = dev.color();
+            let c = fd.metric(dev.key());
             let p = ui.painter();
             widgets::accent_card(p, r, &pal, c, fd.bloom);
             let inner = r.shrink2(vec2(10.0, 6.0));

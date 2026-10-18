@@ -39,7 +39,8 @@ mod scr {
     use eframe::egui;
     use tmop::metrics::{history_capacity, Sampler};
     use tmop::screensaver::ScrMode;
-    use tmop::ui::theme::{self, metric_color};
+    use tmop::settings::{self, Settings};
+    use tmop::ui::theme::{self, MetricColors};
     use tmop::ui::widgets::{draw_graph, Graph, GraphLine};
 
     pub fn run(mode: ScrMode) -> eframe::Result<()> {
@@ -69,17 +70,24 @@ mod scr {
                         theme::install_fonts(&cc.egui_ctx);
                         let ctx = cc.egui_ctx.clone();
                         let sampler = Sampler::start(Some(std::time::Duration::from_millis(500)), history_capacity(30), move || ctx.request_repaint());
-                        Ok(Box::new(Saver { sampler, start: std::time::Instant::now(), origin: None }))
+                        Ok(Box::new(Saver { sampler, start: std::time::Instant::now(), origin: None, colors: metric_colors() }))
                     }),
                 )
             }
         }
     }
 
+    /// Metric colours from the settings file, read without migrating or writing it.
+    fn metric_colors() -> MetricColors {
+        let s = std::fs::read_to_string(settings::default_path()).ok().and_then(|t| Settings::from_json(&t).ok()).map(|l| l.settings).unwrap_or_default();
+        MetricColors::from_settings(&s.graphs)
+    }
+
     struct Saver {
         sampler: Sampler,
         start: std::time::Instant,
         origin: Option<egui::Pos2>,
+        colors: MetricColors,
     }
 
     impl eframe::App for Saver {
@@ -93,7 +101,7 @@ mod scr {
                     let rh = r.height() / 3.0;
                     for (i, (k, label, s)) in rows.iter().enumerate() {
                         let rr = egui::Rect::from_min_size(r.min + egui::vec2(0.0, i as f32 * rh + 40.0), egui::vec2(r.width(), rh - 60.0));
-                        let c = metric_color(k);
+                        let c = self.colors.get(k);
                         let mut g = Graph::new(vec![GraphLine { series: s, color: c, range: (0.0, 100.0) }]);
                         g.px_per_update = (rr.width() / s.capacity.max(2) as f32).max(2.0);
                         g.bloom = 1.0;

@@ -3,7 +3,7 @@
 
 use super::icons::IconCache;
 use super::summary::proc_icon;
-use super::theme::{self, metric_color, mix, with_alpha, Palette};
+use super::theme::{self, mix, with_alpha, MetricColors, Palette};
 use super::widgets::{self, draw_graph, GraphLine, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
@@ -297,7 +297,7 @@ impl App {
                             let agg = agg_cache.get(idx).copied();
                             for c in &cols {
                                 row.col(|ui| {
-                                    let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, agg, logical, per_core };
+                                    let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, agg, logical, per_core, metrics: fd.metric_colors };
                                     if cell_ui(ui, r, *c, &pal, cx, icons) {
                                         toggle = Some(key);
                                     }
@@ -408,14 +408,14 @@ impl App {
         if let (Some(cpu), Some(mem)) = (&self.proc.sel_cpu, &self.proc.sel_mem) {
             let top_cpu = widgets::eased(ui.ctx(), "process-cpu", cpu.max().max(1.0) * 1.2);
             let (lo, hi) = widgets::eased_range(ui.ctx(), "process-memory", super::summary::visible_range(mem, 240));
-            let mut g = self.graph(vec![GraphLine { series: cpu, color: metric_color("cpu"), range: (0.0, top_cpu) }, GraphLine { series: mem, color: metric_color("memory"), range: (lo, hi) }], fd);
+            let mut g = self.graph(vec![GraphLine { series: cpu, color: fd.metric("cpu"), range: (0.0, top_cpu) }, GraphLine { series: mem, color: fd.metric("memory"), range: (lo, hi) }], fd);
             g.regions = 1;
             g.px_per_update = 4.0;
             g.border = Some(pal.card_stroke);
             g.line_width = 1.6;
             draw_graph(&p, g_rect, &g);
-            p.text(g_rect.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, "CPU", theme::ui(11.0), metric_color("cpu"));
-            p.text(g_rect.left_top() + vec2(36.0, 4.0), Align2::LEFT_TOP, "Memory", theme::ui(11.0), metric_color("memory"));
+            p.text(g_rect.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP, "CPU", theme::ui(11.0), fd.metric("cpu"));
+            p.text(g_rect.left_top() + vec2(36.0, 4.0), Align2::LEFT_TOP, "Memory", theme::ui(11.0), fd.metric("memory"));
         }
         let buttons = Rect::from_min_max(pos2(cols[2].left(), cols[2].bottom() - 68.0), cols[2].max);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(buttons).layout(Layout::top_down(Align::Min)), |ui| {
@@ -483,6 +483,7 @@ struct CellCtx {
     agg: Option<Agg>,
     logical: usize,
     per_core: bool,
+    metrics: MetricColors,
 }
 
 /// Draws one cell. Returns true when the tree chevron was clicked.
@@ -547,8 +548,8 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
         Column::Status => {
             let c = match r.status {
                 Status::Running => color,
-                Status::Suspended => metric_color("gpu"),
-                Status::NotResponding => metric_color("clock"),
+                Status::Suspended => cx.metrics.get("gpu"),
+                Status::NotResponding => cx.metrics.get("clock"),
             };
             widgets::text_fit(ui.painter(), pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, r.status.label(), font, c, rect.width() - 10.0);
         }
