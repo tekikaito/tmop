@@ -95,15 +95,15 @@ impl App {
             fd.bloom,
             &[
                 ("Clock".into(), if cur > 0.0 { format!("{:.2} GHz", cur / 1000.0) } else { "N/A".into() }, "Average of all logical processors".into(), red, (max > 0.0).then(|| cur / (max * 1.25))),
-                ("Fastest core".into(), format!("{:.2} GHz", fastest as f32 / 1000.0), format!("Base {:.2} GHz", max / 1000.0), fd.metric("thermal"), (max > 0.0).then(|| fastest as f32 / (max * 1.25))),
+                ("Fastest core".into(), format!("{:.2} GHz", fastest as f32 / 1000.0), format!("Base {:.2} GHz", max / 1000.0), theme::ORANGE, (max > 0.0).then(|| fastest as f32 / (max * 1.25))),
                 (
                     "Power plan".into(),
                     info.as_ref().map(|i| i.scheme_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "\u{2014}".into()),
                     info.as_ref().map(|i| format!("{} plans installed", i.schemes.len())).unwrap_or_else(|| "Reading power policy\u{2026}".into()),
-                    fd.metric("gpu"),
+                    theme::BLUE,
                     None,
                 ),
-                (batt_title, batt_value, batt_sub, fd.metric("cpu"), batt_frac),
+                (batt_title, batt_value, batt_sub, theme::GREEN, batt_frac),
             ],
         );
         // Clock history + per-core meters.
@@ -135,7 +135,7 @@ impl App {
                 let cx = content.left() + col_w * (i as f32 + 0.5);
                 let m = Rect::from_min_max(pos2(cx - meter_w / 2.0, content.top() + 4.0), pos2(cx + meter_w / 2.0, mbottom));
                 let segs = ((m.height() / 9.0).floor() as usize).clamp(6, 40);
-                led_column(&p, m, segs, mhz / (max * 1.25), &LedStyle::traffic(&fd.metric_colors, fd.bloom));
+                led_column(&p, m, segs, mhz / (max * 1.25), &LedStyle::traffic(fd.bloom));
                 if col_w >= 18.0 {
                     p.text(pos2(cx, mbottom + 4.0), Align2::CENTER_TOP, i.to_string(), theme::ui(11.0), pal.text_dim);
                     p.text(pos2(cx, content.bottom()), Align2::CENTER_BOTTOM, format!("{:.1}", mhz / 1000.0), theme::ui(10.5), pal.text);
@@ -160,8 +160,8 @@ impl App {
                         p.rect_filled(Rect::from_min_max(pos2(content.left(), y - 12.0), pos2(content.right(), y + 12.0)), 3.0, with_alpha(pal.text, 0.03));
                     }
                     p.text(pos2(content.left() + 8.0, y), Align2::LEFT_CENTER, row.name, theme::ui(12.5), pal.text);
-                    p.text(pos2(x_ac, y), Align2::LEFT_CENTER, &row.ac, theme::ui(12.5), red);
-                    p.text(pos2(x_dc, y), Align2::LEFT_CENTER, &row.dc, theme::ui(12.5), fd.metric("thermal"));
+                    p.text(pos2(x_ac, y), Align2::LEFT_CENTER, &row.ac, theme::ui(12.5), theme::RED);
+                    p.text(pos2(x_dc, y), Align2::LEFT_CENTER, &row.dc, theme::ui(12.5), theme::ORANGE);
                 }
             }
             _ => empty_state(&p, content, &pal, self.pro.power.error().unwrap_or("Reading power policy\u{2026}")),
@@ -177,7 +177,7 @@ impl App {
                 if *active {
                     p.rect_filled(r, 4.0, pal.selection);
                 }
-                p.circle_filled(pos2(r.left() + 12.0, y), 4.0, if *active { fd.metric("cpu") } else { pal.text_faint });
+                p.circle_filled(pos2(r.left() + 12.0, y), 4.0, if *active { theme::GREEN } else { pal.text_faint });
                 p.text(pos2(r.left() + 26.0, y), Align2::LEFT_CENTER, if name.is_empty() { guid } else { name }, theme::ui(12.5), if *active { pal.on_selection() } else { pal.text });
                 if *active {
                     p.text(pos2(r.right() - 8.0, y), Align2::RIGHT_CENTER, "Active", theme::ui(11.5), pal.on_selection());
@@ -324,7 +324,7 @@ impl App {
         let mem = mk(&|r| r.mem_pct);
         let disk = mk(&|r| r.disk_pct);
         let gpu = mk(&|r| r.gpu);
-        let legend = [("CPU", fd.metric("cpu")), ("Memory", fd.metric("memory")), ("Disk", fd.metric("thermal")), ("GPU", fd.metric("gpu"))];
+        let legend = [("CPU", fd.metric("cpu")), ("Memory", fd.metric("memory")), ("Disk", fd.metric("disk")), ("GPU", fd.metric("gpu"))];
         let mut lx = content.left() + 44.0;
         for (t, c) in legend {
             p.circle_filled(pos2(lx + 4.0, content.top() + 8.0), 4.0, c);
@@ -345,7 +345,7 @@ impl App {
                 vec![
                     GraphLine { series: &cpu, color: fd.metric("cpu"), range: (0.0, 100.0) },
                     GraphLine { series: &mem, color: fd.metric("memory"), range: (0.0, 100.0) },
-                    GraphLine { series: &disk, color: fd.metric("thermal"), range: (0.0, 100.0) },
+                    GraphLine { series: &disk, color: fd.metric("disk"), range: (0.0, 100.0) },
                     GraphLine { series: &gpu, color: fd.metric("gpu"), range: (0.0, 100.0) },
                 ],
                 fd,
@@ -393,9 +393,9 @@ impl App {
         for (i, e) in self.recorder.events.iter().rev().take(max_rows).enumerate() {
             let y = content.top() + i as f32 * row_h + row_h / 2.0;
             let (tag, c) = match e.kind {
-                EventKind::Started => ("\u{25b2}", fd.metric("cpu")),
-                EventKind::Exited => ("\u{25bc}", fd.metric("clock")),
-                EventKind::Note => ("\u{25cf}", fd.metric("gpu")),
+                EventKind::Started => ("\u{25b2}", theme::GREEN),
+                EventKind::Exited => ("\u{25bc}", theme::RED),
+                EventKind::Note => ("\u{25cf}", theme::BLUE),
             };
             p.text(pos2(content.left() + 2.0, y), Align2::LEFT_CENTER, &e.time[11.min(e.time.len())..], theme::mono(11.5), pal.text_dim);
             p.text(pos2(content.left() + 70.0, y), Align2::LEFT_CENTER, tag, theme::ui(11.0), c);
@@ -417,7 +417,7 @@ impl App {
             } else if resp.hovered() {
                 p.rect_filled(rr, 3.0, pal.hover);
             }
-            widgets::draw_icon(&p, Rect::from_center_size(pos2(rr.left() + 12.0, rr.center().y), vec2(13.0, 13.0)), Icon::Chart, fd.metric("cpu"));
+            widgets::draw_icon(&p, Rect::from_center_size(pos2(rr.left() + 12.0, rr.center().y), vec2(13.0, 13.0)), Icon::Chart, theme::GREEN);
             let clip = p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.right() - 90.0, rr.bottom())));
             let (fg, fg_dim) = if playing { (pal.on_selection(), pal.on_selection()) } else { (pal.text, pal.text_dim) };
             clip.text(pos2(rr.left() + 26.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::ui(12.5), fg);
@@ -485,10 +485,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Established".into(), est.to_string(), format!("{} to the internet", internet), fd.metric("cpu"), Some(est as f32 / total)),
-                ("Listening".into(), listen.to_string(), "TCP ports accepting connections".into(), fd.metric("gpu"), Some(listen as f32 / total)),
-                ("UDP".into(), udp.to_string(), "Open UDP endpoints".into(), fd.metric("memory"), Some(udp as f32 / total)),
-                ("Processes".into(), procs.len().to_string(), "With established connections".into(), fd.metric("thermal"), None),
+                ("Established".into(), est.to_string(), format!("{} to the internet", internet), theme::GREEN, Some(est as f32 / total)),
+                ("Listening".into(), listen.to_string(), "TCP ports accepting connections".into(), theme::BLUE, Some(listen as f32 / total)),
+                ("UDP".into(), udp.to_string(), "Open UDP endpoints".into(), theme::PURPLE, Some(udp as f32 / total)),
+                ("Processes".into(), procs.len().to_string(), "With established connections".into(), theme::ORANGE, None),
                 ("Throughput".into(), format_rate(fd.snap.network.rx_bps + fd.snap.network.tx_bps), format!("\u{2193} {}  \u{2191} {}", format_rate(fd.snap.network.rx_bps), format_rate(fd.snap.network.tx_bps)), fd.metric("network"), Some(fd.smooth.net / 100.0)),
             ],
         );
@@ -543,19 +543,19 @@ impl App {
                 4 => Cell::new(c.remote_text()),
                 5 => {
                     let color = if c.is_established() {
-                        fd.metric("cpu")
+                        theme::GREEN
                     } else if c.is_listen() {
-                        fd.metric("gpu")
+                        theme::BLUE
                     } else if c.proto == Proto::Udp {
-                        fd.metric("memory")
+                        theme::PURPLE
                     } else {
-                        fd.metric("thermal")
+                        theme::ORANGE
                     };
                     Cell::new(c.state_name()).dot(color)
                 }
                 _ => {
                     let s = c.scope();
-                    Cell::new(s).color(if s == "Internet" { fd.metric("network") } else { pal.text_dim })
+                    Cell::new(s).color(if s == "Internet" { theme::BLUE } else { pal.text_dim })
                 }
             }
         };
@@ -592,10 +592,10 @@ impl App {
             &pal,
             fd.bloom,
             &[
-                ("Apps".into(), apps.len().to_string(), format!("{user} per-user, {x86} 32-bit"), fd.metric("gpu"), None),
-                ("Reported size".into(), format_bytes(total as f64), "Sum of EstimatedSize".into(), fd.metric("memory"), None),
-                ("Publishers".into(), publishers.len().to_string(), "Distinct publishers".into(), fd.metric("cpu"), None),
-                ("Largest".into(), biggest.map(|b| format_bytes(b.size as f64)).unwrap_or_default(), biggest.map(|b| b.name.clone()).unwrap_or_default(), fd.metric("thermal"), biggest.map(|b| b.size as f32 / total.max(1) as f32)),
+                ("Apps".into(), apps.len().to_string(), format!("{user} per-user, {x86} 32-bit"), theme::BLUE, None),
+                ("Reported size".into(), format_bytes(total as f64), "Sum of EstimatedSize".into(), theme::PURPLE, None),
+                ("Publishers".into(), publishers.len().to_string(), "Distinct publishers".into(), theme::GREEN, None),
+                ("Largest".into(), biggest.map(|b| format_bytes(b.size as f64)).unwrap_or_default(), biggest.map(|b| b.name.clone()).unwrap_or_default(), theme::ORANGE, biggest.map(|b| b.size as f32 / total.max(1) as f32)),
             ],
         );
         if apps.is_empty() {
@@ -704,7 +704,7 @@ impl App {
             let rects = hsplit(strip, &vec![1.0; shown], GAP);
             for (r, v) in rects.iter().zip(vols.iter()) {
                 let frac = v.used_fraction();
-                let c = if frac > 0.9 { fd.metric("clock") } else if frac > 0.75 { fd.metric("thermal") } else { fd.metric("cpu") };
+                let c = if frac > 0.9 { theme::RED } else if frac > 0.75 { theme::ORANGE } else { theme::GREEN };
                 let title = format!("{} {}", v.root.trim_end_matches('\\'), if v.label.is_empty() { v.kind } else { v.label.as_str() });
                 kit::stat_card(&p, *r, &pal, fd.bloom, &title, &format!("{} free", format_bytes(v.free as f64)), &format!("{} of {} used \u{2022} {}", format_bytes(v.used() as f64), format_bytes(v.total as f64), v.fs), c, Some(frac));
                 let resp = ui.interact(*r, ui.id().with(("vol", &v.root)), Sense::click());
@@ -725,7 +725,7 @@ impl App {
             let bar = Rect::from_min_max(pos2(line.left(), line.bottom() - 3.0), pos2(line.right(), line.bottom()));
             let t = (fd.time as f32 * 0.6).fract();
             p.rect_filled(bar, 1.0, pal.grid);
-            p.rect_filled(Rect::from_min_max(pos2(bar.left() + bar.width() * t * 0.8, bar.top()), pos2(bar.left() + bar.width() * (t * 0.8 + 0.2), bar.bottom())), 1.0, fd.metric("gpu"));
+            p.rect_filled(Rect::from_min_max(pos2(bar.left() + bar.width() * t * 0.8, bar.top()), pos2(bar.left() + bar.width() * (t * 0.8 + 0.2), bar.bottom())), 1.0, theme::BLUE);
         } else if let Some(t) = &tree {
             let mut x = line.left() + 2.0;
             let mut go = None;
@@ -933,7 +933,7 @@ impl App {
                 let biggest = t.largest.first().map(|l| l.0).unwrap_or(1).max(1) as f32;
                 for (i, (size, path)) in t.largest.iter().take(max_rows).enumerate() {
                     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let r = draw_row(i, &name, *size, *size as f32 / biggest, fd.metric("thermal"));
+                    let r = draw_row(i, &name, *size, *size as f32 / biggest, theme::ORANGE);
                     let resp = ui.interact(r, ui.id().with(("big", i)), Sense::click());
                     if resp.clicked() || resp.secondary_clicked() {
                         reveal = Some(PathBuf::from(path));
@@ -971,15 +971,15 @@ pub fn driver_like_page(ui: &mut egui::Ui, p: &egui::Painter, rows: Vec<Rect>, f
     let third_party = list.iter().filter(|s| !s.company.is_empty() && !s.company.contains("Microsoft")).count();
     let n = list.len().max(1) as f32;
     let mut cards = vec![
-        ("Running".to_string(), running.to_string(), format!("of {} {}", list.len(), if drivers { "drivers" } else { "services" }), fd.metric("cpu"), Some(running as f32 / n)),
-        ("Stopped".to_string(), (list.len() - running).to_string(), format!("{disabled} disabled"), fd.metric("thermal"), Some((list.len() - running) as f32 / n)),
-        ("Start at boot".to_string(), auto.to_string(), "Boot, system or automatic".into(), fd.metric("gpu"), Some(auto as f32 / n)),
+        ("Running".to_string(), running.to_string(), format!("of {} {}", list.len(), if drivers { "drivers" } else { "services" }), theme::GREEN, Some(running as f32 / n)),
+        ("Stopped".to_string(), (list.len() - running).to_string(), format!("{disabled} disabled"), theme::ORANGE, Some((list.len() - running) as f32 / n)),
+        ("Start at boot".to_string(), auto.to_string(), "Boot, system or automatic".into(), theme::BLUE, Some(auto as f32 / n)),
     ];
     if drivers {
-        cards.push(("Third party".into(), third_party.to_string(), "Not signed by Microsoft (company name)".into(), fd.metric("memory"), Some(third_party as f32 / n)));
+        cards.push(("Third party".into(), third_party.to_string(), "Not signed by Microsoft (company name)".into(), theme::PURPLE, Some(third_party as f32 / n)));
     } else {
         let shared = list.iter().filter(|s| s.kind == "Shared process" && s.running).count();
-        cards.push(("Shared hosts".into(), shared.to_string(), "Running in svchost groups".into(), fd.metric("memory"), Some(shared as f32 / n)));
+        cards.push(("Shared hosts".into(), shared.to_string(), "Running in svchost groups".into(), theme::PURPLE, Some(shared as f32 / n)));
     }
     stat_row(p, rows[0], pal, bloom, &cards);
     if list.is_empty() {
@@ -1015,8 +1015,8 @@ pub fn driver_like_page(ui: &mut egui::Ui, p: &egui::Painter, rows: Vec<Rect>, f
         match map(col) {
             0 => Cell::new(&s.name),
             1 => Cell::new(if drivers && !s.description.is_empty() { &s.description } else { &s.display }).dim(pal),
-            2 => Cell::new(s.state).dot(if s.running { fd.metric("cpu") } else { pal.text_faint }),
-            3 => Cell::new(s.start).color(if s.start == "Disabled" { fd.metric("clock") } else { pal.text_dim }),
+            2 => Cell::new(s.state).dot(if s.running { theme::GREEN } else { pal.text_faint }),
+            3 => Cell::new(s.start).color(if s.start == "Disabled" { theme::RED } else { pal.text_dim }),
             4 => Cell::new(s.kind).dim(pal),
             5 => {
                 if drivers {

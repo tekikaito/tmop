@@ -49,7 +49,7 @@ impl App {
         let s = fd.snap;
         let temp = s.thermal.max_c();
         let cols: [MeterColumn<'_>; 4] = [
-            ("CPU", fd.metric("cpu"), Some(fd.smooth.cpu / 100.0), format!("{:.1}%", s.cpu.total_pct), LedStyle::traffic(&fd.metric_colors, fd.bloom), Device::Cpu),
+            ("CPU", fd.metric("cpu"), Some(fd.smooth.cpu / 100.0), format!("{:.1}%", s.cpu.total_pct), LedStyle::traffic(fd.bloom), Device::Cpu),
             (
                 "Clock",
                 fd.metric("clock"),

@@ -493,16 +493,25 @@ pub const METRICS: [(&str, &str); 9] = [
     ("kernel", "Kernel"),
 ];
 
-/// Built-in metric colours. `yellow` (the middle of the green/yellow/red LED ramp) and unknown
-/// keys have fixed colours.
+// Fixed accent colours: the built-in metric colours, plus yellow for the middle of the
+// green/yellow/red ramps. Status and severity colours (ok/warning/danger ramps, process,
+// connection and service states, summary-card accents) use these rather than a metric's colour,
+// so `graphs.metricColors` overrides never reach them.
+pub const GREEN: Color32 = Color32::from_rgb(0x1F, 0xC4, 0x48);
+pub const PURPLE: Color32 = Color32::from_rgb(0xC0, 0x40, 0xFF);
+pub const BLUE: Color32 = Color32::from_rgb(0x2F, 0x8B, 0xFF);
+pub const ORANGE: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x2E);
+pub const RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x3B);
+pub const YELLOW: Color32 = Color32::from_rgb(0xE8, 0xD0, 0x2A);
+
+/// Built-in metric colours. Unknown keys are grey.
 pub fn default_metric_color(key: &str) -> Color32 {
     match key {
-        "cpu" | "disk" => Color32::from_rgb(0x1F, 0xC4, 0x48),
-        "memory" => Color32::from_rgb(0xC0, 0x40, 0xFF),
-        "gpu" | "network" => Color32::from_rgb(0x2F, 0x8B, 0xFF),
-        "thermal" => Color32::from_rgb(0xFF, 0x9A, 0x2E),
-        "clock" | "power" | "kernel" => Color32::from_rgb(0xFF, 0x3B, 0x3B),
-        "yellow" => Color32::from_rgb(0xE8, 0xD0, 0x2A),
+        "cpu" | "disk" => GREEN,
+        "memory" => PURPLE,
+        "gpu" | "network" => BLUE,
+        "thermal" => ORANGE,
+        "clock" | "power" | "kernel" => RED,
         _ => Color32::from_rgb(0x9A, 0x9A, 0x9A),
     }
 }

@@ -15,7 +15,7 @@ fn test_color(fd: &FrameData<'_>, t: Test) -> Color32 {
     match t.group() {
         "cpu" => fd.metric("cpu"),
         "memory" => fd.metric("memory"),
-        _ => fd.metric("thermal"),
+        _ => fd.metric("disk"),
     }
 }
 
@@ -122,9 +122,9 @@ impl App {
         let done = Test::ALL.len() - prog.queue.len() - prog.running.map(|_| 1).unwrap_or(0);
         let overall = if running { (done as f32 + prog.fraction) / total } else { 0.0 };
         p.text(side.left_top(), Align2::LEFT_TOP, "Test progress", theme::ui(12.0), pal.text_dim);
-        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 20.0), vec2(side.width(), 12.0)), 24, prog.fraction, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(fd.metric("gpu"), fd.bloom) });
+        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 20.0), vec2(side.width(), 12.0)), 24, prog.fraction, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(theme::BLUE, fd.bloom) });
         p.text(side.left_top() + vec2(0.0, 44.0), Align2::LEFT_TOP, "Queue", theme::ui(12.0), pal.text_dim);
-        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 64.0), vec2(side.width(), 12.0)), 24, if running { overall } else { 0.0 }, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(fd.metric("cpu"), fd.bloom) });
+        led_row(&p, Rect::from_min_size(side.left_top() + vec2(0.0, 64.0), vec2(side.width(), 12.0)), 24, if running { overall } else { 0.0 }, &LedStyle { rim: false, rounding: 1.0, ..LedStyle::new(theme::GREEN, fd.bloom) });
         let next = if prog.queue.is_empty() { if running { "Last test".to_string() } else { String::new() } } else { format!("Next: {}", prog.queue.iter().map(|t| t.title()).collect::<Vec<_>>().join(", ")) };
         let gal = p.layout(next, theme::ui(12.0), pal.text_dim, side.width());
         p.galley(side.left_top() + vec2(0.0, 90.0), gal, pal.text_dim);

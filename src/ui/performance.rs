@@ -163,7 +163,7 @@ impl App {
         }
         let det = self.pro.cpu_details.clone().unwrap_or_default();
         let name = if s.cpu.name.is_empty() { "CPU".to_string() } else { s.cpu.name.clone() };
-        let mut y = self.detail_title(ui, rect, &name, &format!("{:.1}%", s.cpu.total_pct), fd.smooth.cpu / 100.0, [green, fd.metric("yellow"), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, &name, &format!("{:.1}%", s.cpu.total_pct), fd.smooth.cpu / 100.0, [green, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, format!("{} logical processors", s.cpu.logical_count), theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -253,7 +253,7 @@ impl App {
         let pal = fd.pal;
         let s = fd.snap;
         let purple = fd.metric("memory");
-        let mut y = self.detail_title(ui, rect, "Memory", &format!("{:.1}%", s.memory.used_pct), fd.smooth.memory / 100.0, [purple, theme::lighten(purple, 0.2), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, "Memory", &format!("{:.1}%", s.memory.used_pct), fd.smooth.memory / 100.0, [purple, theme::lighten(purple, 0.2), theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, format!("{} total physical memory", format_bytes(s.memory.total as f64)), theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -301,7 +301,7 @@ impl App {
         let pal = fd.pal;
         let s = fd.snap;
         let blue = fd.metric("gpu");
-        let mut y = self.detail_title(ui, rect, "GPU", &if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "N/A".into() }, fd.smooth.gpu / 100.0, [blue, theme::lighten(blue, 0.3), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, "GPU", &if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "N/A".into() }, fd.smooth.gpu / 100.0, [blue, theme::lighten(blue, 0.3), theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Busiest engine of the busiest adapter (PDH GPU Engine counters)", theme::ui(12.0), pal.text_dim);
         y += 24.0;
@@ -332,7 +332,7 @@ impl App {
         let pal = fd.pal;
         let s = fd.snap;
         let green = fd.metric("disk");
-        let mut y = self.detail_title(ui, rect, "Disk", &format!("{:.1}%", s.disk.active_pct), fd.smooth.disk / 100.0, [green, fd.metric("yellow"), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, "Disk", &format!("{:.1}%", s.disk.active_pct), fd.smooth.disk / 100.0, [green, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Active time (all physical disks)", theme::ui(12.0), pal.text_dim);
         y += 19.0;
@@ -349,7 +349,7 @@ impl App {
         p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, format!("Read  \u{2022}  Write    scale {}", format_rate(m as f64)), theme::ui(11.5), pal.text_dim);
         y += 18.0;
         let g2 = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), rect.bottom() - 110.0));
-        let mut g = self.graph(vec![GraphLine { series: &fd.hist.disk_read, color: green, range: (0.0, m) }, GraphLine { series: &fd.hist.disk_write, color: fd.metric("thermal"), range: (0.0, m) }], fd);
+        let mut g = self.graph(vec![GraphLine { series: &fd.hist.disk_read, color: green, range: (0.0, m) }, GraphLine { series: &fd.hist.disk_write, color: theme::ORANGE, range: (0.0, m) }], fd);
         g.border = Some(with_alpha(green, 0.7));
         draw_graph(&p, g2, &g);
         y = g2.bottom() + 14.0;
@@ -361,14 +361,14 @@ impl App {
         let pal = fd.pal;
         let s = fd.snap;
         let blue = fd.metric("network");
-        let mut y = self.detail_title(ui, rect, "Network", &format_rate(s.network.rx_bps + s.network.tx_bps), fd.smooth.net / 100.0, [blue, theme::lighten(blue, 0.3), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, "Network", &format_rate(s.network.rx_bps + s.network.tx_bps), fd.smooth.net / 100.0, [blue, theme::lighten(blue, 0.3), theme::RED], fd);
         let p = ui.painter().clone();
         let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "Throughput (GetIfTable2, all adapters)", theme::ui(12.0), pal.text_dim);
         p.text(pos2(rect.right(), y), Align2::RIGHT_TOP, format!("Receive  \u{2022}  Send    scale {}", format_rate(m as f64)), theme::ui(11.5), pal.text_dim);
         y += 19.0;
         let gr = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), rect.bottom() - 110.0));
-        let mut g = self.graph(vec![GraphLine { series: &fd.hist.net_rx, color: blue, range: (0.0, m) }, GraphLine { series: &fd.hist.net_tx, color: fd.metric("thermal"), range: (0.0, m) }], fd);
+        let mut g = self.graph(vec![GraphLine { series: &fd.hist.net_rx, color: blue, range: (0.0, m) }, GraphLine { series: &fd.hist.net_tx, color: theme::ORANGE, range: (0.0, m) }], fd);
         g.border = Some(blue);
         g.fill = 0.10;
         draw_graph(&p, gr, &g);
@@ -386,7 +386,7 @@ impl App {
         let pal = fd.pal;
         let s = fd.snap;
         let orange = fd.metric("thermal");
-        let mut y = self.detail_title(ui, rect, "Thermals", &s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("N/A".into()), fd.smooth.thermal / 110.0, [fd.metric("cpu"), fd.metric("yellow"), fd.metric("clock")], fd);
+        let mut y = self.detail_title(ui, rect, "Thermals", &s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("N/A".into()), fd.smooth.thermal / 110.0, [theme::GREEN, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
         p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "ACPI thermal zones (firmware sensors, not the CPU package)", theme::ui(12.0), pal.text_dim);
         y += 19.0;

@@ -1,7 +1,7 @@
 //! Custom-painted widgets: scrolling history graphs with compressed time, glow and
 //! smoothed curves; segmented LED meters; dot-matrix LED panels; cards; toggles; icons.
 
-use super::theme::{self, dim, lighten, mix, with_alpha, MetricColors, Palette};
+use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
 use crate::metrics::Series;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Rounding, Sense, Shape, Stroke, Ui, Vec2};
 
@@ -682,9 +682,10 @@ impl LedStyle {
     pub fn new(lit: Color32, bloom: f32) -> Self {
         Self { lit, unlit_factor: 0.22, positional: None, bloom, rounding: 1.5, gap: 2.0, rim: true }
     }
-    /// Green → yellow → red by position (CPU load meters): the CPU and clock colours around yellow.
-    pub fn traffic(m: &MetricColors, bloom: f32) -> Self {
-        Self { positional: Some([m.get("cpu"), m.get("yellow"), m.get("clock")]), ..Self::new(m.get("cpu"), bloom) }
+    /// Green → yellow → red by position (CPU load meters). A severity ramp, so it keeps fixed
+    /// colours whatever the metric colours are.
+    pub fn traffic(bloom: f32) -> Self {
+        Self { positional: Some([theme::GREEN, theme::YELLOW, theme::RED]), ..Self::new(theme::GREEN, bloom) }
     }
     fn color_at(&self, t: f32) -> Color32 {
         match self.positional {

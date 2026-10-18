@@ -3,7 +3,7 @@
 
 use super::icons::IconCache;
 use super::summary::proc_icon;
-use super::theme::{self, mix, with_alpha, MetricColors, Palette};
+use super::theme::{self, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, GraphLine, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
@@ -297,7 +297,7 @@ impl App {
                             let agg = agg_cache.get(idx).copied();
                             for c in &cols {
                                 row.col(|ui| {
-                                    let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, agg, logical, per_core, metrics: fd.metric_colors };
+                                    let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, agg, logical, per_core };
                                     if cell_ui(ui, r, *c, &pal, cx, icons) {
                                         toggle = Some(key);
                                     }
@@ -483,7 +483,6 @@ struct CellCtx {
     agg: Option<Agg>,
     logical: usize,
     per_core: bool,
-    metrics: MetricColors,
 }
 
 /// Draws one cell. Returns true when the tree chevron was clicked.
@@ -548,8 +547,8 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
         Column::Status => {
             let c = match r.status {
                 Status::Running => color,
-                Status::Suspended => cx.metrics.get("gpu"),
-                Status::NotResponding => cx.metrics.get("clock"),
+                Status::Suspended => theme::BLUE,
+                Status::NotResponding => theme::RED,
             };
             widgets::text_fit(ui.painter(), pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, r.status.label(), font, c, rect.width() - 10.0);
         }
