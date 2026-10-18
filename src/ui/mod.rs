@@ -845,29 +845,42 @@ impl App {
             let rect = ui.max_rect();
             let hovered = ctx.input(|i| i.pointer.hover_pos().map(|p| rect.contains(p)).unwrap_or(false));
             let op = if self.settings.popout_opaque_on_hover && hovered { 1.0 } else { opacity_setting };
+            // Registered before the chrome so the close/chevron/drag areas stay on top of it.
+            let menu = ui.interact(rect, ui.id().with("popout-menu"), Sense::click());
             let ev = popout::draw(ui, rect, &skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
             if ev.drag {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }
             close |= ev.close;
-            let menu = ui.interact(rect, ui.id().with("popout-menu"), Sense::click());
-            if ev.menu || menu.secondary_clicked() {
-                // handled through the context menu below
-            }
-            menu.context_menu(|ui| {
+            let catalog = &self.catalog;
+            let skin_menu = |ui: &mut egui::Ui, new_skin: &mut Option<String>, close: &mut bool| {
                 ui.label(egui::RichText::new("Skin").strong());
-                for k in &self.catalog.skins {
+                for k in &catalog.skins {
                     if ui.radio(k.id == skin.id, &k.name).clicked() {
-                        new_skin = Some(k.id.clone());
+                        *new_skin = Some(k.id.clone());
                         ui.close_menu();
                     }
                 }
                 ui.separator();
                 if ui.button("Close popout").clicked() {
-                    close = true;
+                    *close = true;
                     ui.close_menu();
                 }
-            });
+            };
+            menu.context_menu(|ui| skin_menu(ui, &mut new_skin, &mut close));
+            if let Some(chev) = &ev.chevron {
+                let id = ui.id().with("popout-chevron-menu");
+                if ev.menu {
+                    ui.memory_mut(|m| m.toggle_popup(id));
+                }
+                egui::popup_below_widget(ui, id, chev, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                    ui.set_min_width(140.0);
+                    skin_menu(ui, &mut new_skin, &mut close);
+                });
+                if new_skin.is_some() || close {
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            }
         });
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             close = true;

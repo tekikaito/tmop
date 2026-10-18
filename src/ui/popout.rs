@@ -375,6 +375,8 @@ pub struct PopoutEvents {
     pub close: bool,
     pub drag: bool,
     pub menu: bool,
+    /// The chevron, for anchoring the skin menu.
+    pub chevron: Option<egui::Response>,
 }
 
 /// Draws the whole popout into `rect`.
@@ -465,6 +467,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     painter.add(Shape::line(vec![chev.left_center() + vec2(3.0, -3.5), chev.center() + vec2(0.0, 3.5), chev.right_center() + vec2(-3.0, -3.5)], Stroke::new(1.4_f32, ctl(chev_resp.hovered()))));
     ev.close = close_resp.clicked();
     ev.menu = chev_resp.clicked();
+    ev.chevron = Some(chev_resp);
     let drag_rect = Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom()));
     let drag = ui.interact(drag_rect, ui.id().with("popout-drag"), egui::Sense::click_and_drag());
     ev.drag = drag.drag_started();

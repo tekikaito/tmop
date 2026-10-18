@@ -188,6 +188,9 @@ impl Collector {
             ("gpu_mem", r"\GPU Adapter Memory(*)\Dedicated Usage"),
             ("thermal", r"\Thermal Zone Information(*)\Temperature"),
             ("pagefile", r"\Paging File(_Total)\% Usage"),
+            // Live clock as a share of base; CurrentMhz from CallNtPowerInformation stays at base.
+            ("cpu_perf_total", r"\Processor Information(_Total)\% Processor Performance"),
+            ("cpu_perf", r"\Processor Information(*)\% Processor Performance"),
         ]);
         Self {
             seq: 0,
@@ -233,6 +236,15 @@ impl Collector {
                 .filter(|(_, k)| *k > 200.0)
                 .map(|(n, k)| (n, (k - 273.15) as f32))
                 .collect();
+            // CPU clock
+            if let Some(base) = snap.cpu.max_mhz {
+                if let Some(mhz) = pdh.value("cpu_perf_total").and_then(|pct| perf_mhz(base, pct)) {
+                    snap.cpu.current_mhz = Some(mhz);
+                }
+                if let Some(cores) = per_core_perf_mhz(&pdh.array("cpu_perf"), base, snap.cpu.per_core_mhz.len()) {
+                    snap.cpu.per_core_mhz = cores;
+                }
+            }
         } else {
             snap.errors.push("PDH unavailable: disk, GPU and thermal readings disabled".into());
         }
@@ -385,6 +397,31 @@ impl Collector {
     }
 }
 
+/// MHz from a `% Processor Performance` reading (share of base clock; above 100 while boosting).
+pub(crate) fn perf_mhz(base_mhz: u32, pct: f64) -> Option<u32> {
+    if base_mhz == 0 || !pct.is_finite() || pct <= 0.0 {
+        return None;
+    }
+    Some((base_mhz as f64 * pct.min(1000.0) / 100.0).round() as u32)
+}
+
+/// Per-core MHz from `Processor Information(*)` instances (`"group,index"`), group 0 only to
+/// match the logical-processor count; `None` unless each of the `n` cores has a reading.
+pub(crate) fn per_core_perf_mhz(items: &[(String, f64)], base_mhz: u32, n: usize) -> Option<Vec<u32>> {
+    if n == 0 {
+        return None;
+    }
+    let mut out = vec![None; n];
+    for (name, pct) in items {
+        let Some(("0", idx)) = name.split_once(',') else { continue };
+        let Ok(i) = idx.parse::<usize>() else { continue };
+        if let Some(slot) = out.get_mut(i) {
+            *slot = perf_mhz(base_mhz, *pct);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Parses `pid_1234_luid_0x..._0x..._phys_0_eng_3_engtype_3D` instance names.
 pub(crate) fn parse_gpu_instance(name: &str) -> Option<(u32, String, String)> {
     let pid: u32 = name.strip_prefix("pid_")?.split('_').next()?.parse().ok()?;
@@ -440,5 +477,25 @@ mod tests {
         assert!((g.utilization_pct - 55.0).abs() < 0.01);
         assert_eq!(per[&1], 40.0);
         assert_eq!(per[&1234], 30.0);
+    }
+
+    #[test]
+    fn clock_from_processor_performance() {
+        assert_eq!(perf_mhz(3000, 100.0), Some(3000));
+        assert_eq!(perf_mhz(3000, 150.0), Some(4500));
+        assert_eq!(perf_mhz(3000, 1e9), Some(30000));
+        assert_eq!(perf_mhz(0, 150.0), None);
+        assert_eq!(perf_mhz(3000, 0.0), None);
+        assert_eq!(perf_mhz(3000, f64::NAN), None);
+        let items = vec![
+            ("_Total".to_string(), 120.0),
+            ("0,_Total".into(), 120.0),
+            ("0,1".into(), 110.0),
+            ("0,0".into(), 130.0),
+            ("1,0".into(), 90.0),
+        ];
+        assert_eq!(per_core_perf_mhz(&items, 2000, 2), Some(vec![2600, 2200]));
+        assert_eq!(per_core_perf_mhz(&items, 2000, 3), None);
+        assert_eq!(per_core_perf_mhz(&items, 2000, 0), None);
     }
 }
