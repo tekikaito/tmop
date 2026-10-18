@@ -317,12 +317,24 @@ mod tests {
         assert!(!list.iter().any(|f| f.starts_with('@') || is_built_in(f)));
         let arial = load("Arial").expect("Arial");
         assert!(arial.parses() && arial.index == 0);
+        let mut egui_gets = arial;
         if list.iter().any(|f| f == "Cambria Math") {
             let math = load("Cambria Math").expect("Cambria Math");
             assert_eq!((&math.bytes[..4], math.index), (&b"ttcf"[..], 1));
             assert!(math.parses());
+            egui_gets = math;
         }
         assert_eq!(load("No Such Font 4f1c"), None);
+        // egui lays out display text in it.
+        use crate::ui::theme;
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx, Some(egui_gets));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| ui.label(egui::RichText::new("TMOP 42%").font(theme::display(20.0))));
+            });
+        }
     }
 
     /// A two-face collection: each face is found by its `name` table; anything else isn't.
