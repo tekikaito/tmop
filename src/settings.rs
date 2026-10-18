@@ -38,7 +38,8 @@ pub struct Settings {
     pub appearance: Appearance,
     pub graphs: Graphs,
     pub popout: Popout,
-    /// Set when the file is from a newer TMOP: [`Settings::save`] refuses to overwrite it.
+    /// Set when the file is from a newer TMOP, or is an old one that couldn't be backed up:
+    /// [`Settings::save`] refuses to overwrite it.
     #[serde(skip)]
     pub read_only: bool,
 }
@@ -256,6 +257,8 @@ pub enum LoadOutcome {
     Upgraded(u32),
     /// `version` is newer than this build: defaults, read-only, the file is left alone.
     Newer(u64),
+    /// Migrated, but the original couldn't be backed up: read-only, the file is left alone.
+    BackupFailed(String),
     /// Unreadable/invalid JSON, no version or wrong value types; file set aside as `.corrupt.`.
     Corrupt(String),
 }
@@ -337,16 +340,23 @@ impl Settings {
             Err(_) => return Load::defaults(LoadOutcome::Missing),
         };
         match Self::from_json(&text) {
-            Ok(load) => {
+            Ok(mut load) => {
                 let old = match load.outcome {
                     LoadOutcome::MigratedV12 => Some(12),
                     LoadOutcome::Upgraded(v) => Some(v),
                     _ => None,
                 };
                 // Keep the original, then write the migrated file so it migrates only once.
+                // Without a backup the original must never be overwritten, so go read-only.
                 if let Some(v) = old {
-                    if std::fs::write(path.with_extension(format!("v{v}.bak")), &text).is_ok() {
-                        let _ = load.settings.save(path);
+                    match backup(path, v, &text) {
+                        Ok(()) => {
+                            let _ = load.settings.save(path);
+                        }
+                        Err(e) => {
+                            load.settings.read_only = true;
+                            load.outcome = LoadOutcome::BackupFailed(e.to_string());
+                        }
                     }
                 }
                 load
@@ -367,7 +377,7 @@ impl Settings {
     /// Atomic save: write `<path>.tmp.<pid>` then rename over the target.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if self.read_only {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the file is from a newer TMOP and is not overwritten"));
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "settings are read-only; the file is not overwritten"));
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -378,6 +388,29 @@ impl Settings {
         std::fs::write(&tmp, self.to_json())?;
         std::fs::rename(&tmp, path)
     }
+}
+
+/// How many `.bak` names [`backup`] tries before giving up.
+const BACKUP_SLOTS: u32 = 10;
+
+/// Writes `text` to `settings.v<v>.bak` next to `path`, never replacing an existing backup:
+/// if that name is taken it uses `settings.v<v>.1.bak`, `.2.bak`, ...
+fn backup(path: &Path, v: u32, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    for n in 0..BACKUP_SLOTS {
+        let ext = if n == 0 { format!("v{v}.bak") } else { format!("v{v}.{n}.bak") };
+        let bak = path.with_extension(ext);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&bak) {
+            Ok(mut f) => {
+                return f.write_all(text.as_bytes()).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&bak);
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{BACKUP_SLOTS} v{v} backups already exist")))
 }
 
 /// TMOG `schemaVersion` 12 key → TMOP `section.key`. TMOP 0.1 wrote the same format and kept
@@ -626,6 +659,31 @@ mod tests {
         let second = Settings::load(&path);
         assert!(matches!(second.outcome, LoadOutcome::Loaded));
         assert_eq!(second.settings, first.settings);
+        // A later v12 file (TMOP 0.1 run again) never replaces the first backup.
+        let later = r#"{"schemaVersion":12,"theme":"dark"}"#;
+        std::fs::write(&path, later).unwrap();
+        assert!(matches!(Settings::load(&path).outcome, LoadOutcome::MigratedV12));
+        assert_eq!(std::fs::read_to_string(dir.join("settings.v12.bak")).unwrap(), SAMPLE);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.v12.1.bak")).unwrap(), later);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_without_a_backup_is_read_only() {
+        let dir = std::env::temp_dir().join(format!("tmop-settings-nobak-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, SAMPLE).unwrap();
+        for n in 0..BACKUP_SLOTS {
+            let ext = if n == 0 { "v12.bak".to_string() } else { format!("v12.{n}.bak") };
+            std::fs::write(path.with_extension(ext), "taken").unwrap();
+        }
+        let load = Settings::load(&path);
+        assert!(matches!(load.outcome, LoadOutcome::BackupFailed(_)));
+        assert!(load.settings.read_only);
+        assert_eq!(load.settings.popout.skin, "com.tmog.console", "migrated values are still used");
+        assert!(load.settings.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE, "an original without a backup must not be touched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

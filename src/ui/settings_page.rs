@@ -241,7 +241,7 @@ impl App {
             match settings::import_tmog() {
                 Ok(load) => {
                     self.status = load.describe("Imported TMOG settings");
-                    // A file from a newer TMOP stays protected after an import.
+                    // A read-only file (newer TMOP, or no backup) stays protected after an import.
                     let read_only = self.settings.read_only;
                     self.settings = Settings { read_only, ..load.settings };
                     self.settings_dirty = true;

@@ -814,12 +814,12 @@ impl App {
         }
     }
 
-    /// `popoutMode`: `off`, `desktop`, `normal` or `topMost`.
+    /// `popout.mode`: `off`, `desktop`, `normal` or `topMost`.
     pub fn popout_mode(&self) -> String {
         self.settings.popout.mode.clone()
     }
 
-    /// Opens or closes the popout and records it in `popoutMode`.
+    /// Opens or closes the popout and records it in `popout.mode` (and `popout.lastMode`).
     pub fn set_popout(&mut self, open: bool) {
         self.popout_open = open;
         let mode = self.popout_mode();
@@ -1145,7 +1145,7 @@ impl App {
         }
         // Frame pacing. egui shortens every delay by its predicted frame time, which would
         // double the rate (or pin it to the monitor's refresh), so add that back to get the
-        // configured visualFrameRate.
+        // configured appearance.frameRate.
         let fps = self.settings.appearance.frame_rate.clamp(10, 240) as f32;
         let wait = if hf && interval.is_some() { Duration::from_secs_f32(1.0 / fps) } else { Duration::from_millis(500) };
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
