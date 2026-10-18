@@ -35,12 +35,32 @@ once.
   on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.
 
+## Open TMOP instead of Windows Task Manager
+
+In *Settings*, under *Task Manager*, turn on **Open TMOP instead of Windows Task Manager**.
+From then on, Ctrl+Shift+Esc, *Task Manager* in the taskbar menu and `taskmgr` all open TMOP.
+Windows asks for administrator permission, and the change applies to every user of the PC.
+
+- Pressing Ctrl+Shift+Esc again brings the open TMOP window to the front instead of opening a
+  second one.
+- You can still reach the real Task Manager: *File* → *Open Windows Task Manager*.
+- Windows remembers where TMOP.exe is. **Before you move or delete TMOP.exe, turn the setting
+  off**; otherwise Ctrl+Shift+Esc opens nothing. If you start a moved copy, TMOP offers to fix it.
+- To turn it off without the window, run `TMOP.exe --restore-taskmgr`.
+- If TMOP.exe is already gone, open *Command Prompt* as administrator and run:
+
+  ```
+  reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe" /v Debugger /f
+  ```
+
 ## Update or remove
 
 - **Update:** download the newest version as above and replace your old TMOP.exe with it.
-  Your settings are kept.
-- **Remove:** delete TMOP.exe. To also remove its settings, delete the folder
-  `%LOCALAPPDATA%\TMOP` (paste that into the address bar of File Explorer).
+  Your settings are kept. Keep the new TMOP.exe in the same place if TMOP opens instead of
+  Task Manager.
+- **Remove:** if TMOP opens instead of Task Manager, turn that off first (see above). Then delete
+  TMOP.exe. To also remove its settings, delete the folder `%LOCALAPPDATA%\TMOP` (paste that into
+  the address bar of File Explorer).
 
 ## Good to know
 

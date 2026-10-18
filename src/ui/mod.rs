@@ -9,6 +9,7 @@ pub mod performance;
 pub mod popout;
 pub mod pro_pages;
 pub mod processes;
+pub mod replace;
 pub mod settings_page;
 pub mod summary;
 pub mod table;
@@ -319,6 +320,7 @@ pub struct App {
     pub pro: pro_pages::ProState,
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
+    pub replace: replace::ReplaceUi,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
@@ -365,6 +367,7 @@ impl App {
             pro: pro_pages::ProState::default(),
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
+            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
@@ -510,6 +513,7 @@ impl App {
                         ui.close_menu();
                     }
                     ui.separator();
+                    self.replace_menu_item(ui);
                     if ui.button("Exit").clicked() {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
@@ -1110,7 +1114,9 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         } else {
+            self.replace_poll(ctx);
             self.menu_bar(ctx, &pal);
+            self.replace_banner(ctx, &pal);
             self.status_bar(ctx, &pal, &snap);
             self.sidebar(ctx, &pal);
             let frame = egui::Frame::none().fill(pal.body);
@@ -1133,6 +1139,7 @@ impl App {
                 Page::DiskSpace => self.diskspace_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
+            self.replace_dialog(ctx, &pal);
             if self.popout_open {
                 self.popout_viewport(ctx, &fd);
             }
