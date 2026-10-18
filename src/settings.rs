@@ -97,7 +97,9 @@ pub struct Graphs {
     pub compressed_time: bool,
     pub history_multiplier: u32,
     pub pixels_per_update: u32,
-    /// Metric id → `#rrggbb` override. Not used yet.
+    /// Metric id (`cpu`, `disk`, `memory`, `network`, `gpu`, `thermal`, `clock`, `power`,
+    /// `kernel`) → `#RRGGBB` override; a missing id keeps its built-in colour. Applies only
+    /// with `colorKeyed` (see [`crate::ui::theme::MetricColors`]).
     pub metric_colors: BTreeMap<String, String>,
 }
 
@@ -607,6 +609,22 @@ mod tests {
         assert_eq!(load.settings.window.process_table_column_widths.get("cpu"), Some(&80));
         assert!(load.describe("settings").ends_with("ignored unknown keys: foo, graphs.bar, schemaVersion"));
         assert!(!load.settings.to_json().contains("foo"));
+    }
+
+    #[test]
+    fn metric_colors_serialise_under_graphs() {
+        let mut s = Settings::default();
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["graphs"]["metricColors"], serde_json::json!({}), "no overrides by default");
+        s.graphs.metric_colors.insert("disk".into(), "#112233".into());
+        s.graphs.metric_colors.insert("kernel".into(), "#AABBCC".into());
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["graphs"]["metricColors"], serde_json::json!({"disk": "#112233", "kernel": "#AABBCC"}));
+        let load = parse(r##"{"version":1,"graphs":{"metricColors":{"cpu":"#010203","power":"#fff"}}}"##);
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings.graphs.metric_colors.get("cpu").map(String::as_str), Some("#010203"));
+        assert_eq!(load.settings.graphs.metric_colors.get("power").map(String::as_str), Some("#fff"));
+        assert!(Settings::from_json(r#"{"version":1,"graphs":{"metricColors":{"cpu":7}}}"#).is_err());
     }
 
     #[test]

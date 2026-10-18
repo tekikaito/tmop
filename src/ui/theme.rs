@@ -479,8 +479,23 @@ impl Palette {
     }
 }
 
-/// Metric accent colours.
-pub fn metric_color(key: &str) -> Color32 {
+/// Metrics with a colour of their own (`graphs.metricColors` keys), with their labels in
+/// Settings → Graphs.
+pub const METRICS: [(&str, &str); 9] = [
+    ("cpu", "CPU"),
+    ("disk", "Disk"),
+    ("memory", "Memory"),
+    ("network", "Network"),
+    ("gpu", "GPU"),
+    ("thermal", "Thermals"),
+    ("clock", "Clock"),
+    ("power", "Power"),
+    ("kernel", "Kernel"),
+];
+
+/// Built-in metric colours. `yellow` (the middle of the green/yellow/red LED ramp) and unknown
+/// keys have fixed colours.
+pub fn default_metric_color(key: &str) -> Color32 {
     match key {
         "cpu" | "disk" => Color32::from_rgb(0x1F, 0xC4, 0x48),
         "memory" => Color32::from_rgb(0xC0, 0x40, 0xFF),
@@ -489,6 +504,43 @@ pub fn metric_color(key: &str) -> Color32 {
         "clock" | "power" | "kernel" => Color32::from_rgb(0xFF, 0x3B, 0x3B),
         "yellow" => Color32::from_rgb(0xE8, 0xD0, 0x2A),
         _ => Color32::from_rgb(0x9A, 0x9A, 0x9A),
+    }
+}
+
+/// Metric accent colours (built-in only).
+pub fn metric_color(key: &str) -> Color32 {
+    default_metric_color(key)
+}
+
+/// The colours that identify a metric:[`default_metric_color`] with the `graphs.metricColors`
+/// overrides applied. Resolved once per frame (see [`super::FrameData::metric`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MetricColors {
+    /// Overrides, indexed like [`METRICS`].
+    custom: [Option<Color32>; METRICS.len()],
+}
+
+impl MetricColors {
+    /// Overrides from the settings. Without colour keying there are none (graphs use one blue
+    /// and every other accent keeps its built-in colour); values that aren't colours are ignored.
+    pub fn from_settings(g: &crate::settings::Graphs) -> Self {
+        let mut m = Self::default();
+        if g.color_keyed {
+            for (i, (key, _)) in METRICS.iter().enumerate() {
+                m.custom[i] = g.metric_colors.get(*key).and_then(|v| crate::skin::Color::parse(v)).map(from_skin);
+            }
+        }
+        m
+    }
+
+    /// The colour of metric `key`.
+    pub fn get(&self, key: &str) -> Color32 {
+        self.custom(key).unwrap_or_else(|| default_metric_color(key))
+    }
+
+    /// The override for `key`, if there is one.
+    pub fn custom(&self, key: &str) -> Option<Color32> {
+        METRICS.iter().position(|(k, _)| *k == key).and_then(|i| self.custom[i])
     }
 }
 
@@ -547,6 +599,46 @@ mod tests {
         for (a, b) in [(l.bg, Color32::from_rgb(0x0A, 0x16, 0x26)), (l.rim, Color32::from_rgb(0x1A, 0x2C, 0x44)), (l.lit, Color32::from_rgb(0x9C, 0xB8, 0xD8)), (l.unlit, Color32::from_rgb(0x16, 0x26, 0x3A))] {
             assert!(close(a, b), "{a:?} vs {b:?}");
         }
+    }
+
+    /// Without overrides every metric keeps the colour it had before overrides existed,
+    /// including the ones that shared a colour.
+    #[test]
+    fn metric_colors_default_to_the_built_in_ones() {
+        let m = MetricColors::from_settings(&crate::settings::Graphs::default());
+        assert_eq!(m, MetricColors::default());
+        let green = Color32::from_rgb(0x1F, 0xC4, 0x48);
+        let blue = Color32::from_rgb(0x2F, 0x8B, 0xFF);
+        let red = Color32::from_rgb(0xFF, 0x3B, 0x3B);
+        for (k, c) in [("cpu", green), ("disk", green), ("gpu", blue), ("network", blue), ("clock", red), ("power", red), ("kernel", red)] {
+            assert_eq!(m.get(k), c, "{k}");
+            assert_eq!(m.custom(k), None);
+        }
+        assert_eq!(m.get("memory"), Color32::from_rgb(0xC0, 0x40, 0xFF));
+        assert_eq!(m.get("thermal"), Color32::from_rgb(0xFF, 0x9A, 0x2E));
+        assert_eq!(m.get("yellow"), default_metric_color("yellow"));
+        assert_eq!(m.get("nope"), default_metric_color("nope"));
+    }
+
+    /// Each key is its own override: changing CPU leaves Disk (which shared its colour) alone.
+    #[test]
+    fn metric_color_overrides_are_per_key() {
+        let mut g = crate::settings::Graphs::default();
+        g.metric_colors.insert("cpu".into(), "#112233".into());
+        g.metric_colors.insert("kernel".into(), "abc".into());
+        g.metric_colors.insert("gpu".into(), "not a colour".into());
+        g.metric_colors.insert("yellow".into(), "#000000".into());
+        let m = MetricColors::from_settings(&g);
+        assert_eq!(m.get("cpu"), Color32::from_rgb(0x11, 0x22, 0x33));
+        assert_eq!(m.custom("cpu"), Some(Color32::from_rgb(0x11, 0x22, 0x33)));
+        assert_eq!(m.get("disk"), default_metric_color("disk"));
+        assert_eq!(m.get("kernel"), Color32::from_rgb(0xAA, 0xBB, 0xCC));
+        assert_eq!(m.get("clock"), default_metric_color("clock"));
+        assert_eq!((m.get("gpu"), m.custom("gpu")), (default_metric_color("gpu"), None), "an invalid value is ignored");
+        assert_eq!(m.get("yellow"), default_metric_color("yellow"), "only metric keys can be overridden");
+        // Colour keying off: overrides are kept in the settings but not used.
+        g.color_keyed = false;
+        assert_eq!(MetricColors::from_settings(&g), MetricColors::default());
     }
 
     /// egui keeps a style per OS theme; a palette restyles both, so Windows' theme can't undo it.
