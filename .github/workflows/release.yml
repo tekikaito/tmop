@@ -63,6 +63,12 @@ jobs:
           Compress-Archive -Path "$dir\*" -DestinationPath "dist\$name.zip"
           $hash = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "dist\$name.zip.sha256"
+          # The bare exe under a version-less name, so the website and install.ps1 can link to
+          # releases/latest/download/TMOP-windows-<arch>.exe without knowing the version.
+          $exe = "TMOP-${{ matrix.name }}.exe"
+          Copy-Item "target\${{ matrix.target }}\release\TMOP.exe" "dist\$exe"
+          $hash = (Get-FileHash "dist\$exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $exe" | Out-File -Encoding ascii "dist\$exe.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,6 +76,8 @@ jobs:
           path: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*.exe
+            dist/*.exe.sha256
           if-no-files-found: error
 
   engine:
