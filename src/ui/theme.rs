@@ -85,6 +85,7 @@ pub struct Palette {
     pub panel: Color32,
     pub panel_stroke: Color32,
     pub hover: Color32,
+    /// Selected rows, tabs and nav entries. Text on it uses [`Palette::on_selection`], not `text`.
     pub selection: Color32,
     pub accent: Color32,
     pub text: Color32,
@@ -395,8 +396,10 @@ impl Palette {
         mix(self.ok, self.body, 0.4)
     }
 
+    /// Tuned so Dark reproduces the old fixed LCD (#0A1626, rim #1A2C44, lit #9CB8D8, unlit #16263A).
     pub fn lcd(&self) -> Lcd {
-        Lcd { bg: mix(self.led_bg, self.led_dim, 0.25), rim: self.led_dim, lit: lighten(self.led_dim, 0.55), unlit: mix(self.led_bg, self.led_dim, 0.6) }
+        let tint = |t: f32, haze: f32| lighten(mix(self.led_bg, self.led_dim, t), haze);
+        Lcd { bg: tint(0.35, 0.035), rim: tint(0.55, 0.09), lit: lighten(mix(self.led_dim, self.accent, 0.65), 0.51), unlit: tint(0.48, 0.08) }
     }
 
     /// Card background used behind graphs on the light theme (graphs stay dark-ish for contrast).
@@ -408,7 +411,8 @@ impl Palette {
         }
     }
 
-    /// Applies the palette to egui's own widgets (combos, sliders, text edits, menus).
+    /// Applies the palette to egui's own widgets (combos, sliders, text edits, menus). egui keeps
+    /// one style per OS theme; both get this palette, so a Windows theme change can't swap it out.
     pub fn apply(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
         let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -441,7 +445,7 @@ impl Palette {
         v.widgets.active.bg_fill = self.selection;
         v.widgets.active.weak_bg_fill = self.selection;
         v.widgets.active.bg_stroke = Stroke::new(1.0_f32, self.accent);
-        v.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.text);
+        v.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.on_selection());
         v.widgets.active.rounding = Rounding::same(4.0);
         v.widgets.open.bg_fill = self.control;
         v.widgets.open.weak_bg_fill = self.control;
@@ -469,7 +473,9 @@ impl Palette {
         ]
         .into_iter()
         .collect();
-        ctx.set_style(Arc::new(style));
+        let style = Arc::new(style);
+        ctx.set_style_of(egui::Theme::Dark, style.clone());
+        ctx.set_style_of(egui::Theme::Light, style);
     }
 }
 
@@ -527,4 +533,30 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let [r1, g1, b1, a1] = b.to_srgba_unmultiplied();
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgba_unmultiplied(m(r0, r1), m(g0, g1), m(b0, b1), m(a0, a1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dark's derived LCD stays (within a few levels) the fixed LCD it replaced.
+    #[test]
+    fn dark_lcd_keeps_its_look() {
+        let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| (*x as i32 - y as i32).abs() <= 6);
+        let l = DARK.lcd();
+        for (a, b) in [(l.bg, Color32::from_rgb(0x0A, 0x16, 0x26)), (l.rim, Color32::from_rgb(0x1A, 0x2C, 0x44)), (l.lit, Color32::from_rgb(0x9C, 0xB8, 0xD8)), (l.unlit, Color32::from_rgb(0x16, 0x26, 0x3A))] {
+            assert!(close(a, b), "{a:?} vs {b:?}");
+        }
+    }
+
+    /// egui keeps a style per OS theme; a palette restyles both, so Windows' theme can't undo it.
+    #[test]
+    fn apply_styles_both_os_themes() {
+        let ctx = egui::Context::default();
+        NORD.apply(&ctx);
+        for t in [egui::Theme::Dark, egui::Theme::Light] {
+            let s = ctx.style_of(t);
+            assert_eq!((s.visuals.panel_fill, s.visuals.dark_mode), (NORD.body, true), "{t:?}");
+        }
+    }
 }

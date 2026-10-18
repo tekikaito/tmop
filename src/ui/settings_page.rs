@@ -34,9 +34,25 @@ pub struct PaletteUi {
     dialog: Option<(Option<String>, Receiver<Option<PathBuf>>)>,
     /// The last duplicate/rename/delete/import/export problem, shown under the buttons.
     message: Option<String>,
+    /// HWND of the main window, the owner of the import/export dialogs (0 for none).
+    owner: isize,
 }
 
 impl PaletteUi {
+    pub fn new(owner: isize) -> Self {
+        Self { owner, ..Default::default() }
+    }
+
+    /// After a rescan of the palette folder: keeps the editor open only if its palette is
+    /// still a custom one, and drops a pending rename or delete. Save edits before rescanning.
+    fn rescanned(&mut self, pals: &PaletteCatalog) {
+        if self.editing.as_ref().is_some_and(|(id, _)| pals.get(id).is_none_or(|p| p.is_built_in())) {
+            self.editing = None;
+        }
+        self.rename = None;
+        self.confirm_delete = false;
+    }
+
     fn open_editor(&mut self, p: &PaletteFile) {
         let on_disk = match &p.source {
             palette::PaletteSource::File(path) => PaletteFile::load(path).map(|f| f.palette).unwrap_or(p.palette),
@@ -143,12 +159,12 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
             .on_disabled_hover_text("Built-in palettes are read-only; duplicate one to edit it.");
             ui.add_enabled_ui(pui.dialog.is_none(), |ui| {
                 if widgets::button(ui, "Import", pal, None).clicked() {
-                    let d = FileDialog { save: false, title: "Import palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name: String::new() };
+                    let d = FileDialog { save: false, title: "Import palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name: String::new(), owner: pui.owner };
                     pui.dialog = Some((None, file_dialog(d)));
                 }
                 if widgets::button(ui, "Export", pal, None).on_hover_text(format!("Save {} as a .{} file", cur.name, palette::EXTENSION)).clicked() {
                     let file_name = format!("{}.{}", cur.id, palette::EXTENSION);
-                    let d = FileDialog { save: true, title: "Export palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name };
+                    let d = FileDialog { save: true, title: "Export palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name, owner: pui.owner };
                     pui.dialog = Some((Some(cur.id.clone()), file_dialog(d)));
                 }
             });
@@ -188,10 +204,11 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
         if let Some(yes) = answer {
             pui.confirm_delete = false;
             if yes {
-                pui.editing = None;
-                pui.save_due = None;
+                // Save pending edits first: if the delete fails, the palette stays and keeps them.
+                pui.message = pui.flush(pals, true);
                 match pals.delete(current) {
                     Ok(()) => {
+                        pui.editing = None;
                         s.appearance.theme = SYSTEM.into();
                         changed = true;
                     }
@@ -223,6 +240,19 @@ fn palette_editor(ui: &mut egui::Ui, pal: &Palette, pals: &mut PaletteCatalog, p
         }
     }
     hint(ui, pal, "Changing a core colour recomputes the other roles from the core ones. Changes apply at once and are saved automatically.");
+    if !pui.advanced {
+        // Warnings on roles the core view doesn't show (derived text or surfaces).
+        let hidden: Vec<String> = p
+            .palette
+            .contrast_warnings()
+            .into_iter()
+            .filter(|(k, _)| !CORE_ROLES.iter().any(|r| r.key == *k))
+            .filter_map(|(k, c)| ROLES.iter().find(|r| r.key == k).map(|r| format!("{} {c:.1}:1", r.label)))
+            .collect();
+        if !hidden.is_empty() {
+            ui.label(RichText::new(format!("\u{26a0} Text contrast below {MIN_CONTRAST}:1 on {}. Turn on Advanced to adjust these roles.", hidden.join(", "))).font(theme::ui(12.0)).color(pal.warn));
+        }
+    }
     toggle_row(ui, pal, &mut pui.advanced, "Advanced: all 22 roles");
     if pui.advanced {
         for r in ROLES {
@@ -429,7 +459,7 @@ impl App {
                 });
                 section(ui, &pal, Icon::Record, "Skins and files", |ui| {
                     ui.horizontal(|ui| {
-                        if widgets::button(ui, "Reload skins", &pal, Some(Icon::Refresh)).clicked() {
+                        if widgets::button(ui, "Reload skins and palettes", &pal, Some(Icon::Refresh)).clicked() {
                             reload_skins = true;
                         }
                         if widgets::button(ui, "Import TMOG settings", &pal, None).clicked() {
@@ -471,7 +501,17 @@ impl App {
         }
         if reload_skins {
             self.catalog = skin::scan(&skin::default_skin_dirs());
-            self.status = format!("{} skins, {} errors", self.catalog.skins.len(), self.catalog.errors.len());
+            // Write pending palette edits first so the rescan reads them back; if that fails,
+            // keep the palettes (and the edits) as they are.
+            match self.palette_ui.flush(&self.palettes, true) {
+                Some(e) => self.status = format!("{e}; palettes not reloaded"),
+                None => {
+                    self.palettes = palette::scan(&self.palettes.dir);
+                    self.palette_ui.rescanned(&self.palettes);
+                    let errors = self.catalog.errors.len() + self.palettes.errors.len();
+                    self.status = format!("{} skins, {} palettes, {errors} errors", self.catalog.skins.len(), self.palettes.palettes.len());
+                }
+            }
         }
         if import {
             match settings::import_tmog() {

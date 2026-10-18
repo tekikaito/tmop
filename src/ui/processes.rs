@@ -510,7 +510,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, c: Column, pal: &Palette, cx: Cell
     }
     let font = theme::ui(12.5);
     let dimmed = matches!(c, Column::Pid | Column::User | Column::Priority | Column::Architecture | Column::CommandLine | Column::Path | Column::Description);
-    let color = if cx.selected || !dimmed { pal.text } else { pal.text_dim };
+    let color = if cx.selected { pal.on_selection() } else if dimmed { pal.text_dim } else { pal.text };
     let mut toggled = false;
     match c {
         Column::Name => {

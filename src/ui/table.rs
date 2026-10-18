@@ -163,7 +163,7 @@ pub fn show(
                                 p.rect_filled(r.expand2(vec2(0.5, 0.0)), 0.0, mix(pal.body, pal.heat(), 0.25 + 0.75 * content.heat));
                             }
                             p.line_segment([pos2(r.right() - 0.5, r.top()), pos2(r.right() - 0.5, r.bottom())], Stroke::new(1.0_f32, with_alpha(pal.panel_stroke, 0.5)));
-                            let color = content.color.unwrap_or(pal.text);
+                            let color = if is_sel { pal.on_selection() } else { content.color.unwrap_or(pal.text) };
                             let font = theme::ui(12.5);
                             let mut x = r.left() + 8.0;
                             if let Some(d) = content.dot {

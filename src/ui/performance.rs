@@ -81,9 +81,10 @@ impl App {
             };
             let tx = r.left() + 42.0;
             let tw = r.right() - 90.0 - tx;
-            widgets::text_fit(p, pos2(tx, r.top() + 13.0), Align2::LEFT_CENTER, &name, theme::display(14.0), pal.text, tw);
-            widgets::text_fit(p, pos2(tx, r.top() + 31.0), Align2::LEFT_CENTER, &sub1, theme::ui(11.5), pal.text, tw);
-            widgets::text_fit(p, pos2(tx, r.top() + 45.0), Align2::LEFT_CENTER, &sub2, theme::ui(11.5), pal.text, tw);
+            let fg = if selected { pal.on_selection() } else { pal.text };
+            widgets::text_fit(p, pos2(tx, r.top() + 13.0), Align2::LEFT_CENTER, &name, theme::display(14.0), fg, tw);
+            widgets::text_fit(p, pos2(tx, r.top() + 31.0), Align2::LEFT_CENTER, &sub1, theme::ui(11.5), fg, tw);
+            widgets::text_fit(p, pos2(tx, r.top() + 45.0), Align2::LEFT_CENTER, &sub2, theme::ui(11.5), fg, tw);
             let thumb = Rect::from_min_size(pos2(r.right() - 82.0, r.top() + 7.0), vec2(76.0, 44.0));
             let mut g = Graph::new(vec![GraphLine { series, color: c, range }]);
             g.px_per_update = 1.5;

@@ -329,6 +329,16 @@ pub struct App {
     profile: Option<Profile>,
 }
 
+/// The main window's HWND (0 if unknown): the owner of the palette file dialogs, so they open
+/// above it even when it is always on top.
+fn main_hwnd(cc: &eframe::CreationContext<'_>) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        _ => 0,
+    }
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, status: String, launch: Launch) -> Self {
         let popout_only = launch.popout_only;
@@ -341,11 +351,9 @@ impl App {
         let device = launch.start_device.as_deref().and_then(|d| Device::ALL.into_iter().find(|x| x.key() == d)).unwrap_or(Device::Cpu);
         // A normal settings load needs no message.
         let mut status = if status.ends_with("(Loaded)") { String::new() } else { status };
-        if !catalog.errors.is_empty() {
-            status = format!("{} skin(s) failed to load", catalog.errors.len());
-        }
-        if !palettes.errors.is_empty() {
-            status = format!("{} palette(s) failed to load", palettes.errors.len());
+        let failed: Vec<String> = [(catalog.errors.len(), "skin"), (palettes.errors.len(), "palette")].into_iter().filter(|(n, _)| *n > 0).map(|(n, what)| format!("{n} {what}(s)")).collect();
+        if !failed.is_empty() {
+            status = format!("{} failed to load", failed.join(" and "));
         }
         let settings_popout_on = settings.popout.mode != "off";
         let app = Self {
@@ -353,7 +361,7 @@ impl App {
             settings_dirty: false,
             catalog,
             palettes,
-            palette_ui: settings_page::PaletteUi::default(),
+            palette_ui: settings_page::PaletteUi::new(main_hwnd(cc)),
             sampler,
             page,
             device,
@@ -605,13 +613,15 @@ impl App {
             let settings_rect = Rect::from_min_size(pos2(full.left() + 10.0, bottom - 46.0), vec2(96.0, 32.0));
             let resp = ui.interact(settings_rect, ui.id().with("nav-settings"), Sense::click());
             let p = ui.painter();
-            if self.page == Page::Settings {
+            let on = self.page == Page::Settings;
+            if on {
                 p.rect_filled(settings_rect, 4.0, pal.selection);
             } else if resp.hovered() {
                 p.rect_filled(settings_rect, 4.0, pal.hover);
             }
-            draw_icon(p, Rect::from_center_size(pos2(settings_rect.left() + 20.0, settings_rect.center().y), vec2(15.0, 15.0)), Icon::Gear, pal.text);
-            p.text(pos2(settings_rect.left() + 36.0, settings_rect.center().y), Align2::LEFT_CENTER, "Settings", theme::ui(13.0), pal.text);
+            let fg = if on { pal.on_selection() } else { pal.text };
+            draw_icon(p, Rect::from_center_size(pos2(settings_rect.left() + 20.0, settings_rect.center().y), vec2(15.0, 15.0)), Icon::Gear, fg);
+            p.text(pos2(settings_rect.left() + 36.0, settings_rect.center().y), Align2::LEFT_CENTER, "Settings", theme::ui(13.0), fg);
             if resp.clicked() {
                 self.page = Page::Settings;
             }
@@ -624,8 +634,9 @@ impl App {
             } else if resp.hovered() {
                 p.rect_filled(pop_rect, 4.0, pal.hover);
             }
-            draw_icon(p, Rect::from_center_size(pos2(pop_rect.left() + 18.0, pop_rect.center().y), vec2(15.0, 15.0)), Icon::Popout, pal.text);
-            p.text(pos2(pop_rect.left() + 34.0, pop_rect.center().y), Align2::LEFT_CENTER, "Popout", theme::ui(13.0), pal.text);
+            let fg = if self.popout_open { pal.on_selection() } else { pal.text };
+            draw_icon(p, Rect::from_center_size(pos2(pop_rect.left() + 18.0, pop_rect.center().y), vec2(15.0, 15.0)), Icon::Popout, fg);
+            p.text(pos2(pop_rect.left() + 34.0, pop_rect.center().y), Align2::LEFT_CENTER, "Popout", theme::ui(13.0), fg);
             if resp.clicked() {
                 let open = !self.popout_open;
                 self.set_popout(open);
@@ -1081,8 +1092,10 @@ impl App {
     fn update_inner(&mut self, ctx: &egui::Context) {
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
-        // Any change of palette (another palette, or a role edited in the editor) restyles egui.
-        if self.applied_pal != Some(pal) {
+        // Any change of palette (another palette, or a role edited in the editor) restyles egui,
+        // and so does a style that no longer matches it (egui swaps styles with the OS theme).
+        let live = ctx.style();
+        if self.applied_pal != Some(pal) || live.visuals.panel_fill != pal.body || live.visuals.dark_mode != pal.dark {
             pal.apply(ctx);
             self.applied_pal = Some(pal);
         }

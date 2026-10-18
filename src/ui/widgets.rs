@@ -1040,8 +1040,9 @@ pub fn button(ui: &mut Ui, label: &str, pal: &Palette, icon: Option<Icon>) -> Re
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     let p = ui.painter();
     let enabled = ui.is_enabled();
-    let bg = if !enabled { pal.control } else if resp.is_pointer_button_down_on() { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
-    let fg = if enabled { pal.text } else { pal.text_faint };
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    let bg = if !enabled { pal.control } else if pressed { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
+    let fg = if pressed { pal.on_selection() } else if enabled { pal.text } else { pal.text_faint };
     p.rect_filled(rect, 4.0, bg);
     p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke));
     let mut x = rect.left() + 12.0;

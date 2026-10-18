@@ -178,9 +178,9 @@ impl App {
                     p.rect_filled(r, 4.0, pal.selection);
                 }
                 p.circle_filled(pos2(r.left() + 12.0, y), 4.0, if *active { metric_color("cpu") } else { pal.text_faint });
-                p.text(pos2(r.left() + 26.0, y), Align2::LEFT_CENTER, if name.is_empty() { guid } else { name }, theme::ui(12.5), pal.text);
+                p.text(pos2(r.left() + 26.0, y), Align2::LEFT_CENTER, if name.is_empty() { guid } else { name }, theme::ui(12.5), if *active { pal.on_selection() } else { pal.text });
                 if *active {
-                    p.text(pos2(r.right() - 8.0, y), Align2::RIGHT_CENTER, "Active", theme::ui(11.5), pal.text_dim);
+                    p.text(pos2(r.right() - 8.0, y), Align2::RIGHT_CENTER, "Active", theme::ui(11.5), pal.on_selection());
                 }
             }
         }
@@ -419,8 +419,9 @@ impl App {
             }
             widgets::draw_icon(&p, Rect::from_center_size(pos2(rr.left() + 12.0, rr.center().y), vec2(13.0, 13.0)), Icon::Chart, metric_color("cpu"));
             let clip = p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.right() - 90.0, rr.bottom())));
-            clip.text(pos2(rr.left() + 26.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::ui(12.5), pal.text);
-            p.text(pos2(rr.right() - 6.0, rr.center().y), Align2::RIGHT_CENTER, format_bytes(r.size as f64), theme::ui(12.0), pal.text_dim);
+            let (fg, fg_dim) = if playing { (pal.on_selection(), pal.on_selection()) } else { (pal.text, pal.text_dim) };
+            clip.text(pos2(rr.left() + 26.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::ui(12.5), fg);
+            p.text(pos2(rr.right() - 6.0, rr.center().y), Align2::RIGHT_CENTER, format_bytes(r.size as f64), theme::ui(12.0), fg_dim);
             if resp.clicked() {
                 open = Some(r.path.clone());
             }
@@ -885,7 +886,7 @@ impl App {
             } else if resp.hovered() {
                 p.rect_filled(r, 4.0, pal.hover);
             }
-            p.text(r.center(), Align2::CENTER_CENTER, *name, theme::ui(13.0), pal.text);
+            p.text(r.center(), Align2::CENTER_CENTER, *name, theme::ui(13.0), if sel { pal.on_selection() } else { pal.text });
             if resp.clicked() {
                 self.pro.disk_tab = i;
             }

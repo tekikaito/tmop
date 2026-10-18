@@ -126,6 +126,9 @@ pub struct FileDialog {
     pub filter: (String, String),
     /// Suggested file name (save only).
     pub file_name: String,
+    /// HWND of the window that owns the dialog (0 for none). The dialog opens above it and is
+    /// modal to it.
+    pub owner: isize,
 }
 
 /// Shows a native open/save dialog on its own thread (so the UI keeps running). The receiver
@@ -160,7 +163,7 @@ fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
                 dialog.SetFileName(&HSTRING::from(d.file_name.as_str()))?;
             }
             dialog.SetOptions(opts)?;
-            dialog.Show(HWND::default())?;
+            dialog.Show(HWND(d.owner as *mut _))?;
             let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
             let s = path.to_string();
             CoTaskMemFree(Some(path.0 as *const _));

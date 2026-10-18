@@ -2016,6 +2016,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "png",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "windows",
