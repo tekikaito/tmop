@@ -6,6 +6,9 @@
 //! * a file without `version` is TMOG's format (`schemaVersion` 12, also what TMOP 0.1 wrote) and
 //!   is converted by [`migrate_v12`]; TMOG keys TMOP doesn't implement are dropped;
 //! * unknown keys are dropped with a warning; values are type-checked ("expected a boolean", ...);
+//! * a file that migrates is rewritten at once; the original is kept as `settings.v<old>.bak`
+//!   (TMOG's format: `settings.v12.bak`);
+//! * a file from a newer TMOP opens read-only with defaults and is never overwritten;
 //! * writes go through a temporary file (`.tmp.`) and a corrupt file is set aside (`.corrupt.`).
 //!
 //! TMOP stores its file at `%LOCALAPPDATA%\TMOP\settings.json` and can import TMOG's file
@@ -35,6 +38,9 @@ pub struct Settings {
     pub appearance: Appearance,
     pub graphs: Graphs,
     pub popout: Popout,
+    /// Set when the file is from a newer TMOP: [`Settings::save`] refuses to overwrite it.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -115,6 +121,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             graphs: Graphs::default(),
             popout: Popout::default(),
+            read_only: false,
         }
     }
 }
@@ -247,6 +254,8 @@ pub enum LoadOutcome {
     MigratedV12,
     /// Upgraded from an older TMOP `version`.
     Upgraded(u32),
+    /// `version` is newer than this build: defaults, read-only, the file is left alone.
+    Newer(u64),
     /// Unreadable/invalid JSON, no version or wrong value types; file set aside as `.corrupt.`.
     Corrupt(String),
 }
@@ -296,6 +305,10 @@ impl Settings {
                 }
                 LoadOutcome::Upgraded(ver as u32)
             }
+            Some(Some(ver)) if ver > VERSION as u64 => {
+                let settings = Settings { read_only: true, ..Default::default() };
+                return Ok(Load { settings, outcome: LoadOutcome::Newer(ver), unknown_keys: Vec::new() });
+            }
             Some(Some(ver)) => return Err(format!("unsupported settings version {ver}")),
             Some(None) => return Err("version must be an unsigned integer".into()),
             None if obj.contains_key("schemaVersion") => {
@@ -324,7 +337,20 @@ impl Settings {
             Err(_) => return Load::defaults(LoadOutcome::Missing),
         };
         match Self::from_json(&text) {
-            Ok(r) => r,
+            Ok(load) => {
+                let old = match load.outcome {
+                    LoadOutcome::MigratedV12 => Some(12),
+                    LoadOutcome::Upgraded(v) => Some(v),
+                    _ => None,
+                };
+                // Keep the original, then write the migrated file so it migrates only once.
+                if let Some(v) = old {
+                    if std::fs::write(path.with_extension(format!("v{v}.bak")), &text).is_ok() {
+                        let _ = load.settings.save(path);
+                    }
+                }
+                load
+            }
             Err(e) => {
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -340,6 +366,9 @@ impl Settings {
 
     /// Atomic save: write `<path>.tmp.<pid>` then rename over the target.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if self.read_only {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the file is from a newer TMOP and is not overwritten"));
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -581,6 +610,40 @@ mod tests {
         assert!(matches!(load.outcome, LoadOutcome::Corrupt(_)));
         assert_eq!(load.settings, Settings::default());
         assert!(!path.exists(), "corrupt file should have been set aside");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v12_file_migrates_once_and_keeps_a_backup() {
+        let dir = std::env::temp_dir().join(format!("tmop-settings-v12-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, SAMPLE).unwrap();
+        let first = Settings::load(&path);
+        assert!(matches!(first.outcome, LoadOutcome::MigratedV12));
+        assert_eq!(std::fs::read_to_string(dir.join("settings.v12.bak")).unwrap(), SAMPLE);
+        // The file on disk is version 1 now, so the next load doesn't migrate again.
+        let second = Settings::load(&path);
+        assert!(matches!(second.outcome, LoadOutcome::Loaded));
+        assert_eq!(second.settings, first.settings);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newer_version_is_read_only_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("tmop-settings-newer-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let newer = r#"{"version":99,"appearance":{"theme":"dark"},"futureSection":{}}"#;
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, newer).unwrap();
+        let load = Settings::load(&path);
+        assert!(matches!(load.outcome, LoadOutcome::Newer(99)));
+        assert!(load.settings.read_only);
+        assert_eq!(load.settings.appearance, Appearance::default());
+        let mut s = load.settings;
+        s.window.always_on_top = true;
+        assert!(s.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer, "a newer file must not be touched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -3,7 +3,7 @@
 use super::theme::{self, Palette};
 use super::widgets::{self, draw_icon, Icon};
 use super::{App, FrameData, Page};
-use crate::settings::{self, UpdateSpeed};
+use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
 use eframe::egui::{self, pos2, vec2, Align2, RichText, Stroke};
 
@@ -241,7 +241,9 @@ impl App {
             match settings::import_tmog() {
                 Ok(load) => {
                     self.status = load.describe("Imported TMOG settings");
-                    self.settings = load.settings;
+                    // A file from a newer TMOP stays protected after an import.
+                    let read_only = self.settings.read_only;
+                    self.settings = Settings { read_only, ..load.settings };
                     self.settings_dirty = true;
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),
