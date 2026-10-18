@@ -9,7 +9,8 @@ pub const MICHROMA: &[u8] = include_bytes!("../../assets/fonts/Michroma-Regular.
 pub const F_UI: &str = "ui";
 pub const F_UI_BOLD: &str = "ui-bold";
 pub const F_UI_SEMIBOLD: &str = "ui-semibold";
-pub const F_DISPLAY: &str = "michroma";
+/// The display font: Michroma or the `appearance.displayFont` family (see [`crate::fonts`]).
+pub const F_DISPLAY: &str = "display";
 pub const F_MONO: &str = "mono";
 
 pub fn display(size: f32) -> FontId {
@@ -28,12 +29,22 @@ pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_MONO.into()))
 }
 
-/// Installs the application fonts: the embedded Michroma (SIL OFL) for display text and,
-/// when present on this machine, Segoe UI / Consolas from the Windows font folder for
-/// body text. Missing fonts fall back to egui's bundled ones.
-pub fn install_fonts(ctx: &egui::Context) {
+/// Installs the application fonts (see [`font_definitions`]). Takes effect from the next frame.
+pub fn install_fonts(ctx: &egui::Context, display: Option<crate::fonts::FontFile>) {
+    ctx.set_fonts(font_definitions(display));
+}
+
+/// The application fonts: `display` (an installed font, see [`crate::fonts::resolve`]) or else
+/// the embedded Michroma (SIL OFL) for display text and, when present on this machine,
+/// Segoe UI / Consolas from the Windows font folder for body text. Missing fonts fall back
+/// to egui's bundled ones.
+pub fn font_definitions(display: Option<crate::fonts::FontFile>) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
-    defs.font_data.insert(F_DISPLAY.into(), FontData::from_static(MICHROMA));
+    let display = match display {
+        Some(f) => FontData { index: f.index, ..FontData::from_owned(f.bytes) },
+        None => FontData::from_static(MICHROMA),
+    };
+    defs.font_data.insert(F_DISPLAY.into(), display);
     let win = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into());
     let fonts = win.join("Fonts");
     let mut load = |name: &str, file: &str| -> bool {
@@ -65,7 +76,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mono_fam = fam(have_mono.then_some(F_MONO), &default_mono);
     defs.families.insert(FontFamily::Monospace, mono_fam.clone());
     defs.families.insert(FontFamily::Name(F_MONO.into()), mono_fam);
-    ctx.set_fonts(defs);
+    defs
 }
 
 /// Application palette: 22 colour roles (see [`ROLES`]). Built-in and custom palettes
@@ -651,6 +662,26 @@ mod tests {
         g.color_keyed = false;
         assert_eq!(MetricColors::from_settings(&g), MetricColors::default());
         assert_eq!(MetricColors::from_map(&g.metric_colors), m);
+    }
+
+    /// The display font is Michroma or the installed one, falling back to the UI fonts for
+    /// missing glyphs; body text never uses it.
+    #[test]
+    fn display_font_only_changes_the_display_family() {
+        let family = |d: &FontDefinitions, f: FontFamily| d.families.get(&f).cloned().unwrap_or_default();
+        let builtin = font_definitions(None);
+        assert_eq!(builtin.font_data[F_DISPLAY].font.as_ref(), MICHROMA);
+        let file = crate::fonts::FontFile { family: "Other".into(), bytes: vec![7; 16], index: 2 };
+        let custom = font_definitions(Some(file));
+        assert_eq!((custom.font_data[F_DISPLAY].font.as_ref(), custom.font_data[F_DISPLAY].index), (&[7u8; 16][..], 2));
+        for d in [&builtin, &custom] {
+            let display = family(d, FontFamily::Name(F_DISPLAY.into()));
+            assert_eq!(display[0], F_DISPLAY);
+            assert_eq!(display[1..], family(d, FontFamily::Name(F_UI.into())));
+            for f in [FontFamily::Proportional, FontFamily::Name(F_UI.into()), FontFamily::Name(F_UI_BOLD.into()), FontFamily::Monospace] {
+                assert!(!family(d, f.clone()).iter().any(|n| n == F_DISPLAY), "{f:?}");
+            }
+        }
     }
 
     /// egui keeps a style per OS theme; a palette restyles both, so Windows' theme can't undo it.

@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn metric_color_rows_draw_without_changing_settings() {
         let ctx = egui::Context::default();
-        theme::install_fonts(&ctx);
+        theme::install_fonts(&ctx, None);
         let mut g = settings::Graphs::default();
         g.metric_colors.insert("cpu".into(), "#112233".into());
         for keyed in [true, false] {

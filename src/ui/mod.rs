@@ -319,6 +319,8 @@ pub struct App {
     applied_top: Option<bool>,
     /// The palette last given to egui's style.
     applied_pal: Option<Palette>,
+    /// The `appearance.displayFont` last installed, and whether it fell back to Michroma.
+    display_font: (String, bool),
     last_seq: u64,
     last_sample_at: Instant,
     last_frame_at: Instant,
@@ -348,7 +350,7 @@ fn main_hwnd(cc: &eframe::CreationContext<'_>) -> isize {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, status: String, launch: Launch) -> Self {
         let popout_only = launch.popout_only;
-        theme::install_fonts(&cc.egui_ctx);
+        let display_font = install_display_font(&cc.egui_ctx, &settings.appearance.display_font);
         let ctx = cc.egui_ctx.clone();
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
@@ -380,6 +382,7 @@ impl App {
             status,
             applied_top: None,
             applied_pal: None,
+            display_font,
             last_seq: 0,
             last_sample_at: Instant::now(),
             last_frame_at: Instant::now(),
@@ -935,6 +938,14 @@ impl App {
     }
 }
 
+/// Installs the egui fonts with display font `name` (`appearance.displayFont`): Michroma, or an
+/// installed family read here. Returns `name` and whether it fell back to Michroma.
+fn install_display_font(ctx: &egui::Context, name: &str) -> (String, bool) {
+    let (file, missing) = crate::fonts::resolve(name, crate::fonts::load);
+    theme::install_fonts(ctx, file);
+    (name.to_string(), missing)
+}
+
 /// `HH:MM:SS.cc` stopwatch text.
 pub fn fmt_clock(d: Duration) -> String {
     let t = d.as_secs();
@@ -1109,6 +1120,9 @@ impl App {
         if self.applied_pal != Some(pal) || live.visuals.panel_fill != pal.body || live.visuals.dark_mode != pal.dark {
             pal.apply(ctx);
             self.applied_pal = Some(pal);
+        }
+        if self.settings.appearance.display_font != self.display_font.0 {
+            self.display_font = install_display_font(ctx, &self.settings.appearance.display_font);
         }
         self.shortcuts(ctx);
         self.icons.poll(ctx);
