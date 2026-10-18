@@ -321,6 +321,7 @@ pub struct App {
     applied_pal: Option<Palette>,
     /// The `appearance.displayFont` last installed, and whether it fell back to Michroma.
     display_font: (String, bool),
+    pub font_list: settings_page::FontList,
     last_seq: u64,
     last_sample_at: Instant,
     last_frame_at: Instant,
@@ -383,6 +384,7 @@ impl App {
             applied_top: None,
             applied_pal: None,
             display_font,
+            font_list: settings_page::FontList::default(),
             last_seq: 0,
             last_sample_at: Instant::now(),
             last_frame_at: Instant::now(),

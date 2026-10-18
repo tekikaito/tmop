@@ -4,6 +4,7 @@ use super::kit::{file_dialog, FileDialog};
 use super::theme::{self, MetricColors, Palette, Role, CORE_ROLES, METRICS, MIN_CONTRAST, ROLES};
 use super::widgets::{self, draw_icon, Icon};
 use super::{App, FrameData, Page};
+use crate::fonts;
 use crate::palette::{self, PaletteCatalog, PaletteFile, SYSTEM};
 use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
@@ -78,6 +79,67 @@ impl PaletteUi {
         self.editing = None;
         err
     }
+}
+
+/// Installed font families for the Display font picker, listed on a worker thread the first
+/// time the Settings page is shown (enumerating every installed font takes a while).
+#[derive(Default)]
+pub struct FontList {
+    families: Option<Vec<String>>,
+    pending: Option<Receiver<Vec<String>>>,
+}
+
+impl FontList {
+    /// The installed families, or `None` while they are being listed (the first call starts that).
+    fn get(&mut self, ctx: &egui::Context) -> Option<&[String]> {
+        if self.families.is_none() {
+            match &self.pending {
+                None => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(fonts::installed());
+                        ctx.request_repaint();
+                    });
+                    self.pending = Some(rx);
+                }
+                Some(rx) => match rx.try_recv() {
+                    Ok(list) => self.families = Some(list),
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => self.families = Some(Vec::new()),
+                },
+            }
+        }
+        self.families.as_deref()
+    }
+}
+
+/// The Display font picker: Michroma first, then the installed `families` (`None` while they are
+/// being listed). `missing`: the saved font isn't installed and Michroma is used instead.
+/// Returns whether settings changed.
+fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, families: Option<&[String]>, missing: bool) -> bool {
+    let mut changed = false;
+    row(ui, pal, "Display font", |ui| {
+        egui::ComboBox::from_id_salt("display-font").width(200.0).selected_text(fonts::picker_label(&a.display_font, missing)).show_ui(ui, |ui| {
+            let built_in = fonts::is_built_in(&a.display_font);
+            if ui.selectable_label(built_in, fonts::BUILT_IN_LABEL).clicked() && !built_in {
+                a.display_font = fonts::BUILT_IN.into();
+                changed = true;
+            }
+            match families {
+                Some(list) => {
+                    for f in list {
+                        changed |= ui.selectable_value(&mut a.display_font, f.clone(), f).changed();
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("Listing installed fonts\u{2026}").font(theme::ui(12.0)).color(pal.text_faint));
+                }
+            }
+        });
+    });
+    hint(ui, pal, "Page titles, large values and the Classic popout's title. Other text stays Segoe UI.");
+    changed
 }
 
 /// One colour role: label, colour button, hex value and a contrast warning.
@@ -362,6 +424,8 @@ impl App {
         let mut import = false;
         let mut popout_change: Option<&'static str> = None;
         let current_palette = self.palette_id();
+        let font_missing = self.display_font.1;
+        let font_families = self.font_list.get(ui.ctx());
         // The columns are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -373,6 +437,7 @@ impl App {
                 let (pals, pui) = (&mut self.palettes, &mut self.palette_ui);
                 section(ui, &pal, Icon::Apps, "Appearance", |ui| {
                     changed |= palette_controls(ui, &pal, s, pals, pui, &current_palette);
+                    changed |= display_font_row(ui, &pal, &mut s.appearance, font_families, font_missing);
                     row(ui, &pal, "Temperature", |ui| {
                         egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
                             changed |= ui.selectable_value(&mut s.general.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
@@ -644,6 +709,25 @@ mod tests {
             });
             assert!(!changed);
             assert_eq!(g, before);
+        }
+    }
+
+    /// The display font picker lays out while the families are being listed, with them, and
+    /// for a saved font that isn't installed, and leaves the settings alone.
+    #[test]
+    fn display_font_row_draws_without_changing_settings() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx, None);
+        let list = ["Arial".to_string(), "Consolas".to_string()];
+        for (font, families, missing) in [("Michroma", None, false), ("Arial", Some(&list[..]), false), ("Nope Sans", Some(&list[..]), true)] {
+            let mut a = settings::Appearance { display_font: font.into(), ..Default::default() };
+            let before = a.clone();
+            let mut changed = true;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| changed = display_font_row(ui, &theme::DARK, &mut a, families, missing));
+            });
+            assert!(!changed);
+            assert_eq!(a, before);
         }
     }
 }
