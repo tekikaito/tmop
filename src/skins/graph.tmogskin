@@ -1,0 +1,21 @@
+{
+  "format": 1, "id": "com.tmop.graph", "name": "Graph", "author": "TMOP",
+  "description": "Scrolling history graphs on a dark slate",
+  "quadrants": ["cpu", "gpu", "disk", "network", "memory", "thermal"],
+  "surfaces": {
+    "window": "#0B0F14", "windowStroke": "#2A3441", "header": "#0B0F14", "headerRule": "#1E2630",
+    "tile": "#121820", "tileStroke": "#26303C", "badgeStroke": "#3A4656"
+  },
+  "ink": {
+    "title": "#E6EDF3", "primary": "#E6EDF3", "secondary": "#9AA7B4", "control": "#C9D3DD",
+    "badge": "#3FB950", "rule": "#2A3441"
+  },
+  "meters": {
+    "style": "graph", "columns": 2, "auxiliary": true,
+    "graph": { "showsGrid": true, "height": 44 },
+    "channels": {
+      "cpu": { "accent": "#3FB950" }, "gpu": { "accent": "#58A6FF" }, "disk": { "accent": "#E3B341" },
+      "network": { "accent": "#39C5CF" }, "memory": { "accent": "#F778BA" }, "thermal": { "accent": "#FF9E64" }
+    }
+  }
+}

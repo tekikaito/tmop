@@ -1,0 +1,24 @@
+{
+  "format": 1, "id": "com.tmop.led", "name": "LED", "author": "TMOP",
+  "description": "Green vertical LED meters in a grey frame, after the classic Windows Task Manager",
+  "quadrants": ["cpu", "memory", "gpu", "disk"],
+  "metrics": { "cornerRadius": 0, "tileCornerRadius": 0 },
+  "surfaces": {
+    "window": "#C0C0C0", "windowStroke": "#808080", "header": "#C0C0C0", "headerRule": "#808080",
+    "tile": "#C0C0C0", "tileStroke": "#808080", "badgeStroke": "#808080"
+  },
+  "ink": {
+    "title": "#000000", "primary": "#000000", "secondary": "#2A2A2A", "control": "#000000",
+    "badge": "#004D00", "rule": "#808080"
+  },
+  "typography": { "title": { "size": 9, "weight": "bold" }, "label": { "size": 9, "weight": "regular" } },
+  "meters": {
+    "style": "vertical", "split": 2, "segments": 10, "flat": true, "ground": "#000000",
+    "channels": {
+      "cpu": { "accent": "#004D00", "lit": "#00FF00", "unlit": "#004000" },
+      "memory": { "accent": "#004D00", "lit": "#00FF00", "unlit": "#004000" },
+      "gpu": { "accent": "#004D00", "lit": "#00FF00", "unlit": "#004000" },
+      "disk": { "accent": "#004D00", "lit": "#FFFF00", "unlit": "#404000" }
+    }
+  }
+}

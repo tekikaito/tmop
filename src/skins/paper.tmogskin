@@ -1,0 +1,21 @@
+{
+  "format": 1, "id": "com.tmop.paper", "name": "Paper", "author": "TMOP",
+  "description": "Dark ink on warm white, high contrast",
+  "quadrants": ["cpu", "gpu", "disk", "network", "memory", "thermal"],
+  "surfaces": {
+    "window": "#F7F5F0", "windowStroke": "#BDB8AC", "header": "#F7F5F0", "headerRule": "#D6D2C8",
+    "tile": "#FFFFFF", "tileStroke": "#D6D2C8", "badgeStroke": "#BDB8AC"
+  },
+  "ink": {
+    "title": "#1A1A1A", "primary": "#1A1A1A", "secondary": "#555555", "control": "#333333",
+    "badge": "#1F7A3A", "rule": "#D6D2C8"
+  },
+  "meters": {
+    "style": "bars", "columns": 1, "auxiliary": true,
+    "channels": {
+      "cpu": { "accent": "#1F7A3A", "unlit": "#E4E1D9" }, "gpu": { "accent": "#1E5FB4", "unlit": "#E4E1D9" },
+      "disk": { "accent": "#8A5A00", "unlit": "#E4E1D9" }, "network": { "accent": "#00707A", "unlit": "#E4E1D9" },
+      "memory": { "accent": "#8E2DB8", "unlit": "#E4E1D9" }, "thermal": { "accent": "#B44A00", "unlit": "#E4E1D9" }
+    }
+  }
+}

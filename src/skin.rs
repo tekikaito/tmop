@@ -559,10 +559,47 @@ fn is_skin_entry(path: &Path) -> bool {
     path.extension().map(|e| e.eq_ignore_ascii_case("tmogskin")).unwrap_or(false)
 }
 
-/// Scans `dirs` (highest priority first). The built-in Classic skin is always
-/// present; a skin id seen earlier wins over the same id seen later.
+/// Skins compiled into the binary, after Classic.
+const BUILT_IN: [&str; 5] = [
+    include_str!("skins/graph.tmogskin"),
+    include_str!("skins/led.tmogskin"),
+    include_str!("skins/gauge.tmogskin"),
+    include_str!("skins/paper.tmogskin"),
+    include_str!("skins/neon.tmogskin"),
+];
+
+/// Classic followed by the embedded skins.
+pub fn built_in() -> Vec<Skin> {
+    let mut skins = vec![Skin::classic()];
+    skins.extend(BUILT_IN.iter().map(|text| Skin::from_json(text).expect("built-in skin parses")));
+    skins
+}
+
+/// WCAG relative luminance.
+pub fn luminance(c: Color) -> f32 {
+    let lin = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio of `fg` over the opaque `bg` (`fg` alpha is composited first).
+pub fn contrast(fg: Color, bg: Color) -> f32 {
+    let fg = bg.lerp(Color { a: 255, ..fg }, fg.a as f32 / 255.0);
+    let (a, b) = (luminance(fg), luminance(bg));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Scans `dirs` (highest priority first). The built-in skins are always present;
+/// a skin id seen earlier wins over the same id seen later, and any installed skin
+/// replaces a built-in one with its id.
 pub fn scan(dirs: &[PathBuf]) -> SkinCatalog {
-    let mut cat = SkinCatalog { skins: vec![Skin::classic()], errors: Vec::new() };
+    let mut cat = SkinCatalog { skins: built_in(), errors: Vec::new() };
     for dir in dirs {
         let Ok(rd) = std::fs::read_dir(dir) else { continue };
         let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| is_skin_entry(p)).collect();
@@ -655,6 +692,69 @@ mod tests {
         assert_eq!(cat.errors.len(), 1);
         assert!(cat.get("classic").is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every built-in skin meets WCAG AA: 4.5:1 for text, 3:1 for meters and graph lines.
+    #[test]
+    fn built_in_skins_are_readable() {
+        let skins = built_in();
+        assert_eq!(skins.len(), 6);
+        for s in skins.iter().filter(|s| s.id != "classic") {
+            let id = &s.id;
+            let surf = s.surfaces.as_ref().unwrap_or_else(|| panic!("{id}: no surfaces"));
+            let ink = s.ink.as_ref().unwrap_or_else(|| panic!("{id}: no ink"));
+            let window = surf.window.as_ref().and_then(Fill::bottom).unwrap();
+            let over = |f: &Option<Fill>| -> Vec<Color> {
+                let f = f.as_ref().unwrap_or_else(|| panic!("{id}: missing surface"));
+                [f.top().unwrap(), f.bottom().unwrap()].into_iter().map(|c| window.lerp(Color { a: 255, ..c }, c.a as f32 / 255.0)).collect()
+            };
+            let check = |what: &str, fg: Color, bgs: &[Color], min: f32| {
+                for bg in bgs {
+                    let r = contrast(fg, *bg);
+                    assert!(r >= min, "{id}: {what} {fg} on {bg} is {r:.2}:1, needs {min}:1");
+                }
+            };
+            let header = over(&surf.header);
+            let tile = over(&surf.tile);
+            check("title", ink.title.unwrap(), &header, 4.5);
+            check("control", ink.control.unwrap(), &header, 3.0);
+            check("primary", ink.primary.unwrap(), &tile, 4.5);
+            check("secondary", ink.secondary.unwrap(), &tile, 4.5);
+            let meters = s.meters.as_ref().unwrap();
+            let face = meters.gauge.as_ref().and_then(|g| g.get("face")).and_then(|v| v.as_str()).and_then(Color::parse);
+            for q in s.resolved_quadrants() {
+                let ch = s.channel(q);
+                let accent = ch.accent.unwrap_or_else(|| panic!("{id}: no accent for {}", q.key()));
+                let lit = ch.lit.unwrap_or(accent);
+                let what = format!("{} meter", q.key());
+                match s.meter_style() {
+                    // Labels and values are drawn in the accent.
+                    MeterStyle::Rows | MeterStyle::Graph => check(&what, accent, &tile, 4.5),
+                    MeterStyle::Bars => check(&what, lit, &tile, 3.0),
+                    MeterStyle::Vertical => check(&what, lit, &[meters.ground.unwrap()], 3.0),
+                    MeterStyle::Gauge => check(&what, accent, &[face.unwrap()], 3.0),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn installed_skin_replaces_built_in() {
+        let dir = std::env::temp_dir().join(format!("tmop-test-override-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Mine.tmogskin"), r#"{"format":1,"id":"com.tmop.graph","name":"Mine"}"#).unwrap();
+        let cat = scan(std::slice::from_ref(&dir));
+        assert_eq!(cat.get("com.tmop.graph").unwrap().name, "Mine");
+        assert_eq!(cat.skins.iter().filter(|s| s.id == "com.tmop.graph").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contrast_ratio() {
+        assert!((contrast(Color::rgb(0, 0, 0), Color::rgb(255, 255, 255)) - 21.0).abs() < 0.01);
+        assert!((contrast(Color::rgb(9, 9, 9), Color::rgb(9, 9, 9)) - 1.0).abs() < 0.001);
+        // Fully transparent ink disappears into the background.
+        assert!((contrast(Color::rgba(255, 255, 255, 0), Color::rgb(0, 0, 0)) - 1.0).abs() < 0.001);
     }
 
     /// Parses the skins of an installed TMOG, when present.

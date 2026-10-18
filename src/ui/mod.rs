@@ -492,7 +492,10 @@ impl App {
     }
 
     pub fn current_skin(&self) -> skin::Skin {
-        self.catalog.get(&self.settings.popout_skin).cloned().unwrap_or_else(skin::Skin::classic)
+        match self.catalog.get(&self.settings.popout_skin) {
+            Some(s) if s.source != skin::SkinSource::BuiltIn || s.id != "classic" => s.clone(),
+            _ => popout::classic_skin(&self.palette()),
+        }
     }
 
     // ------------------------------------------------------------------ chrome

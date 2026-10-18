@@ -1,0 +1,26 @@
+{
+  "format": 1, "id": "com.tmop.gauge", "name": "Gauge", "author": "TMOP",
+  "description": "Radial dials with a red needle on graphite",
+  "quadrants": ["cpu", "gpu", "memory", "thermal"],
+  "surfaces": {
+    "window": { "gradient": ["#2A2C31", "#17181B"] }, "windowStroke": "#45484F",
+    "header": { "gradient": ["#2A2C31", "#232529"] }, "headerRule": "#3A3D44",
+    "tile": "#1E2024", "tileStroke": "#3A3D44", "badgeStroke": "#55595F"
+  },
+  "ink": {
+    "title": "#F2F2F2", "primary": "#F2F2F2", "secondary": "#A8ACB3", "control": "#D5D8DD",
+    "badge": "#4ADE80", "rule": "#3A3D44"
+  },
+  "typography": { "value": { "size": 11, "weight": "bold" } },
+  "meters": {
+    "style": "gauge", "columns": 2,
+    "gauge": {
+      "face": "#121316", "bezel": "#3A3D44", "track": "#2E3036", "needle": "#FF5A36", "cap": "#FF5A36",
+      "majorTick": "#8A8F98", "arcWidth": 5, "trackWidth": 5
+    },
+    "channels": {
+      "cpu": { "accent": "#4ADE80" }, "gpu": { "accent": "#60A5FA" },
+      "memory": { "accent": "#C084FC" }, "thermal": { "accent": "#FB923C" }
+    }
+  }
+}
