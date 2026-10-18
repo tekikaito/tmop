@@ -1,7 +1,7 @@
 //! Settings page: two columns of sections of settings.
 
 use super::kit::{file_dialog, FileDialog};
-use super::theme::{self, Palette, Role, CORE_ROLES, MIN_CONTRAST, ROLES};
+use super::theme::{self, MetricColors, Palette, Role, CORE_ROLES, METRICS, MIN_CONTRAST, ROLES};
 use super::widgets::{self, draw_icon, Icon};
 use super::{App, FrameData, Page};
 use crate::palette::{self, PaletteCatalog, PaletteFile, SYSTEM};
@@ -92,6 +92,41 @@ fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool
             ui.label(RichText::new(format!("\u{26a0} {w:.1}:1")).font(theme::ui(12.0)).color(pal.warn))
                 .on_hover_text(format!("Text contrast is below {MIN_CONTRAST}:1 (WCAG AA). The palette is still saved."));
         }
+    });
+    changed
+}
+
+/// One row per metric (Settings → Graphs): its colour and a reset to the built-in one. While
+/// Color Keyed Graphs is off the overrides aren't used, so the rows are shown dimmed (still
+/// editable). Returns whether settings changed.
+fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs) -> bool {
+    let mut changed = false;
+    let custom = MetricColors::from_map(&g.metric_colors);
+    ui.scope(|ui| {
+        if !g.color_keyed {
+            ui.multiply_opacity(0.45);
+        }
+        for (key, label) in METRICS {
+            let mut c = custom.get(key);
+            row(ui, pal, label, |ui| {
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    g.metric_colors.insert(key.into(), theme::to_skin(c).to_string());
+                    changed = true;
+                }
+                ui.label(RichText::new(theme::to_skin(c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
+                let reset = ui.add_enabled_ui(g.metric_colors.contains_key(key), |ui| widgets::button(ui, "Reset", pal, Some(Icon::Refresh)).on_hover_text("Back to the built-in colour").clicked()).inner;
+                if reset {
+                    g.metric_colors.remove(key);
+                    changed = true;
+                }
+            });
+        }
+        let text = if g.color_keyed {
+            "Colours that identify each metric in graphs, sparklines, meters and the popout."
+        } else {
+            "Color Keyed Graphs is off: graphs use a single blue and these colours aren't used."
+        };
+        hint(ui, pal, text);
     });
     changed
 }
@@ -397,6 +432,7 @@ impl App {
                 });
                 section(ui, &pal, Icon::Chart, "Graphs", |ui| {
                     changed |= toggle_row(ui, &pal, &mut s.graphs.color_keyed, "Color Keyed Graphs");
+                    changed |= metric_color_rows(ui, &pal, &mut s.graphs);
                     changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graph");
                     changed |= toggle_row(ui, &pal, &mut s.graphs.smooth_curves, "Smooth Graph Curves");
                     changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress Older History");
@@ -583,6 +619,31 @@ fn title_case(s: &str) -> String {
                 Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
                 None => String::new(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The metric rows lay out with colour keying on and off and leave the settings alone
+    /// until something is edited.
+    #[test]
+    fn metric_color_rows_draw_without_changing_settings() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let mut g = settings::Graphs::default();
+        g.metric_colors.insert("cpu".into(), "#112233".into());
+        for keyed in [true, false] {
+            g.color_keyed = keyed;
+            let before = g.clone();
+            let mut changed = true;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| changed = metric_color_rows(ui, &theme::DARK, &mut g));
+            });
+            assert!(!changed);
+            assert_eq!(g, before);
         }
     }
 }

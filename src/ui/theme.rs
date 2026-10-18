@@ -519,11 +519,18 @@ impl MetricColors {
     /// Overrides from the settings. Without colour keying there are none (graphs use one blue
     /// and every other accent keeps its built-in colour); values that aren't colours are ignored.
     pub fn from_settings(g: &crate::settings::Graphs) -> Self {
-        let mut m = Self::default();
         if g.color_keyed {
-            for (i, (key, _)) in METRICS.iter().enumerate() {
-                m.custom[i] = g.metric_colors.get(*key).and_then(|v| crate::skin::Color::parse(v)).map(from_skin);
-            }
+            Self::from_map(&g.metric_colors)
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Overrides from a `graphs.metricColors` map, whether or not colour keying is on.
+    pub fn from_map(map: &std::collections::BTreeMap<String, String>) -> Self {
+        let mut m = Self::default();
+        for (i, (key, _)) in METRICS.iter().enumerate() {
+            m.custom[i] = map.get(*key).and_then(|v| crate::skin::Color::parse(v)).map(from_skin);
         }
         m
     }
@@ -634,6 +641,7 @@ mod tests {
         // Colour keying off: overrides are kept in the settings but not used.
         g.color_keyed = false;
         assert_eq!(MetricColors::from_settings(&g), MetricColors::default());
+        assert_eq!(MetricColors::from_map(&g.metric_colors), m);
     }
 
     /// egui keeps a style per OS theme; a palette restyles both, so Windows' theme can't undo it.
