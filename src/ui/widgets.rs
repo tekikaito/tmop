@@ -1038,16 +1038,22 @@ pub fn button(ui: &mut Ui, label: &str, pal: &Palette, icon: Option<Icon>) -> Re
     let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text).size().x + 24.0 + if icon.is_some() { 20.0 } else { 0.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     let p = ui.painter();
-    let bg = if resp.is_pointer_button_down_on() { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
+    let enabled = ui.is_enabled();
+    let bg = if !enabled { pal.control } else if resp.is_pointer_button_down_on() { pal.selection } else if resp.hovered() { pal.hover } else { pal.control };
+    let fg = if enabled { pal.text } else { pal.text_faint };
     p.rect_filled(rect, 4.0, bg);
     p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke));
     let mut x = rect.left() + 12.0;
     if let Some(i) = icon {
-        draw_icon(p, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), i, pal.text);
+        draw_icon(p, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), i, fg);
         x += 20.0;
     }
-    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, label, font, pal.text);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
+    if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
 }
 
 /// Text field with a hint, in the application style.

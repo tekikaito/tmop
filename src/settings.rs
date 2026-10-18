@@ -78,7 +78,8 @@ pub struct Window {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Appearance {
-    /// `system`, `dark` or `light`.
+    /// `system` (built-in Dark or Light, following Windows) or a palette id (`dark`, `nord`,
+    /// a custom `.tmoptheme` id; see [`crate::palette`]).
     pub theme: String,
     pub display_font: String,
     pub bloom: bool,

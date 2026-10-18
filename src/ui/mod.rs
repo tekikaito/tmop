@@ -16,6 +16,7 @@ pub mod theme;
 pub mod widgets;
 
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
+use crate::palette::{self, PaletteCatalog};
 use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{self, Action, Column, Priority, ProcessRow};
 use crate::settings::{self, Settings};
@@ -297,6 +298,8 @@ pub struct App {
     pub settings: Settings,
     pub settings_dirty: bool,
     pub catalog: SkinCatalog,
+    pub palettes: PaletteCatalog,
+    pub palette_ui: settings_page::PaletteUi,
     pub sampler: Sampler,
     pub page: Page,
     pub device: Device,
@@ -308,6 +311,8 @@ pub struct App {
     pending: Option<Pending>,
     pub status: String,
     applied_top: Option<bool>,
+    /// The palette last given to egui's style.
+    applied_pal: Option<Palette>,
     last_seq: u64,
     last_sample_at: Instant,
     last_frame_at: Instant,
@@ -331,6 +336,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
+        let palettes = palette::scan(&palette::default_dir());
         let page = launch.start_page.unwrap_or_else(|| Page::from_id(&settings.general.default_page));
         let device = launch.start_device.as_deref().and_then(|d| Device::ALL.into_iter().find(|x| x.key() == d)).unwrap_or(Device::Cpu);
         // A normal settings load needs no message.
@@ -338,11 +344,16 @@ impl App {
         if !catalog.errors.is_empty() {
             status = format!("{} skin(s) failed to load", catalog.errors.len());
         }
+        if !palettes.errors.is_empty() {
+            status = format!("{} palette(s) failed to load", palettes.errors.len());
+        }
         let settings_popout_on = settings.popout.mode != "off";
         let app = Self {
             settings,
             settings_dirty: false,
             catalog,
+            palettes,
+            palette_ui: settings_page::PaletteUi::default(),
             sampler,
             page,
             device,
@@ -354,6 +365,7 @@ impl App {
             pending: None,
             status,
             applied_top: None,
+            applied_pal: None,
             last_seq: 0,
             last_sample_at: Instant::now(),
             last_frame_at: Instant::now(),
@@ -388,23 +400,24 @@ impl App {
             app.pro.disk_root = root.display().to_string();
             app.pro.scanner.start(root);
         }
-        app.palette().apply(&cc.egui_ctx);
+        let pal = app.palette();
+        pal.apply(&cc.egui_ctx);
+        app.applied_pal = Some(pal);
         app
     }
 
-    pub fn palette(&self) -> Palette {
-        match self.settings.appearance.theme.as_str() {
-            "light" => theme::LIGHT,
-            "dark" => theme::DARK,
-            _ => {
-                // "system": follow the OS preference when known.
-                if matches!(dark_light_system(), Some(false)) {
-                    theme::LIGHT
-                } else {
-                    theme::DARK
-                }
-            }
+    /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following
+    /// Windows) for `system` and for an id that isn't installed.
+    pub fn palette_id(&self) -> String {
+        let id = &self.settings.appearance.theme;
+        if id != palette::SYSTEM && self.palettes.get(id).is_some() {
+            return id.clone();
         }
+        if matches!(dark_light_system(), Some(false)) { "light" } else { "dark" }.into()
+    }
+
+    pub fn palette(&self) -> Palette {
+        self.palettes.get(&self.palette_id()).map(|p| p.palette).unwrap_or(theme::DARK)
     }
 
     pub fn bloom(&self) -> f32 {
@@ -1041,6 +1054,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.recorder.stop();
+        self.save_palette_edits(true);
         if self.settings_dirty {
             self.save_settings();
         }
@@ -1066,8 +1080,10 @@ impl App {
     fn update_inner(&mut self, ctx: &egui::Context) {
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
-        if ctx.style().visuals.dark_mode != pal.dark || ctx.style().visuals.panel_fill != pal.body {
+        // Any change of palette (another palette, or a role edited in the editor) restyles egui.
+        if self.applied_pal != Some(pal) {
             pal.apply(ctx);
+            self.applied_pal = Some(pal);
         }
         self.shortcuts(ctx);
         self.icons.poll(ctx);
@@ -1140,6 +1156,8 @@ impl App {
 
         // Apply cadence changes and persist.
         self.sampler.set_interval(self.settings.update_speed().interval());
+        self.poll_palette_dialog();
+        self.save_palette_edits(false);
         if self.settings_dirty {
             self.save_settings();
         }

@@ -1,13 +1,249 @@
 //! Settings page: two columns of sections of settings.
 
-use super::theme::{self, Palette};
+use super::kit::{file_dialog, FileDialog};
+use super::theme::{self, Palette, Role, CORE_ROLES, MIN_CONTRAST, ROLES};
 use super::widgets::{self, draw_icon, Icon};
 use super::{App, FrameData, Page};
+use crate::palette::{self, PaletteCatalog, PaletteFile, SYSTEM};
 use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
 use eframe::egui::{self, pos2, vec2, Align2, RichText, Stroke};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 const LABEL_W: f32 = 150.0;
+
+/// Palette edits are written to disk this long after the last change.
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
+
+/// Palette controls and editor state (Settings → Appearance).
+#[derive(Default)]
+pub struct PaletteUi {
+    /// The custom palette open in the editor, and its colours as its file had them when the
+    /// editor opened ("Revert to file on disk").
+    editing: Option<(String, Palette)>,
+    /// Show all 22 roles, not only the core ones.
+    advanced: bool,
+    /// The name being typed for Rename.
+    rename: Option<String>,
+    confirm_delete: bool,
+    /// When the unsaved edits are written.
+    save_due: Option<Instant>,
+    /// An open import (`None`) or export (`Some(palette id)`) dialog.
+    dialog: Option<(Option<String>, Receiver<Option<PathBuf>>)>,
+    /// The last duplicate/rename/delete/import/export problem, shown under the buttons.
+    message: Option<String>,
+}
+
+impl PaletteUi {
+    fn open_editor(&mut self, p: &PaletteFile) {
+        let on_disk = match &p.source {
+            palette::PaletteSource::File(path) => PaletteFile::load(path).map(|f| f.palette).unwrap_or(p.palette),
+            palette::PaletteSource::BuiltIn => p.palette,
+        };
+        self.editing = Some((p.id.clone(), on_disk));
+    }
+
+    /// Writes pending edits when they are due (or at once with `now`). Returns an error line.
+    fn flush(&mut self, pals: &PaletteCatalog, now: bool) -> Option<String> {
+        let due = self.save_due?;
+        if !now && Instant::now() < due {
+            return None;
+        }
+        self.save_due = None;
+        let p = pals.get(&self.editing.as_ref()?.0)?;
+        p.save().err().map(|e| format!("Could not save palette {}: {e}", p.name))
+    }
+
+    /// Saves pending edits and closes the editor.
+    fn close_editor(&mut self, pals: &PaletteCatalog) -> Option<String> {
+        let err = self.flush(pals, true);
+        self.editing = None;
+        err
+    }
+}
+
+/// One colour role: label, colour button, hex value and a contrast warning.
+fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool {
+    let warning = p.worst_contrast(r.key).filter(|c| *c < MIN_CONTRAST);
+    let mut changed = false;
+    row(ui, pal, r.label, |ui| {
+        let c = p.role_mut(r.key).expect("palette role");
+        changed = egui::color_picker::color_edit_button_srgba(ui, c, egui::color_picker::Alpha::Opaque).changed();
+        ui.label(RichText::new(theme::to_skin(*c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
+        if let Some(w) = warning {
+            ui.label(RichText::new(format!("\u{26a0} {w:.1}:1")).font(theme::ui(12.0)).color(pal.warn))
+                .on_hover_text(format!("Text contrast is below {MIN_CONTRAST}:1 (WCAG AA). The palette is still saved."));
+        }
+    });
+    changed
+}
+
+/// Theme combo, the palette buttons next to it and the palette editor. `current` is the id of
+/// the palette in use. Returns whether settings changed.
+fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &mut PaletteCatalog, pui: &mut PaletteUi, current: &str) -> bool {
+    let mut changed = false;
+    row(ui, pal, "Theme", |ui| {
+        let selected = match pals.get(&s.appearance.theme) {
+            _ if s.appearance.theme == SYSTEM => "System".to_string(),
+            Some(p) => p.name.clone(),
+            None => format!("{} (not installed)", s.appearance.theme),
+        };
+        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(selected).show_ui(ui, |ui| {
+            changed |= ui.selectable_value(&mut s.appearance.theme, SYSTEM.to_string(), "System").changed();
+            for p in &pals.palettes {
+                changed |= ui.selectable_value(&mut s.appearance.theme, p.id.clone(), &p.name).changed();
+            }
+        });
+    });
+    if changed {
+        pui.message = pui.close_editor(pals);
+        pui.rename = None;
+        pui.confirm_delete = false;
+    }
+    let Some(cur) = pals.get(current).cloned() else { return changed };
+    let custom = !cur.is_built_in();
+    let editing = pui.editing.as_ref().is_some_and(|(id, _)| id == current);
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL_W);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if widgets::button(ui, "Duplicate", pal, None).on_hover_text(format!("Make an editable copy of {}", cur.name)).clicked() {
+                pui.message = pui.close_editor(pals);
+                match pals.duplicate(current) {
+                    Ok(id) => {
+                        s.appearance.theme = id.clone();
+                        changed = true;
+                        if let Some(p) = pals.get(&id) {
+                            pui.open_editor(p);
+                        }
+                    }
+                    Err(e) => pui.message = Some(format!("Duplicate failed: {e}")),
+                }
+            }
+            ui.add_enabled_ui(custom, |ui| {
+                if widgets::button(ui, if editing { "Done" } else { "Edit" }, pal, None).clicked() {
+                    if editing {
+                        pui.message = pui.close_editor(pals);
+                    } else {
+                        pui.open_editor(&cur);
+                    }
+                }
+                if widgets::button(ui, "Rename", pal, None).clicked() {
+                    pui.rename = Some(cur.name.clone());
+                    pui.confirm_delete = false;
+                }
+                if widgets::button(ui, "Delete", pal, None).clicked() {
+                    pui.confirm_delete = true;
+                    pui.rename = None;
+                }
+            })
+            .response
+            .on_disabled_hover_text("Built-in palettes are read-only; duplicate one to edit it.");
+            ui.add_enabled_ui(pui.dialog.is_none(), |ui| {
+                if widgets::button(ui, "Import", pal, None).clicked() {
+                    let d = FileDialog { save: false, title: "Import palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name: String::new() };
+                    pui.dialog = Some((None, file_dialog(d)));
+                }
+                if widgets::button(ui, "Export", pal, None).on_hover_text(format!("Save {} as a .{} file", cur.name, palette::EXTENSION)).clicked() {
+                    let file_name = format!("{}.{}", cur.id, palette::EXTENSION);
+                    let d = FileDialog { save: true, title: "Export palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name };
+                    pui.dialog = Some((Some(cur.id.clone()), file_dialog(d)));
+                }
+            });
+        });
+    });
+    let mut rename_done = None;
+    if let Some(name) = &mut pui.rename {
+        row(ui, pal, "New name", |ui| {
+            let resp = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if widgets::button(ui, "Rename", pal, None).clicked() || enter {
+                rename_done = Some(true);
+            }
+            if widgets::button(ui, "Cancel", pal, None).clicked() {
+                rename_done = Some(false);
+            }
+        });
+    }
+    if let Some(ok) = rename_done {
+        let name = pui.rename.take().unwrap_or_default();
+        if ok && !name.trim().is_empty() {
+            if let Err(e) = pals.rename(current, &name) {
+                pui.message = Some(format!("Rename failed: {e}"));
+            }
+        }
+    }
+    if pui.confirm_delete {
+        let mut answer = None;
+        row(ui, pal, &format!("Delete {}?", cur.name), |ui| {
+            if widgets::button(ui, "Delete", pal, None).clicked() {
+                answer = Some(true);
+            }
+            if widgets::button(ui, "Cancel", pal, None).clicked() {
+                answer = Some(false);
+            }
+        });
+        if let Some(yes) = answer {
+            pui.confirm_delete = false;
+            if yes {
+                pui.editing = None;
+                pui.save_due = None;
+                match pals.delete(current) {
+                    Ok(()) => {
+                        s.appearance.theme = SYSTEM.into();
+                        changed = true;
+                    }
+                    Err(e) => pui.message = Some(format!("Delete failed: {e}")),
+                }
+            }
+        }
+    }
+    if let Some(m) = &pui.message {
+        ui.label(RichText::new(m).font(theme::ui(12.0)).color(pal.warn));
+    }
+    if editing {
+        palette_editor(ui, pal, pals, pui, current);
+    }
+    changed
+}
+
+/// The editor for custom palette `id`: core roles, optionally all roles, revert.
+fn palette_editor(ui: &mut egui::Ui, pal: &Palette, pals: &mut PaletteCatalog, pui: &mut PaletteUi, id: &str) {
+    let Some(p) = pals.get_mut(id) else { return };
+    let mut edited = false;
+    ui.separator();
+    ui.label(RichText::new(format!("Editing {}", p.name)).font(theme::bold(13.0)).color(pal.text));
+    edited |= toggle_row(ui, pal, &mut p.palette.dark, "Dark palette");
+    for r in CORE_ROLES {
+        if color_row(ui, pal, &mut p.palette, r) {
+            p.palette = p.palette.derived();
+            edited = true;
+        }
+    }
+    hint(ui, pal, "Changing a core colour recomputes the other roles from the core ones. Changes apply at once and are saved automatically.");
+    toggle_row(ui, pal, &mut pui.advanced, "Advanced: all 22 roles");
+    if pui.advanced {
+        for r in ROLES {
+            edited |= color_row(ui, pal, &mut p.palette, r);
+        }
+    }
+    let mut revert = false;
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL_W);
+        revert = widgets::button(ui, "Revert to file on disk", pal, Some(Icon::Refresh)).on_hover_text("Undo every change made since the editor was opened").clicked();
+    });
+    if revert {
+        if let Some((_, original)) = pui.editing {
+            p.palette = original;
+            edited = true;
+        }
+    }
+    if edited {
+        pui.save_due = Some(Instant::now() + AUTOSAVE_DELAY);
+    }
+}
 
 /// A settings section: icon + bold heading, then a card with rows.
 fn section(ui: &mut egui::Ui, pal: &Palette, icon: Icon, title: &str, add: impl FnOnce(&mut egui::Ui)) {
@@ -60,6 +296,7 @@ impl App {
         let mut reload_skins = false;
         let mut import = false;
         let mut popout_change: Option<&'static str> = None;
+        let current_palette = self.palette_id();
         // The columns are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -68,14 +305,9 @@ impl App {
             ui.vertical(|ui| {
                 ui.set_width(col_w);
                 let s = &mut self.settings;
+                let (pals, pui) = (&mut self.palettes, &mut self.palette_ui);
                 section(ui, &pal, Icon::Apps, "Appearance", |ui| {
-                    row(ui, &pal, "Theme", |ui| {
-                        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(title_case(&s.appearance.theme)).show_ui(ui, |ui| {
-                            for t in ["system", "dark", "light"] {
-                                changed |= ui.selectable_value(&mut s.appearance.theme, t.to_string(), title_case(t)).changed();
-                            }
-                        });
-                    });
+                    changed |= palette_controls(ui, &pal, s, pals, pui, &current_palette);
                     row(ui, &pal, "Temperature", |ui| {
                         egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
                             changed |= ui.selectable_value(&mut s.general.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
@@ -206,11 +438,15 @@ impl App {
                     });
                     hint(ui, &pal, &format!("Settings file: {}", settings::default_path().display()));
                     hint(ui, &pal, &format!("Skin folders: {}", skin::default_skin_dirs().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")));
+                    hint(ui, &pal, &format!("Palettes: {}", self.palettes.dir.display()));
                     hint(ui, &pal, &format!("Recordings: {}", crate::pro::recorder::default_dir().display()));
                     if !self.catalog.errors.is_empty() {
                         for (p, e) in &self.catalog.errors {
                             hint(ui, &pal, &format!("Skin error: {}: {e}", p.display()));
                         }
+                    }
+                    for (p, e) in &self.palettes.errors {
+                        hint(ui, &pal, &format!("Palette error: {}: {e}", p.display()));
                     }
                 });
                 section(ui, &pal, Icon::Home, "About", |ui| {
@@ -248,6 +484,52 @@ impl App {
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),
             }
+        }
+    }
+}
+
+impl App {
+    /// Writes the palette being edited once its last change is [`AUTOSAVE_DELAY`] old, or at
+    /// once with `now`.
+    pub fn save_palette_edits(&mut self, now: bool) {
+        if let Some(e) = self.palette_ui.flush(&self.palettes, now) {
+            self.status = e;
+        }
+    }
+
+    /// Finishes an import or export once its file dialog has closed.
+    pub fn poll_palette_dialog(&mut self) {
+        let Some((export, rx)) = &self.palette_ui.dialog else { return };
+        let path = match rx.try_recv() {
+            Ok(p) => p,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        let export = export.clone();
+        self.palette_ui.dialog = None;
+        let Some(path) = path else { return };
+        let pui = &mut self.palette_ui;
+        match export {
+            Some(id) => {
+                let Some(p) = self.palettes.get(&id) else { return };
+                match palette::export(p, &path) {
+                    Ok(()) => {
+                        pui.message = None;
+                        self.status = format!("Exported {} to {}", p.name, path.display());
+                    }
+                    Err(e) => pui.message = Some(format!("Export failed: {e}")),
+                }
+            }
+            None => match self.palettes.import(&path) {
+                Ok(id) => {
+                    pui.message = pui.close_editor(&self.palettes);
+                    let name = self.palettes.get(&id).map(|p| p.name.clone()).unwrap_or_default();
+                    self.status = format!("Imported palette {name} ({id})");
+                    self.settings.appearance.theme = id;
+                    self.settings_dirty = true;
+                }
+                Err(e) => pui.message = Some(format!("Import failed: {}: {e}", path.display())),
+            },
         }
     }
 }
