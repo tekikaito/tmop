@@ -101,7 +101,7 @@ impl Default for Settings {
             process_table_column_widths: BTreeMap::new(),
             main_window_placement: String::new(),
             popout_bounds_by_skin: String::new(),
-            popout_skin: "com.tmog.console".into(),
+            popout_skin: "classic".into(),
             extra: BTreeMap::new(),
         }
     }

@@ -6,12 +6,12 @@
 
 use super::icons::IconCache;
 use super::summary::proc_icon;
-use super::theme::{self, dim, lighten, mix, with_alpha};
+use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, draw_icon, ellipse_points, fill_vertical_gradient, polygon_points, rounded_rect_points, GraphLine, Icon, LedStyle};
 use super::FrameData;
 use crate::metrics::Series;
 use crate::process::format_rate;
-use crate::skin::{Color, Fill, FontDesign, FontSpec, FontWeight, MeterStyle, Quadrant, Skin, SkinSource};
+use crate::skin::{Channel, Color, Fill, FontDesign, FontSpec, FontWeight, Ink, MeterStyle, Quadrant, Skin, SkinSource, Surfaces};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
 use std::path::{Path, PathBuf};
 
@@ -278,6 +278,13 @@ fn accent(skin: &Skin, q: Quadrant, op: f32) -> (Color32, Color32, Color32) {
     (accent, lit, unlit)
 }
 
+/// Top-process heat band for a row at `t` (0..1 of the busiest): the tile tinted towards the
+/// badge colour, so row text keeps the contrast it has on the tile.
+fn proc_band(p: &Paint, t: f32) -> Color32 {
+    let [r, g, b, _] = p.tile.1.to_srgba_unmultiplied();
+    mix(Color32::from_rgb(r, g, b), p.badge, 0.10 + 0.14 * t)
+}
+
 /// Positional palette: lit segments shade towards the skin's `alert` accent near the top.
 fn positional(skin: &Skin, lit: Color32, op: f32) -> [Color32; 3] {
     let alert = skin.meters.as_ref().and_then(|m| m.channels.get("alert")).and_then(|c| c.accent).map(|c| c32(c, op)).unwrap_or(Color32::from_rgb(0xE8, 0x5A, 0x50));
@@ -375,6 +382,8 @@ pub struct PopoutEvents {
     pub close: bool,
     pub drag: bool,
     pub menu: bool,
+    /// The chevron, for anchoring the skin menu.
+    pub chevron: Option<egui::Response>,
 }
 
 /// Draws the whole popout into `rect`.
@@ -465,6 +474,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     painter.add(Shape::line(vec![chev.left_center() + vec2(3.0, -3.5), chev.center() + vec2(0.0, 3.5), chev.right_center() + vec2(-3.0, -3.5)], Stroke::new(1.4_f32, ctl(chev_resp.hovered()))));
     ev.close = close_resp.clicked();
     ev.menu = chev_resp.clicked();
+    ev.chevron = Some(chev_resp);
     let drag_rect = Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom()));
     let drag = ui.interact(drag_rect, ui.id().with("popout-drag"), egui::Sense::click_and_drag());
     ev.drag = drag.drag_started();
@@ -590,12 +600,10 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let mut rows: Vec<&crate::process::ProcessRow> = fd.rows.iter().filter(|r| r.pid != 0 && (fd.show_self || r.pid != me)).collect();
     rows.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
     let top = rows.first().map(|r| r.cpu_pct).unwrap_or(0.0).max(0.5);
-    let band = mix(p.badge, Color32::BLACK, 0.58);
     for (i, r) in rows.iter().take(l.procs_rows).enumerate() {
         let rr = Rect::from_min_size(pos2(procs.left() + 6.0, rule_y + 5.0 + i as f32 * l.row_h), vec2(procs.width() - 12.0, l.row_h - 2.0));
         if r.cpu_pct > 0.0 {
-            let t = 0.35 + 0.65 * (r.cpu_pct / top).min(1.0);
-            painter.rect_filled(rr, 2.0, with_alpha(band, t * opacity * 0.9));
+            painter.rect_filled(rr, 2.0, with_alpha(proc_band(&p, (r.cpu_pct / top).min(1.0)), opacity));
         }
         let ic = Rect::from_center_size(pos2(rr.left() + 11.0, rr.center().y), vec2(16.0, 16.0));
         match icons.for_process(r.pid, r.path.as_deref()) {
@@ -605,7 +613,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
             None => proc_icon(&painter, ic.shrink(2.0), r.has_window),
         }
         widgets::text_fit(&painter, pos2(rr.left() + 24.0, rr.center().y), Align2::LEFT_CENTER, &r.name, row_f.clone(), p.primary, rr.width() - 80.0);
-        painter.text(pos2(rr.right() - 3.0, rr.center().y), Align2::RIGHT_CENTER, format!("{:.1}%", r.cpu_pct), rowv_f.clone(), if r.cpu_pct > 0.0 { lighten(p.badge, 0.1) } else { p.secondary });
+        painter.text(pos2(rr.right() - 3.0, rr.center().y), Align2::RIGHT_CENTER, format!("{:.1}%", r.cpu_pct), rowv_f.clone(), if r.cpu_pct > 0.0 { p.badge } else { p.secondary });
     }
     // Window outline (and optional glow).
     if let Some(g) = p.glow {
@@ -742,4 +750,95 @@ fn draw_gauge(skin: &Skin, painter: &egui::Painter, cell: Rect, r: &Reading, acc
     painter.circle_filled(center, 3.0, col("cap", p.primary));
     painter.text(inner.center_top(), Align2::CENTER_TOP, r.quadrant.label(), label_f.clone(), p.secondary);
     painter.text(inner.center_bottom(), Align2::CENTER_BOTTOM, &r.text, value_f.clone(), col("text", p.primary));
+}
+
+fn skin_color(c: Color32) -> Color {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    Color::rgba(r, g, b, a)
+}
+
+/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`.
+fn classic_accent(pal: &Palette, q: Quadrant) -> Color32 {
+    let c = theme::metric_color(q.key());
+    if pal.dark {
+        lighten(c, 0.35)
+    } else {
+        dim(c, 0.55)
+    }
+}
+
+/// Classic drawn in the application's own colours (`pal`).
+pub fn classic_skin(pal: &Palette) -> Skin {
+    let mut skin = Skin::classic();
+    let solid = |c: Color32| Some(Fill::Solid(skin_color(c)));
+    skin.surfaces = Some(Surfaces {
+        window: solid(pal.body),
+        window_stroke: solid(pal.card_stroke),
+        header: solid(pal.chrome),
+        header_rule: solid(pal.panel_stroke),
+        tile: solid(pal.card),
+        tile_stroke: solid(pal.panel_stroke),
+        badge_stroke: solid(pal.card_stroke),
+        ..Default::default()
+    });
+    skin.ink = Some(Ink {
+        title: Some(skin_color(pal.text)),
+        primary: Some(skin_color(pal.text)),
+        secondary: Some(skin_color(pal.text_dim)),
+        control: Some(skin_color(pal.text_dim)),
+        badge: Some(skin_color(if pal.dark { pal.ok } else { dim(pal.ok, 0.7) })),
+        rule: Some(skin_color(pal.grid)),
+        ..Default::default()
+    });
+    if let Some(m) = skin.meters.as_mut() {
+        for q in Quadrant::ALL {
+            let accent = skin_color(classic_accent(pal, q));
+            let unlit = skin_color(pal.grid);
+            m.channels.insert(q.key().into(), Channel { accent: Some(accent), lit: None, unlit: Some(unlit) });
+        }
+    }
+    skin
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skin::contrast;
+
+    /// Process rows stay readable on their heat band in every built-in skin, Classic included.
+    #[test]
+    fn process_rows_are_readable() {
+        let mut skins: Vec<Skin> = crate::skin::built_in().into_iter().filter(|s| s.id != "classic").collect();
+        skins.push(classic_skin(&theme::DARK));
+        skins.push(classic_skin(&theme::LIGHT));
+        for s in &skins {
+            let p = paint(s, 1.0);
+            for t in [0.0, 0.5, 1.0] {
+                let band = skin_color(proc_band(&p, t));
+                for (what, fg, min) in [("name", p.primary, 4.5), ("value", p.badge, 3.0)] {
+                    let r = contrast(skin_color(fg), band);
+                    assert!(r >= min, "{}: {what} on band t={t} is {r:.2}:1", s.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn classic_follows_the_app_palette_and_is_readable() {
+        for pal in [theme::DARK, theme::LIGHT] {
+            let s = classic_skin(&pal);
+            let tile = s.surfaces.as_ref().unwrap().tile.as_ref().unwrap().top().unwrap();
+            assert_eq!(tile, skin_color(pal.card));
+            let ink = s.ink.as_ref().unwrap();
+            for fg in [ink.primary, ink.secondary, ink.title] {
+                let r = contrast(fg.unwrap(), tile);
+                assert!(r >= 4.5, "dark={} ink {} is {r:.2}:1", pal.dark, fg.unwrap());
+            }
+            for q in s.resolved_quadrants() {
+                let a = s.channel(q).accent.unwrap();
+                let r = contrast(a, tile);
+                assert!(r >= 4.5, "dark={} {} accent {a} is {r:.2}:1", pal.dark, q.key());
+            }
+        }
+    }
 }

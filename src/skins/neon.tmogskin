@@ -1,0 +1,25 @@
+{
+  "format": 1, "id": "com.tmop.neon", "name": "Neon", "author": "TMOP",
+  "description": "Glowing synthwave meters on a violet gradient",
+  "quadrants": ["cpu", "gpu", "disk", "network", "memory", "thermal"],
+  "header": { "title": "TMOP//NEON" },
+  "metrics": { "cornerRadius": 12, "tileCornerRadius": 8 },
+  "surfaces": {
+    "window": { "gradient": ["#1A0B2E", "#0B0618"] }, "windowStroke": "#FF2BD6",
+    "header": { "gradient": ["#2B0F4C", "#1A0B2E"] }, "headerRule": "#5A2A8A",
+    "tile": "#150A28", "tileStroke": "#7A2FB8", "badgeStroke": "#FF2BD6"
+  },
+  "ink": {
+    "title": "#FF7AE6", "primary": "#F5F0FF", "secondary": "#B9A8E0", "control": "#E0D0FF",
+    "badge": "#39FF14", "rule": "#3D1F66", "glow": "#FF2BD680"
+  },
+  "typography": { "title": { "size": 11, "weight": "bold", "design": "monospaced" }, "titleTracking": 1.5 },
+  "meters": {
+    "style": "rows", "columns": 2,
+    "channels": {
+      "cpu": { "accent": "#39FF14", "unlit": "#2A1A40" }, "gpu": { "accent": "#00E5FF", "unlit": "#2A1A40" },
+      "disk": { "accent": "#FF8A00", "unlit": "#2A1A40" }, "network": { "accent": "#7DF9FF", "unlit": "#2A1A40" },
+      "memory": { "accent": "#FF2BD6", "unlit": "#2A1A40" }, "thermal": { "accent": "#FFD300", "unlit": "#2A1A40" }
+    }
+  }
+}

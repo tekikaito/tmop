@@ -76,11 +76,6 @@ impl App {
                             }
                         });
                     });
-                    row(ui, &pal, "Application font", |ui| {
-                        egui::ComboBox::from_id_salt("font").width(200.0).selected_text("Michroma (display) / Segoe UI").show_ui(ui, |ui| {
-                            ui.label("Michroma for headings, Segoe UI for text");
-                        });
-                    });
                     row(ui, &pal, "Temperature", |ui| {
                         egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
                             changed |= ui.selectable_value(&mut s.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
