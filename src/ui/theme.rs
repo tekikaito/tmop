@@ -68,7 +68,8 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(defs);
 }
 
-/// Application palette.
+/// Application palette: 22 colour roles (see [`ROLES`]). Built-in and custom palettes
+/// (`.tmoptheme` files) are listed by [`crate::palette`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub dark: bool,
@@ -151,13 +152,259 @@ pub const LIGHT: Palette = Palette {
     control_stroke: Color32::from_rgb(0xBE, 0xBE, 0xBE),
 };
 
+pub const HIGH_CONTRAST: Palette = Palette {
+    dark: true,
+    chrome: Color32::from_rgb(0x00, 0x00, 0x00),
+    body: Color32::from_rgb(0x00, 0x00, 0x00),
+    sidebar: Color32::from_rgb(0x00, 0x00, 0x00),
+    sidebar_rule: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    card: Color32::from_rgb(0x0A, 0x0A, 0x0A),
+    card_stroke: Color32::from_rgb(0xC8, 0xC8, 0xC8),
+    panel: Color32::from_rgb(0x0A, 0x0A, 0x0A),
+    panel_stroke: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    hover: Color32::from_rgb(0x30, 0x30, 0x30),
+    selection: Color32::from_rgb(0x1A, 0xEB, 0xFF),
+    accent: Color32::from_rgb(0xFF, 0xFF, 0x00),
+    text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    text_dim: Color32::from_rgb(0xE6, 0xE6, 0xE6),
+    text_faint: Color32::from_rgb(0xB4, 0xB4, 0xB4),
+    grid: Color32::from_rgb(0x5A, 0x5A, 0x5A),
+    led_bg: Color32::from_rgb(0x00, 0x00, 0x00),
+    led_dim: Color32::from_rgb(0x00, 0x33, 0x3A),
+    led_lit: Color32::from_rgb(0x00, 0xFF, 0xFF),
+    ok: Color32::from_rgb(0x3F, 0xF2, 0x3F),
+    warn: Color32::from_rgb(0xFF, 0xB0, 0x00),
+    control: Color32::from_rgb(0x00, 0x00, 0x00),
+    control_stroke: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+};
+
+/// Nord (Arctic Ice Studio): polar night surfaces, snow storm text, frost accent.
+pub const NORD: Palette = Palette {
+    dark: true,
+    chrome: Color32::from_rgb(0x34, 0x3A, 0x48),
+    body: Color32::from_rgb(0x2E, 0x34, 0x40),
+    sidebar: Color32::from_rgb(0x2A, 0x2F, 0x3A),
+    sidebar_rule: Color32::from_rgb(0x43, 0x4C, 0x5E),
+    card: Color32::from_rgb(0x3B, 0x42, 0x52),
+    card_stroke: Color32::from_rgb(0x4C, 0x56, 0x6A),
+    panel: Color32::from_rgb(0x3F, 0x47, 0x58),
+    panel_stroke: Color32::from_rgb(0x4C, 0x56, 0x6A),
+    hover: Color32::from_rgb(0x43, 0x4C, 0x5E),
+    selection: Color32::from_rgb(0x4C, 0x6A, 0x92),
+    accent: Color32::from_rgb(0x88, 0xC0, 0xD0),
+    text: Color32::from_rgb(0xEC, 0xEF, 0xF4),
+    text_dim: Color32::from_rgb(0xD8, 0xDE, 0xE9),
+    text_faint: Color32::from_rgb(0x9A, 0xA3, 0xB5),
+    grid: Color32::from_rgb(0x43, 0x4C, 0x5E),
+    led_bg: Color32::from_rgb(0x24, 0x29, 0x33),
+    led_dim: Color32::from_rgb(0x2F, 0x40, 0x4E),
+    led_lit: Color32::from_rgb(0x8F, 0xBC, 0xBB),
+    ok: Color32::from_rgb(0xA3, 0xBE, 0x8C),
+    warn: Color32::from_rgb(0xD0, 0x87, 0x70),
+    control: Color32::from_rgb(0x43, 0x4C, 0x5E),
+    control_stroke: Color32::from_rgb(0x4C, 0x56, 0x6A),
+};
+
+/// Solarized Light (Ethan Schoonover): base3/base2 surfaces, base02 text.
+pub const SOLARIZED_LIGHT: Palette = Palette {
+    dark: false,
+    chrome: Color32::from_rgb(0xF6, 0xF0, 0xDD),
+    body: Color32::from_rgb(0xEE, 0xE8, 0xD5),
+    sidebar: Color32::from_rgb(0xF4, 0xEE, 0xDB),
+    sidebar_rule: Color32::from_rgb(0xD9, 0xD2, 0xBC),
+    card: Color32::from_rgb(0xFD, 0xF6, 0xE3),
+    card_stroke: Color32::from_rgb(0xC9, 0xC2, 0xAC),
+    panel: Color32::from_rgb(0xFA, 0xF3, 0xE0),
+    panel_stroke: Color32::from_rgb(0xDD, 0xD6, 0xC1),
+    hover: Color32::from_rgb(0xE8, 0xE2, 0xCF),
+    selection: Color32::from_rgb(0x1F, 0x6F, 0xA8),
+    accent: Color32::from_rgb(0x26, 0x8B, 0xD2),
+    text: Color32::from_rgb(0x07, 0x36, 0x42),
+    text_dim: Color32::from_rgb(0x4A, 0x5F, 0x66),
+    text_faint: Color32::from_rgb(0x83, 0x94, 0x96),
+    grid: Color32::from_rgb(0xDD, 0xD6, 0xC1),
+    led_bg: Color32::from_rgb(0x00, 0x2B, 0x36),
+    led_dim: Color32::from_rgb(0x0B, 0x3B, 0x46),
+    led_lit: Color32::from_rgb(0x2A, 0xA1, 0x98),
+    ok: Color32::from_rgb(0x85, 0x99, 0x00),
+    warn: Color32::from_rgb(0xCB, 0x4B, 0x16),
+    control: Color32::from_rgb(0xFF, 0xFB, 0xEF),
+    control_stroke: Color32::from_rgb(0xC9, 0xC2, 0xAC),
+};
+
+/// A colour role of a [`Palette`]: its `.tmoptheme` key and its label in the editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Role {
+    pub key: &'static str,
+    pub label: &'static str,
+}
+
+const fn role(key: &'static str, label: &'static str) -> Role {
+    Role { key, label }
+}
+
+/// All 22 roles, in file order.
+pub const ROLES: [Role; 22] = [
+    role("chrome", "Title and status bars"),
+    role("body", "Background"),
+    role("sidebar", "Sidebar"),
+    role("sidebarRule", "Sidebar rule"),
+    role("card", "Surface"),
+    role("cardStroke", "Surface border"),
+    role("panel", "Panel"),
+    role("panelStroke", "Panel border"),
+    role("hover", "Hover"),
+    role("selection", "Selection"),
+    role("accent", "Accent"),
+    role("text", "Text"),
+    role("textDim", "Secondary text"),
+    role("textFaint", "Hint text"),
+    role("grid", "Grid"),
+    role("ledBg", "LED background"),
+    role("ledDim", "LED unlit"),
+    role("ledLit", "LED lit"),
+    role("ok", "OK"),
+    role("warn", "Warning"),
+    role("control", "Control"),
+    role("controlStroke", "Control border"),
+];
+
+/// The roles the editor shows by default; [`Palette::derived`] computes the others from them.
+pub const CORE_ROLES: [Role; 8] = [
+    role("body", "Background"),
+    role("card", "Surface"),
+    role("sidebar", "Sidebar"),
+    role("accent", "Accent"),
+    role("text", "Text"),
+    role("ok", "OK"),
+    role("warn", "Warning"),
+    role("grid", "Grid"),
+];
+
+/// Text roles that must stay readable (WCAG AA, 4.5:1) on every [`SURFACE_ROLES`] colour.
+pub const TEXT_ROLES: [&str; 2] = ["text", "textDim"];
+/// Roles text is drawn on.
+pub const SURFACE_ROLES: [&str; 7] = ["chrome", "body", "sidebar", "card", "panel", "hover", "control"];
+/// Minimum text contrast (WCAG AA).
+pub const MIN_CONTRAST: f32 = 4.5;
+
+/// The recorder's seven-segment display (status bar and Flight Recorder page).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lcd {
+    pub bg: Color32,
+    pub rim: Color32,
+    /// Segments while not recording (recording uses red).
+    pub lit: Color32,
+    pub unlit: Color32,
+}
+
 impl Palette {
+    /// The colour of role `key` (a [`ROLES`] key).
+    pub fn role(&self, key: &str) -> Option<Color32> {
+        let mut p = *self;
+        p.role_mut(key).map(|c| *c)
+    }
+
+    pub fn role_mut(&mut self, key: &str) -> Option<&mut Color32> {
+        Some(match key {
+            "chrome" => &mut self.chrome,
+            "body" => &mut self.body,
+            "sidebar" => &mut self.sidebar,
+            "sidebarRule" => &mut self.sidebar_rule,
+            "card" => &mut self.card,
+            "cardStroke" => &mut self.card_stroke,
+            "panel" => &mut self.panel,
+            "panelStroke" => &mut self.panel_stroke,
+            "hover" => &mut self.hover,
+            "selection" => &mut self.selection,
+            "accent" => &mut self.accent,
+            "text" => &mut self.text,
+            "textDim" => &mut self.text_dim,
+            "textFaint" => &mut self.text_faint,
+            "grid" => &mut self.grid,
+            "ledBg" => &mut self.led_bg,
+            "ledDim" => &mut self.led_dim,
+            "ledLit" => &mut self.led_lit,
+            "ok" => &mut self.ok,
+            "warn" => &mut self.warn,
+            "control" => &mut self.control,
+            "controlStroke" => &mut self.control_stroke,
+            _ => return None,
+        })
+    }
+
+    /// This palette with every non-core role recomputed from the [`CORE_ROLES`] and `dark`.
+    pub fn derived(&self) -> Palette {
+        let (body, card, text) = (self.body, self.card, self.text);
+        let control = if self.dark { mix(card, text, 0.06) } else { lighten(card, 0.8) };
+        Palette {
+            chrome: mix(body, card, 0.5),
+            sidebar_rule: mix(self.sidebar, text, 0.15),
+            card_stroke: mix(card, text, 0.28),
+            panel: mix(card, text, 0.025),
+            panel_stroke: mix(card, text, 0.1),
+            hover: mix(card, text, 0.06),
+            selection: dim(self.accent, 0.6),
+            text_dim: mix(text, body, 0.3),
+            text_faint: mix(text, body, 0.5),
+            led_bg: dim(body, 0.1),
+            led_dim: dim(self.accent, 0.3),
+            led_lit: lighten(self.accent, 0.35),
+            control,
+            control_stroke: mix(control, text, 0.15),
+            ..*self
+        }
+    }
+
+    /// Text on [`Palette::selection`]: white or black, whichever reads better.
+    pub fn on_selection(&self) -> Color32 {
+        if contrast(Color32::WHITE, self.selection) >= contrast(Color32::BLACK, self.selection) {
+            Color32::WHITE
+        } else {
+            Color32::BLACK
+        }
+    }
+
+    /// The lowest text contrast that involves role `key`, if it is a text or surface role:
+    /// a text role over every surface, or every text role over a surface.
+    pub fn worst_contrast(&self, key: &str) -> Option<f32> {
+        let pairs: Vec<(&str, &str)> = if TEXT_ROLES.contains(&key) {
+            SURFACE_ROLES.iter().map(|s| (key, *s)).collect()
+        } else if SURFACE_ROLES.contains(&key) {
+            TEXT_ROLES.iter().map(|t| (*t, key)).collect()
+        } else {
+            return None;
+        };
+        let mut worst = f32::MAX;
+        for (fg, bg) in pairs {
+            worst = worst.min(contrast(self.role(fg)?, self.role(bg)?));
+        }
+        if key == "selection" {
+            worst = worst.min(contrast(self.on_selection(), self.selection));
+        }
+        Some(worst)
+    }
+
+    /// Roles whose [`Palette::worst_contrast`] is below [`MIN_CONTRAST`], with that contrast.
+    pub fn contrast_warnings(&self) -> Vec<(&'static str, f32)> {
+        ROLES.iter().filter_map(|r| self.worst_contrast(r.key).filter(|c| *c < MIN_CONTRAST).map(|c| (r.key, c))).collect()
+    }
+
+    /// Process-row heat shading (busy rows tinted towards it).
+    pub fn heat(&self) -> Color32 {
+        mix(self.ok, self.body, 0.3)
+    }
+
+    pub fn lcd(&self) -> Lcd {
+        Lcd { bg: mix(self.led_bg, self.led_dim, 0.25), rim: self.led_dim, lit: lighten(self.led_dim, 0.55), unlit: mix(self.led_bg, self.led_dim, 0.6) }
+    }
+
     /// Card background used behind graphs on the light theme (graphs stay dark-ish for contrast).
     pub fn graph_bg(&self) -> Color32 {
         if self.dark {
             self.card
         } else {
-            Color32::from_rgb(0xF2, 0xF4, 0xF6)
+            mix(self.card, self.body, 0.5)
         }
     }
 
@@ -176,7 +423,7 @@ impl Palette {
         v.override_text_color = Some(self.text);
         v.hyperlink_color = self.accent;
         v.selection.bg_fill = self.selection;
-        v.selection.stroke = Stroke::new(1.0_f32, self.text);
+        v.selection.stroke = Stroke::new(1.0_f32, self.on_selection());
         v.widgets.noninteractive.bg_fill = self.panel;
         v.widgets.noninteractive.weak_bg_fill = self.panel;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.panel_stroke);
@@ -257,6 +504,20 @@ pub fn lighten(c: Color32, t: f32) -> Color32 {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     let m = |v: u8| (v as f32 + (255.0 - v as f32) * t.clamp(0.0, 1.0)).round() as u8;
     Color32::from_rgba_unmultiplied(m(r), m(g), m(b), a)
+}
+
+/// WCAG contrast ratio of `fg` over the opaque `bg` (see [`crate::skin::contrast`]).
+pub fn contrast(fg: Color32, bg: Color32) -> f32 {
+    crate::skin::contrast(to_skin(fg), to_skin(bg))
+}
+
+pub fn to_skin(c: Color32) -> crate::skin::Color {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    crate::skin::Color::rgba(r, g, b, a)
+}
+
+pub fn from_skin(c: crate::skin::Color) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
 }
 
 /// Gamma-space mix of two colours.
