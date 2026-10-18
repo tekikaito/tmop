@@ -1,0 +1,24 @@
+//! Docker support: host contexts, plain data types shared with the UI, and the
+//! engine connection factory.
+//!
+//! * [`context`] reads the Docker CLI configuration (`~/.docker`) and lists the
+//!   hosts that can be used;
+//! * [`model`] holds engine data as plain Rust types, so no `bollard` type leaks
+//!   into the UI;
+//! * [`backend`] runs the background worker: polling, stats, events and commands;
+//! * [`client`] turns an [`context::Endpoint`] into a connected `bollard::Docker`.
+
+pub mod backend;
+pub mod client;
+pub mod exec;
+pub mod files;
+pub mod logs;
+pub mod notify;
+pub mod run;
+pub mod stack;
+
+pub mod context;
+pub mod model;
+
+/// Maximum number of containers that keep their own stats history.
+pub const MAX_TRACKED: usize = 50;

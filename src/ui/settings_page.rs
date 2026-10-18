@@ -563,6 +563,7 @@ impl App {
                     changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
                     changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                     changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
+                    changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
                 });
                 section(ui, &pal, Icon::Wrench, "Task Manager", |ui| {
                     self.replace_section(ui, &pal, |ui, on| toggle_row(ui, &pal, on, "Open TMOP instead of Windows Task Manager"), |ui, t| hint(ui, &pal, t));

@@ -72,9 +72,35 @@ jobs:
             dist/*.zip.sha256
           if-no-files-found: error
 
+  engine:
+    name: Build engine ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Check init script syntax
+        run: sh -n engine/rootfs/usr/local/bin/tmop-engine
+
+      - name: Build rootfs
+        run: engine/build.sh ${{ github.ref_name }} ${{ matrix.arch }} dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.arch }}
+          path: dist/tmop-engine-*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [build, engine]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

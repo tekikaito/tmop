@@ -46,3 +46,35 @@ jobs:
         run: |
           cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
           cargo clippy --locked --target ${{ matrix.target }} --all-targets --features screensaver -- -D warnings
+
+  docker-linux:
+    name: Docker integration tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-docker
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libasound2-dev
+
+      - name: Docker info
+        run: |
+          docker version
+          docker info --format '{{.ServerVersion}}'
+
+      # The full suite runs in the Windows jobs; here only the tests that need a Docker engine.
+      - name: Test
+        run: cargo test --locked --test docker_exec --test docker_files --test docker_logs --test docker_run
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings

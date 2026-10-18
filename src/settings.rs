@@ -1,7 +1,7 @@
 //! Settings (`settings.json`): TMOP's own schema, grouped by section.
 //!
 //! * the file is a JSON object `{ "version": 1, "general": {..}, "window": {..},
-//!   "appearance": {..}, "graphs": {..}, "popout": {..} }` with camelCase keys;
+//!   "appearance": {..}, "graphs": {..}, "popout": {..}, "docker": {..} }` with camelCase keys;
 //! * an older `version` is upgraded step by step (1→2→…) by [`MIGRATIONS`];
 //! * a file without `version` is TMOG's format (`schemaVersion` 12, also what TMOP 0.1 wrote) and
 //!   is converted by [`migrate_v12`]; TMOG keys TMOP doesn't implement are dropped;
@@ -27,7 +27,7 @@ pub const VERSION: u32 = 1;
 const MIGRATIONS: &[fn(&mut Map<String, Value>)] = &[];
 
 /// Maps whose keys are data (column ids, metric ids), not settings, so they are not checked.
-const FREE_MAPS: &[&str] = &["window.processTableColumnWidths", "graphs.metricColors"];
+const FREE_MAPS: &[&str] = &["window.processTableColumnWidths", "graphs.metricColors", "docker.contexts"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,6 +38,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub graphs: Graphs,
     pub popout: Popout,
+    pub docker: Docker,
     /// Set when the file is from a newer TMOP, or is an old one that couldn't be backed up:
     /// [`Settings::save`] refuses to overwrite it.
     #[serde(skip)]
@@ -116,6 +117,62 @@ pub struct Popout {
     pub last_mode: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Docker {
+    /// Hides the Docker page in the navigation.
+    pub hide_page: bool,
+    /// Docker context in use; empty means the context selected in the Docker CLI.
+    pub active_context: String,
+    /// Per-context Docker options, keyed by context name.
+    pub contexts: BTreeMap<String, DockerContextSettings>,
+    /// Hosts added in TMOP; shown in the host picker next to the Docker CLI contexts.
+    pub hosts: Vec<DockerHost>,
+    /// Data folder of TMOP's own Docker engine; empty means `%LOCALAPPDATA%\TMOP\engine`.
+    pub engine_data_dir: String,
+    /// Looks for a newer engine release when the Docker page starts.
+    pub engine_update_check: bool,
+}
+
+impl Default for Docker {
+    fn default() -> Self {
+        Self {
+            hide_page: false,
+            active_context: String::new(),
+            contexts: BTreeMap::new(),
+            hosts: Vec::new(),
+            engine_data_dir: String::new(),
+            engine_update_check: true,
+        }
+    }
+}
+
+/// Per-context Docker options.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerContextSettings {
+    /// Blocks start, stop, remove and other changes for this context.
+    pub read_only: bool,
+    /// Shows desktop notifications for container events.
+    pub notifications: bool,
+}
+
+impl Default for DockerContextSettings {
+    /// Read-only off, notifications on.
+    fn default() -> Self {
+        Self { read_only: false, notifications: true }
+    }
+}
+
+/// A Docker host added in TMOP. `host` is a Docker host string (`ssh://user@server`, `tcp://server:2375`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerHost {
+    pub name: String,
+    pub host: String,
+    pub description: String,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -125,6 +182,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             graphs: Graphs::default(),
             popout: Popout::default(),
+            docker: Docker::default(),
             read_only: false,
         }
     }
@@ -452,6 +510,13 @@ const V12_KEYS: &[(&str, &str)] = &[
     ("popoutOpaqueOnHover", "popout.opaqueOnHover"),
     ("popoutMode", "popout.mode"),
     ("popoutLastMode", "popout.lastMode"),
+    // Written by TMOP builds with Docker support before the grouped schema.
+    ("dockerHidePage", "docker.hidePage"),
+    ("dockerActiveContext", "docker.activeContext"),
+    ("dockerContexts", "docker.contexts"),
+    ("dockerHosts", "docker.hosts"),
+    ("engineDataDir", "docker.engineDataDir"),
+    ("engineUpdateCheck", "docker.engineUpdateCheck"),
 ];
 
 /// Converts a TMOG-format object to a version 1 object.
@@ -565,7 +630,7 @@ mod tests {
         // Unimplemented TMOG keys are gone from the written file.
         let out: Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout"]);
+        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout", "docker"]);
         assert!(!s.to_json().contains("diskLights"));
     }
 
@@ -729,6 +794,51 @@ mod tests {
         let Ok(text) = std::fs::read_to_string(tmog_path()) else { return };
         let load = Settings::from_json(&text).expect("TMOG settings should parse");
         assert!(matches!(load.outcome, LoadOutcome::MigratedV12));
+    }
+
+    #[test]
+    fn docker_settings_roundtrip() {
+        let mut s = Settings::default();
+        s.docker.hide_page = true;
+        s.docker.active_context = "work".into();
+        s.docker.hosts.push(DockerHost {
+            name: "tmop-test-host".into(),
+            host: "ssh://nobody@example.invalid".into(),
+            description: String::new(),
+        });
+        s.docker.contexts.insert("work".into(), DockerContextSettings { read_only: true, notifications: false });
+        s.docker.contexts.insert("desktop-linux".into(), DockerContextSettings::default());
+        s.docker.engine_data_dir = r"D:\tmop-engine".into();
+        s.docker.engine_update_check = false;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["docker"]["contexts"]["work"]["readOnly"], true);
+        assert_eq!(out["docker"]["engineDataDir"], r"D:\tmop-engine");
+        let load = parse(&s.to_json());
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty(), "context names are data: {:?}", load.unknown_keys);
+        assert_eq!(load.settings, s);
+    }
+
+    #[test]
+    fn docker_settings_default_when_absent() {
+        let s = parse(SAMPLE).settings;
+        assert_eq!(s.docker, Docker::default());
+        assert!(s.docker.engine_update_check, "update check is on by default");
+        let s = parse(r#"{"version":1,"docker":{"contexts":{"x":{"readOnly":true}}}}"#).settings;
+        assert!(s.docker.contexts["x"].read_only);
+        assert!(s.docker.contexts["x"].notifications, "missing notifications defaults to true");
+    }
+
+    #[test]
+    fn migrates_v12_docker_keys() {
+        let v12 = r#"{"schemaVersion":12,"dockerHidePage":true,"dockerActiveContext":"work","dockerContexts":{"work":{"readOnly":true,"notifications":false}},"dockerHosts":[{"name":"nas","host":"ssh://me@nas","description":""}],"engineDataDir":"D:\\e","engineUpdateCheck":false}"#;
+        let load = parse(v12);
+        assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+        let d = load.settings.docker;
+        assert!(d.hide_page && !d.engine_update_check);
+        assert_eq!((d.active_context.as_str(), d.engine_data_dir.as_str()), ("work", "D:\\e"));
+        assert_eq!(d.contexts["work"], DockerContextSettings { read_only: true, notifications: false });
+        assert_eq!(d.hosts[0].host, "ssh://me@nas");
     }
 
     #[test]
