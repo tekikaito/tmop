@@ -117,6 +117,17 @@ fn font(spec: Option<&FontSpec>, default_pt: f32, default_weight: FontWeight) ->
     }
 }
 
+/// The header title's font. Classic, drawn in the application's style, uses the display font
+/// (`appearance.displayFont`); other skins keep their own typography.
+fn title_font(skin: &Skin, spec: Option<&FontSpec>) -> FontId {
+    let f = font(spec, 11.0, FontWeight::Bold);
+    if skin.source == SkinSource::BuiltIn && skin.id == "classic" {
+        theme::display(f.size)
+    } else {
+        f
+    }
+}
+
 /// Loaded skin images (textures live in the egui context).
 #[derive(Default)]
 pub struct Textures {
@@ -452,7 +463,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let hide_title = skin.header.as_ref().and_then(|h| h.hide_title).unwrap_or(false);
     if !hide_title {
         let title = skin.header.as_ref().and_then(|h| h.title.clone()).unwrap_or_else(|| DEFAULT_TITLE.to_string());
-        let tf = font(typo.title.as_ref(), 11.0, FontWeight::Bold);
+        let tf = title_font(skin, typo.title.as_ref());
         let tracking = typo.title_tracking.unwrap_or(0.0);
         if tracking > 0.05 {
             let mut cx = x;
@@ -835,6 +846,21 @@ mod tests {
         let bare = Skin { meters: None, ..Skin::classic() };
         assert_eq!(accent(&bare, Quadrant::Cpu, 1.0, &m).0, Color32::from_rgb(0x20, 0x40, 0xFF));
         assert_eq!(accent(&bare, Quadrant::Disk, 1.0, &m).0, channel_default(Quadrant::Disk));
+    }
+
+    /// Classic's title is in the display font; other skins, and a user skin that reuses the
+    /// id `classic`, keep their own typography.
+    #[test]
+    fn only_classic_uses_the_display_font() {
+        let classic = classic_skin(&theme::DARK, &MetricColors::default());
+        assert_eq!(title_font(&classic, None), theme::display(11.0 * PT));
+        let mut user = classic.clone();
+        user.source = SkinSource::File(PathBuf::from("classic.tmogskin"));
+        assert_eq!(title_font(&user, None), theme::bold(11.0 * PT));
+        for s in crate::skin::built_in().into_iter().filter(|s| s.id != "classic") {
+            let typo = s.typography.clone().unwrap_or_default();
+            assert_eq!(title_font(&s, typo.title.as_ref()), font(typo.title.as_ref(), 11.0, FontWeight::Bold), "{}", s.id);
+        }
     }
 
     #[test]
