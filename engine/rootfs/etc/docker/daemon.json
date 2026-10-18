@@ -1,0 +1,1 @@
+{"hosts": ["unix:///var/run/docker.sock"], "log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}, "cgroup-parent": "/tmop-engine", "containerd": "/run/containerd/containerd.sock", "userland-proxy-path": "/usr/bin/docker-proxy"}

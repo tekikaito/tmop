@@ -3,11 +3,19 @@
 //!
 //! Usage:
 //!   TMOP                  main window (page from `defaultPage`)
-//!   TMOP --page=<id>      start on summary|performance|processes|settings
+//!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
+//!   TMOP --docker-terminal=<container>[;<command>]
+//!                         open a terminal session in a container on the Docker page
+//!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
+//!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
+//!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
+//!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
+//!
+//! The `--engine-relay` modes honour the `TMOP_ENGINE_*` test overrides (`tmop::engine::Overrides`).
 
 use tmop::metrics::Collector;
 use tmop::settings;
@@ -132,6 +140,34 @@ mod scr {
     }
 }
 
+#[cfg(windows)]
+fn engine_relay() -> i32 {
+    tmop::engine::relay::run()
+}
+
+#[cfg(not(windows))]
+fn engine_relay() -> i32 {
+    eprintln!("available on Windows only");
+    2
+}
+
+#[cfg(windows)]
+fn engine_relay_stop() -> i32 {
+    let pipe = tmop::engine::Overrides::from_env().pipe;
+    if tmop::engine::relay::signal_stop(&pipe) {
+        0
+    } else {
+        eprintln!("no engine relay is running on pipe {pipe}");
+        1
+    }
+}
+
+#[cfg(not(windows))]
+fn engine_relay_stop() -> i32 {
+    eprintln!("available on Windows only");
+    2
+}
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -158,6 +194,12 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    if args.iter().any(|a| a == "--engine-relay") {
+        std::process::exit(engine_relay());
+    }
+    if args.iter().any(|a| a == "--engine-relay-stop") {
+        std::process::exit(engine_relay_stop());
+    }
     if args.iter().any(|a| a == "--dump") {
         dump();
         return Ok(());
@@ -181,6 +223,14 @@ fn main() -> eframe::Result<()> {
             }
         }),
         disk_scan: value(&["--disk-scan="]).map(std::path::PathBuf::from),
+        docker_terminal: value(&["--docker-terminal="]).and_then(|v| {
+            let (container, command) = v.split_once(';').unwrap_or((v.as_str(), ""));
+            let container = container.trim();
+            let command = command.trim();
+            (!container.is_empty()).then(|| (container.to_string(), (!command.is_empty()).then(|| command.to_string())))
+        }),
+        docker_tab: value(&["--docker-tab="]),
+        engine_test: value(&["--engine-test="]),
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;

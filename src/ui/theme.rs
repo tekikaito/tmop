@@ -492,7 +492,7 @@ impl Palette {
 
 /// Metrics with a colour of their own (`graphs.metricColors` keys), with their labels in
 /// Settings → Graphs.
-pub const METRICS: [(&str, &str); 9] = [
+pub const METRICS: [(&str, &str); 10] = [
     ("cpu", "CPU"),
     ("disk", "Disk"),
     ("memory", "Memory"),
@@ -502,6 +502,7 @@ pub const METRICS: [(&str, &str); 9] = [
     ("clock", "Clock"),
     ("power", "Power"),
     ("kernel", "Kernel"),
+    ("docker", "Docker"),
 ];
 
 // Fixed accent colours: the built-in metric colours, plus yellow for the middle of the
@@ -523,6 +524,7 @@ pub fn default_metric_color(key: &str) -> Color32 {
         "gpu" | "network" => BLUE,
         "thermal" => ORANGE,
         "clock" | "power" | "kernel" => RED,
+        "docker" => Color32::from_rgb(36, 150, 237),
         _ => Color32::from_rgb(0x9A, 0x9A, 0x9A),
     }
 }

@@ -1,5 +1,7 @@
 //! TMOP (Task Manager OverPowered): a skinnable Windows system monitor.
 
+pub mod docker;
+pub mod engine;
 pub mod fonts;
 pub mod metrics;
 pub mod palette;
@@ -9,6 +11,7 @@ pub mod screensaver;
 pub mod settings;
 pub mod skin;
 pub mod taskmgr;
+pub mod terminal;
 pub mod ui;
 pub mod update;
 

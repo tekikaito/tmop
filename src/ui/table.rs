@@ -87,6 +87,9 @@ impl TableState {
     }
 }
 
+/// Context menu of a row: `(item index, ui)`.
+pub type RowMenu<'a> = &'a dyn Fn(usize, &mut egui::Ui);
+
 /// Draws the table in `rect`. `order` lists the item indices to show (already filtered
 /// and sorted); `key` gives each item a stable key for selection; `cell(item, col)`
 /// returns the content. Returns the item index that was double-clicked, if any.
@@ -102,6 +105,25 @@ pub fn show(
     key: &dyn Fn(usize) -> String,
     cell: &dyn Fn(usize, usize) -> Cell,
     icons: &mut super::icons::IconCache,
+) -> Option<usize> {
+    show_with_menu(ui, rect, id, pal, cols, order, state, key, cell, icons, None)
+}
+
+/// Like [`show`], and `menu(item, ui)` fills the context menu of each row. A right click
+/// selects the row before the menu opens.
+#[allow(clippy::too_many_arguments)]
+pub fn show_with_menu(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id: &str,
+    pal: &Palette,
+    cols: &[Col],
+    order: &[usize],
+    state: &mut TableState,
+    key: &dyn Fn(usize) -> String,
+    cell: &dyn Fn(usize, usize) -> Cell,
+    icons: &mut super::icons::IconCache,
+    menu: Option<RowMenu<'_>>,
 ) -> Option<usize> {
     let mut sort_click = None;
     let mut clicked: Option<String> = None;
@@ -188,8 +210,11 @@ pub fn show(
                         });
                     }
                     let resp = row.response();
-                    if resp.clicked() {
+                    if resp.clicked() || resp.secondary_clicked() {
                         clicked = Some(k.clone());
+                    }
+                    if let Some(menu) = menu {
+                        resp.context_menu(|ui| menu(item, ui));
                     }
                     if resp.double_clicked() {
                         activated = Some(item);

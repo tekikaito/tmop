@@ -2,6 +2,7 @@
 //! the pages, and the skinnable popout window.
 
 pub mod bench_page;
+pub mod docker;
 pub mod icons;
 pub mod inventory_pages;
 pub mod kit;
@@ -13,13 +14,17 @@ pub mod replace;
 pub mod settings_page;
 pub mod summary;
 pub mod table;
+pub mod terminal;
 pub mod theme;
 pub mod widgets;
 
+use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::palette::{self, PaletteCatalog};
 use crate::pro::{bench::Bench, recorder::Recorder};
-use crate::process::{self, Action, Column, Priority, ProcessRow};
+#[cfg(windows)]
+use crate::process;
+use crate::process::{Action, Column, Priority, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
@@ -36,6 +41,7 @@ pub enum Page {
     Summary,
     Performance,
     Processes,
+    Docker,
     SystemInfo,
     AppHistory,
     StartupApps,
@@ -52,10 +58,11 @@ pub enum Page {
 }
 
 impl Page {
-    pub const NAV: [Page; 15] = [
+    pub const NAV: [Page; 16] = [
         Page::Summary,
         Page::Performance,
         Page::Processes,
+        Page::Docker,
         Page::SystemInfo,
         Page::AppHistory,
         Page::StartupApps,
@@ -75,6 +82,7 @@ impl Page {
         match id {
             "performance" => Page::Performance,
             "processes" | "details" => Page::Processes,
+            "docker" => Page::Docker,
             "system-info" => Page::SystemInfo,
             "app-history" => Page::AppHistory,
             "startup" | "startup-apps" => Page::StartupApps,
@@ -96,6 +104,7 @@ impl Page {
             Page::Summary => "summary",
             Page::Performance => "performance",
             Page::Processes => "processes",
+            Page::Docker => "docker",
             Page::SystemInfo => "system-info",
             Page::AppHistory => "app-history",
             Page::StartupApps => "startup-apps",
@@ -116,6 +125,7 @@ impl Page {
             Page::Summary => "Summary",
             Page::Performance => "Performance",
             Page::Processes => "Processes",
+            Page::Docker => "Docker",
             Page::SystemInfo => "System Info",
             Page::AppHistory => "App history",
             Page::StartupApps => "Startup apps",
@@ -136,6 +146,7 @@ impl Page {
             Page::Summary => Icon::Home,
             Page::Performance => Icon::Chart,
             Page::Processes => Icon::List,
+            Page::Docker => Icon::Container,
             Page::SystemInfo => Icon::Info,
             Page::AppHistory => Icon::History,
             Page::StartupApps => Icon::Play,
@@ -177,10 +188,11 @@ pub enum Device {
     Disk,
     Network,
     Thermal,
+    Docker,
 }
 
 impl Device {
-    pub const ALL: [Device; 6] = [Device::Cpu, Device::Memory, Device::Gpu, Device::Disk, Device::Network, Device::Thermal];
+    pub const ALL: [Device; 7] = [Device::Cpu, Device::Memory, Device::Gpu, Device::Disk, Device::Network, Device::Thermal, Device::Docker];
     pub fn key(self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
@@ -189,6 +201,7 @@ impl Device {
             Device::Network => "network",
             Device::Gpu => "gpu",
             Device::Thermal => "thermal",
+            Device::Docker => "docker",
         }
     }
     pub fn title(self) -> &'static str {
@@ -199,6 +212,7 @@ impl Device {
             Device::Network => "Network",
             Device::Gpu => "GPU",
             Device::Thermal => "Thermals",
+            Device::Docker => "Docker",
         }
     }
     pub fn icon(self) -> Icon {
@@ -209,6 +223,7 @@ impl Device {
             Device::Network => Icon::Network,
             Device::Gpu => Icon::Gpu,
             Device::Thermal => Icon::Thermal,
+            Device::Docker => Icon::Container,
         }
     }
 }
@@ -284,7 +299,7 @@ impl FrameData<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct Launch {
     pub start_page: Option<Page>,
-    /// cpu, memory, gpu, disk, network or thermal
+    /// cpu, memory, gpu, disk, network, thermal or docker
     pub start_device: Option<String>,
     pub popout_only: bool,
     /// Start recording at launch: (folder, seconds).
@@ -293,6 +308,12 @@ pub struct Launch {
     pub bench: Option<Vec<crate::pro::bench::Test>>,
     /// Start a Disk Space scan of this folder at launch.
     pub disk_scan: Option<std::path::PathBuf>,
+    /// Container (name or id prefix) to open a terminal session in at start-up, with an optional command (used for runtime checks).
+    pub docker_terminal: Option<(String, Option<String>)>,
+    /// Docker page tab at start-up: engine, containers, stacks, images, volumes or networks.
+    pub docker_tab: Option<String>,
+    /// Test-only engine operation at start-up: setup, wizard, start, stop, restart, remove or update.
+    pub engine_test: Option<String>,
 }
 
 struct Pending {
@@ -335,6 +356,9 @@ pub struct App {
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
     pub replace: replace::ReplaceUi,
+    pub docker: docker::DockerState,
+    /// Docker series for the Performance page, refreshed when the backend has new stats.
+    pub perf_docker: performance::DockerPerfCache,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
@@ -367,7 +391,10 @@ impl App {
             status = format!("{} failed to load", failed.join(" and "));
         }
         let settings_popout_on = settings.popout.mode != "off";
+        let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
+            docker,
+            perf_docker: performance::DockerPerfCache::default(),
             settings,
             settings_dirty: false,
             catalog,
@@ -425,6 +452,26 @@ impl App {
         let pal = app.palette();
         pal.apply(&cc.egui_ctx);
         app.applied_pal = Some(pal);
+        if let Some((container, command)) = launch.docker_terminal {
+            app.docker.ui.detail.terminals.request(container, command);
+        }
+        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id) {
+            app.docker.ui.tab = tab;
+        }
+        match launch.engine_test.as_deref() {
+            Some("setup") => {
+                // Same as the wizard: the engine's context becomes the active one once it runs.
+                app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.docker.engine_data_dir));
+                app.docker.switch_to_engine_when_ready = true;
+            }
+            Some("wizard") => docker::engine_wizard::open(&mut app.docker),
+            Some("start") => app.docker.engine.start(),
+            Some("stop") => app.docker.engine.stop(),
+            Some("restart") => app.docker.engine.restart(),
+            Some("remove") => app.docker.engine.remove(),
+            Some("update") => app.docker.engine.update(),
+            _ => {}
+        }
         app
     }
 
@@ -445,6 +492,11 @@ impl App {
     /// Metric colours from `graphs.metricColors` (the built-in ones without colour keying).
     pub fn metric_colors(&self) -> MetricColors {
         MetricColors::from_settings(&self.settings.graphs)
+    }
+
+    /// `Page::NAV` without the pages that are hidden right now (Docker when its page is off).
+    pub fn visible_pages(&self) -> Vec<Page> {
+        Page::NAV.into_iter().filter(|p| *p != Page::Docker || self.docker.visible(&self.settings)).collect()
     }
 
     pub fn bloom(&self) -> f32 {
@@ -556,7 +608,7 @@ impl App {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    for p in Page::NAV.iter().chain([Page::Settings].iter()) {
+                    for p in self.visible_pages().iter().chain([Page::Settings].iter()) {
                         if ui.button(format!("{}\t{}", p.title(), p.shortcut())).clicked() {
                             self.page = *p;
                             ui.close_menu();
@@ -587,7 +639,8 @@ impl App {
             // The nav list gets the space above the bottom controls. The wordmark is shown only when
             // the list fits above it too; if the list doesn't fit at all, it scrolls (mouse wheel).
             let bottom = full.bottom();
-            let nav_h = 14.0 + Page::NAV.len() as f32 * 42.0;
+            let pages = self.visible_pages();
+            let nav_h = 14.0 + pages.len() as f32 * 42.0;
             let show_logo = full.top() + nav_h <= bottom - 136.0;
             let nav_rect = Rect::from_min_max(full.min, pos2(full.right(), if show_logo { bottom - 136.0 } else { bottom - 56.0 }));
             let scroll_id = ui.id().with("nav-scroll");
@@ -601,7 +654,7 @@ impl App {
             let nav_painter = ui.painter().with_clip_rect(nav_rect);
             // One plain list of all pages.
             let mut y = full.top() + 14.0 - scroll;
-            for page in Page::NAV {
+            for page in pages {
                 let rect = Rect::from_min_size(pos2(full.left() + 12.0, y), vec2(SIDEBAR_W - 26.0, 36.0));
                 y += 42.0;
                 let hit = rect.intersect(nav_rect);
@@ -1132,6 +1185,13 @@ impl App {
         }
         self.shortcuts(ctx);
         self.icons.poll(ctx);
+        self.engine_poll();
+        self.docker.poll(self.page == Page::Docker);
+        self.docker.refresh_snap();
+        self.refresh_docker_perf();
+        if self.page == Page::Docker && !self.docker.visible(&self.settings) {
+            self.page = Page::Summary;
+        }
         let (snap, mut hist, rows) = self.snapshot();
         let cap = history_capacity(self.settings.graphs.history_multiplier);
         if hist.capacity() != cap {
@@ -1147,6 +1207,7 @@ impl App {
         if snap.seq != self.last_seq {
             self.last_seq = snap.seq;
             self.last_sample_at = now;
+            self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(&snap, &rows);
             let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(&rows, dt);
@@ -1194,9 +1255,11 @@ impl App {
                 Page::InstalledApps => self.apps_page(ui, &fd),
                 Page::Drivers => self.drivers_page(ui, &fd),
                 Page::DiskSpace => self.diskspace_page(ui, &fd),
+                Page::Docker => self.docker_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
+            self.draw_toasts(ctx);
             if self.popout_open {
                 self.popout_viewport(ctx, &fd);
             }
