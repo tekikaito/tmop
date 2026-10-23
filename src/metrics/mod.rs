@@ -10,6 +10,7 @@
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin).
 //! * Processes: `NtQuerySystemInformation(SystemProcessInformation)`.
 
+pub mod hwinfo;
 #[cfg(windows)]
 mod win;
 
@@ -28,6 +29,18 @@ pub struct CpuSample {
     pub per_core_kernel_pct: Vec<f32>,
     pub current_mhz: Option<u32>,
     pub max_mhz: Option<u32>,
+    /// Base clock: registry `~MHz`, cross-checked with PDH (see `clock::clock_base`).
+    pub base_mhz: Option<u32>,
+    /// `MaxMhz` from the power API when it exceeds the base (the boost clock).
+    pub boost_mhz: Option<u32>,
+    /// `MhzLimit` from the power API (max over cores).
+    pub mhz_limit: Option<u32>,
+    /// Raw `\Processor Information(_Total)\% Processor Performance`.
+    pub perf_pct: Option<f64>,
+    /// Raw `\Processor Information(_Total)\Processor Frequency`.
+    pub pdh_freq_mhz: Option<u32>,
+    /// True when `current_mhz` came from a live PDH reading; false = static base clock.
+    pub clock_live: bool,
     pub logical_count: usize,
     /// Current clock of each logical processor (MHz), when available.
     pub per_core_mhz: Vec<u32>,
@@ -78,11 +91,59 @@ pub struct GpuSample {
 pub struct ThermalSample {
     /// (zone name, °C)
     pub zones: Vec<(String, f32)>,
+    /// CPU temperature from HWiNFO shared memory: (reading label, °C).
+    pub cpu: Option<(String, f32)>,
+    /// Which sources were checked, e.g. "ACPI: no zones · HWiNFO: not running".
+    pub sources: String,
 }
 
 impl ThermalSample {
     pub fn max_c(&self) -> Option<f32> {
-        self.zones.iter().map(|z| z.1).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
+        self.zones.iter().map(|z| z.1).chain(self.cpu.as_ref().map(|c| c.1)).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
+    }
+}
+
+/// Hint shown where no temperature source is available.
+pub const HWINFO_HINT: &str = "Enable Shared Memory Support in HWiNFO (Settings \u{2192} Main) for CPU temperature";
+
+/// Pure CPU clock conversions.
+pub mod clock {
+    /// MHz from a `% Processor Performance` reading (share of base clock; above 100 while boosting).
+    pub fn perf_mhz(base_mhz: u32, pct: f64) -> Option<u32> {
+        if base_mhz == 0 || !pct.is_finite() || pct <= 0.0 {
+            return None;
+        }
+        Some((base_mhz as f64 * pct.min(1000.0) / 100.0).round() as u32)
+    }
+
+    /// The multiplier for `% Processor Performance`: registry base, else PDH Processor Frequency,
+    /// else MhzLimit (when 0 < limit <= max), else MaxMhz. When registry and PDH disagree by
+    /// more than 10 % the smaller wins.
+    pub fn clock_base(reg_mhz: Option<u32>, pdh_freq: Option<u32>, limit: Option<u32>, max: Option<u32>) -> Option<u32> {
+        let reg = reg_mhz.filter(|m| *m > 0);
+        let pdh = pdh_freq.filter(|m| *m > 0);
+        match (reg, pdh) {
+            (Some(a), Some(b)) => {
+                let (lo, hi) = (a.min(b), a.max(b));
+                Some(if hi as f64 > lo as f64 * 1.1 { lo } else { a })
+            }
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => limit.filter(|l| *l > 0 && max.is_none_or(|m| *l <= m)).or(max.filter(|m| *m > 0)),
+        }
+    }
+
+    /// Live MHz = base * pct / 100 (pct clamped to 10x). None without a base or a positive pct.
+    pub fn clock_mhz(base: Option<u32>, pct: Option<f64>) -> Option<u32> {
+        perf_mhz(base?, pct?)
+    }
+
+    /// Meter ceiling: the boost clock when known (above base), otherwise base * 1.25.
+    pub fn clock_ceiling(base: Option<u32>, boost: Option<u32>) -> Option<f32> {
+        let b = base.filter(|b| *b > 0)?;
+        Some(match boost {
+            Some(x) if x > b => x as f32,
+            _ => b as f32 * 1.25,
+        })
     }
 }
 
@@ -351,6 +412,45 @@ mod tests {
         s.resize(2);
         assert_eq!(s.last(), 4.0);
         assert_eq!(s.values.len(), 2);
+    }
+
+    #[test]
+    fn clock_base_prefers_registry_then_pdh() {
+        use clock::clock_base;
+        assert_eq!(clock_base(Some(3400), Some(3400), None, None), Some(3400));
+        assert_eq!(clock_base(None, Some(3000), None, None), Some(3000));
+        assert_eq!(clock_base(Some(3400), Some(2900), None, None), Some(2900));
+        assert_eq!(clock_base(Some(2900), Some(3400), None, None), Some(2900));
+        assert_eq!(clock_base(None, None, Some(3600), Some(5000)), Some(3600));
+        assert_eq!(clock_base(None, None, Some(0), Some(5000)), Some(5000));
+        assert_eq!(clock_base(None, None, None, None), None);
+    }
+
+    #[test]
+    fn clock_mhz_from_pct() {
+        use clock::clock_mhz;
+        assert_eq!(clock_mhz(Some(3400), Some(141.2)), Some(4801));
+        assert_eq!(clock_mhz(Some(3400), Some(0.0)), None);
+        assert_eq!(clock_mhz(Some(3400), Some(f64::NAN)), None);
+        assert_eq!(clock_mhz(Some(3400), None), None);
+        assert_eq!(clock_mhz(None, Some(100.0)), None);
+        assert_eq!(clock_mhz(Some(3400), Some(1e9)), Some(34000));
+    }
+
+    #[test]
+    fn clock_ceiling_boost_or_125() {
+        use clock::clock_ceiling;
+        assert_eq!(clock_ceiling(Some(3400), Some(5000)), Some(5000.0));
+        assert_eq!(clock_ceiling(Some(3400), None), Some(4250.0));
+        assert_eq!(clock_ceiling(Some(3400), Some(3400)), Some(4250.0));
+        assert_eq!(clock_ceiling(None, Some(5000)), None);
+    }
+
+    #[test]
+    fn thermal_max_includes_hwinfo() {
+        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], cpu: Some(("CPU Package".into(), 70.0)), sources: String::new() };
+        assert_eq!(t.max_c(), Some(70.0));
+        assert_eq!(ThermalSample::default().max_c(), None);
     }
 
     #[cfg(windows)]
