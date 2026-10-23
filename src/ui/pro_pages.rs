@@ -3,13 +3,13 @@
 
 use super::kit::{self, empty_state, header_toolbar, hsplit, row_ui, stat_row, titled_card, vsplit, GAP, MARGIN};
 use super::table::{self, cmp_str, Cell, Col, TableState};
-use super::theme::{self, mix, with_alpha};
+use super::theme::{self, mix, with_alpha, Palette};
 use super::widgets::{self, card, draw_graph, led_column, GraphLine, Icon, LedStyle};
 use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::pro::apps::App as InstalledApp;
 use crate::pro::connections::{Conn, Proto};
-use crate::pro::diskspace::{self, Scanner, Tree, Volume};
+use crate::pro::diskspace::{self, DirFile, Scanner, Tree, Volume};
 use crate::pro::drivers::Service;
 use crate::pro::power::PowerInfo;
 use crate::pro::recorder::{self, EventKind, Record, RecordingInfo};
@@ -19,7 +19,7 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense, Str
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// UI state of the advanced and inventory pages.
 #[derive(Default)]
@@ -38,6 +38,16 @@ pub struct ProState {
     pub disk_tree: Option<(Arc<Tree>, u64)>,
     pub disk_cursor: u32,
     pub disk_tab: usize,
+    /// Files tab sort column; direction in `disk_files_asc` (false = descending).
+    pub disk_files_sort: FileCol,
+    pub disk_files_asc: bool,
+    /// Folder the Files tab listing was requested for (None = nothing requested yet).
+    pub disk_files_for: Option<PathBuf>,
+    pub disk_files: Loader<Vec<DirFile>>,
+    /// Sorted index order of `disk_files.ok()`, valid for the (col, asc) it was built with.
+    pub disk_files_order: Option<(FileCol, bool, Vec<usize>)>,
+    /// Largest-files indices into `Tree::files` for (tree generation, cursor).
+    pub disk_largest: Option<(u64, u32, Vec<usize>)>,
     pub disk_confirm_stop: bool,
     pub recordings: Vec<RecordingInfo>,
     pub recordings_listed: bool,
@@ -47,6 +57,21 @@ pub struct ProState {
     pub inv: super::inventory_pages::InventoryState,
     pub cpu_details: Option<crate::pro::inventory::CpuDetails>,
 }
+
+/// Column of the Disk Space Files tab (in-memory only, never saved).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileCol {
+    Name,
+    #[default]
+    Size,
+    Modified,
+}
+
+const DISK_ROW_H: f32 = 24.0;
+const DISK_BIG_ROW_H: f32 = 40.0;
+const DISK_DATE_W: f32 = 78.0;
+const DISK_NARROW_W: f32 = 330.0;
+const DISK_TINY_W: f32 = 240.0;
 
 const LIMITS: [(&str, Option<u64>); 6] = [("Until stopped", None), ("1 minute", Some(60)), ("5 minutes", Some(300)), ("15 minutes", Some(900)), ("1 hour", Some(3600)), ("8 hours", Some(28800))];
 
@@ -806,6 +831,8 @@ impl App {
             if root.is_dir() {
                 self.pro.disk_cursor = 0;
                 self.pro.disk_tree = None;
+                self.pro.disk_largest = None;
+                self.pro.disk_files_for = None;
                 self.pro.scanner.start(root);
             } else {
                 self.status = format!("{} is not a folder", root.display());
@@ -813,7 +840,7 @@ impl App {
         }
     }
 
-    fn treemap(&self, ui: &mut egui::Ui, rect: Rect, t: &Tree, cursor: u32, fd: &FrameData<'_>) -> Option<u32> {
+    fn treemap(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tree, cursor: u32, fd: &FrameData<'_>) -> Option<u32> {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let node = &t.nodes[cursor as usize];
@@ -821,7 +848,11 @@ impl App {
         let kids: Vec<u32> = node.children.iter().copied().filter(|c| t.nodes[*c as usize].size > 0).take(60).collect();
         let mut sizes: Vec<f64> = kids.iter().map(|c| t.nodes[*c as usize].size as f64).collect();
         let shown: u64 = sizes.iter().sum::<f64>() as u64;
-        let rest = node.size.saturating_sub(shown);
+        let rest = node.own; // files directly here
+        let more = node.size.saturating_sub(shown).saturating_sub(rest); // folders past the 60th
+        if more > 0 {
+            sizes.push(more as f64);
+        }
         if rest > 0 {
             sizes.push(rest as f64);
         }
@@ -846,7 +877,8 @@ impl App {
                 p.rect_stroke(r.expand(1.5), 4.0, Stroke::new(3.0_f32, with_alpha(c, 0.25 * fd.bloom)));
             }
             p.rect_stroke(r, 3.0, Stroke::new(1.0_f32, with_alpha(c, 0.85)));
-            let (name, size) = if is_rest { ("Files here".to_string(), rest) } else { let n = &t.nodes[kids[i] as usize]; (n.name.clone(), n.size) };
+            let is_more = is_rest && more > 0 && i == kids.len();
+            let (name, size) = if is_more { ("More folders".to_string(), more) } else if is_rest { ("Files here".to_string(), rest) } else { let n = &t.nodes[kids[i] as usize]; (n.name.clone(), n.size) };
             if r.width() > 46.0 && r.height() > 22.0 {
                 let clip = p.with_clip_rect(r.shrink(4.0));
                 clip.text(r.left_top() + vec2(6.0, 5.0), Align2::LEFT_TOP, &name, theme::semibold(12.5), pal.text);
@@ -860,6 +892,14 @@ impl App {
                     go = Some(kids[i]);
                 }
                 resp.on_hover_text(format!("{}\n{}  \u{2022}  {} files", t.path_of(kids[i]).display(), format_bytes(size as f64), t.nodes[kids[i] as usize].files));
+            } else if is_more {
+                ui.interact(r, ui.id().with("tm-more"), Sense::hover()).on_hover_text(format!("{} in smaller folders not drawn here\nSee the Folders tab", format_bytes(more as f64)));
+            } else {
+                let resp = ui.interact(r, ui.id().with("tm-rest"), Sense::click());
+                if resp.clicked() {
+                    self.pro.disk_tab = 1;
+                }
+                resp.on_hover_text(format!("{} in files directly in this folder\nClick to list them", format_bytes(rest as f64)));
             }
         }
         // Right-click anywhere goes up one level.
@@ -875,7 +915,7 @@ impl App {
         card(&p, rect, &pal);
         let inner = rect.shrink(8.0);
         // Tabs.
-        let tabs = ["Folders", "Largest files", "File types"];
+        let tabs = ["Folders", "Files", "Largest files", "File types"];
         let mut x = inner.left();
         for (i, name) in tabs.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x, inner.top()), vec2(widgets::text_width(&p, name, theme::ui(13.0)) + 24.0, 28.0));
@@ -888,64 +928,152 @@ impl App {
             }
             p.text(r.center(), Align2::CENTER_CENTER, *name, theme::ui(13.0), if sel { pal.on_selection() } else { pal.text });
             if resp.clicked() {
+                if i == 1 && self.pro.disk_tab != 1 {
+                    self.pro.disk_files_for = None; // re-list on entering the Files tab
+                }
                 self.pro.disk_tab = i;
             }
             x = r.right() + 6.0;
         }
         let list = Rect::from_min_max(pos2(inner.left(), inner.top() + 38.0), inner.max);
-        let row_h = 24.0;
-        let max_rows = (list.height() / row_h).floor() as usize;
         let node = &t.nodes[self.pro.disk_cursor as usize];
         let total = node.size.max(1) as f32;
         let mut go = None;
         let mut reveal = None;
-        let draw_row = |i: usize, name: &str, size: u64, frac: f32, color: Color32| -> Rect {
-            let r = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * row_h), vec2(list.width(), row_h - 2.0));
-            let bar = Rect::from_min_max(pos2(r.left(), r.bottom() - 4.0), pos2(r.left() + r.width() * frac.clamp(0.0, 1.0), r.bottom() - 1.0));
-            p.rect_filled(bar, 1.0, with_alpha(color, 0.75));
-            let clip = p.with_clip_rect(Rect::from_min_max(r.min, pos2(r.right() - 140.0, r.bottom())));
-            clip.text(pos2(r.left() + 4.0, r.center().y - 2.0), Align2::LEFT_CENTER, name, theme::ui(12.5), pal.text);
-            p.text(pos2(r.right() - 60.0, r.center().y - 2.0), Align2::RIGHT_CENTER, format_bytes(size as f64), theme::ui(12.0), pal.text);
-            p.text(pos2(r.right() - 4.0, r.center().y - 2.0), Align2::RIGHT_CENTER, format!("{:.1}%", frac * 100.0), theme::ui(12.0), pal.text_dim);
-            r
-        };
+        let now = SystemTime::now();
+        let narrow = list.width() < DISK_NARROW_W;
+        let tiny = list.width() < DISK_TINY_W;
+        let stamp = |m: Option<SystemTime>| m.map(diskspace::local_stamp).filter(|s| !s.is_empty()).unwrap_or_else(|| "\u{2014}".into());
+        // Date cell text; a dash keeps the size column aligned when there is no timestamp.
+        let date_of = |m: Option<SystemTime>| if tiny { None } else { Some(m.map(|m| diskspace::relative_time(now, m)).unwrap_or_else(|| "\u{2014}".into())) };
         match self.pro.disk_tab {
             0 => {
-                for (i, c) in node.children.iter().take(max_rows).enumerate() {
-                    let n = &t.nodes[*c as usize];
-                    let r = draw_row(i, &n.name, n.size, n.size as f32 / total, kit::category_color(i));
-                    let resp = ui.interact(r, ui.id().with(("disk-row", *c)), Sense::click());
-                    if resp.hovered() {
-                        p.rect_filled(r, 3.0, with_alpha(pal.text, 0.05));
-                    }
+                disk_list(ui, list, ("disk-folders", self.pro.disk_cursor), &pal, DISK_ROW_H, node.children.len(), |ui, i, r, resp| {
+                    let c = node.children[i];
+                    let n = &t.nodes[c as usize];
+                    disk_row(ui.painter(), r, &pal, &n.name, false, n.size, n.size as f32 / total, kit::category_color(i), !narrow, None);
                     if resp.clicked() && !n.children.is_empty() {
-                        go = Some(*c);
+                        go = Some(c);
                     }
                     if resp.secondary_clicked() {
-                        reveal = Some(t.path_of(*c));
+                        reveal = Some(t.path_of(c));
                     }
-                }
+                });
                 if node.children.is_empty() {
                     empty_state(&p, list, &pal, "No sub-folders");
                 }
             }
             1 => {
-                let biggest = t.largest.first().map(|l| l.0).unwrap_or(1).max(1) as f32;
-                for (i, (size, path)) in t.largest.iter().take(max_rows).enumerate() {
-                    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let r = draw_row(i, &name, *size, *size as f32 / biggest, theme::ORANGE);
-                    let resp = ui.interact(r, ui.id().with(("big", i)), Sense::click());
-                    if resp.clicked() || resp.secondary_clicked() {
-                        reveal = Some(PathBuf::from(path));
-                    }
-                    resp.on_hover_text(path.as_str());
+                // Keep the listing current: one background read per visited folder.
+                if self.pro.disk_files.poll() {
+                    self.pro.disk_files_order = None;
                 }
+                let here = t.path_of(self.pro.disk_cursor);
+                if self.pro.disk_files_for.as_deref() != Some(here.as_path()) && !self.pro.disk_files.is_loading() {
+                    self.pro.disk_files_for = Some(here.clone());
+                    self.pro.disk_files_order = None;
+                    let h = here.clone();
+                    self.pro.disk_files.start(move || diskspace::list_files(&h));
+                }
+                let loading = self.pro.disk_files.is_loading() || self.pro.disk_files_for.as_deref() != Some(here.as_path());
+                if loading {
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+                // Header strip with sortable columns.
+                let hdr = Rect::from_min_size(list.min, vec2(list.width(), 22.0));
+                let body = Rect::from_min_max(pos2(list.left(), hdr.bottom()), list.max);
+                let date_w = if tiny { 0.0 } else { DISK_DATE_W };
+                let cols = [(FileCol::Name, "Name", Align2::LEFT_CENTER, hdr.left() + 4.0), (FileCol::Size, "Size", Align2::RIGHT_CENTER, hdr.right() - 4.0 - date_w), (FileCol::Modified, "Modified", Align2::RIGHT_CENTER, hdr.right() - 4.0)];
+                for (k, (col, label, anchor, x)) in cols.iter().enumerate() {
+                    if *col == FileCol::Modified && tiny {
+                        continue;
+                    }
+                    let active = *col == self.pro.disk_files_sort;
+                    let arrow = if !active { "" } else if self.pro.disk_files_asc { "  \u{25b2}" } else { "  \u{25bc}" };
+                    let r = p.text(pos2(*x, hdr.center().y), *anchor, format!("{label}{arrow}"), theme::ui(12.0), if active { pal.text } else { pal.text_dim });
+                    if ui.interact(r.expand2(vec2(4.0, 3.0)), ui.id().with(("files-hdr", k)), Sense::click()).clicked() {
+                        if active {
+                            self.pro.disk_files_asc = !self.pro.disk_files_asc;
+                        } else {
+                            self.pro.disk_files_sort = *col;
+                            self.pro.disk_files_asc = *col == FileCol::Name;
+                        }
+                        self.pro.disk_files_order = None;
+                    }
+                }
+                p.line_segment([pos2(hdr.left(), hdr.bottom()), pos2(hdr.right(), hdr.bottom())], Stroke::new(1.0_f32, pal.panel_stroke));
+                // Sorted order, rebuilt only when the data or sort changed.
+                let (col, asc) = (self.pro.disk_files_sort, self.pro.disk_files_asc);
+                if self.pro.disk_files_order.as_ref().map(|o| (o.0, o.1) != (col, asc)).unwrap_or(true) {
+                    if let Some(files) = self.pro.disk_files.ok() {
+                        let mut v: Vec<usize> = (0..files.len()).collect();
+                        v.sort_by(|a, b| {
+                            let (a, b) = (&files[*a], &files[*b]);
+                            let o = match col {
+                                FileCol::Name => cmp_str(&a.name, &b.name),
+                                FileCol::Size => a.size.cmp(&b.size),
+                                FileCol::Modified => a.modified.cmp(&b.modified),
+                            };
+                            if asc { o } else { o.reverse() }
+                        });
+                        self.pro.disk_files_order = Some((col, asc, v));
+                    }
+                }
+                let order: &[usize] = self.pro.disk_files_order.as_ref().map(|o| o.2.as_slice()).unwrap_or(&[]);
+                let cur = self.pro.disk_cursor;
+                if loading {
+                    empty_state(&p, body, &pal, "Reading folder\u{2026}");
+                } else if let Some(e) = self.pro.disk_files.error() {
+                    empty_state(&p, body, &pal, e);
+                } else if let Some(files) = self.pro.disk_files.ok() {
+                    if files.is_empty() {
+                        empty_state(&p, body, &pal, "No files directly in this folder");
+                    } else {
+                        let biggest = files.iter().map(|f| f.size).max().unwrap_or(1).max(1) as f32;
+                        disk_list(ui, body, ("disk-files", cur), &pal, DISK_ROW_H, order.len(), |ui, i, r, resp| {
+                            let f = &files[order[i]];
+                            let date = date_of(f.modified);
+                            disk_row(ui.painter(), r, &pal, &f.name, f.hidden, f.size, f.size as f32 / biggest, theme::BLUE, !narrow, date.as_deref());
+                            let path = here.join(&f.name);
+                            if resp.clicked() || resp.secondary_clicked() {
+                                reveal = Some(path.clone());
+                            }
+                            resp.on_hover_text(format!("{}\n{}\nModified {}", path.display(), format_bytes(f.size as f64), stamp(f.modified)));
+                        });
+                    }
+                }
+            }
+            2 => {
+                let gen = self.pro.disk_tree.as_ref().map(|(_, g)| *g).unwrap_or(0);
+                let cursor = self.pro.disk_cursor;
+                if self.pro.disk_largest.as_ref().map(|(g, c, _)| (*g, *c) != (gen, cursor)).unwrap_or(true) {
+                    self.pro.disk_largest = Some((gen, cursor, t.largest_under(cursor, 100)));
+                }
+                let big: &[usize] = self.pro.disk_largest.as_ref().map(|l| l.2.as_slice()).unwrap_or(&[]);
+                if big.is_empty() {
+                    empty_state(&p, list, &pal, "No files \u{2265} 1 MB here \u{2014} see the Files tab");
+                }
+                let top = big.first().map(|i| t.files[*i].size).unwrap_or(1).max(1) as f32;
+                disk_list(ui, list, ("disk-largest", cursor), &pal, DISK_BIG_ROW_H, big.len(), |ui, i, r, resp| {
+                    let f = &t.files[big[i]];
+                    let folder = t.path_of(f.dir);
+                    let line1 = Rect::from_min_size(r.min, vec2(r.width(), 22.0));
+                    let date = date_of(f.modified);
+                    disk_row(ui.painter(), line1, &pal, &f.name, false, f.size, f.size as f32 / top, theme::ORANGE, !narrow, date.as_deref());
+                    widgets::text_fit(ui.painter(), pos2(r.left() + 4.0, r.bottom() - 9.0), Align2::LEFT_CENTER, &folder.display().to_string(), theme::ui(11.0), pal.text_dim, r.width() - 8.0);
+                    let path = folder.join(&f.name);
+                    if resp.clicked() || resp.secondary_clicked() {
+                        reveal = Some(path.clone());
+                    }
+                    resp.on_hover_text(format!("{}\n{}\nModified {}", path.display(), format_bytes(f.size as f64), stamp(f.modified)));
+                });
             }
             _ => {
                 let all: u64 = t.extensions.iter().map(|e| e.1).sum::<u64>().max(1);
-                for (i, (ext, bytes, files)) in t.extensions.iter().take(max_rows).enumerate() {
-                    draw_row(i, &format!(".{ext}  ({files} files)"), *bytes, *bytes as f32 / all as f32, kit::category_color(i));
-                }
+                disk_list(ui, list, "disk-types", &pal, DISK_ROW_H, t.extensions.len(), |ui, i, r, _| {
+                    let (ext, bytes, files) = &t.extensions[i];
+                    disk_row(ui.painter(), r, &pal, &format!(".{ext}  ({files} files)"), false, *bytes, *bytes as f32 / all as f32, kit::category_color(i), !narrow, None);
+                });
             }
         }
         if let Some(g) = go {
@@ -955,6 +1083,45 @@ impl App {
             let _ = kit::reveal(&path);
         }
     }
+}
+
+/// Virtualised list in `rect`: `row(ui, i, r, resp)` draws item i into r (use `ui.painter()`).
+/// `id` is salted with the folder so each one starts scrolled to the top.
+fn disk_list(ui: &mut egui::Ui, rect: Rect, id: impl std::hash::Hash + Copy, pal: &Palette, row_h: f32, n: usize, mut row: impl FnMut(&mut egui::Ui, usize, Rect, egui::Response)) {
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
+        ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
+        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(ui, row_h, n, |ui, range| {
+            for i in range {
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                let resp = ui.interact(r, ui.id().with(("row", i)), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 3.0, with_alpha(pal.text, 0.05));
+                }
+                row(ui, i, r, resp);
+            }
+        });
+    });
+}
+
+/// One list row: name, thin % bar, size and optional date (right-aligned). `pct` prints the
+/// percentage text (dropped on narrow panels); `date` is skipped when `None`.
+#[allow(clippy::too_many_arguments)]
+fn disk_row(p: &egui::Painter, r: Rect, pal: &Palette, name: &str, dim: bool, size: u64, frac: f32, color: Color32, pct: bool, date: Option<&str>) {
+    let bar = Rect::from_min_max(pos2(r.left(), r.bottom() - 4.0), pos2(r.left() + r.width() * frac.clamp(0.0, 1.0), r.bottom() - 1.0));
+    p.rect_filled(bar, 1.0, with_alpha(color, 0.75));
+    let y = r.center().y - 2.0;
+    let mut x = r.right() - 4.0;
+    if let Some(d) = date {
+        p.text(pos2(x, y), Align2::RIGHT_CENTER, d, theme::ui(11.5), pal.text_dim);
+        x -= DISK_DATE_W;
+    }
+    if pct {
+        p.text(pos2(x, y), Align2::RIGHT_CENTER, format!("{:.1}%", frac * 100.0), theme::ui(12.0), pal.text_dim);
+        x -= 56.0;
+    }
+    p.text(pos2(x, y), Align2::RIGHT_CENTER, format_bytes(size as f64), theme::ui(12.0), pal.text);
+    x -= 70.0;
+    widgets::text_fit(p, pos2(r.left() + 4.0, y), Align2::LEFT_CENTER, name, theme::ui(12.5), if dim { pal.text_faint } else { pal.text }, x - r.left() - 8.0);
 }
 
 fn lighten_text(c: Color32) -> Color32 {
