@@ -1102,6 +1102,8 @@ pub enum Icon {
     User,
     Wrench,
     Container,
+    Warning,
+    Shield,
 }
 
 pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
@@ -1270,6 +1272,14 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             p.circle_stroke(pt(0.68, 0.32), w * 0.2, s);
             line((0.54, 0.46), (0.14, 0.86));
             line((0.2, 0.92), (0.08, 0.8));
+        }
+        Icon::Warning => {
+            poly(&[(0.5, 0.08), (0.95, 0.9), (0.05, 0.9)]);
+            line((0.5, 0.38), (0.5, 0.62));
+            p.circle_filled(pt(0.5, 0.76), 1.3, color);
+        }
+        Icon::Shield => {
+            poly(&[(0.5, 0.06), (0.9, 0.2), (0.9, 0.5), (0.5, 0.94), (0.1, 0.5), (0.1, 0.2)]);
         }
         Icon::Container => {
             // Two stacked boxes.

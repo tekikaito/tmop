@@ -8,6 +8,7 @@
 //!                         open a terminal session in a container on the Docker page
 //!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
+//!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
@@ -222,7 +223,7 @@ fn main() -> eframe::Result<()> {
                 v.split(',').filter_map(tmop::pro::bench::Test::from_id).collect()
             }
         }),
-        disk_scan: value(&["--disk-scan="]).map(std::path::PathBuf::from),
+        disk_scan: value(&["--disk-scan=", "--disk-root="]).map(std::path::PathBuf::from),
         docker_terminal: value(&["--docker-terminal="]).and_then(|v| {
             let (container, command) = v.split_once(';').unwrap_or((v.as_str(), ""));
             let container = container.trim();

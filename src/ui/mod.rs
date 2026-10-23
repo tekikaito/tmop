@@ -2,6 +2,8 @@
 //! the pages, and the skinnable popout window.
 
 pub mod bench_page;
+pub mod disk_cleanup;
+pub mod disk_delete;
 pub mod docker;
 pub mod icons;
 pub mod inventory_pages;
@@ -1259,6 +1261,7 @@ impl App {
             });
             self.confirm_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
+            self.disk_delete_dialogs(ctx, &pal);
             self.draw_toasts(ctx);
             if self.popout_open {
                 self.popout_viewport(ctx, &fd);

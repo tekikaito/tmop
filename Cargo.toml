@@ -66,6 +66,8 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Pipes",
     "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_RestartManager",
     "Win32_System_RemoteDesktop",
     "Win32_System_Diagnostics_Debug",
     "Win32_Networking_WinHttp",
