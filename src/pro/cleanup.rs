@@ -16,21 +16,25 @@ pub enum Category {
     WindowsTemp,
     BrowserCaches,
     CrashDumps,
+    WerReports,
     ThumbnailCache,
     UpdateDownloads,
+    DeliveryOptimization,
     RecycleBin,
     OldDownloads,
     DevArtifacts,
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 11] = [
         Category::UserTemp,
         Category::WindowsTemp,
         Category::BrowserCaches,
         Category::CrashDumps,
+        Category::WerReports,
         Category::ThumbnailCache,
         Category::UpdateDownloads,
+        Category::DeliveryOptimization,
         Category::RecycleBin,
         Category::OldDownloads,
         Category::DevArtifacts,
@@ -41,9 +45,11 @@ impl Category {
             Category::UserTemp => "User temp files older than 24 h",
             Category::WindowsTemp => "Windows temp",
             Category::BrowserCaches => "Browser caches",
-            Category::CrashDumps => "Crash reports and dumps",
+            Category::CrashDumps => "Crash dumps",
+            Category::WerReports => "Windows Error Reporting",
             Category::ThumbnailCache => "Thumbnail cache",
-            Category::UpdateDownloads => "Windows Update downloads and Delivery Optimization",
+            Category::UpdateDownloads => "Windows Update downloads",
+            Category::DeliveryOptimization => "Delivery Optimization cache",
             Category::RecycleBin => "Empty Recycle Bin",
             Category::OldDownloads => "Downloads older than 90 days",
             Category::DevArtifacts => "Developer artifacts",
@@ -55,9 +61,11 @@ impl Category {
             Category::UserTemp => "Files and folders in your temp folder that were not touched for a day",
             Category::WindowsTemp => "The system temp folder",
             Category::BrowserCaches => "Edge, Chrome and Firefox cache folders only; never profiles, passwords or history",
-            Category::CrashDumps => "Error reports, crash dumps and MEMORY.DMP",
+            Category::CrashDumps => "Crash dumps, minidumps and MEMORY.DMP",
+            Category::WerReports => "Archived and queued error reports",
             Category::ThumbnailCache => "Explorer thumbnail and icon caches; files Explorer is using are skipped",
             Category::UpdateDownloads => "Downloaded update files Windows can fetch again; locked files are skipped",
+            Category::DeliveryOptimization => "Update files cached for sharing with other PCs; Windows fetches them again",
             Category::RecycleBin => "Permanently removes everything in the Recycle Bin (handled by Windows)",
             Category::OldDownloads => "Goes to the Recycle Bin; needs a scan that covers your Downloads folder",
             Category::DevArtifacts => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Recycle Bin; needs a scan",
@@ -68,9 +76,9 @@ impl Category {
         !matches!(self, Category::RecycleBin | Category::OldDownloads | Category::DevArtifacts)
     }
 
-    /// Whole category needs administrator rights (CrashDumps has admin-only items, see `CleanItem`).
+    /// Whole category needs administrator rights (CrashDumps and WerReports have admin-only items, see `CleanItem`).
     pub fn needs_admin(self) -> bool {
-        matches!(self, Category::WindowsTemp | Category::UpdateDownloads)
+        matches!(self, Category::WindowsTemp | Category::UpdateDownloads | Category::DeliveryOptimization)
     }
 
     /// Measured from the last scan instead of from disk.
@@ -286,15 +294,9 @@ pub fn measure_fixed(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
     }
     out.push(Measured::with_items(Category::BrowserCaches, items));
 
+    // Crash dumps Windows Error Reporting does not own; its archive and queue are their own category.
     let mut items = Vec::new();
-    for (base, rel, admin) in [
-        (&sys.program_data, r"Microsoft\Windows\WER\ReportArchive", true),
-        (&sys.program_data, r"Microsoft\Windows\WER\ReportQueue", true),
-        (&sys.local_appdata, r"Microsoft\Windows\WER\ReportArchive", false),
-        (&sys.local_appdata, r"Microsoft\Windows\WER\ReportQueue", false),
-        (&sys.local_appdata, "CrashDumps", false),
-        (&sys.system_root, "Minidump", true),
-    ] {
+    for (base, rel, admin) in [(&sys.local_appdata, "CrashDumps", false), (&sys.system_root, "Minidump", true)] {
         if let Some(d) = under_base(base, rel) {
             items.extend(entries(&d, admin, &all));
         }
@@ -305,6 +307,19 @@ pub fn measure_fixed(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
         }
     }
     out.push(Measured::with_items(Category::CrashDumps, items));
+
+    let mut items = Vec::new();
+    for (base, rel, admin) in [
+        (&sys.program_data, r"Microsoft\Windows\WER\ReportArchive", true),
+        (&sys.program_data, r"Microsoft\Windows\WER\ReportQueue", true),
+        (&sys.local_appdata, r"Microsoft\Windows\WER\ReportArchive", false),
+        (&sys.local_appdata, r"Microsoft\Windows\WER\ReportQueue", false),
+    ] {
+        if let Some(d) = under_base(base, rel) {
+            items.extend(entries(&d, admin, &all));
+        }
+    }
+    out.push(Measured::with_items(Category::WerReports, items));
 
     let mut items = under_base(&sys.local_appdata, r"Microsoft\Windows\Explorer")
         .map(|d| {
@@ -319,13 +334,11 @@ pub fn measure_fixed(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
     items.retain(|i| !busy.contains_key(&i.path));
     out.push(Measured::with_items(Category::ThumbnailCache, items));
 
-    let mut items = Vec::new();
-    for rel in [r"SoftwareDistribution\Download", r"ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"] {
-        if let Some(d) = under_base(&sys.system_root, rel) {
-            items.extend(entries(&d, true, &all));
-        }
-    }
+    let items = under_base(&sys.system_root, r"SoftwareDistribution\Download").map(|d| entries(&d, true, &all)).unwrap_or_default();
     out.push(Measured::with_items(Category::UpdateDownloads, items));
+
+    let items = under_base(&sys.system_root, r"ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache").map(|d| entries(&d, true, &all)).unwrap_or_default();
+    out.push(Measured::with_items(Category::DeliveryOptimization, items));
     out
 }
 
@@ -591,6 +604,8 @@ mod tests {
         write(&root.join(r"local\Microsoft\Windows\Explorer\other.db"), 8, 0);
         write(&root.join(r"local\Google\Chrome\User Data\Default\Cache\f_000001"), 30, 0);
         write(&root.join(r"windows\SoftwareDistribution\Download\u.cab"), 40, 0);
+        write(&root.join(r"local\Microsoft\Windows\WER\ReportArchive\r1\Report.wer"), 4, 0);
+        write(&root.join(r"windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\c1"), 6, 0);
         let got = measure_fixed(&sys, SystemTime::now());
         let get = |c: Category| got.iter().find(|m| m.cat == c).unwrap();
         assert_eq!(names_of(get(Category::UserTemp)), vec!["old.tmp", "stale"]);
@@ -604,6 +619,8 @@ mod tests {
         assert_eq!(names_of(get(Category::ThumbnailCache)), vec!["thumbcache_32.db"]);
         assert_eq!(names_of(get(Category::BrowserCaches)), vec!["f_000001"]);
         assert_eq!(names_of(get(Category::UpdateDownloads)), vec!["u.cab"]);
+        assert_eq!(names_of(get(Category::WerReports)), vec!["r1"]);
+        assert_eq!(names_of(get(Category::DeliveryOptimization)), vec!["c1"]);
         assert_eq!(get(Category::UserTemp).bytes, 110);
         // Empty settings measure nothing and never fall back to relative paths.
         assert!(measure_fixed(&SystemPaths::default(), SystemTime::now()).iter().all(|m| m.items.is_empty()));
@@ -636,12 +653,12 @@ mod tests {
     #[test]
     fn category_modes_and_preselection() {
         let pre: Vec<bool> = Category::ALL.iter().map(|c| c.preselected()).collect();
-        assert_eq!(pre, vec![true, true, true, true, true, true, false, false, false]);
+        assert_eq!(pre, vec![true, true, true, true, true, true, true, true, false, false, false]);
         for c in Category::ALL {
             assert_eq!(c.mode() == Mode::Recycle, matches!(c, Category::OldDownloads | Category::DevArtifacts), "{c:?}");
             assert_eq!(c.needs_scan(), c.mode() == Mode::Recycle);
         }
-        assert!(Category::WindowsTemp.needs_admin() && Category::UpdateDownloads.needs_admin());
+        assert!(Category::WindowsTemp.needs_admin() && Category::UpdateDownloads.needs_admin() && Category::DeliveryOptimization.needs_admin());
         assert!(!Category::UserTemp.needs_admin() && !Category::CrashDumps.needs_admin());
     }
 

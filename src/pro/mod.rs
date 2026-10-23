@@ -11,6 +11,7 @@
 //! * [`apps`]         installed applications (Uninstall registry keys)
 //! * [`drivers`]      kernel driver services and loaded kernel modules
 //! * [`cleanup`]      Disk Space cleanup categories and their measuring
+//! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
 //! * [`mft`]          NTFS Master File Table reader (fast scan method when elevated)
 //! * [`walker`]       parallel directory walker (scan method otherwise)
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
@@ -30,6 +31,7 @@ pub mod power;
 pub mod recorder;
 #[cfg(windows)]
 pub(crate) mod restartmgr;
+pub mod volcache;
 pub mod walker;
 #[cfg(windows)]
 pub(crate) mod winutil;

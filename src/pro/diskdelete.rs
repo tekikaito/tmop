@@ -748,8 +748,38 @@ fn short_error(e: &std::io::Error) -> String {
     }
 }
 
-/// Permanent delete. A link (symlink or junction) is removed itself, never its target.
+/// `path` in `\\?\` verbatim form, which Win32 does not normalise: a name with a trailing dot or
+/// space is looked up as written and can never resolve to a sibling (`foo.` is not `foo`). Drive
+/// and UNC paths only; anything else (relative, already verbatim, device) is returned unchanged.
+pub fn verbatim(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") || s.starts_with(r"\??\") {
+        return path.to_path_buf();
+    }
+    let s = s.replace('/', "\\");
+    let b = s.as_bytes();
+    if let Some(unc) = s.strip_prefix(r"\\") {
+        PathBuf::from(format!(r"\\?\UNC\{unc}"))
+    } else if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        PathBuf::from(format!(r"\\?\{s}"))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// A component ends with a dot or space: Win32 (and the shell) fold it away, so the name could resolve
+/// to a sibling (`foo.` -> `foo`). Pure.
+pub fn folds_to_sibling(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().ends_with(['.', ' '])))
+}
+
+/// Permanent delete. A link (symlink or junction) is removed itself, never its target. Works on the
+/// verbatim form of `path` (see [`verbatim`]) on Windows.
 pub fn delete_permanent(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    let path = verbatim(path);
+    #[cfg(windows)]
+    let path = path.as_path();
     let md = std::fs::symlink_metadata(path).map_err(|e| short_error(&e))?;
     #[cfg(windows)]
     let (link, dir) = {
@@ -791,7 +821,13 @@ impl Recycler {
         use windows::Win32::UI::Shell::{
             FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FILEOPERATION_FLAGS, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
         };
-        if std::fs::symlink_metadata(path).is_err() {
+        // The exact name is looked up in verbatim form (no trailing dot / space folding to a sibling). The shell
+        // rejects verbatim (backslash-backslash-question) paths with E_INVALIDARG, so it gets the plain path, and only for names Win32 cannot fold.
+        let vpath = verbatim(path);
+        if folds_to_sibling(path) {
+            return Err("the name ends with a dot or space; use permanent delete".into());
+        }
+        if std::fs::symlink_metadata(&vpath).is_err() {
             return Err("no longer exists".into());
         }
         // The shell destroys instead of recycling when the bin is switched off or too small for the
@@ -817,7 +853,7 @@ impl Recycler {
             })()
         };
         match r {
-            Ok(false) if std::fs::symlink_metadata(path).is_err() => Ok(()),
+            Ok(false) if std::fs::symlink_metadata(&vpath).is_err() => Ok(()),
             Ok(_) => Err("could not be moved to the Recycle Bin".into()),
             Err(e) if e.code().0 as u32 == 0x8007_0005 => Err("access denied".into()),
             Err(e) => Err(e.message()),
@@ -916,6 +952,18 @@ pub fn has_recycle_bin(path: &Path) -> bool {
 
 #[cfg(not(windows))]
 pub fn has_recycle_bin(_: &Path) -> bool {
+    false
+}
+
+/// The volume of `path` has a Recycle Bin size limit on record (`BitBucket\Volume\{guid}\MaxCapacity`).
+/// Without one the shell may delete large items for good, so the dialogs must not promise a restore.
+#[cfg(windows)]
+pub fn recycle_limit_known(path: &Path) -> bool {
+    bin_limits(path).is_some_and(|l| l.max_bytes.is_some())
+}
+
+#[cfg(not(windows))]
+pub fn recycle_limit_known(_: &Path) -> bool {
     false
 }
 

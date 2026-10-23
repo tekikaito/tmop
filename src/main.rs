@@ -15,6 +15,8 @@
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
 //!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
 //!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
+//!   TMOP --volume-caches=query:<drive>   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:) as JSON lines (Windows only)
+//!   TMOP --volume-caches=purge:<drive>:<id1,id2,...>   helper: purge exactly those handler ids (Clean up starts it after the confirm dialog)
 //!
 //! The `--engine-relay` modes honour the `TMOP_ENGINE_*` test overrides (`tmop::engine::Overrides`).
 
@@ -178,6 +180,10 @@ fn main() -> eframe::Result<()> {
 
     // Task Manager replacement: the elevated helper and restore switches run without a window.
     if let Some(code) = tmop::taskmgr::run_switches(&args) {
+        std::process::exit(code);
+    }
+    // Windows Disk Cleanup helper: runs the COM handlers in this separate process.
+    if let Some(code) = tmop::pro::volcache::run_switches(&args) {
         std::process::exit(code);
     }
     // Started in place of Task Manager: a running TMOP window takes it over if there is one.

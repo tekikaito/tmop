@@ -81,6 +81,8 @@ pub struct PendingDelete {
     pub ack: bool,
     /// False when the volume has no Recycle Bin (known once assessed).
     pub has_bin: bool,
+    /// Every drive has a Recycle Bin size limit on record (otherwise large items may be deleted for good).
+    pub bin_capped: bool,
     pub assessed: Option<Vec<Assessed>>,
     /// Scan tree version the targets were taken from.
     pub epoch: u64,
@@ -91,6 +93,7 @@ pub struct AssessOut {
     pub id: u64,
     pub items: Vec<Assessed>,
     pub has_bin: bool,
+    pub bin_capped: bool,
 }
 
 #[derive(Clone)]
@@ -129,9 +132,10 @@ pub struct MenuOut {
 // ---------------------------------------------------------------- pure helpers
 
 /// (first line, destination line, permanent) of the confirm dialog.
-pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool) -> (String, String, bool) {
+pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool, capped: bool) -> (String, String, bool) {
     let first = format!("{n} item{} \u{2022} {}", if n == 1 { "" } else { "s" }, format_bytes(size as f64));
     match (mode, has_bin) {
+        (Mode::Recycle, true) if !capped => (first, "Items go to the Recycle Bin, but large items may be deleted permanently by Windows.".into(), true),
         (Mode::Recycle, true) => (first, "Items go to the Recycle Bin and can be restored.".into(), false),
         (Mode::Recycle, false) => (first, "This volume has no Recycle Bin: items are deleted permanently.".into(), true),
         (Mode::Permanent, _) => (first, "Items are deleted permanently. This cannot be undone.".into(), true),
@@ -246,7 +250,7 @@ impl DiskDeleteUi {
         }
         self.next_id += 1;
         self.procs = rows.iter().map(|r| (r.pid, r.name.clone(), r.path.clone())).collect();
-        self.pending = Some(PendingDelete { id: self.next_id, targets, mode, ack: false, has_bin: true, assessed: None, epoch });
+        self.pending = Some(PendingDelete { id: self.next_id, targets, mode, ack: false, has_bin: true, bin_capped: false, assessed: None, epoch });
     }
 
     /// Plain/Ctrl/Shift click on row `i`. True for a plain click.
@@ -342,6 +346,7 @@ impl App {
             if let (Some(out), Some(p)) = (d.assess.ok(), d.pending.as_mut()) {
                 if out.id == p.id {
                     p.has_bin = out.has_bin;
+                    p.bin_capped = out.bin_capped;
                     p.assessed = Some(out.items.clone());
                 }
             }
@@ -356,16 +361,18 @@ impl App {
                     d.assess.start(move || {
                         let mut roots: Vec<std::path::Component> = Vec::new();
                         let mut has_bin = true;
+                        let mut bin_capped = true;
                         for t in &targets {
                             let root = t.path.components().next();
                             if let Some(r) = root {
                                 if !roots.contains(&r) {
                                     roots.push(r);
                                     has_bin &= diskdelete::has_recycle_bin(&t.path);
+                                    bin_capped &= diskdelete::recycle_limit_known(&t.path);
                                 }
                             }
                         }
-                        Ok(AssessOut { id, items: diskdelete::assess(targets, &rules), has_bin })
+                        Ok(AssessOut { id, items: diskdelete::assess(targets, &rules), has_bin, bin_capped })
                     });
                 }
             }
@@ -416,7 +423,7 @@ impl App {
             None => p.targets.iter().collect(),
         };
         let size: u64 = all.iter().map(|t| t.size).sum();
-        let (line1, dest, permanent) = summary_text(all.len(), size, p.mode, p.has_bin);
+        let (line1, dest, permanent) = summary_text(all.len(), size, p.mode, p.has_bin, p.bin_capped);
         let title = if permanent_mode { "Delete permanently" } else { "Move to Recycle Bin" };
         let warns: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Warn(_))).collect()).unwrap_or_default();
         let blocked: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Blocked(_))).collect()).unwrap_or_default();
@@ -609,12 +616,14 @@ mod tests {
 
     #[test]
     fn dialog_summary_text() {
-        let (a, b, perm) = summary_text(1, 1024, Mode::Recycle, true);
+        let (a, b, perm) = summary_text(1, 1024, Mode::Recycle, true, true);
         assert!(a.starts_with("1 item ") && b.contains("Recycle Bin") && !perm);
-        let (a, b, perm) = summary_text(3, 0, Mode::Recycle, false);
+        let (a, b, perm) = summary_text(3, 0, Mode::Recycle, false, true);
         assert!(a.starts_with("3 items") && b.contains("no Recycle Bin") && perm);
-        let (_, b, perm) = summary_text(2, 0, Mode::Permanent, true);
+        let (_, b, perm) = summary_text(2, 0, Mode::Permanent, true, true);
         assert!(b.contains("cannot be undone") && perm);
+        let (_, b, _) = summary_text(1, 0, Mode::Recycle, true, false);
+        assert!(b.contains("may be deleted permanently") && !b.contains("can be restored"));
     }
 
     #[test]

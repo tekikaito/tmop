@@ -454,10 +454,7 @@ mod tests {
         std::fs::write(dir.join("real/a.bin"), vec![0u8; 100]).unwrap();
         std::fs::create_dir_all(dir.join("outside")).unwrap();
         std::fs::write(dir.join("outside/b.bin"), vec![0u8; 100]).unwrap();
-        if std::os::windows::fs::symlink_dir(dir.join("outside"), dir.join("real/link")).is_err() {
-            let _ = std::fs::remove_dir_all(&dir);
-            return; // no symlink privilege
-        }
+        assert!(crate::pro::winutil::make_junction(&dir.join("real").join("link"), &dir.join("outside")), "junctions need no privilege");
         let t = run(&dir.join("real"));
         assert_eq!(t.files.len(), 1, "link target must not be descended");
         assert_eq!(t.nodes.len(), 1);

@@ -42,6 +42,11 @@ impl Key {
         (st == ERROR_SUCCESS).then_some(Key(h))
     }
 
+    /// The raw handle, for COM calls that take an open key. Valid while `self` lives.
+    pub fn raw(&self) -> HKEY {
+        self.0
+    }
+
     pub fn subkey(&self, name: &str) -> Option<Key> {
         let w = wide(name);
         let mut h = HKEY::default();
@@ -195,6 +200,20 @@ pub fn long_path(p: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 pub use super::expand_env;
+
+/// Test helper: a directory junction `link` -> `target` (needs no privilege, unlike a symlink).
+#[cfg(test)]
+pub(crate) fn make_junction(link: &std::path::Path, target: &std::path::Path) -> bool {
+    std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+        && std::fs::symlink_metadata(link).is_ok()
+}
 
 #[cfg(test)]
 mod tests {

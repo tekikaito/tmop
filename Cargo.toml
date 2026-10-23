@@ -77,6 +77,7 @@ features = [
     "Win32_System_Memory",
     "Data_Xml_Dom",
     "UI_Notifications",
+    "Win32_UI_LegacyWindowsEnvironmentFeatures",
 ]
 
 [dev-dependencies]

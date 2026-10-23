@@ -10,6 +10,7 @@ use super::{App, FrameData};
 use crate::pro::cleanup::{self, Category, Measured};
 use crate::pro::diskdelete::{self, Assessed, Mode, Report, SystemPaths, Target, Verdict};
 use crate::pro::diskspace::Tree;
+use crate::pro::volcache::{self, Handler};
 use crate::pro::Loader;
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
@@ -50,11 +51,16 @@ pub struct CleanAssess {
     pub items: Vec<Vec<Assessed>>,
     /// Every drive of the Recycle Bin categories has a Recycle Bin.
     pub bin_ok: bool,
+    /// Every such drive has a Recycle Bin size limit on record (else large items may be deleted for good).
+    pub bin_capped: bool,
 }
 
 pub struct CleanPending {
     pub id: u64,
     pub cats: Vec<CatSel>,
+    /// Checked Windows Disk Cleanup handlers (purged by Windows, not through the classifier).
+    pub vols: Vec<Handler>,
+    pub drive: String,
     /// Bytes in the Recycle Bin when "Empty Recycle Bin" is checked.
     pub bin_bytes: Option<u64>,
     pub ack: bool,
@@ -76,12 +82,36 @@ pub struct CleanupUi {
     pub expanded: HashSet<Category>,
     pub pending: Option<CleanPending>,
     pub assess: Loader<CleanAssess>,
+    /// Windows Disk Cleanup handlers of the system drive (helper process), measured with `fixed`.
+    pub vols: Loader<Vec<Handler>>,
+    pub vol_checked: HashMap<String, bool>,
     next_id: u64,
 }
 
 impl CleanupUi {
     pub fn is_checked(&self, c: Category) -> bool {
         self.checked.get(&c).copied().unwrap_or(c.preselected())
+    }
+
+    pub fn is_vol_checked(&self, id: &str) -> bool {
+        self.vol_checked.get(id).copied().unwrap_or_else(|| volcache::preselected(id))
+    }
+
+    /// Categories to show: all, minus those a working Windows handler replaces. When the helper failed
+    /// (or has not answered yet) nothing is hidden, so nothing is lost.
+    pub fn visible(&self) -> Vec<Category> {
+        let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v)).unwrap_or_default();
+        Category::ALL.into_iter().filter(|c| !hidden.contains(c)).collect()
+    }
+
+    /// Handlers shown in the "Windows Disk Cleanup" group.
+    pub fn vol_list(&self, elevated: bool) -> Vec<Handler> {
+        self.vols.ok().map(|v| volcache::listed(v, elevated)).unwrap_or_default()
+    }
+
+    /// Checked handlers a cleanup would purge (administrator-only ones only when elevated).
+    pub fn selected_vols(&self, elevated: bool) -> Vec<Handler> {
+        self.vol_list(elevated).into_iter().filter(|h| h.size > 0 && (elevated || !h.needs_admin) && self.is_vol_checked(&h.id)).collect()
     }
 
     /// Measurement of `cat`; the scan-based ones only when they match scan version `epoch`.
@@ -105,10 +135,15 @@ pub fn selectable(m: &Measured, elevated: bool) -> (u64, u64) {
     m.items.iter().filter(|i| elevated || !i.needs_admin).fold((0, 0), |(b, n), i| (b + i.size, n + 1))
 }
 
-/// (destination text, permanent) of a category in the confirm dialog.
-pub fn dest_text(cat: Category, bin_ok: bool) -> (&'static str, bool) {
+/// Destination of a Windows Disk Cleanup handler in the confirm dialog.
+pub const VOL_DEST: &str = "removed by Windows Disk Cleanup (not recoverable)";
+
+/// (destination text, permanent) of a category in the confirm dialog. `capped`: the Recycle Bin has a size
+/// limit on record, otherwise Windows may delete large items for good and the text must not promise a restore.
+pub fn dest_text(cat: Category, bin_ok: bool, capped: bool) -> (&'static str, bool) {
     match (cat, cat.mode()) {
         (Category::RecycleBin, _) => ("emptied by Windows, permanent", true),
+        (_, Mode::Recycle) if bin_ok && !capped => ("moved to the Recycle Bin; large items may be deleted permanently by Windows", true),
         (_, Mode::Recycle) if bin_ok => ("moved to the Recycle Bin", false),
         (_, Mode::Recycle) => ("deleted permanently (no Recycle Bin on this volume)", true),
         _ => ("deleted permanently", true),
@@ -175,8 +210,12 @@ impl App {
             let c = &mut self.pro.clean;
             c.fixed.poll();
             c.tree_m.poll();
+            c.vols.poll();
             if !c.started && !c.fixed.is_loading() {
                 c.started = true;
+                // Windows Disk Cleanup sizes (helper process), cached until the next Refresh or delete.
+                c.vols = Loader::default();
+                c.vols.start(|| volcache::query(&volcache::system_drive()));
                 c.fixed.start(|| {
                     let sys = diskdelete::system_paths();
                     let mut measured = cleanup::measure_fixed(&sys, SystemTime::now());
@@ -195,7 +234,7 @@ impl App {
                 }
                 _ => {}
             }
-            if c.fixed.is_loading() || c.tree_m.is_loading() {
+            if c.fixed.is_loading() || c.tree_m.is_loading() || c.vols.is_loading() {
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
         }
@@ -209,18 +248,70 @@ impl App {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(head).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, None).clicked();
         });
-        let busy = self.pro.clean.fixed.is_loading() || self.pro.clean.tree_m.is_loading();
+        let busy = self.pro.clean.fixed.is_loading() || self.pro.clean.tree_m.is_loading() || self.pro.clean.vols.is_loading();
         let hint = if busy { "Measuring\u{2026}" } else { "Everything is checked against the same safety rules as manual deletes" };
         widgets::text_fit(&p, pos2(head.left() + 80.0, head.center().y + 1.0), Align2::LEFT_CENTER, hint, theme::ui(12.5), pal.text_dim, (head.width() - 180.0).max(40.0));
 
         let mut toggles: Vec<(Category, bool)> = Vec::new();
         let mut expands: Vec<Category> = Vec::new();
+        let mut vol_toggles: Vec<(String, bool)> = Vec::new();
         let mut want_scan = false;
         let c = &self.pro.clean;
+        let visible = c.visible();
+        let vol_rows = c.vol_list(elevated);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
-                for cat in Category::ALL {
+                // Windows Disk Cleanup: the handlers Windows' own Disk Cleanup offers. They replace TMOP's
+                // temp, thumbnail, Delivery Optimization, Recycle Bin and error report categories.
+                {
+                    let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+                    let p = ui.painter();
+                    p.text(pos2(hr.left() + 4.0, hr.center().y), Align2::LEFT_CENTER, "Windows Disk Cleanup", theme::semibold(13.5), pal.text);
+                    let (msg, col) = if c.vols.is_loading() {
+                        ("Measuring\u{2026}".to_string(), pal.text_dim)
+                    } else if let Some(e) = c.vols.error() {
+                        (format!("Not available: {e}"), pal.warn)
+                    } else if vol_rows.is_empty() {
+                        ("Nothing to clean".to_string(), pal.text_dim)
+                    } else {
+                        (String::new(), pal.text_dim)
+                    };
+                    widgets::text_fit(p, pos2(hr.right() - 4.0, hr.center().y), Align2::RIGHT_CENTER, &msg, theme::ui(12.0), col, (hr.width() - 190.0).max(60.0));
+                    if let Some(e) = c.vols.error() {
+                        hresp.on_hover_text(format!("{e}\nTMOP's own categories are shown instead."));
+                    }
+                }
+                for h in &vol_rows {
+                    let locked = h.needs_admin && !elevated;
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
+                    let resp = if h.description.is_empty() { resp } else { resp.on_hover_text(h.description.as_str()) };
+                    ui.painter().rect_filled(r, 6.0, with_alpha(pal.text, if resp.hovered() { 0.07 } else { 0.04 }));
+                    let mut v = c.is_vol_checked(&h.id) && !locked;
+                    let cb = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
+                    if ui.add_enabled_ui(!locked, |ui| ui.put(cb, egui::Checkbox::without_text(&mut v)).changed()).inner {
+                        vol_toggles.push((h.id.clone(), v));
+                    }
+                    let p = ui.painter();
+                    let dim = if locked { pal.text_faint } else { pal.text };
+                    let left = r.left() + 46.0;
+                    let right_w = 190.0;
+                    let text_w = (r.width() - 46.0 - right_w - 34.0).max(60.0);
+                    widgets::text_fit(p, pos2(left, r.top() + 18.0), Align2::LEFT_CENTER, &h.name, theme::semibold(13.5), dim, text_w);
+                    let detail = h.description.split_whitespace().collect::<Vec<_>>().join(" ");
+                    widgets::text_fit(p, pos2(left, r.top() + 39.0), Align2::LEFT_CENTER, &detail, theme::ui(12.0), pal.text_dim, text_w);
+                    let rx = r.right() - 34.0;
+                    if locked {
+                        widgets::text_fit(p, pos2(rx, r.top() + 18.0), Align2::RIGHT_CENTER, "\u{2014}", theme::semibold(13.5), dim, right_w);
+                        widgets::text_fit(p, pos2(rx, r.top() + 39.0), Align2::RIGHT_CENTER, "needs administrator", theme::ui(12.0), pal.warn, right_w);
+                    } else {
+                        widgets::text_fit(p, pos2(rx, r.top() + 29.0), Align2::RIGHT_CENTER, &format_bytes(h.size as f64), theme::semibold(13.5), dim, right_w);
+                    }
+                }
+                if !vol_rows.is_empty() || c.vols.is_loading() || c.vols.error().is_some() {
+                    ui.add_space(4.0);
+                }
+                for cat in visible.iter().copied() {
                     let m = c.measured(cat, epoch);
                     let locked = cat.needs_admin() && !elevated;
                     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
@@ -307,12 +398,15 @@ impl App {
         });
 
         // Footer.
-        let ms: Vec<(&Measured, bool)> = Category::ALL
+        let ms: Vec<(&Measured, bool)> = visible
             .iter()
             .filter(|cat| !(cat.needs_admin() && !elevated))
             .filter_map(|&cat| c.measured(cat, epoch).map(|m| (m, c.is_checked(cat))))
             .collect();
-        let (total, n) = footer_totals(&ms, elevated);
+        let (mut total, mut n) = footer_totals(&ms, elevated);
+        let sel_vols = c.selected_vols(elevated);
+        total += sel_vols.iter().map(|h| h.size).sum::<u64>();
+        n += sel_vols.len();
         let text = if n == 0 { "Nothing selected".to_string() } else { format!("{} in {n} categor{} selected", format_bytes(total as f64), if n == 1 { "y" } else { "ies" }) };
         p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0_f32, pal.panel_stroke));
         p.text(pos2(foot.left() + 4.0, foot.center().y + 1.0), Align2::LEFT_CENTER, text, theme::semibold(13.0), pal.text);
@@ -327,6 +421,9 @@ impl App {
         let c = &mut self.pro.clean;
         for (cat, v) in toggles {
             c.checked.insert(cat, v);
+        }
+        for (id, v) in vol_toggles {
+            c.vol_checked.insert(id, v);
         }
         for cat in expands {
             if !c.expanded.remove(&cat) {
@@ -351,7 +448,7 @@ impl App {
         }
         let mut cats = Vec::new();
         let mut bin_bytes = None;
-        for cat in Category::ALL {
+        for cat in c.visible() {
             if !c.is_checked(cat) || (cat.needs_admin() && !elevated) {
                 continue;
             }
@@ -367,13 +464,14 @@ impl App {
                 cats.push(CatSel { cat, targets });
             }
         }
-        if cats.is_empty() && bin_bytes.is_none() {
+        let vols = c.selected_vols(elevated);
+        if cats.is_empty() && bin_bytes.is_none() && vols.is_empty() {
             return;
         }
         let procs = rows.iter().map(|r| (r.pid, r.name.clone(), r.path.clone())).collect();
         let c = &mut self.pro.clean;
         c.next_id += 1;
-        c.pending = Some(CleanPending { id: c.next_id, cats, bin_bytes, ack: false, assessed: None, epoch, procs });
+        c.pending = Some(CleanPending { id: c.next_id, cats, vols, drive: volcache::system_drive(), bin_bytes, ack: false, assessed: None, epoch, procs });
         self.pro.del.ensure_rules(rows);
     }
 
@@ -382,6 +480,7 @@ impl App {
         let (c, d) = (&mut self.pro.clean, &mut self.pro.del);
         c.fixed.poll();
         c.tree_m.poll();
+        c.vols.poll();
         if c.assess.poll() {
             if let (Some(out), Some(p)) = (c.assess.ok().cloned(), c.pending.as_mut()) {
                 if out.id == p.id {
@@ -399,6 +498,7 @@ impl App {
                     let cats: Vec<CatSel> = p.cats.clone();
                     c.assess.start(move || {
                         let mut bin_ok = true;
+                        let mut bin_capped = true;
                         let mut roots: Vec<std::path::Component> = Vec::new();
                         for cs in cats.iter().filter(|cs| cs.cat.mode() == Mode::Recycle) {
                             for t in &cs.targets {
@@ -406,6 +506,7 @@ impl App {
                                     if !roots.contains(&r) {
                                         roots.push(r);
                                         bin_ok &= diskdelete::has_recycle_bin(&t.path);
+                                        bin_capped &= diskdelete::recycle_limit_known(&t.path);
                                     }
                                 }
                             }
@@ -414,7 +515,7 @@ impl App {
                         let flat: Vec<Target> = cats.into_iter().flat_map(|cs| cs.targets).collect();
                         let mut done = diskdelete::assess(flat, &rules).into_iter();
                         let items = counts.iter().map(|&n| done.by_ref().take(n).collect()).collect();
-                        Ok(CleanAssess { id, items, bin_ok })
+                        Ok(CleanAssess { id, items, bin_ok, bin_capped })
                     });
                 }
             }
@@ -429,6 +530,8 @@ impl App {
         let Some(p) = self.pro.clean.pending.as_mut() else { return };
         let a = p.assessed.as_ref();
         let bin_ok = a.map(|a| a.bin_ok).unwrap_or(true);
+        let capped = a.map(|a| a.bin_capped).unwrap_or(false);
+        let vols = p.vols.clone();
         let live = |v: &Verdict| !matches!(v, Verdict::Blocked(_));
         // (category, items, bytes) of what will actually be deleted.
         let mut lines: Vec<(Category, u64, u64)> = Vec::new();
@@ -447,24 +550,33 @@ impl App {
         let all: Vec<&Assessed> = a.map(|a| a.items.iter().flatten().collect()).unwrap_or_default();
         let warns: Vec<&Assessed> = all.iter().copied().filter(|x| matches!(x.verdict, Verdict::Warn(_))).collect();
         let blocked: Vec<&Assessed> = all.iter().copied().filter(|x| !live(&x.verdict)).collect();
-        let deletable = lines.iter().any(|l| l.1 > 0 || l.0 == Category::RecycleBin);
-        let total: u64 = lines.iter().map(|l| l.2).sum();
+        let deletable = !vols.is_empty() || lines.iter().any(|l| l.1 > 0 || l.0 == Category::RecycleBin);
+        let total: u64 = lines.iter().map(|l| l.2).sum::<u64>() + vols.iter().map(|h| h.size).sum::<u64>();
+        let count = lines.len() + vols.len();
         let skipped_in_use = diskdelete::in_use_skipped(all.iter().copied());
         let mut ack = p.ack;
         let ok_to_go = a.is_some() && deletable && (warns.is_empty() || ack);
         let mut answer = None;
         egui::Window::new("Clean up").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).frame(egui::Frame::window(&ctx.style()).fill(pal.panel)).show(ctx, |ui| {
             ui.set_width(560.0);
-            ui.label(RichText::new(format!("{} \u{2022} {} categor{}", format_bytes(total as f64), lines.len(), if lines.len() == 1 { "y" } else { "ies" })).font(theme::semibold(14.0)).color(pal.text));
+            ui.label(RichText::new(format!("{} \u{2022} {count} categor{}", format_bytes(total as f64), if count == 1 { "y" } else { "ies" })).font(theme::semibold(14.0)).color(pal.text));
             ui.add_space(6.0);
             for (cat, n, bytes) in &lines {
-                let (dest, permanent) = dest_text(*cat, bin_ok);
+                let (dest, permanent) = dest_text(*cat, bin_ok, capped);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(cat.title()).font(theme::semibold(12.5)).color(pal.text));
                     let count = if *cat == Category::RecycleBin { String::new() } else { format!("{n} item{} \u{2022} ", if *n == 1 { "" } else { "s" }) };
                     ui.label(RichText::new(format!("{count}{}", format_bytes(*bytes as f64))).font(theme::ui(12.0)).color(pal.text_dim));
                 });
                 ui.label(RichText::new(dest).font(theme::ui(11.5)).color(if permanent { theme::RED } else { pal.text_dim }));
+                ui.add_space(3.0);
+            }
+            for h in &vols {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(h.name.as_str()).font(theme::semibold(12.5)).color(pal.text));
+                    ui.label(RichText::new(format_bytes(h.size as f64)).font(theme::ui(12.0)).color(pal.text_dim));
+                });
+                ui.label(RichText::new(VOL_DEST).font(theme::ui(11.5)).color(theme::RED));
                 ui.add_space(3.0);
             }
             if a.is_none() {
@@ -556,6 +668,7 @@ impl App {
             .filter(|g| !g.1.is_empty())
             .collect();
         let bin = p.bin_bytes;
+        let (vols, drive) = (p.vols, p.drive);
         let epoch = p.epoch;
         let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
@@ -569,28 +682,53 @@ impl App {
             }
             if let Some(bytes) = bin {
                 let res = cleanup::empty_recycle_bin();
-                log_bin(bytes, &res);
+                log_entry("Recycle Bin", bytes, &res);
                 match res {
                     Ok(()) => report.freed += bytes,
                     Err(e) => report.skipped.push((Target { path: PathBuf::from("Recycle Bin"), size: bytes, is_dir: false, node: None, file: None }, e)),
                 }
             }
+            purge_vols(&vols, &drive, &mut report);
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
             Ok(JobOut { report, tree, epoch })
         });
     }
 }
 
-/// One `deletions.log` line for emptying the Recycle Bin.
-fn log_bin(bytes: u64, res: &Result<(), String>) {
+/// One `deletions.log` line for a purge by Windows (`label` is the Recycle Bin or `cleanmgr:<handler id>`).
+fn log_entry(label: &str, bytes: u64, res: &Result<(), String>) {
     use std::io::Write;
     let path = diskdelete::default_log();
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let line = diskdelete::log_line(&crate::pro::display_stamp(), Mode::Permanent, bytes, res, std::path::Path::new("Recycle Bin"));
+        let line = diskdelete::log_line(&crate::pro::display_stamp(), Mode::Permanent, bytes, res, std::path::Path::new(label));
         let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Purges exactly the checked Windows Disk Cleanup handlers through the helper process, logs each one
+/// (`cleanmgr:<id>`, size before, result) and adds the outcome to `report`. They are not in `report.deleted`
+/// (no paths): the scan tree is not touched.
+fn purge_vols(vols: &[Handler], drive: &str, report: &mut Report) {
+    if vols.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = vols.iter().map(|v| v.id.clone()).collect();
+    let (done, failure) = volcache::purge(drive, &ids);
+    for v in vols {
+        let d = done.iter().find(|d| d.id.eq_ignore_ascii_case(&v.id));
+        let before = d.map(|d| d.size).filter(|&s| s > 0).unwrap_or(v.size);
+        let res: Result<(), String> = match d {
+            Some(d) => d.error.clone().map_or(Ok(()), Err),
+            None => Err(failure.clone().unwrap_or_else(|| "not run".into())),
+        };
+        log_entry(&format!("cleanmgr:{}", v.id), before, &res);
+        match res {
+            Ok(()) => report.freed += before,
+            Err(e) => report.skipped.push((Target { path: PathBuf::from(format!("Windows Disk Cleanup: {}", v.name)), size: before, is_dir: false, node: None, file: None }, e)),
+        }
     }
 }
 
@@ -627,10 +765,13 @@ mod tests {
 
     #[test]
     fn destinations_per_category() {
-        assert_eq!(dest_text(Category::UserTemp, true), ("deleted permanently", true));
-        assert_eq!(dest_text(Category::DevArtifacts, true), ("moved to the Recycle Bin", false));
-        assert!(dest_text(Category::OldDownloads, false).0.contains("no Recycle Bin"));
-        assert!(dest_text(Category::RecycleBin, true).1);
+        assert_eq!(dest_text(Category::UserTemp, true, true), ("deleted permanently", true));
+        assert_eq!(dest_text(Category::DevArtifacts, true, true), ("moved to the Recycle Bin", false));
+        assert!(dest_text(Category::OldDownloads, false, true).0.contains("no Recycle Bin"));
+        assert!(dest_text(Category::RecycleBin, true, true).1);
+        // No size limit on record for the volume: no promise of a restore.
+        let (t, perm) = dest_text(Category::DevArtifacts, true, false);
+        assert!(t.contains("large items may be deleted permanently") && perm);
     }
 
     #[test]
@@ -640,5 +781,57 @@ mod tests {
         c.checked.insert(Category::UserTemp, false);
         c.checked.insert(Category::DevArtifacts, true);
         assert!(!c.is_checked(Category::UserTemp) && c.is_checked(Category::DevArtifacts));
+    }
+
+    fn with_vols(r: Result<Vec<Handler>, String>) -> CleanupUi {
+        let mut c = CleanupUi::default();
+        c.vols.start(move || r);
+        while !c.vols.poll() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        c
+    }
+
+    fn handler(id: &str, size: u64, admin: bool) -> Handler {
+        Handler { id: id.into(), name: id.into(), size, needs_admin: admin, ..Default::default() }
+    }
+
+    #[test]
+    fn windows_handlers_replace_overlapping_categories() {
+        let c = with_vols(Ok(vec![handler("Temporary Files", 10, false), handler("Recycle Bin", 5, false), handler("Thumbnail Cache", 0, false)]));
+        let vis = c.visible();
+        for hidden in [Category::UserTemp, Category::WindowsTemp, Category::RecycleBin, Category::ThumbnailCache] {
+            assert!(!vis.contains(&hidden), "{hidden:?}");
+        }
+        for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts, Category::WerReports] {
+            assert!(vis.contains(&kept), "{kept:?}");
+        }
+        // The helper failed: nothing is hidden.
+        let failed = with_vols(Err("timed out".into()));
+        assert_eq!(failed.visible(), Category::ALL.to_vec());
+        assert_eq!(CleanupUi::default().visible(), Category::ALL.to_vec());
+    }
+
+    #[test]
+    fn windows_handler_selection() {
+        let mut c = with_vols(Ok(vec![
+            handler("Temporary Files", 10, false),
+            handler("Recycle Bin", 20, false),
+            handler("Update Cleanup", 0, true),
+            handler("D3D Shader Cache", 30, false),
+            handler("DownloadsFolder", 99, false),
+        ]));
+        let ids = |v: Vec<Handler>| v.into_iter().map(|h| h.id).collect::<Vec<_>>();
+        // Only the pre-selected ones; never Recycle Bin, Update Cleanup or DownloadsFolder.
+        assert_eq!(ids(c.selected_vols(false)), vec!["D3D Shader Cache", "Temporary Files"]);
+        c.vol_checked.insert("Recycle Bin".into(), true);
+        c.vol_checked.insert("Update Cleanup".into(), true);
+        c.vol_checked.insert("DownloadsFolder".into(), true);
+        // Administrator-only handlers are listed (greyed) but not selectable until elevated.
+        assert_eq!(ids(c.vol_list(false)), vec!["D3D Shader Cache", "Recycle Bin", "Temporary Files", "Update Cleanup"]);
+        assert_eq!(ids(c.selected_vols(false)), vec!["D3D Shader Cache", "Recycle Bin", "Temporary Files"]);
+        assert!(!ids(c.vol_list(true)).contains(&"DownloadsFolder".to_string()));
+        c.vol_checked.insert("Temporary Files".into(), false);
+        assert_eq!(ids(c.selected_vols(true)), vec!["D3D Shader Cache", "Recycle Bin"]);
     }
 }

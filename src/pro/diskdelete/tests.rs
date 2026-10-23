@@ -257,9 +257,11 @@ fn permanent_delete_in_temp() {
     std::fs::write(&lone, [0u8; 7]).unwrap();
     // A directory link inside the victim pointing at `keep`: it must go, the target must stay.
     #[cfg(windows)]
-    let linked = std::os::windows::fs::symlink_dir(&keep, victim.join("link")).is_ok();
+    let linked = crate::pro::winutil::make_junction(&victim.join("link"), &keep);
     #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(&keep, victim.join("link")).is_ok();
+    #[cfg(windows)]
+    assert!(linked, "junctions need no privilege");
     let log = base.join("deletions.log");
     let missing = base.join("missing");
     let rep = run_with_log(vec![target(&victim, 100, true), target(&lone, 7, false), target(&missing, 5, false)], Mode::Permanent, Some(&log), None);
@@ -276,7 +278,7 @@ fn permanent_delete_in_temp() {
     if linked {
         std::fs::create_dir_all(base.join("x")).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&keep, base.join("x").join("l2")).unwrap();
+        assert!(crate::pro::winutil::make_junction(&base.join("x").join("l2"), &keep));
         #[cfg(unix)]
         std::os::unix::fs::symlink(&keep, base.join("x").join("l2")).unwrap();
         delete_permanent(&base.join("x").join("l2")).unwrap();
@@ -377,10 +379,7 @@ fn classify_resolved_follows_links_in_the_parent_chain() {
     std::fs::create_dir_all(fake_win.join("system32")).unwrap();
     std::fs::create_dir_all(base.join("plain")).unwrap();
     let link = base.join("plain").join("alias");
-    if std::os::windows::fs::symlink_dir(&fake_win, &link).is_err() {
-        let _ = std::fs::remove_dir_all(&base);
-        return; // no symlink privilege on this machine
-    }
+    assert!(crate::pro::winutil::make_junction(&link, &fake_win), "junctions need no privilege");
     let mut r = Rules::default();
     r.sys.system_root = norm_path(&std::fs::canonicalize(&fake_win).unwrap());
     let via_link = link.join("system32");
@@ -428,4 +427,39 @@ fn has_recycle_bin_for_system_drive() {
     let d = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
     assert!(has_recycle_bin(Path::new(&format!(r"{d}\"))));
     assert!(!has_recycle_bin(Path::new(r"\\server\share\x")));
+}
+
+#[test]
+fn verbatim_form_of_paths() {
+    assert_eq!(verbatim(Path::new(r"C:\a\b. ")), PathBuf::from(r"\\?\C:\a\b. "));
+    assert_eq!(verbatim(Path::new("c:/a/b")), PathBuf::from(r"\\?\c:\a\b"));
+    assert_eq!(verbatim(Path::new(r"\\srv\share\f")), PathBuf::from(r"\\?\UNC\srv\share\f"));
+    for same in [r"\\?\C:\x", r"\\?\UNC\s\h\x", r"\\.\PhysicalDrive0", r"rel\x", r"C:x"] {
+        assert_eq!(verbatim(Path::new(same)), PathBuf::from(same), "{same}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn permanent_delete_never_hits_a_trailing_dot_sibling() {
+    let base = std::env::temp_dir().join(format!("tmop-del-dot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let sibling = base.join("report");
+    std::fs::write(&sibling, b"keep").unwrap();
+    // Win32 would fold `report.` to `report`; the verbatim form is looked up as written.
+    let dotted = PathBuf::from(format!("{}.", sibling.display()));
+    assert!(delete_permanent(&dotted).is_err());
+    assert!(sibling.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn trailing_dot_or_space_names_are_detected() {
+    for p in [r"C:\a\b.", r"C:\a\b ", r"C:\a. \c", r"\srv\share\x."] {
+        assert!(folds_to_sibling(Path::new(p)), "{p}");
+    }
+    for p in [r"C:\a\b", r"C:\a\.git", r"C:\a\b.txt", r"C:\a\..\b", r"C:\"] {
+        assert!(!folds_to_sibling(Path::new(p)), "{p}");
+    }
 }
