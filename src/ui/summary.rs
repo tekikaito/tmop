@@ -53,8 +53,8 @@ impl App {
             (
                 "Clock",
                 fd.metric("clock"),
-                s.cpu.max_mhz.filter(|m| *m > 0).map(|m| fd.smooth.clock / m as f32),
-                s.cpu.current_mhz.map(|m| format!("{:.1}G", m as f32 / 1000.0)).unwrap_or("\u{2014}".into()),
+                crate::metrics::clock::clock_ceiling(s.cpu.base_mhz, s.cpu.boost_mhz).filter(|_| s.cpu.clock_live).map(|c| (fd.smooth.clock / c).clamp(0.0, 1.0)),
+                if !s.cpu.clock_live && s.cpu.current_mhz.is_some() { "static".into() } else { s.cpu.current_mhz.map(|m| format!("{:.1}G", m as f32 / 1000.0)).unwrap_or("\u{2014}".into()) },
                 LedStyle::new(fd.metric("clock"), fd.bloom),
                 Device::Cpu,
             ),
@@ -106,7 +106,7 @@ impl App {
         let green = fd.metric("cpu");
         let red = fd.metric("kernel");
         let orange = fd.metric("thermal");
-        let has_temp = !s.thermal.zones.is_empty();
+        let has_temp = s.thermal.max_c().is_some();
         let mut legend = vec![("Utilization", green), ("Kernel", red)];
         if has_temp {
             legend.insert(1, ("Temperature", orange));
@@ -133,7 +133,7 @@ impl App {
             }
         }
         p.text(pos2(graph.left(), inner.bottom()), Align2::LEFT_BOTTOM, format!("{} logical processors", s.cpu.logical_count), theme::ui(12.0), pal.text_dim);
-        let speed = s.cpu.current_mhz.map(|m| format!("Speed {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
+        let speed = s.cpu.current_mhz.map(|m| format!("Speed {:.2} GHz{}", m as f32 / 1000.0, if s.cpu.clock_live { "" } else { " (static)" })).unwrap_or_default();
         p.text(pos2(graph.right(), inner.bottom()), Align2::RIGHT_BOTTOM, &speed, theme::ui(12.0), pal.text_dim);
         if ui.interact(graph, ui.id().with("overview-graph"), Sense::click()).clicked() {
             self.device = Device::Cpu;
@@ -256,7 +256,7 @@ impl App {
                 Device::Thermal,
                 "Thermals",
                 s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("\u{2014}".into()),
-                if s.thermal.zones.is_empty() { "No ACPI thermal zones".into() } else { format!("{} ACPI zone(s), firmware sensor", s.thermal.zones.len()) },
+                if s.thermal.sources.is_empty() { "No ACPI thermal zones".into() } else { s.thermal.sources.clone() },
                 String::new(),
                 fd.smooth.thermal / 100.0,
             ),

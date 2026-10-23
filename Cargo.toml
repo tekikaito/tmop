@@ -72,6 +72,7 @@ features = [
     "Win32_Security_Authorization",
     "Win32_System_Environment",
     "Win32_System_Console",
+    "Win32_System_Memory",
     "Data_Xml_Dom",
     "UI_Notifications",
 ]

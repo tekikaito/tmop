@@ -27,11 +27,15 @@ fn dump() {
     std::thread::sleep(std::time::Duration::from_secs(1));
     let (s, procs) = c.collect();
     println!("CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz);
+    println!(
+        "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
+        s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
+    );
     println!("Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total - s.memory.available, s.memory.total);
     println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
     println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
     println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
-    println!("Thermal  {:?}", s.thermal.zones);
+    println!("Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources);
     println!("Procs    {} processes, {} threads, {} handles", s.process_count, s.thread_count, s.handle_count);
     let mut top: Vec<_> = procs.iter().collect();
     top.sort_by_key(|p| std::cmp::Reverse(p.private_working_set));

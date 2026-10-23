@@ -1,5 +1,6 @@
 //! Windows metric collection.
 
+use super::clock::{clock_base, clock_mhz, perf_mhz};
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
 use std::collections::HashMap;
@@ -168,6 +169,22 @@ pub struct Collector {
     prev_net: Option<(Instant, u64, u64)>,
     pdh: Option<Pdh>,
     procs: Enumerator,
+    /// Registry `~MHz` of CPU 0 (read once).
+    reg_mhz: Option<u32>,
+    hwinfo: HwinfoCache,
+}
+
+/// Last HWiNFO read; the mapping is polled at most every 2 s (30 s while not running).
+struct HwinfoCache {
+    at: Option<Instant>,
+    cpu: Option<(String, f32)>,
+    status: String,
+    running: bool,
+}
+
+fn registry_base_mhz() -> Option<u32> {
+    use crate::pro::winutil::{Key, View};
+    Key::open(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", View::Default)?.u32("~MHz")
 }
 
 impl Default for Collector {
@@ -191,6 +208,7 @@ impl Collector {
             // Live clock as a share of base; CurrentMhz from CallNtPowerInformation stays at base.
             ("cpu_perf_total", r"\Processor Information(_Total)\% Processor Performance"),
             ("cpu_perf", r"\Processor Information(*)\% Processor Performance"),
+            ("cpu_freq", r"\Processor Information(_Total)\Processor Frequency"),
         ]);
         Self {
             seq: 0,
@@ -200,6 +218,8 @@ impl Collector {
             prev_net: None,
             pdh,
             procs: Enumerator::new(),
+            reg_mhz: registry_base_mhz(),
+            hwinfo: HwinfoCache { at: None, cpu: None, status: "not running".into(), running: false },
         }
     }
 
@@ -236,18 +256,27 @@ impl Collector {
                 .filter(|(_, k)| *k > 200.0)
                 .map(|(n, k)| (n, (k - 273.15) as f32))
                 .collect();
-            // CPU clock
-            if let Some(base) = snap.cpu.max_mhz {
-                if let Some(mhz) = pdh.value("cpu_perf_total").and_then(|pct| perf_mhz(base, pct)) {
-                    snap.cpu.current_mhz = Some(mhz);
-                }
-                if let Some(cores) = per_core_perf_mhz(&pdh.array("cpu_perf"), base, snap.cpu.per_core_mhz.len()) {
+            // CPU clock: live MHz = base * % Processor Performance.
+            snap.cpu.perf_pct = pdh.value("cpu_perf_total");
+            snap.cpu.pdh_freq_mhz = pdh.value("cpu_freq").filter(|f| *f > 0.0).map(|f| f.round() as u32);
+            let base = clock_base(self.reg_mhz, snap.cpu.pdh_freq_mhz, snap.cpu.mhz_limit, snap.cpu.max_mhz);
+            if let Some(mhz) = clock_mhz(base, snap.cpu.perf_pct) {
+                snap.cpu.current_mhz = Some(mhz);
+                snap.cpu.clock_live = true;
+                if let Some(cores) = base.and_then(|b| per_core_perf_mhz(&pdh.array("cpu_perf"), b, snap.cpu.per_core_mhz.len())) {
                     snap.cpu.per_core_mhz = cores;
                 }
             }
         } else {
             snap.errors.push("PDH unavailable: disk, GPU and thermal readings disabled".into());
         }
+        snap.cpu.base_mhz = clock_base(self.reg_mhz, snap.cpu.pdh_freq_mhz, snap.cpu.mhz_limit, snap.cpu.max_mhz);
+        snap.cpu.boost_mhz = snap.cpu.max_mhz.filter(|m| snap.cpu.base_mhz.is_some_and(|b| *m > b));
+        if !snap.cpu.clock_live {
+            // No live counter: report the static base clock instead of pretending.
+            snap.cpu.current_mhz = snap.cpu.base_mhz.or(snap.cpu.current_mhz);
+        }
+        self.thermal(&mut snap);
         let rows = match self.procs.collect(self.logical, &gpu_by_pid) {
             Ok((rows, t)) => {
                 snap.process_count = t.processes;
@@ -331,9 +360,41 @@ impl Collector {
             let avg = ppi.iter().map(|p| p.current_mhz as u64).sum::<u64>() / ppi.len() as u64;
             snap.cpu.current_mhz = Some(avg as u32);
             snap.cpu.max_mhz = ppi.iter().map(|p| p.max_mhz).max();
+            snap.cpu.mhz_limit = ppi.iter().map(|p| p.mhz_limit).max();
             snap.cpu.per_core_mhz = ppi.iter().map(|p| p.current_mhz).collect();
         }
         snap.cpu.name = cpu_brand();
+    }
+
+    /// Adds HWiNFO's CPU temperature (when its shared memory is up) and the source summary.
+    fn thermal(&mut self, snap: &mut Snapshot) {
+        let wait = Duration::from_secs(if self.hwinfo.running { 2 } else { 30 });
+        if self.hwinfo.at.is_none_or(|t| t.elapsed() >= wait) {
+            self.hwinfo.at = Some(Instant::now());
+            self.hwinfo.running = true;
+            self.hwinfo.cpu = None;
+            match super::hwinfo::read() {
+                Ok(r) => match super::hwinfo::cpu_temp(&r) {
+                    Some(t) => {
+                        self.hwinfo.status = t.0.clone();
+                        self.hwinfo.cpu = Some(t);
+                    }
+                    None => self.hwinfo.status = "no CPU temperature reading".into(),
+                },
+                Err(super::hwinfo::Error::NotRunning) => {
+                    self.hwinfo.status = "not running".into();
+                    self.hwinfo.running = false;
+                }
+                Err(super::hwinfo::Error::Parse(e)) => self.hwinfo.status = format!("unreadable ({e})"),
+            }
+        }
+        snap.thermal.cpu = self.hwinfo.cpu.clone();
+        let acpi = match snap.thermal.zones.len() {
+            0 => "no zones".to_string(),
+            1 => "1 zone".to_string(),
+            n => format!("{n} zones"),
+        };
+        snap.thermal.sources = format!("ACPI: {acpi} \u{b7} HWiNFO: {}", self.hwinfo.status);
     }
 
     fn memory(&mut self, snap: &mut Snapshot) {
@@ -395,14 +456,6 @@ impl Collector {
         }
         self.prev_net = Some((now, rx, tx));
     }
-}
-
-/// MHz from a `% Processor Performance` reading (share of base clock; above 100 while boosting).
-pub(crate) fn perf_mhz(base_mhz: u32, pct: f64) -> Option<u32> {
-    if base_mhz == 0 || !pct.is_finite() || pct <= 0.0 {
-        return None;
-    }
-    Some((base_mhz as f64 * pct.min(1000.0) / 100.0).round() as u32)
 }
 
 /// Per-core MHz from `Processor Information(*)` instances (`"group,index"`), group 0 only to
