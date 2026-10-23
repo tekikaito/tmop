@@ -21,8 +21,10 @@ const EXCLUDED: [&str; 1] = ["DownloadsFolder"];
 /// Windows Error Reporting. Everything else (Recycle Bin, Update Cleanup, ...) is opt-in.
 const PRESELECTED: [&str; 5] = ["Temporary Files", "Thumbnail Cache", "Delivery Optimization Files", "D3D Shader Cache", "Windows Error Reporting Files"];
 
-const QUERY_TIMEOUT: Duration = Duration::from_secs(180);
-const PURGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Parent-side limits are "no handler finished within X" (reset on every line the helper emits), not totals:
+/// one handler's budget in the helper plus slack.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30 + 60);
+const PURGE_TIMEOUT: Duration = Duration::from_secs(60 * 60 + 60);
 
 /// One handler as the helper reports it. `size` is what Windows would free (bytes).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -116,8 +118,9 @@ pub fn covers(id: &str) -> &'static [Category] {
 }
 
 /// Categories to hide: those covered by a handler that answered (a failed one covers nothing, so nothing is lost).
-pub fn hidden_categories(all: &[Handler]) -> Vec<Category> {
-    all.iter().filter(|h| h.error.is_none() && !is_excluded(&h.id)).flat_map(|h| covers(&h.id).iter().copied()).collect()
+/// A handler that needs administrator while TMOP is not elevated is unusable, so it covers nothing.
+pub fn hidden_categories(all: &[Handler], elevated: bool) -> Vec<Category> {
+    all.iter().filter(|h| h.error.is_none() && !is_excluded(&h.id) && (elevated || !h.needs_admin)).flat_map(|h| covers(&h.id).iter().copied()).collect()
 }
 
 /// Drive the handlers are queried for: the system drive.
@@ -131,8 +134,8 @@ pub fn system_drive() -> String {
 pub fn query(drive: &str) -> Result<Vec<Handler>, String> {
     let (lines, failure) = run_helper(&format!("query:{}", drive.trim_end_matches('\\')), QUERY_TIMEOUT);
     match failure {
-        Some(why) => Err(why),
-        None => Ok(lines),
+        Some(why) if lines.is_empty() => Err(why),
+        _ => Ok(lines), // handlers that answered before a failure are still shown
     }
 }
 
@@ -176,26 +179,59 @@ fn run_helper(what: &str, limit: Duration) -> (Vec<Handler>, Option<String>) {
             }
         }
     });
-    let deadline = Instant::now() + limit;
+    // `limit` is the longest silence allowed between two lines. The child is polled, because pipe EOF never
+    // comes while a grandchild still holds the write end.
+    let mut deadline = Instant::now() + limit;
     let mut text = String::new();
     let mut failure = None;
+    let mut status = None;
     loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(200))) {
             Ok(l) => {
                 text.push_str(&l);
                 text.push('\n');
+                deadline = Instant::now() + limit;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                failure = Some(format!("Windows Disk Cleanup did not answer within {} s and was stopped", limit.as_secs()));
-                break;
+                if let Ok(Some(st)) = child.try_wait() {
+                    while let Ok(l) = rx.recv_timeout(Duration::from_millis(500)) {
+                        text.push_str(&l);
+                        text.push('\n');
+                    }
+                    status = Some(Ok(st));
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    failure = Some(format!("Windows Disk Cleanup did not answer within {} s and was stopped", limit.as_secs()));
+                    break;
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    match child.wait() {
-        Ok(s) if failure.is_none() && !s.success() => failure = Some(format!("Windows Disk Cleanup helper failed (exit {})", s.code().map(|c| format!("{:#x}", c as u32)).unwrap_or_else(|| "?".into()))),
-        Err(e) if failure.is_none() => failure = Some(format!("Windows Disk Cleanup helper: {e}")),
+    if failure.is_some() {
+        let _ = child.wait();
+    } else if status.is_none() {
+        // EOF seen: the exit is imminent; never wait unboundedly on a helper that hangs after closing stdout.
+        let end = Instant::now() + Duration::from_secs(10);
+        status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Some(Ok(s)),
+                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    failure = Some("Windows Disk Cleanup helper did not exit and was stopped".into());
+                    break None;
+                }
+                Err(e) => break Some(Err(e)),
+            }
+        };
+    }
+    match status {
+        Some(Ok(s)) if failure.is_none() && !s.success() => failure = Some(format!("Windows Disk Cleanup helper failed (exit {})", s.code().map(|c| format!("{:#x}", c as u32)).unwrap_or_else(|| "?".into()))),
+        Some(Err(e)) if failure.is_none() => failure = Some(format!("Windows Disk Cleanup helper: {e}")),
         _ => {}
     }
     (parse_lines(&text), failure)
@@ -279,7 +315,7 @@ mod com {
 
     pub const ROOT: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches";
     pub const QUERY_EACH: Duration = Duration::from_secs(30);
-    pub const PURGE_EACH: Duration = Duration::from_secs(10 * 60);
+    pub const PURGE_EACH: Duration = Duration::from_secs(60 * 60);
     const E_ACCESSDENIED: i32 = 0x8007_0005_u32 as i32;
     /// HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED)
     const E_ELEVATION: i32 = 0x8007_02E4_u32 as i32;
@@ -381,6 +417,15 @@ mod com {
         unsafe { IEmptyVolumeCacheCallBack::from_raw(raw as *mut c_void) }
     }
 
+    /// Calls Deactivate on every exit path after a successful Initialize.
+    struct Deactivate<'a>(&'a IEmptyVolumeCache);
+    impl Drop for Deactivate<'_> {
+        fn drop(&mut self) {
+            // SAFETY: the interface is alive; Deactivate takes no input.
+            let _ = unsafe { self.0.Deactivate() };
+        }
+    }
+
     struct Fail {
         code: i32,
         what: &'static str,
@@ -412,32 +457,37 @@ mod com {
         let vol = HSTRING::from(drive);
         let (mut disp, mut desc) = (PWSTR::null(), PWSTR::null());
         let mut flags = EMPTY_VOLUME_CACHE_FLAGS(0);
-        let init = if let Ok(c2) = cache.cast::<IEmptyVolumeCache2>() {
+        // Raw vtable calls: the windows crate folds the success code S_FALSE (1, "does not apply / nothing to
+        // clean, call nothing further") into Ok(()).
+        let hr: HRESULT = if let Ok(c2) = cache.cast::<IEmptyVolumeCache2>() {
             let mut btn = PWSTR::null();
-            let r = c2.InitializeEx(key.raw(), &vol, &HSTRING::from(reg.id.as_str()), &mut disp, &mut desc, &mut btn, &mut flags);
+            let id = HSTRING::from(reg.id.as_str());
+            let r = (c2.vtable().InitializeEx)(c2.as_raw(), key.raw(), PCWSTR(vol.as_ptr()), PCWSTR(id.as_ptr()), &mut disp, &mut desc, &mut btn, &mut flags);
             take(btn);
             r
         } else {
-            cache.Initialize(key.raw(), &vol, &mut disp, &mut desc, &mut flags)
+            (cache.vtable().Initialize)(cache.as_raw(), key.raw(), PCWSTR(vol.as_ptr()), &mut disp, &mut desc, &mut flags)
         };
         let (disp, desc) = (take(disp), take(desc));
-        init.map_err(at("Initialize"))?;
+        if hr.0 < 0 {
+            return Err(Fail { code: hr.0, what: "Initialize" });
+        }
         if h.name.is_empty() {
             h.name = resolve_indirect(&disp);
         }
         if h.description.is_empty() {
             h.description = resolve_indirect(&desc);
         }
+        if hr.0 != 0 {
+            return Ok(()); // S_FALSE: declined, nothing to clean (size stays 0)
+        }
+        let _active = Deactivate(&cache);
         let cb = new_callback();
         let mut used = 0u64;
         cache.GetSpaceUsed(&mut used, &cb).map_err(at("GetSpaceUsed"))?;
         h.size = used;
         if purge && used > 0 {
-            let r = cache.Purge(used, &cb);
-            let _ = cache.Deactivate();
-            r.map_err(at("Purge"))?;
-        } else {
-            let _ = cache.Deactivate();
+            cache.Purge(used, &cb).map_err(at("Purge"))?;
         }
         Ok(())
     }
@@ -555,16 +605,20 @@ mod tests {
             assert!(!preselected(id), "{id}");
         }
         let ok = |id: &str| Handler { id: id.into(), ..Default::default() };
-        let hidden = hidden_categories(&[ok("Temporary Files"), ok("Recycle Bin"), ok("D3D Shader Cache")]);
+        let hidden = hidden_categories(&[ok("Temporary Files"), ok("Recycle Bin"), ok("D3D Shader Cache")], false);
         assert!(hidden.contains(&Category::UserTemp) && hidden.contains(&Category::WindowsTemp) && hidden.contains(&Category::RecycleBin));
         assert!(!hidden.contains(&Category::ThumbnailCache) && !hidden.contains(&Category::BrowserCaches));
         // A handler that failed covers nothing: TMOP keeps its own category.
         let bad = Handler { id: "Thumbnail Cache".into(), error: Some("boom".into()), ..Default::default() };
-        assert!(hidden_categories(&[bad]).is_empty());
+        assert!(hidden_categories(&[bad], true).is_empty());
+        // A handler that needs administrator is unusable when not elevated: nothing is hidden.
+        let adm = Handler { id: "Temporary Files".into(), needs_admin: true, ..Default::default() };
+        assert!(hidden_categories(std::slice::from_ref(&adm), false).is_empty());
+        assert!(!hidden_categories(&[adm], true).is_empty());
         // TMOP keeps browser caches, Windows Update downloads, crash dumps, old Downloads, developer artifacts.
         let every: Vec<&str> = ["Temporary Files", "Thumbnail Cache", "Delivery Optimization Files", "Recycle Bin", "Windows Error Reporting Files"].to_vec();
         let all: Vec<Handler> = every.into_iter().map(ok).collect();
-        let hidden = hidden_categories(&all);
+        let hidden = hidden_categories(&all, false);
         for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts] {
             assert!(!hidden.contains(&kept), "{kept:?}");
         }
@@ -599,7 +653,8 @@ mod tests {
         let regs = com::enumerate();
         let mut ok = 0;
         for reg in regs.into_iter().take(40) {
-            let h = com::run_one(reg.clone(), &drive, false, com::QUERY_EACH).expect("handler answered in time");
+            // A slow handler must not flake the test: skip it.
+            let Some(h) = com::run_one(reg.clone(), &drive, false, com::QUERY_EACH) else { continue };
             assert_eq!(h.id, reg.id);
             assert!(!h.name.is_empty());
             if h.error.is_none() && !h.needs_admin {

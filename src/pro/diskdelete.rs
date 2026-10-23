@@ -752,11 +752,10 @@ fn short_error(e: &std::io::Error) -> String {
 /// space is looked up as written and can never resolve to a sibling (`foo.` is not `foo`). Drive
 /// and UNC paths only; anything else (relative, already verbatim, device) is returned unchanged.
 pub fn verbatim(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
+    let s = path.to_string_lossy().replace('/', "\\");
     if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") || s.starts_with(r"\??\") {
-        return path.to_path_buf();
+        return PathBuf::from(s);
     }
-    let s = s.replace('/', "\\");
     let b = s.as_bytes();
     if let Some(unc) = s.strip_prefix(r"\\") {
         PathBuf::from(format!(r"\\?\UNC\{unc}"))
@@ -776,10 +775,22 @@ pub fn folds_to_sibling(path: &Path) -> bool {
 /// Permanent delete. A link (symlink or junction) is removed itself, never its target. Works on the
 /// verbatim form of `path` (see [`verbatim`]) on Windows.
 pub fn delete_permanent(path: &Path) -> Result<(), String> {
+    // Win32 does not normalise verbatim paths (`..` would not resolve) and cannot make a relative path
+    // verbatim (a trailing dot or space would still fold to a sibling).
+    #[cfg(windows)]
+    {
+        if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err("the path contains '..'".into());
+        }
+    }
     #[cfg(windows)]
     let path = verbatim(path);
     #[cfg(windows)]
     let path = path.as_path();
+    #[cfg(windows)]
+    if !path.to_string_lossy().starts_with(r"\\") && folds_to_sibling(path) {
+        return Err("the name ends with a dot or space".into());
+    }
     let md = std::fs::symlink_metadata(path).map_err(|e| short_error(&e))?;
     #[cfg(windows)]
     let (link, dir) = {

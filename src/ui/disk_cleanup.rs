@@ -85,6 +85,9 @@ pub struct CleanupUi {
     /// Windows Disk Cleanup handlers of the system drive (helper process), measured with `fixed`.
     pub vols: Loader<Vec<Handler>>,
     pub vol_checked: HashMap<String, bool>,
+    /// The handlers must be queried again; done as soon as no query is running. The previous answer stays
+    /// in place meanwhile (the Loader keeps its value), so covered categories do not reappear.
+    pub vols_dirty: bool,
     next_id: u64,
 }
 
@@ -99,8 +102,8 @@ impl CleanupUi {
 
     /// Categories to show: all, minus those a working Windows handler replaces. When the helper failed
     /// (or has not answered yet) nothing is hidden, so nothing is lost.
-    pub fn visible(&self) -> Vec<Category> {
-        let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v)).unwrap_or_default();
+    pub fn visible(&self, elevated: bool) -> Vec<Category> {
+        let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v, elevated)).unwrap_or_default();
         Category::ALL.into_iter().filter(|c| !hidden.contains(c)).collect()
     }
 
@@ -214,14 +217,17 @@ impl App {
             if !c.started && !c.fixed.is_loading() {
                 c.started = true;
                 // Windows Disk Cleanup sizes (helper process), cached until the next Refresh or delete.
-                c.vols = Loader::default();
-                c.vols.start(|| volcache::query(&volcache::system_drive()));
+                c.vols_dirty = true;
                 c.fixed.start(|| {
                     let sys = diskdelete::system_paths();
                     let mut measured = cleanup::measure_fixed(&sys, SystemTime::now());
                     measured.push(cleanup::measure_recycle_bin());
                     Ok(Fixed { sys, measured })
                 });
+            }
+            if c.vols_dirty && !c.vols.is_loading() {
+                c.vols_dirty = false;
+                c.vols.start(|| volcache::query(&volcache::system_drive()));
             }
             match tree {
                 None => c.tree_for = None,
@@ -257,7 +263,7 @@ impl App {
         let mut vol_toggles: Vec<(String, bool)> = Vec::new();
         let mut want_scan = false;
         let c = &self.pro.clean;
-        let visible = c.visible();
+        let visible = c.visible(elevated);
         let vol_rows = c.vol_list(elevated);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -410,7 +416,7 @@ impl App {
         let text = if n == 0 { "Nothing selected".to_string() } else { format!("{} in {n} categor{} selected", format_bytes(total as f64), if n == 1 { "y" } else { "ies" }) };
         p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0_f32, pal.panel_stroke));
         p.text(pos2(foot.left() + 4.0, foot.center().y + 1.0), Align2::LEFT_CENTER, text, theme::semibold(13.0), pal.text);
-        let can_go = n > 0 && c.pending.is_none() && !self.pro.del.job.is_loading();
+        let can_go = n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
         let mut want_clean = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(foot.shrink2(vec2(0.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(can_go, |ui| {
@@ -443,12 +449,12 @@ impl App {
     /// Opens the confirm dialog for the checked categories.
     fn clean_request(&mut self, rows: &[ProcessRow], elevated: bool, epoch: u64) {
         let c = &self.pro.clean;
-        if c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() {
+        if c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.vols_dirty || c.vols.is_loading() || c.fixed.is_loading() {
             return;
         }
         let mut cats = Vec::new();
         let mut bin_bytes = None;
-        for cat in c.visible() {
+        for cat in c.visible(elevated) {
             if !c.is_checked(cat) || (cat.needs_admin() && !elevated) {
                 continue;
             }
@@ -716,10 +722,18 @@ fn purge_vols(vols: &[Handler], drive: &str, report: &mut Report) {
         return;
     }
     let ids: Vec<String> = vols.iter().map(|v| v.id.clone()).collect();
+    // The purge can run for a long time in a detached helper: record the intent first so it is never unlogged.
+    for v in vols {
+        log_entry(&format!("cleanmgr:{}", v.id), v.size, &Err("started".into()));
+    }
     let (done, failure) = volcache::purge(drive, &ids);
     for v in vols {
         let d = done.iter().find(|d| d.id.eq_ignore_ascii_case(&v.id));
-        let before = d.map(|d| d.size).filter(|&s| s > 0).unwrap_or(v.size);
+        // What the helper measured at purge time (0 = nothing was left); the queried size only when it did not answer.
+        let before = match d {
+            Some(d) if d.error.is_none() => d.size,
+            _ => v.size,
+        };
         let res: Result<(), String> = match d {
             Some(d) => d.error.clone().map_or(Ok(()), Err),
             None => Err(failure.clone().unwrap_or_else(|| "not run".into())),
@@ -799,7 +813,7 @@ mod tests {
     #[test]
     fn windows_handlers_replace_overlapping_categories() {
         let c = with_vols(Ok(vec![handler("Temporary Files", 10, false), handler("Recycle Bin", 5, false), handler("Thumbnail Cache", 0, false)]));
-        let vis = c.visible();
+        let vis = c.visible(true);
         for hidden in [Category::UserTemp, Category::WindowsTemp, Category::RecycleBin, Category::ThumbnailCache] {
             assert!(!vis.contains(&hidden), "{hidden:?}");
         }
@@ -808,8 +822,23 @@ mod tests {
         }
         // The helper failed: nothing is hidden.
         let failed = with_vols(Err("timed out".into()));
-        assert_eq!(failed.visible(), Category::ALL.to_vec());
-        assert_eq!(CleanupUi::default().visible(), Category::ALL.to_vec());
+        assert_eq!(failed.visible(true), Category::ALL.to_vec());
+        assert_eq!(CleanupUi::default().visible(true), Category::ALL.to_vec());
+    }
+
+    #[test]
+    fn requery_keeps_covered_categories_hidden() {
+        let mut c = with_vols(Ok(vec![handler("Temporary Files", 10, false)]));
+        c.vols.start(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(vec![handler("Temporary Files", 0, false)])
+        });
+        assert!(c.vols.is_loading());
+        assert!(!c.visible(true).contains(&Category::UserTemp));
+        // A needs-admin handler covers nothing when not elevated.
+        let adm = with_vols(Ok(vec![handler("Temporary Files", 10, true)]));
+        assert!(adm.visible(false).contains(&Category::UserTemp));
+        assert!(!adm.visible(true).contains(&Category::UserTemp));
     }
 
     #[test]
