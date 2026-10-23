@@ -209,17 +209,17 @@ pub fn paint_selected(p: &egui::Painter, r: Rect, pal: &Palette) {
     p.rect_filled(Rect::from_min_size(r.min, vec2(3.0, r.height())), 1.0, pal.accent);
 }
 
-/// Button with warning-coloured text for destructive actions.
+/// Red button for destructive actions.
 pub fn danger_button(ui: &mut egui::Ui, label: &str, pal: &Palette) -> egui::Response {
     let font = theme::ui(13.0);
     let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text).size().x + 24.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
     let enabled = ui.is_enabled();
-    let bg = if !enabled { pal.control } else if resp.hovered() { with_alpha(pal.warn, 0.3) } else { with_alpha(pal.warn, 0.14) };
-    let fg = if enabled { pal.warn } else { pal.text_faint };
+    let bg = if !enabled { pal.control } else if resp.hovered() { with_alpha(theme::RED, 0.3) } else { with_alpha(theme::RED, 0.14) };
+    let fg = if enabled { theme::RED } else { pal.text_faint };
     let p = ui.painter();
     p.rect_filled(rect, 4.0, bg);
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, if enabled { with_alpha(pal.warn, 0.7) } else { pal.control_stroke }));
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, if enabled { with_alpha(theme::RED, 0.7) } else { pal.control_stroke }));
     p.text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
     if enabled {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -420,6 +420,7 @@ impl App {
         let title = if permanent_mode { "Delete permanently" } else { "Move to Recycle Bin" };
         let warns: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Warn(_))).collect()).unwrap_or_default();
         let blocked: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Blocked(_))).collect()).unwrap_or_default();
+        let skipped_in_use = assessed.map(diskdelete::in_use_skipped).unwrap_or(0);
         let mut ack = p.ack;
         let ok_to_go = assessed.map(|a| can_confirm(a, ack)).unwrap_or(false);
         let mut answer = None;
@@ -440,6 +441,10 @@ impl App {
                     ui.spinner();
                     ui.label(RichText::new("Checking safety\u{2026}").color(pal.text_dim));
                 });
+            }
+            if skipped_in_use > 0 {
+                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(theme::YELLOW));
+                ui.add_space(4.0);
             }
             if !warns.is_empty() || !blocked.is_empty() {
                 egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
@@ -504,14 +509,19 @@ impl App {
 
     /// Hands the deletable targets to the worker thread.
     fn disk_start_job(&mut self) {
+        if self.pro.del.job.is_loading() {
+            self.status = "A delete is already running; try again when it has finished".into();
+            return;
+        }
         let Some(p) = self.pro.del.pending.take() else { return };
         let Some(items) = p.assessed else { return };
         let mode = if p.mode == Mode::Recycle && !p.has_bin { Mode::Permanent } else { p.mode };
         let targets: Vec<Target> = items.into_iter().filter(|a| !matches!(a.verdict, Verdict::Blocked(_))).map(|a| a.target).collect();
         let epoch = p.epoch;
+        let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
         self.pro.del.job.start(move || {
-            let report = diskdelete::run(targets, mode);
+            let report = diskdelete::run(targets, mode, rules.as_deref());
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
             Ok(JobOut { report, tree, epoch })
         });

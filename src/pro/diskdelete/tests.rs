@@ -235,6 +235,9 @@ fn log_line_format() {
 #[test]
 fn relaunch_args_quote_the_root() {
     assert_eq!(relaunch_args(Path::new(r"C:\Program Files")), r#"--page=disk-space --disk-root="C:\Program Files""#);
+    // A trailing backslash would escape the closing quote: it is doubled.
+    assert_eq!(relaunch_args(Path::new(r"C:\")), r#"--page=disk-space --disk-root="C:\\""#);
+    assert_eq!(relaunch_args(Path::new(r"\\srv\share\")), r#"--page=disk-space --disk-root="\\srv\share\\""#);
 }
 
 fn target(p: &Path, size: u64, is_dir: bool) -> Target {
@@ -259,7 +262,7 @@ fn permanent_delete_in_temp() {
     let linked = std::os::unix::fs::symlink(&keep, victim.join("link")).is_ok();
     let log = base.join("deletions.log");
     let missing = base.join("missing");
-    let rep = run_with_log(vec![target(&victim, 100, true), target(&lone, 7, false), target(&missing, 5, false)], Mode::Permanent, Some(&log));
+    let rep = run_with_log(vec![target(&victim, 100, true), target(&lone, 7, false), target(&missing, 5, false)], Mode::Permanent, Some(&log), None);
     assert_eq!(rep.deleted.len(), 2);
     assert_eq!(rep.freed, 107);
     assert_eq!(rep.skipped.len(), 1);
@@ -283,10 +286,110 @@ fn permanent_delete_in_temp() {
 }
 
 #[test]
-fn run_refuses_drive_roots() {
-    let root = if cfg!(windows) { PathBuf::from(r"C:\") } else { PathBuf::from("/") };
-    let rep = run_with_log(vec![target(&root, 1, true)], Mode::Permanent, None);
-    assert!(rep.deleted.is_empty() && rep.skipped.len() == 1);
+fn refuse_reason_is_pure() {
+    for p in [r"C:\", r"\\srv\share", r"\\?\D:\", "D:", r"d:/", r"\\localhost\c$\"] {
+        assert!(refuse_reason(Path::new(p)).is_some(), "{p}");
+    }
+    for p in [r"C:\x", r"\\srv\share\f",r"D:\Windows \.."] {
+        assert_eq!(refuse_reason(Path::new(p)).is_some(), p.ends_with(".."), "{p}");
+    }
+}
+
+#[test]
+fn run_rechecks_rules_before_deleting() {
+    // Only paths inside this test's own temp dir are ever handed to the worker.
+    let base = std::env::temp_dir().join(format!("tmop-del-block-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (guarded, plain) = (base.join("guarded"), base.join("plain"));
+    std::fs::create_dir_all(&guarded).unwrap();
+    std::fs::write(&plain, b"x").unwrap();
+    let mut r = Rules::default();
+    r.sys.system_root = norm_path_long(&guarded);
+    let rep = run_with_log(vec![target(&guarded, 1, true), target(&plain, 1, false)], Mode::Permanent, None, Some(&r));
+    assert_eq!(rep.deleted.len(), 1);
+    assert_eq!(rep.skipped.len(), 1);
+    assert!(rep.skipped[0].1.starts_with("blocked"), "{:?}", rep.skipped);
+    assert!(guarded.exists() && !plain.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn classify_normalises_tricks() {
+    let r = rules();
+    assert_eq!(norm_path(Path::new(r"C:\Windows ")), r"c:\windows");
+    assert_eq!(norm_path(Path::new(r"C:\Windows.\System32 .")), r"c:\windows\system32");
+    assert_eq!(norm_path(Path::new(r"D:\Users\..\Windows\.\System32")), r"d:\windows\system32");
+    assert_eq!(norm_path(Path::new(r"D:\..\..\x")), r"d:\x");
+    assert_eq!(norm_path(Path::new(r"\\localhost\C$\Windows")), r"c:\windows");
+    assert_eq!(norm_path(Path::new(r"\\127.0.0.1\c$")), r"c:\");
+    assert_eq!(norm_path(Path::new(r"\\srv\share\..\..\x")), r"\\srv\share\x");
+    for p in [r"D:\Windows ", r"D:\Windows .\x", r"D:\Users\..\Windows\System32", r"D:\Users\me\..\..\Windows\x", r"d:\Users\me.\AppData ", r"\\localhost\D$\Windows\System32"] {
+        assert!(is_blocked(&file(p, &r)), "{p}");
+        assert!(is_blocked(&dir(p, &r)), "{p} (dir)");
+    }
+    assert!(is_blocked(&dir(r"D:\Users\..", &r)), "drive root");
+}
+
+#[test]
+fn classify_blocks_parents_of_protected_dirs() {
+    let mut r = rules();
+    r.sys.profiles = vec![r"d:\profiles\me".into()];
+    r.sys.appdata = vec![r"d:\profiles\me\appdata".into()];
+    r.sys.known = vec![(r"d:\profiles\me\documents".into(), "Documents")];
+    r.sys.users_root = r"d:\home\users".into();
+    assert!(is_blocked(&dir(r"D:\Profiles", &r)));
+    assert!(is_blocked(&dir(r"D:\Home", &r)));
+    assert!(is_blocked(&dir(r"D:\", &r)));
+    assert!(!is_blocked(&dir(r"D:\Other", &r)));
+    // Only folders can contain something.
+    assert!(!is_blocked(&file(r"D:\Profiles", &r)));
+    // The folder holding DPAPI / credentials.
+    let r = rules();
+    assert!(is_blocked(&dir(r"D:\Users\me\AppData\Roaming\Microsoft", &r)));
+    assert!(is_blocked(&dir(r"D:\Users\me\AppData\Local\Microsoft", &r)));
+    assert!(!is_blocked(&dir(r"D:\Users\me\AppData\Local\Microsoft\Edge", &r)));
+    // A folder containing a redirected known folder warns.
+    let mut r = rules();
+    r.sys.known = vec![(r"e:\data\docs".into(), "Documents")];
+    r.sys.onedrive = vec![r"e:\data\onedrive".into()];
+    let w = reasons(&dir(r"E:\data", &r));
+    assert!(w.iter().any(|x| x.contains("Documents")) && w.iter().any(|x| x.contains("OneDrive")), "{w:?}");
+    assert_eq!(dir(r"E:\other", &r), Verdict::Allowed);
+}
+
+#[test]
+fn temp_folders_themselves_are_blocked() {
+    let r = rules();
+    for p in [r"D:\Windows\Temp", r"D:\Windows\Logs", r"D:\Windows\Prefetch", r"D:\Windows\Minidump", r"D:\Windows\SoftwareDistribution\Download", r"D:\Users\me\AppData\Local\Temp"] {
+        assert!(is_blocked(&dir(p, &r)), "{p}");
+        assert!(!is_blocked(&file(&format!(r"{p}\x.tmp"), &r)) || p.contains("Download"), "{p}");
+    }
+    assert_eq!(dir(r"D:\Windows\Temp\sub", &r), Verdict::Allowed);
+    assert_eq!(dir(r"D:\Users\me\AppData\Local\Temp\sub", &r), Verdict::Allowed);
+}
+
+#[cfg(windows)]
+#[test]
+fn classify_resolved_follows_links_in_the_parent_chain() {
+    let base = std::env::temp_dir().join(format!("tmop-del-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let fake_win = base.join("fakewin");
+    std::fs::create_dir_all(fake_win.join("system32")).unwrap();
+    std::fs::create_dir_all(base.join("plain")).unwrap();
+    let link = base.join("plain").join("alias");
+    if std::os::windows::fs::symlink_dir(&fake_win, &link).is_err() {
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no symlink privilege on this machine
+    }
+    let mut r = Rules::default();
+    r.sys.system_root = norm_path(&std::fs::canonicalize(&fake_win).unwrap());
+    let via_link = link.join("system32");
+    let meta = ItemMeta { is_dir: true, ..Default::default() };
+    assert_eq!(classify(&via_link, meta, &r), Verdict::Allowed, "lexically harmless");
+    assert!(is_blocked(&classify_resolved(&via_link, meta, &r)));
+    assert_eq!(classify_resolved(&base.join("plain"), meta, &r), Verdict::Allowed);
+    let _ = std::fs::remove_dir(&link);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -303,7 +406,7 @@ fn assess_marks_blocked_and_allowed() {
 fn recycle_delete_in_temp() {
     let f = std::env::temp_dir().join(format!("tmop-recycle-{}.txt", std::process::id()));
     std::fs::write(&f, b"x").unwrap();
-    let rep = run_with_log(vec![target(&f, 1, false)], Mode::Recycle, None);
+    let rep = run_with_log(vec![target(&f, 1, false)], Mode::Recycle, None, None);
     assert_eq!(rep.deleted.len(), 1, "{:?}", rep.skipped);
     assert!(!f.exists());
 }

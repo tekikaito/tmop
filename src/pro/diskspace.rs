@@ -668,13 +668,20 @@ fn make_tree(root: &Path, mut nodes: Vec<Node>, files: Vec<FileRec>, names: Name
 
 fn scan(root: PathBuf, shared: &Mutex<ScanShared>, cancel: &AtomicBool) {
     let publish = Publisher::new(shared, &root);
-    if let Some(vol) = super::mft::eligible(&root) {
-        match super::mft::scan(&root, &vol, cancel, &publish) {
-            Ok(()) => return,
-            Err(e) => publish.note_fallback(e),
+    // A panic anywhere in a scan must not leave `running` set: the Scan button would never return.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(vol) = super::mft::eligible(&root) {
+            match super::mft::scan(&root, &vol, cancel, &publish) {
+                Ok(()) => return,
+                Err(e) => publish.note_fallback(e),
+            }
         }
+        super::walker::scan(root.clone(), cancel, &publish);
+    }));
+    if r.is_err() {
+        publish.finish(None, true, ScanMethod::Walker);
+        publish.progress(|p| p.current = "The scan stopped unexpectedly".into());
     }
-    super::walker::scan(root, cancel, &publish);
 }
 
 // ---------------------------------------------------------------------------

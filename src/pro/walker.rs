@@ -130,6 +130,7 @@ fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBoo
                 g = work.wait_timeout(g, Duration::from_millis(100)).map(|r| r.0).unwrap_or_else(|e| e.into_inner().0);
             }
         };
+        let mut guard = ActiveGuard { sh, work, armed: true };
         let mut found = Found::default();
         let mut entries = Vec::new();
         for (idx, dir) in &batch {
@@ -159,11 +160,32 @@ fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBoo
         let pushed = !found.dirs.is_empty();
         append(&mut g, found);
         g.active -= 1;
+        guard.armed = false;
         if g.finished() {
             idle.notify_all();
             work.notify_all();
         } else if pushed {
             work.notify_all();
+        }
+    }
+}
+
+/// If a worker panics while it holds a batch, gives the batch back (as lost) so the other workers
+/// see the scan as finished instead of waiting for it forever; the panic then surfaces from the scope.
+struct ActiveGuard<'a> {
+    sh: &'a Mutex<Shared>,
+    work: &'a Condvar,
+    armed: bool,
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut g = lock(self.sh);
+            g.active = g.active.saturating_sub(1);
+            g.stack.clear();
+            drop(g);
+            self.work.notify_all();
         }
     }
 }

@@ -886,7 +886,7 @@ impl App {
             }
         }
         if let Some(root) = start_scan {
-            let root = PathBuf::from(root.trim());
+            let root = diskdelete::canonical_root(PathBuf::from(root.trim()));
             if root.is_dir() {
                 self.pro.disk_cursor = 0;
                 self.pro.disk_tree = None;

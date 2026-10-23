@@ -448,6 +448,7 @@ impl App {
             app.bench.start(tests, std::env::temp_dir());
         }
         if let Some(root) = launch.disk_scan {
+            let root = crate::pro::diskdelete::canonical_root(root);
             app.pro.disk_root = root.display().to_string();
             app.pro.scanner.start(root);
         }

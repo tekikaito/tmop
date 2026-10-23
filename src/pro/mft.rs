@@ -99,23 +99,26 @@ fn u64le(b: &[u8], o: usize) -> Result<u64, String> {
     b.get(o..o + 8).and_then(|s| s.try_into().ok()).map(u64::from_le_bytes).ok_or_else(|| short(o))
 }
 
-/// Applies the update-sequence fixups in place. Err when the signature is not "FILE" or a sector
-/// tag mismatches (torn write).
-pub fn apply_fixups(rec: &mut [u8], bytes_per_sector: u32) -> Result<(), String> {
+/// NTFS protects every 512-byte block of a record, whatever the volume's sector size (4Kn
+/// volumes included).
+pub const FIXUP_STRIDE: usize = 512;
+
+/// Applies the update-sequence fixups in place. Err when the signature is not "FILE", the array
+/// does not cover exactly the record's 512-byte blocks, or a block tag mismatches (torn write).
+pub fn apply_fixups(rec: &mut [u8]) -> Result<(), String> {
     if rec.len() < 48 || &rec[0..4] != b"FILE" {
         return Err("not a FILE record".into());
     }
+    if !rec.len().is_multiple_of(FIXUP_STRIDE) {
+        return Err("record is not a multiple of 512 bytes".into());
+    }
     let (off, count) = (u16le(rec, 4)? as usize, u16le(rec, 6)? as usize);
-    let bps = bytes_per_sector as usize;
-    if count == 0 || bps < 2 || off + count * 2 > rec.len() {
+    if count != rec.len() / FIXUP_STRIDE + 1 || off + count * 2 > rec.len() {
         return Err("bad update sequence array".into());
     }
     let usn = [rec[off], rec[off + 1]];
     for k in 1..count {
-        let end = k * bps;
-        if end > rec.len() {
-            return Err("update sequence array longer than the record".into());
-        }
+        let end = k * FIXUP_STRIDE;
         if rec[end - 2..end] != usn {
             return Err(format!("fixup mismatch in sector {k}"));
         }
@@ -293,7 +296,7 @@ pub fn mft_extents(record0: &[u8], bytes_per_cluster: u32) -> Result<Vec<(u64, u
     if runs.iter().any(|r| r.0.is_none()) {
         return Err("sparse $MFT".into());
     }
-    let clusters: u64 = runs.iter().map(|r| r.1).sum();
+    let clusters = runs.iter().fold(0u64, |a, r| a.saturating_add(r.1));
     if clusters.saturating_mul(bytes_per_cluster as u64) < real {
         return Err(if list { "$MFT has an $ATTRIBUTE_LIST with $DATA in extension records".into() } else { "$MFT run list is shorter than its size".into() });
     }
@@ -417,8 +420,16 @@ pub fn scan(root: &Path, vol: &VolumeInfo, cancel: &AtomicBool, publish: &Publis
     let root_record = io::root_record(root, geo.VolumeSerialNumber as u64)?;
     let mut rec0 = vec![0u8; rs as usize];
     io::read_at(&h, geo.MftStartLcn as u64 * bpc as u64, &mut rec0)?;
-    apply_fixups(&mut rec0, bps)?;
+    apply_fixups(&mut rec0)?;
     let extents = mft_extents(&rec0, bpc)?;
+    // Records are read extent by extent; an extent that is not a whole number of records would need
+    // records stitched across extents. Rare, so let the caller fall back to the walker.
+    for (_, clusters) in &extents {
+        match clusters.checked_mul(bpc as u64) {
+            Some(b) if b % rs as u64 == 0 => {}
+            _ => return Err("$MFT extent is not a whole number of records".into()),
+        }
+    }
     let valid = geo.MftValidDataLength as u64;
     let rs64 = rs as u64;
     const CHUNK: u64 = 4 << 20;
@@ -429,7 +440,7 @@ pub fn scan(root: &Path, vol: &VolumeInfo, cancel: &AtomicBool, publish: &Publis
     let mut last = Instant::now();
     let mut vofs = 0u64; // byte offset inside $MFT of the current extent
     'extents: for (lcn, clusters) in extents {
-        let ext_bytes = clusters * bpc as u64;
+        let ext_bytes = clusters.saturating_mul(bpc as u64);
         let mut pos = 0u64;
         while pos < ext_bytes {
             if cancel.load(Ordering::Relaxed) {
@@ -445,14 +456,14 @@ pub fn scan(root: &Path, vol: &VolumeInfo, cancel: &AtomicBool, publish: &Publis
             if n == 0 {
                 break 'extents;
             }
-            io::read_at(&h, lcn * bpc as u64 + pos, &mut buf[..n as usize])?;
+            io::read_at(&h, lcn.saturating_mul(bpc as u64).saturating_add(pos), &mut buf[..n as usize])?;
             for (i, chunk) in buf[..n as usize].chunks_exact_mut(rs as usize).enumerate() {
                 if &chunk[0..4] != b"FILE" {
                     continue;
                 }
                 let rn = at / rs64 + i as u64;
                 seen_records += 1;
-                let parsed = apply_fixups(chunk, bps).and_then(|_| parse_record(chunk));
+                let parsed = apply_fixups(chunk).and_then(|_| parse_record(chunk));
                 match parsed {
                     Ok(Some(r)) => {
                         let keep = match r.base {
@@ -699,15 +710,38 @@ mod tests {
         put16(&mut r, 510, 0x1234);
         put16(&mut r, 1022, 0x1234);
         let mut ok = r.clone();
-        apply_fixups(&mut ok, 512).unwrap();
+        apply_fixups(&mut ok).unwrap();
         assert_eq!(&ok[510..512], &0xAABBu16.to_le_bytes());
         assert_eq!(&ok[1022..1024], &0xCCDDu16.to_le_bytes());
         let mut torn = r.clone();
         put16(&mut torn, 1022, 0x9999);
-        assert!(apply_fixups(&mut torn, 512).is_err());
+        assert!(apply_fixups(&mut torn).is_err());
         let mut sig = r;
         sig[0] = b'X';
-        assert!(apply_fixups(&mut sig, 512).is_err());
+        assert!(apply_fixups(&mut sig).is_err());
+    }
+
+    #[test]
+    fn fixups_on_a_4k_record_use_512_byte_blocks() {
+        // A 4Kn volume: 4096-byte record, 4096-byte sectors, still 8 blocks of 512 bytes.
+        let mut r = vec![0u8; 4096];
+        r[0..4].copy_from_slice(b"FILE");
+        put16(&mut r, 4, 0x30);
+        put16(&mut r, 6, 9);
+        put16(&mut r, 0x30, 0x1234);
+        for k in 1..9usize {
+            put16(&mut r, 0x30 + 2 * k, 0x1000 + k as u16);
+            put16(&mut r, k * 512 - 2, 0x1234);
+        }
+        let mut ok = r.clone();
+        apply_fixups(&mut ok).unwrap();
+        for k in 1..9usize {
+            assert_eq!(&ok[k * 512 - 2..k * 512], &(0x1000 + k as u16).to_le_bytes());
+        }
+        // An array shorter than the record's block count would leave blocks unfixed.
+        let mut short = r;
+        put16(&mut short, 6, 5);
+        assert!(apply_fixups(&mut short).is_err());
     }
 
     #[test]

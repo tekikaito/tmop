@@ -21,14 +21,63 @@ pub fn norm_path(p: &Path) -> String {
     } else if low.starts_with(r"\\?\") || low.starts_with(r"\??\") || low.starts_with(r"\\.\") {
         s = s[4..].to_string();
     }
-    let mut s = s.to_lowercase();
-    while s.len() > 1 && s.ends_with('\\') && !(s.len() == 3 && s.as_bytes()[1] == b':') {
-        s.pop();
+    let s = admin_share_to_drive(s.to_lowercase());
+    let unc = s.starts_with(r"\\");
+    let rooted = s.starts_with('\\');
+    let floor = if unc {
+        2
+    } else if s.as_bytes().get(1) == Some(&b':') {
+        1
+    } else {
+        0
+    };
+    // What Win32 resolves lexically before touching the disk: `.` / `..`, doubled separators and
+    // trailing dots / spaces on a component (`Windows ` is `Windows`).
+    let mut parts: Vec<&str> = Vec::new();
+    for c in s.split('\\') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if parts.len() > floor {
+                    parts.pop();
+                }
+            }
+            _ => {
+                let t = if c.len() == 2 && c.ends_with(':') { c } else { c.trim_end_matches(['.', ' ']) };
+                if !t.is_empty() {
+                    parts.push(t);
+                }
+            }
+        }
     }
-    if s.len() == 2 && s.as_bytes()[1] == b':' {
-        s.push('\\');
+    let mut out = String::new();
+    if unc {
+        out.push_str(r"\\");
+    } else if rooted {
+        out.push('\\');
     }
-    s
+    out.push_str(&parts.join("\\"));
+    if parts.len() == 1 && parts[0].len() == 2 && parts[0].ends_with(':') {
+        out.push('\\');
+    }
+    out
+}
+
+/// `\\localhost\c$\x`, `\\127.0.0.1\c$\x` and `\\<this computer>\c$\x` name the local drive.
+fn admin_share_to_drive(s: String) -> String {
+    let Some(rest) = s.strip_prefix(r"\\") else { return s };
+    let Some((host, tail)) = rest.split_once('\\') else { return s };
+    let this = std::env::var("COMPUTERNAME").unwrap_or_default().to_lowercase();
+    if !(host == "localhost" || host == "127.0.0.1" || (!this.is_empty() && host == this)) {
+        return s;
+    }
+    let (share, more) = tail.split_once('\\').unwrap_or((tail, ""));
+    let b = share.as_bytes();
+    if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b'$' {
+        format!("{}:\\{}", b[0] as char, more)
+    } else {
+        s
+    }
 }
 
 /// [`norm_path`] after expanding 8.3 short names (Windows, only when the path contains `~` and exists).
@@ -256,6 +305,63 @@ pub fn classify(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
     classify_norm(&n, meta, rules)
 }
 
+/// Strictest of the lexical verdict and the verdict for the path as the file system resolves it:
+/// junctions and symlinks in the parent chain are followed, so `C:\Documents and Settings\x`
+/// cannot hide `C:\Users\x`. The item itself is not followed (a link is deleted, not its target).
+pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
+    let lexical = classify(path, meta, rules);
+    if matches!(lexical, Verdict::Blocked(_)) {
+        return lexical;
+    }
+    let Some(real) = resolved_path(path) else { return lexical };
+    if norm_path_long(&real) == norm_path_long(path) {
+        return lexical;
+    }
+    match (lexical, classify(&real, meta, rules)) {
+        (_, Verdict::Blocked(r)) => Verdict::Blocked(format!("{r} (resolves to {})", real.display())),
+        (Verdict::Warn(mut a), Verdict::Warn(b)) => {
+            a.extend(b);
+            a.dedup();
+            Verdict::Warn(a)
+        }
+        (Verdict::Allowed, Verdict::Warn(mut b)) => {
+            b.push(format!("resolves to {}", real.display()));
+            Verdict::Warn(b)
+        }
+        (l, _) => l,
+    }
+}
+
+/// `path` with its parent chain resolved (links followed), verbatim prefix removed.
+fn resolved_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let real = std::fs::canonicalize(parent).ok()?;
+    Some(strip_verbatim(real).join(name))
+}
+
+/// The scan root as the file system resolves it (`..`, junctions, `\\?\Volume{..}\`, `\\localhost\C$`),
+/// so every path in the scan tree is the real one and the classifier sees real locations. Falls back to
+/// `root` when it cannot be resolved.
+pub fn canonical_root(root: PathBuf) -> PathBuf {
+    match std::fs::canonicalize(&root) {
+        Ok(c) => strip_verbatim(c),
+        Err(_) => root,
+    }
+}
+
+/// `\\?\C:\x` -> `C:\x`, `\\?\UNC\srv\s` -> `\\srv\s`.
+pub fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(r) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{r}"))
+    } else if let Some(r) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(r.to_string())
+    } else {
+        p
+    }
+}
+
 fn classify_norm(n: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
     let sys = &rules.sys;
     let comps = components(n);
@@ -263,13 +369,19 @@ fn classify_norm(n: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
     let on_drive = comps.first().is_some_and(|c| c.len() == 2 && c.ends_with(':'));
     let mut warn: Vec<String> = Vec::new();
 
-    // --- system root with its exceptions
+    // --- system root with its exceptions (only the CONTENTS of these folders are deletable)
     let sr = sys.system_root.as_str();
     if !sr.is_empty() && under(n, sr) {
-        let allowed_dirs = ["temp", "logs", "prefetch", "minidump"].iter().any(|d| under(n, &join(sr, d)));
-        let wu = under(n, &join(sr, r"softwaredistribution\download"));
+        let flat = ["temp", "logs", "prefetch", "minidump"].map(|d| join(sr, d));
+        let wu_dir = join(sr, r"softwaredistribution\download");
+        let dopt_dir = join(sr, r"serviceprofiles\networkservice\appdata\local\microsoft\windows\deliveryoptimization\cache");
+        if flat.iter().any(|d| n == d) || n == wu_dir || n == dopt_dir {
+            return blocked("system temp/cache folder itself; delete its contents instead");
+        }
+        let allowed_dirs = flat.iter().any(|d| under(n, d));
+        let wu = under(n, &wu_dir);
         // Delivery Optimization's cache lives under the NetworkService profile; it is a pure cache.
-        let dopt = under(n, &join(sr, r"serviceprofiles\networkservice\appdata\local\microsoft\windows\deliveryoptimization\cache"));
+        let dopt = under(n, &dopt_dir);
         if allowed_dirs || n == join(sr, "memory.dmp") || dopt {
             // cleanup locations: not blocked
         } else if wu {
@@ -307,8 +419,41 @@ fn classify_norm(n: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
     for a in &sys.appdata {
         for base in ["roaming", "local"] {
             let b = join(&join(a, base), "microsoft");
-            if under(n, &join(&b, "credentials")) || under(n, &join(&b, "protect")) {
+            let (cred, prot) = (join(&b, "credentials"), join(&b, "protect"));
+            if under(n, &cred) || under(n, &prot) {
                 return blocked("Windows credential / DPAPI store");
+            }
+            if meta.is_dir && (under(&cred, n) || under(&prot, n)) {
+                return blocked("contains the Windows credential / DPAPI store");
+            }
+        }
+    }
+    // The user's Temp folder itself (its contents are fair game).
+    if (!sys.temp.is_empty() && n == sys.temp) || sys.appdata.iter().any(|a| *n == join(&join(a, "local"), "temp")) {
+        return blocked("Temp folder itself; delete its contents instead");
+    }
+    // A folder that contains a protected location (relocated profiles, Users or Program Files under
+    // a parent folder) is as untouchable as the location itself.
+    if meta.is_dir {
+        let protected = std::iter::once((&sys.system_root, "the Windows folder"))
+            .chain(std::iter::once((&sys.program_data, "ProgramData")))
+            .chain(std::iter::once((&sys.users_root, "the Users folder")))
+            .chain(sys.program_files.iter().map(|p| (p, "Program Files")))
+            .chain(sys.profiles.iter().map(|p| (p, "a user profile")))
+            .chain(sys.appdata.iter().map(|p| (p, "a user AppData folder")));
+        for (p, what) in protected {
+            if !p.is_empty() && p != n && under(p, n) {
+                return blocked(&format!("contains {what}"));
+            }
+        }
+        for (k, label) in &sys.known {
+            if k != n && under(k, n) {
+                warn.push(format!("contains your {label} folder"));
+            }
+        }
+        for o in &sys.onedrive {
+            if o != n && under(o, n) {
+                warn.push("contains your OneDrive folder".into());
             }
         }
     }
@@ -442,15 +587,26 @@ pub struct Assessed {
     pub verdict: Verdict,
 }
 
-/// More files than this are not checked against the Restart Manager (the dialog says so).
+/// More files than this are not checked against the Restart Manager; [`in_use_skipped`] tells
+/// the confirm dialogs how many went unchecked.
 pub const IN_USE_CAP: usize = 64;
+
+/// How many files [`assess`] did not check for being in use (0 when the check ran for all).
+pub fn in_use_skipped<'a>(items: impl IntoIterator<Item = &'a Assessed>) -> usize {
+    let n = items.into_iter().filter(|a| !a.target.is_dir && !matches!(a.verdict, Verdict::Blocked(_))).count();
+    if n > IN_USE_CAP {
+        n
+    } else {
+        0
+    }
+}
 
 /// [`classify`] plus a Restart Manager check for files. Worker thread.
 pub fn assess(targets: Vec<Target>, rules: &Rules) -> Vec<Assessed> {
     let mut out: Vec<Assessed> = targets
         .into_iter()
         .map(|t| {
-            let verdict = classify(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, rules);
+            let verdict = classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, rules);
             Assessed { target: t, verdict }
         })
         .collect();
@@ -532,12 +688,18 @@ pub fn default_log() -> PathBuf {
     super::data_dir().join("deletions.log")
 }
 
-/// Runs on a worker thread. Callers must have removed Blocked targets.
-pub fn run(targets: Vec<Target>, mode: Mode) -> Report {
-    run_with_log(targets, mode, Some(&default_log()))
+/// Runs on a worker thread. Callers should have removed Blocked targets; with `rules` every target
+/// is classified once more right before it is deleted and Blocked ones are skipped.
+pub fn run(targets: Vec<Target>, mode: Mode, rules: Option<&Rules>) -> Report {
+    run_with_log(targets, mode, Some(&default_log()), rules)
 }
 
-pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>) -> Report {
+/// Why `path` must never be deleted whatever the rules say (pure, no I/O).
+pub(crate) fn refuse_reason(path: &Path) -> Option<&'static str> {
+    (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
+}
+
+pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
     let mut rep = Report { mode, ..Default::default() };
     let mut log_file = log.and_then(|p| {
         if let Some(d) = p.parent() {
@@ -548,11 +710,17 @@ pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>) -> Rep
     let stamp = super::display_stamp();
     let recycler = (mode == Mode::Recycle).then(Recycler::new);
     for t in targets {
-        let result = if is_drive_root(&norm_path(&t.path)) || t.path.file_name().is_none() {
-            Err("refusing to delete a drive root".to_string())
+        let blocked_now = rules.and_then(|r| match classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
+            Verdict::Blocked(why) => Some(why),
+            _ => None,
+        });
+        let result = if let Some(why) = refuse_reason(&t.path) {
+            Err(why.to_string())
+        } else if let Some(why) = blocked_now {
+            Err(format!("blocked ({why})"))
         } else {
             match (&recycler, mode) {
-                (Some(r), Mode::Recycle) => r.delete(&t.path),
+                (Some(r), Mode::Recycle) => r.delete(&t.path, t.size),
                 _ => delete_permanent(&t.path),
             }
         };
@@ -617,7 +785,7 @@ impl Recycler {
         Recycler { com }
     }
 
-    fn delete(&self, path: &Path) -> Result<(), String> {
+    fn delete(&self, path: &Path, size: u64) -> Result<(), String> {
         use windows::core::PCWSTR;
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
         use windows::Win32::UI::Shell::{
@@ -625,6 +793,16 @@ impl Recycler {
         };
         if std::fs::symlink_metadata(path).is_err() {
             return Err("no longer exists".into());
+        }
+        // The shell destroys instead of recycling when the bin is switched off or too small for the
+        // item, without saying so: refuse rather than delete permanently behind the dialog's back.
+        if let Some(limits) = bin_limits(path) {
+            if limits.nuke {
+                return Err("the Recycle Bin is turned off for this drive; use permanent delete".into());
+            }
+            if limits.max_bytes.is_some_and(|m| size > m) {
+                return Err("too large for the Recycle Bin; use permanent delete".into());
+            }
         }
         let w = super::winutil::wide(&path.to_string_lossy());
         // SAFETY: COM calls on the thread that initialised COM; `w` is NUL-terminated and outlives them.
@@ -662,15 +840,61 @@ impl Recycler {
     fn new() -> Self {
         Recycler {}
     }
-    fn delete(&self, _: &Path) -> Result<(), String> {
+    fn delete(&self, _: &Path, _: u64) -> Result<(), String> {
         Err("the Recycle Bin is only available on Windows".into())
     }
 }
 
-/// False for network, optical and RAM volumes and when the volume has no Recycle Bin (removable
-/// FAT sticks): deletion there is permanent and the dialog says so.
+/// How the Recycle Bin of a volume is configured.
+#[cfg(windows)]
+struct BinLimits {
+    /// "Don't move files to the Recycle Bin" (volume setting or policy): the shell deletes for good.
+    nuke: bool,
+    /// MaxCapacity in bytes; bigger items are deleted for good by the shell.
+    max_bytes: Option<u64>,
+}
+
+#[cfg(windows)]
+fn bin_limits(path: &Path) -> Option<BinLimits> {
+    use super::winutil::{Key, View};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let n = norm_path(path);
+    let b = n.as_bytes();
+    if b.len() < 3 || b[1] != b':' {
+        return None;
+    }
+    let mut limits = BinLimits { nuke: false, max_bytes: None };
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        if let Some(k) = Key::open(root, r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", View::Default) {
+            limits.nuke |= k.u32("NoRecycleFiles").unwrap_or(0) != 0;
+        }
+    }
+    let mount = super::winutil::wide(&format!("{}:\\", b[0] as char));
+    let mut vol = [0u16; 64];
+    // SAFETY: NUL-terminated mount point, output buffer sized as passed.
+    if unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(mount.as_ptr()), &mut vol) }.is_ok() {
+        // `\?\Volume{guid}\` -> `{guid}`
+        let name = super::winutil::from_wide(&vol);
+        if let (Some(a), Some(z)) = (name.find('{'), name.find('}')) {
+            let sub = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{}", &name[a..=z]);
+            if let Some(k) = Key::open(HKEY_CURRENT_USER, &sub, View::Default) {
+                limits.nuke |= k.u32("NukeOnDelete").unwrap_or(0) != 0;
+                limits.max_bytes = k.u32("MaxCapacity").filter(|&m| m > 0).map(|m| m as u64 * 1024 * 1024);
+            }
+        }
+    }
+    Some(limits)
+}
+
+/// False for network, optical and RAM volumes, when the volume has no Recycle Bin (removable FAT
+/// sticks) or the bin is switched off: deletion there is permanent and the dialog says so.
 #[cfg(windows)]
 pub fn has_recycle_bin(path: &Path) -> bool {
+    if bin_limits(path).is_some_and(|l| l.nuke) {
+        return false;
+    }
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDriveTypeW;
     use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
@@ -708,9 +932,12 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// Command line for the elevated copy.
+/// Command line for the elevated copy. Windows argv parsing reads `\"` as a literal quote, so a
+/// backslash run at the end of the quoted root (`C:\`) is doubled.
 pub fn relaunch_args(root: &Path) -> String {
-    format!("--page=disk-space --disk-root=\"{}\"", root.display())
+    let s = root.display().to_string();
+    let trailing = s.len() - s.trim_end_matches('\\').len();
+    format!("--page=disk-space --disk-root=\"{s}{}\"", "\\".repeat(trailing))
 }
 
 /// Starts this exe through the UAC prompt, on Disk Space with `root`. Ok once the new process

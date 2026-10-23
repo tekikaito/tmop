@@ -449,6 +449,7 @@ impl App {
         let blocked: Vec<&Assessed> = all.iter().copied().filter(|x| !live(&x.verdict)).collect();
         let deletable = lines.iter().any(|l| l.1 > 0 || l.0 == Category::RecycleBin);
         let total: u64 = lines.iter().map(|l| l.2).sum();
+        let skipped_in_use = diskdelete::in_use_skipped(all.iter().copied());
         let mut ack = p.ack;
         let ok_to_go = a.is_some() && deletable && (warns.is_empty() || ack);
         let mut answer = None;
@@ -471,6 +472,10 @@ impl App {
                     ui.spinner();
                     ui.label(RichText::new("Checking safety\u{2026}").color(pal.text_dim));
                 });
+            }
+            if skipped_in_use > 0 {
+                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(theme::YELLOW));
+                ui.add_space(4.0);
             }
             if !warns.is_empty() || !blocked.is_empty() {
                 egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
@@ -534,6 +539,10 @@ impl App {
 
     /// Hands the deletable items of every category to the worker thread (the manual-delete job slot).
     fn clean_start_job(&mut self) {
+        if self.pro.del.job.is_loading() {
+            self.status = "A delete is already running; try again when it has finished".into();
+            return;
+        }
         let Some(p) = self.pro.clean.pending.take() else { return };
         let Some(a) = p.assessed else { return };
         let groups: Vec<(Mode, Vec<Target>)> = p
@@ -548,11 +557,12 @@ impl App {
             .collect();
         let bin = p.bin_bytes;
         let epoch = p.epoch;
+        let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
         self.pro.del.job.start(move || {
             let mut report = Report { mode: Mode::Permanent, ..Default::default() };
             for (mode, targets) in groups {
-                let r = diskdelete::run(targets, mode);
+                let r = diskdelete::run(targets, mode, rules.as_deref());
                 report.deleted.extend(r.deleted);
                 report.skipped.extend(r.skipped);
                 report.freed += r.freed;

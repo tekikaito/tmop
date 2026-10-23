@@ -218,16 +218,18 @@ fn real(s: &str) -> PathBuf {
     }
 }
 
-/// Bytes below `path`, not following links, giving up after `max_entries` entries.
-pub fn dir_size(path: &Path, max_entries: usize) -> u64 {
+/// Bytes below `path` and the newest file time in it, not following links, giving up after
+/// `max_entries` entries.
+pub fn dir_stats(path: &Path, max_entries: usize) -> (u64, Option<SystemTime>) {
     let (mut total, mut seen) = (0u64, 0usize);
+    let mut newest: Option<SystemTime> = None;
     let mut stack = vec![path.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             seen += 1;
             if seen > max_entries {
-                return total;
+                return (total, newest);
             }
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_symlink() {
@@ -237,10 +239,11 @@ pub fn dir_size(path: &Path, max_entries: usize) -> u64 {
                 stack.push(e.path());
             } else if let Ok(m) = e.metadata() {
                 total += m.len();
+                newest = newest.max(m.modified().ok());
             }
         }
     }
-    total
+    (total, newest)
 }
 
 const DIR_SIZE_CAP: usize = 200_000;
@@ -251,12 +254,16 @@ fn entries(dir: &Path, needs_admin: bool, keep: &dyn Fn(&str, Option<SystemTime>
     let mut out = Vec::new();
     for e in rd.flatten() {
         let Ok(md) = std::fs::symlink_metadata(e.path()) else { continue };
-        if !keep(&e.file_name().to_string_lossy(), md.modified().ok()) {
-            continue;
-        }
         let link = md.file_type().is_symlink();
         let is_dir = md.is_dir() && !link;
-        let size = if is_dir { dir_size(&e.path(), DIR_SIZE_CAP) } else if link { 0 } else { md.len() };
+        // A folder is as old as the newest file inside it: its own time only changes when entries
+        // are added or removed directly in it.
+        let (dir_bytes, newest) = if is_dir { dir_stats(&e.path(), DIR_SIZE_CAP) } else { (0, None) };
+        let modified = md.modified().ok().max(newest);
+        if !keep(&e.file_name().to_string_lossy(), modified) {
+            continue;
+        }
+        let size = if is_dir { dir_bytes } else if link { 0 } else { md.len() };
         out.push(CleanItem { path: e.path(), size, is_dir, needs_admin, node: None, file: None });
     }
     out
@@ -568,6 +575,14 @@ mod tests {
         let sys = SystemPaths { temp: s("temp"), system_root: s("windows"), program_data: s("pd"), local_appdata: s("local"), ..Default::default() };
         write(&root.join(r"temp\old.tmp"), 100, 3);
         write(&root.join(r"temp\new.tmp"), 100, 0);
+        // A folder whose own time is old but which holds a fresh file is not "old"; a wholly old one is.
+        write(&root.join(r"temp\busy\fresh.tmp"), 10, 0);
+        write(&root.join(r"temp\stale\inner.tmp"), 10, 3);
+        for d in ["busy", "stale"] {
+            use std::os::windows::fs::OpenOptionsExt;
+            let h = std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(root.join("temp").join(d)).unwrap();
+            h.set_modified(SystemTime::now() - Duration::from_secs(3 * DAY)).unwrap();
+        }
         write(&root.join(r"windows\Temp\a.tmp"), 50, 0);
         write(&root.join(r"windows\Minidump\a.dmp"), 10, 0);
         write(&root.join(r"windows\MEMORY.DMP"), 20, 0);
@@ -578,7 +593,7 @@ mod tests {
         write(&root.join(r"windows\SoftwareDistribution\Download\u.cab"), 40, 0);
         let got = measure_fixed(&sys, SystemTime::now());
         let get = |c: Category| got.iter().find(|m| m.cat == c).unwrap();
-        assert_eq!(names_of(get(Category::UserTemp)), vec!["old.tmp"]);
+        assert_eq!(names_of(get(Category::UserTemp)), vec!["old.tmp", "stale"]);
         assert!(!get(Category::UserTemp).items[0].needs_admin);
         let wt = get(Category::WindowsTemp);
         assert_eq!(names_of(wt), vec!["a.tmp"]);
@@ -589,7 +604,7 @@ mod tests {
         assert_eq!(names_of(get(Category::ThumbnailCache)), vec!["thumbcache_32.db"]);
         assert_eq!(names_of(get(Category::BrowserCaches)), vec!["f_000001"]);
         assert_eq!(names_of(get(Category::UpdateDownloads)), vec!["u.cab"]);
-        assert_eq!(get(Category::UserTemp).bytes, 100);
+        assert_eq!(get(Category::UserTemp).bytes, 110);
         // Empty settings measure nothing and never fall back to relative paths.
         assert!(measure_fixed(&SystemPaths::default(), SystemTime::now()).iter().all(|m| m.items.is_empty()));
         let _ = std::fs::remove_dir_all(&root);

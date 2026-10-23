@@ -86,7 +86,7 @@ pub fn cpu_temp(readings: &[Reading]) -> Option<(String, f32)> {
     let pick = PRIORITY
         .iter()
         .find_map(|l| temps().find(|r| r.label.eq_ignore_ascii_case(l)))
-        .or_else(|| temps().find(|r| r.label.len() >= 3 && r.label[..3].eq_ignore_ascii_case("cpu")))?;
+        .or_else(|| temps().find(|r| r.label.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("cpu"))))?;
     Some((pick.label.clone(), pick.value as f32))
 }
 
@@ -201,6 +201,9 @@ mod tests {
         assert_eq!(cpu_temp(&[t("CPU Package", "W", 1)]), None);
         assert_eq!(cpu_temp(&[t("CPU Core 3", "\u{b0}C", 1), t("CPU Package", "\u{b0}C", 1)]).map(|c| c.0), Some("CPU Package".into()));
         assert_eq!(cpu_temp(&[t("CPU Core 3", "\u{b0}C", 1)]).map(|c| c.0), Some("CPU Core 3".into()));
+        // Non-ASCII labels (byte 3 inside a multibyte char) must not panic.
+        assert_eq!(cpu_temp(&[t("\u{422}\u{435}\u{43c}\u{43f}\u{435}\u{440}\u{430}\u{442}\u{443}\u{440}\u{430} GPU", "\u{b0}C", 1)]), None);
+        assert_eq!(cpu_temp(&[t("\u{422}\u{435}\u{43c}", "\u{b0}C", 1), t("CPU Core 3", "\u{b0}C", 1)]).map(|c| c.0), Some("CPU Core 3".into()));
     }
 
     #[cfg(windows)]
