@@ -19,10 +19,10 @@ pub mod tables;
 pub mod terminal_tab;
 pub mod wizards;
 
-use super::kit::{self, GAP, MARGIN};
+use super::kit;
 use super::table::TableState;
 use super::theme::{self, Palette};
-use super::widgets::{self, Icon};
+use super::widgets::{self, Button, Icon};
 use super::{App, FrameData, STATUS_H};
 use crate::docker::backend::{Backend, Command, EngineEvent, NoticeKind, Shared};
 use crate::docker::context::{docker_dir, Context};
@@ -31,7 +31,7 @@ use crate::docker::notify;
 use crate::engine::manager::{self, EngineManager, Phase};
 use crate::engine::Overrides;
 use crate::settings::Settings;
-use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Id, Layout, Order, Rect, RichText, Sense, Stroke};
+use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Id, Layout, Order, Rect, RichText, Sense};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -383,23 +383,52 @@ impl App {
         }
     }
 
-    /// The Docker page: host row, tab strip, the selected tab's table and the detail area.
+    /// The Docker page: title block and toolbar, the tabs, and the selected tab's table with the
+    /// detail aside beside it (below it on narrow windows).
     pub fn docker_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        let body = self.page_header(ui, &pal, "Docker", Icon::Container);
         self.docker.refresh_snap();
-        let area = body.shrink(MARGIN);
-        let rows = kit::vsplit(area, &[40.0, 34.0, -1.0, 236.0], GAP);
         let active = self.active_name();
-        self.host_row(ui, rows[0], &pal);
-        self.tab_strip(ui, rows[1], &pal, &active);
-        if self.docker.ui.tab == Tab::Engine {
-            // The engine tab has no detail area, so its content takes that row too.
-            self.docker.ui.detail.terminals.set_visible(None);
-            engine_tab::show(self, ui, rows[2].union(rows[3]), fd);
+        let full = ui.max_rect();
+        let (subtitle, dot) = self.engine_line(&active, &pal);
+
+        // Title block: the cube, the title and under it the state of the engine with a status dot.
+        let p = ui.painter().clone();
+        widgets::draw_icon(&p, Rect::from_min_size(pos2(full.left() + 12.0, full.top() + 4.0), vec2(56.0, 56.0)), Icon::Container, pal.text_code());
+        let title_area = Rect::from_min_max(pos2(full.left() + 72.0, full.top()), full.max);
+        // The two spaces leave room for the dot.
+        let body = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(title_area), |ui| self.page_title(ui, &pal, "Docker", &format!("  {subtitle}"))).inner;
+        let dot_at = pos2(title_area.left() + 17.0, full.top() + 52.0);
+        p.circle_filled(dot_at, 9.0, theme::with_alpha(dot, 0.10));
+        p.circle_filled(dot_at, 6.5, theme::with_alpha(dot, 0.20));
+        p.circle_filled(dot_at, 4.0, dot);
+
+        let area = Rect::from_min_max(pos2(full.left() + 12.0, body.top()), pos2(full.right() - 16.0, body.bottom()));
+        // The toolbar shares the title row when there is room, else it gets a row of its own.
+        let beside = area.width() >= 1280.0;
+        let (bar, tabs_top) = if beside {
+            (Rect::from_min_max(pos2(area.left() + 560.0, full.top() + 14.0), pos2(area.right(), full.top() + 50.0)), body.top())
         } else {
-            tables::show(self, ui, rows[2], fd);
-            detail::detail_area(self, ui, rows[3], fd);
+            (Rect::from_min_size(pos2(area.left(), body.top() - 4.0), vec2(area.width(), 36.0)), body.top() + 40.0)
+        };
+        self.docker_toolbar(ui, bar, &pal, &active);
+
+        let tabs = Rect::from_min_size(pos2(area.left(), tabs_top), vec2(area.width(), 36.0));
+        self.tab_strip(ui, tabs, &pal, &active);
+        let content = Rect::from_min_max(pos2(area.left(), tabs.bottom() + 14.0), area.max);
+        if self.docker.ui.tab == Tab::Engine {
+            // The engine tab has no detail aside, so its content takes the whole width.
+            self.docker.ui.detail.terminals.set_visible(None);
+            engine_tab::show(self, ui, content, fd);
+        } else if area.width() >= 1100.0 {
+            let cols = kit::hsplit(content, &[3.0, 1.4], 14.0);
+            tables::show(self, ui, cols[0], fd);
+            detail::detail_area(self, ui, cols[1], fd);
+        } else {
+            let detail_h = (content.height() * 0.5).clamp(240.0, 340.0);
+            let rows = kit::vsplit(content, &[-1.0, detail_h], 14.0);
+            tables::show(self, ui, rows[0], fd);
+            detail::detail_area(self, ui, rows[1], fd);
         }
         dialogs::show(self, ui.ctx(), fd);
     }
@@ -414,26 +443,49 @@ impl App {
         }
     }
 
-    /// Host picker, engine status, Refresh and the filter.
-    fn host_row(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+    /// The state of the engine for the title block: the line under the title and the colour of its dot.
+    fn engine_line(&self, active: &str, pal: &Palette) -> (String, Color32) {
         let snap = &self.docker.ui.snap;
-        let status = snap.status;
-        let error = snap.error.clone();
-        let info = snap.info.clone();
-        let active = self.active_name();
+        let st = theme::status(pal);
+        match snap.status {
+            EngineStatus::Connected => {
+                let host = self.docker.contexts.iter().find(|c| c.name == active).map(|c| c.host_label()).unwrap_or_else(|| active.to_string());
+                let text = match snap.info.as_ref() {
+                    Some(i) => format!("Connected \u{b7} Docker {} ({}/{}) \u{b7} host {host}", i.server_version, i.os_type, i.arch),
+                    None => format!("Connected \u{b7} host {host}"),
+                };
+                (text, st.ok)
+            }
+            EngineStatus::Unreachable => match &snap.error {
+                Some(e) => (format!("Engine not reachable \u{b7} {}", short(e, 80)), st.warn),
+                None => ("Engine not reachable".to_string(), st.warn),
+            },
+            EngineStatus::Connecting | EngineStatus::Unknown => ("Connecting\u{2026}".to_string(), pal.text_faint),
+        }
+    }
+
+    /// Host picker, filter, Refresh, Run container and Add host.
+    fn docker_toolbar(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, active: &str) {
         let mut switch_to: Option<String> = None;
         let mut refresh = false;
         let mut add_host = false;
+        let mut run = false;
         let contexts = &self.docker.contexts;
         let filter = &mut self.docker.ui.filter;
-        // The controls on the right keep their width; the picker and status are clipped before them.
-        let left = Rect::from_min_max(rect.min, pos2(rect.right() - 420.0, rect.bottom()));
-        let right = Rect::from_min_max(pos2(rect.right() - 420.0, rect.top()), rect.max);
-        kit::row_ui(ui, left, |ui| {
-            ui.set_clip_rect(left);
-            ui.label(RichText::new("Host").font(theme::ui(13.0)).color(pal.text_dim));
-            ui.add_space(4.0);
-            let shown = contexts.iter().find(|c| c.name == active).map(context_label).unwrap_or_else(|| active.clone());
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Right to left: the first widget added sits at the right edge.
+            if Button::ghost("Add host\u{2026}").show(ui, pal).clicked() {
+                add_host = true;
+            }
+            if Button::primary("Run container\u{2026}").show(ui, pal).clicked() {
+                run = true;
+            }
+            if widgets::button(ui, "Refresh", pal, Some(Icon::Refresh)).clicked() {
+                refresh = true;
+            }
+            kit::filter_box(ui, filter, "Filter", 150.0, pal);
+            let shown = contexts.iter().find(|c| c.name == active).map(context_label).unwrap_or_else(|| active.to_string());
             egui::ComboBox::from_id_salt("docker-host").width(220.0).selected_text(shown).show_ui(ui, |ui| {
                 for c in contexts {
                     let is_active = c.name == active;
@@ -442,39 +494,7 @@ impl App {
                     }
                 }
             });
-            ui.add_space(12.0);
-            let (dot_rect, _) = ui.allocate_exact_size(vec2(10.0, 18.0), Sense::hover());
-            let (dot, text) = match status {
-                EngineStatus::Connected => (
-                    pal.ok,
-                    match info.as_ref() {
-                        Some(i) => format!("Connected - Docker {} ({}/{})", i.server_version, i.os_type, i.arch),
-                        None => "Connected".to_string(),
-                    },
-                ),
-                EngineStatus::Unreachable => (pal.warn, "Engine not reachable".to_string()),
-                EngineStatus::Connecting | EngineStatus::Unknown => (pal.text_faint, "Connecting...".to_string()),
-            };
-            ui.painter().circle_filled(dot_rect.center(), 4.0, dot);
-            ui.label(RichText::new(text).font(theme::ui(13.0)).color(pal.text));
-            if status == EngineStatus::Unreachable {
-                if let Some(e) = &error {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(short(e, 80)).font(theme::ui(12.0)).color(pal.text_faint)).on_hover_text(e.as_str());
-                }
-            }
-        });
-        kit::row_ui(ui, right, |ui| {
-            // Right to left: the first widget added sits at the right edge.
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::search_box(ui, filter, "Filter", 170.0, pal);
-                if widgets::button(ui, "Refresh", pal, Some(Icon::Refresh)).clicked() {
-                    refresh = true;
-                }
-                if widgets::button(ui, "Add host...", pal, None).clicked() {
-                    add_host = true;
-                }
-            });
+            ui.label(RichText::new("Host").font(theme::ui(12.0)).color(pal.text_faint));
         });
 
         if let Some(name) = switch_to {
@@ -500,30 +520,39 @@ impl App {
         if add_host {
             self.docker.ui.dialogs.wizards.open = Some(wizards::Wizard::AddHost);
         }
+        if run {
+            self.docker.ui.dialogs.wizards.open = Some(wizards::Wizard::RunImage { image: String::new() });
+        }
     }
 
-    /// Read-only and Notifications switches of the active context.
+    /// Read-only and Notifications switches of the active context, and the count of notifications
+    /// on screen.
     fn switches(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, active: &str) {
         let entry = self.settings.docker.contexts.get(active).cloned().unwrap_or_default();
         let (mut ro, mut notif) = (entry.read_only, entry.notifications);
         let mut ro_changed = false;
         let mut notif_changed = false;
+        let shown = self.docker.ui.toasts.len();
         kit::row_ui(ui, rect, |ui| {
             // Right to left: the first widget added sits at the right edge.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (chip, _) = ui.allocate_exact_size(vec2(widgets::text_width(ui.painter(), &shown.to_string(), theme::mono(12.0)) + 14.0, 20.0), Sense::hover());
+                ui.painter().rect_filled(chip, 3.0, pal.raise(0.08));
+                ui.painter().text(chip.center(), Align2::CENTER_CENTER, shown, theme::mono(12.0), pal.text_dim);
+                ui.add_space(4.0);
                 let mut n = notif;
                 if widgets::toggle(ui, &mut n, pal).changed() {
                     notif = n;
                     notif_changed = true;
                 }
-                ui.label(RichText::new("Notifications").font(theme::ui(13.0)).color(pal.text));
+                ui.label(RichText::new("Notifications").font(theme::ui(12.0)).color(pal.text_faint));
                 ui.add_space(10.0);
                 let mut r = ro;
                 if widgets::toggle(ui, &mut r, pal).changed() {
                     ro = r;
                     ro_changed = true;
                 }
-                ui.label(RichText::new("Read-only").font(theme::ui(13.0)).color(pal.text));
+                ui.label(RichText::new("Read-only").font(theme::ui(12.0)).color(pal.text_faint));
             });
         });
         if ro_changed || notif_changed {
@@ -550,50 +579,24 @@ impl App {
         }
     }
 
-    /// Tab buttons with counts (scrolled sideways when they do not fit), and the switches on the right.
+    /// Tabs with counts, and the switches on the right.
     fn tab_strip(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, active: &str) {
         let snap = &self.docker.ui.snap;
-        let labels: [(Tab, String); 6] = [
-            (Tab::Containers, format!("Containers {}", snap.containers.len())),
-            (Tab::Stacks, format!("Stacks {}", snap.stacks.len())),
-            (Tab::Images, format!("Images {}", snap.images.len())),
-            (Tab::Volumes, format!("Volumes {}", snap.volumes.len())),
-            (Tab::Networks, format!("Networks {}", snap.networks.len())),
-            (Tab::Engine, "Engine".to_string()),
+        let tabs: [(&str, Option<usize>); 6] = [
+            ("Containers", Some(snap.containers.len())),
+            ("Stacks", Some(snap.stacks.len())),
+            ("Images", Some(snap.images.len())),
+            ("Volumes", Some(snap.volumes.len())),
+            ("Networks", Some(snap.networks.len())),
+            ("Engine", None),
         ];
+        const ORDER: [Tab; 6] = [Tab::Containers, Tab::Stacks, Tab::Images, Tab::Volumes, Tab::Networks, Tab::Engine];
         let current = self.docker.ui.tab;
-        let font = theme::ui(13.0);
-        let left = Rect::from_min_max(rect.min, pos2(rect.right() - 300.0, rect.bottom()));
-        let mut next = None;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left), |ui| {
-            egui::ScrollArea::horizontal()
-                .id_salt("docker-tabs")
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for (tab, label) in labels.iter() {
-                            let w = widgets::text_width(ui.painter(), label, font.clone()) + 24.0;
-                            let (r, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
-                            let p = ui.painter();
-                            if current == *tab {
-                                p.rect_filled(r, 4.0, pal.selection);
-                            } else if resp.hovered() {
-                                p.rect_filled(r, 4.0, pal.hover);
-                            }
-                            p.text(r.center(), Align2::CENTER_CENTER, label, font.clone(), pal.text);
-                            if resp.clicked() {
-                                next = Some(*tab);
-                            }
-                        }
-                    });
-                });
-        });
-        if let Some(t) = next {
-            self.docker.ui.tab = t;
+        let selected = ORDER.iter().position(|t| *t == current).unwrap_or(0);
+        if let Some(i) = widgets::tab_bar(ui, rect, pal, &tabs, selected, None) {
+            self.docker.ui.tab = ORDER[i];
         }
-        let switches_rect = Rect::from_min_max(pos2(rect.right() - 300.0, rect.top()), rect.max);
+        let switches_rect = Rect::from_min_max(pos2(rect.right() - 320.0, rect.top()), pos2(rect.right(), rect.top() + 34.0));
         self.switches(ui, switches_rect, pal, active);
     }
 
@@ -611,24 +614,22 @@ impl App {
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     for (i, t) in toasts.iter().enumerate() {
+                        let st = theme::status(&pal);
                         let bar = match t.kind {
-                            NoticeKind::Error => Color32::from_rgb(0xE5, 0x48, 0x4D),
-                            NoticeKind::Success => pal.ok,
+                            NoticeKind::Error => st.danger,
+                            NoticeKind::Success => st.ok,
                             NoticeKind::Info => pal.accent,
                         };
-                        let frame = egui::Frame::none()
-                            .fill(pal.panel)
-                            .stroke(Stroke::new(1.0_f32, pal.panel_stroke))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(12.0, 8.0));
+                        // The glass of the dialogs, with a bar in the colour of the kind at the left.
+                        let frame = egui::Frame::window(&ctx.style()).rounding(8.0).inner_margin(egui::Margin { left: 18.0, right: 14.0, top: 10.0, bottom: 10.0 });
                         let r = frame
                             .show(ui, |ui| {
                                 ui.set_width(296.0);
-                                ui.label(RichText::new(&t.text).font(theme::ui(12.5)).color(pal.text));
+                                ui.label(RichText::new(&t.text).font(theme::ui(13.0)).color(pal.text));
                             })
                             .response
                             .rect;
-                        ui.painter().rect_filled(Rect::from_min_max(r.left_top(), pos2(r.left() + 4.0, r.bottom())), 2.0, bar);
+                        ui.painter().rect_filled(Rect::from_min_max(r.left_top() + vec2(0.0, 6.0), pos2(r.left() + 4.0, r.bottom() - 6.0)), 2.0, bar);
                         let click = ui.interact(r, ui.id().with(("docker-toast", i)), Sense::click());
                         if click.clicked() {
                             dismiss = Some(i);
