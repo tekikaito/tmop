@@ -83,6 +83,8 @@ pub struct Appearance {
     /// a custom `.tmoptheme` id; see [`crate::palette`]).
     pub theme: String,
     pub display_font: String,
+    /// `#RRGGBB` accent colour that replaces the palette's own; empty keeps the palette's.
+    pub accent: String,
     pub bloom: bool,
     pub bloom_level: u32,
     pub high_frequency_visuals: bool,
@@ -223,6 +225,7 @@ impl Default for Appearance {
         Self {
             theme: "system".into(),
             display_font: "Michroma".into(),
+            accent: String::new(),
             bloom: true,
             bloom_level: 7,
             high_frequency_visuals: true,

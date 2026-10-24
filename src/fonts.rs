@@ -1,17 +1,24 @@
-//! Display fonts (`appearance.displayFont`): the embedded Michroma or an installed family.
+//! Display fonts (`appearance.displayFont`): the design default (Inter Light), the embedded
+//! Michroma or an installed family.
 //!
 //! * installed families are listed with GDI `EnumFontFamiliesExW`: regular-weight, upright
 //!   TrueType and OpenType families only; vertical (`@`) variants, bitmap, vector and Type 1
 //!   fonts are left out (see [`Face::listed`]);
 //! * a family's bytes are read with `GetFontData`; a face in a TrueType collection is read as
 //!   the whole collection (the `ttcf` table) plus its index in it (see [`collection_index`]);
-//! * a saved family that isn't installed (or can't be parsed) falls back to Michroma; the
+//! * a saved family that isn't installed (or can't be parsed) falls back to the default; the
 //!   saved value is kept (see [`resolve`]).
 
-/// `appearance.displayFont` value of the embedded font, and the default.
+/// `appearance.displayFont` value of the default display font, and the settings default. It
+/// names Michroma for compatibility with settings saved before the redesign; it now means
+/// "the design default", Inter Light (see [`is_built_in`]).
 pub const BUILT_IN: &str = "Michroma";
-/// The embedded font's entry in the picker.
-pub const BUILT_IN_LABEL: &str = "Michroma (built-in)";
+/// The default's entry in the picker.
+pub const BUILT_IN_LABEL: &str = "Inter (default)";
+/// `appearance.displayFont` value of the embedded Michroma, the previous look.
+pub const CLASSIC: &str = "Michroma (classic)";
+/// Michroma's entry in the picker.
+pub const CLASSIC_LABEL: &str = "Michroma (built-in)";
 
 // GDI's values (wingdi.h), kept here so the filter is the same on every platform.
 const RASTER_FONTTYPE: u32 = 0x1;
@@ -21,16 +28,23 @@ const NTM_TT_OPENTYPE: u32 = 0x4_0000;
 const NTM_TYPE1: u32 = 0x10_0000;
 const FW_NORMAL: i32 = 400;
 
-/// Whether `name` means the embedded font (an empty value does too).
+/// Whether `name` means the default display font (an empty value does too).
 pub fn is_built_in(name: &str) -> bool {
     let name = name.trim();
     name.is_empty() || name.eq_ignore_ascii_case(BUILT_IN)
 }
 
-/// The picker's text for `saved`; `missing` when it fell back to Michroma.
+/// Whether `name` means the embedded Michroma.
+pub fn is_classic(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(CLASSIC)
+}
+
+/// The picker's text for `saved`; `missing` when it fell back to the default.
 pub fn picker_label(saved: &str, missing: bool) -> String {
     if is_built_in(saved) {
         BUILT_IN_LABEL.into()
+    } else if is_classic(saved) {
+        CLASSIC_LABEL.into()
     } else if missing {
         format!("{saved} (not installed)")
     } else {
@@ -92,12 +106,16 @@ impl FontFile {
     }
 }
 
-/// The installed font for `appearance.displayFont` (read with `load`), or `None` for Michroma:
-/// when `saved` is the built-in font, or isn't installed or can't be parsed. The second value
-/// is true when `saved` names a font that fell back to Michroma.
+/// The font for `appearance.displayFont`: Michroma's embedded bytes for [`CLASSIC`], an installed
+/// font (read with `load`), or `None` for the default (Inter Light): when `saved` is the default,
+/// or isn't installed or can't be parsed. The second value is true when `saved` names a font
+/// that fell back to the default.
 pub fn resolve(saved: &str, load: impl FnOnce(&str) -> Option<FontFile>) -> (Option<FontFile>, bool) {
     if is_built_in(saved) {
         return (None, false);
+    }
+    if is_classic(saved) {
+        return (Some(FontFile { family: "Michroma".into(), bytes: crate::ui::theme::MICHROMA.to_vec(), index: 0 }), false);
     }
     match load(saved.trim()).filter(FontFile::parses) {
         Some(f) => (Some(f), false),
@@ -281,13 +299,16 @@ mod tests {
         assert_eq!(got, ["arial", "Consolas", "Segoe UI"]);
     }
 
-    /// Michroma (or nothing saved) never reads an installed font; a missing or unusable font
-    /// falls back to Michroma and says so.
+    /// The default (or nothing saved) and the classic Michroma never read an installed font; a
+    /// missing or unusable font falls back to the default and says so.
     #[test]
-    fn resolve_falls_back_to_michroma() {
+    fn resolve_falls_back_to_the_default() {
         for saved in ["Michroma", "michroma", "", "  "] {
             assert_eq!(resolve(saved, |_| panic!("loaded {saved:?}")), (None, false));
         }
+        let (classic, missing) = resolve(" michroma (classic) ", |_| panic!("loaded Michroma"));
+        let classic = classic.expect("embedded Michroma");
+        assert!(!missing && classic.parses() && classic.bytes == crate::ui::theme::MICHROMA && classic.family == "Michroma");
         assert_eq!(resolve("Nope Sans", |_| None), (None, true));
         let junk = |f: &str| Some(FontFile { family: f.into(), bytes: vec![1, 2, 3], index: 0 });
         assert_eq!(resolve("Broken", junk), (None, true));
@@ -301,6 +322,7 @@ mod tests {
     #[test]
     fn picker_labels() {
         assert_eq!(picker_label("Michroma", false), BUILT_IN_LABEL);
+        assert_eq!(picker_label(CLASSIC, false), "Michroma (built-in)");
         assert_eq!(picker_label("", true), BUILT_IN_LABEL);
         assert_eq!(picker_label("Consolas", false), "Consolas");
         assert_eq!(picker_label("Nope Sans", true), "Nope Sans (not installed)");

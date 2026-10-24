@@ -73,6 +73,14 @@ impl PaletteUi {
         p.save().err().map(|e| format!("Could not save palette {}: {e}", p.name))
     }
 
+    /// The theme changed (Theme combo, or the header's light/dark button): saves the edits, closes
+    /// the editor and drops a pending rename or delete, which belonged to the old palette.
+    pub fn note_theme_change(&mut self, pals: &PaletteCatalog) {
+        self.message = self.close_editor(pals);
+        self.rename = None;
+        self.confirm_delete = false;
+    }
+
     /// Saves pending edits and closes the editor.
     fn close_editor(&mut self, pals: &PaletteCatalog) -> Option<String> {
         let err = self.flush(pals, true);
@@ -114,8 +122,8 @@ impl FontList {
     }
 }
 
-/// The Display font picker: Michroma first, then the installed `families` (`None` while they are
-/// being listed). `missing`: the saved font isn't installed and Michroma is used instead.
+/// The Display font picker: Inter (the default) and Michroma first, then the installed `families` (`None` while they are
+/// being listed). `missing`: the saved font isn't installed and the default is used instead.
 /// Returns whether settings changed.
 fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, families: Option<&[String]>, missing: bool) -> bool {
     let mut changed = false;
@@ -124,6 +132,11 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
             let built_in = fonts::is_built_in(&a.display_font);
             if ui.selectable_label(built_in, fonts::BUILT_IN_LABEL).clicked() && !built_in {
                 a.display_font = fonts::BUILT_IN.into();
+                changed = true;
+            }
+            let classic = fonts::is_classic(&a.display_font);
+            if ui.selectable_label(classic, fonts::CLASSIC_LABEL).clicked() && !classic {
+                a.display_font = fonts::CLASSIC.into();
                 changed = true;
             }
             match families {
@@ -144,7 +157,7 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
             }
         });
     });
-    hint(ui, pal, "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Segoe UI.");
+    hint(ui, pal, "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Inter.");
     changed
 }
 
@@ -217,9 +230,7 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
         });
     });
     if changed {
-        pui.message = pui.close_editor(pals);
-        pui.rename = None;
-        pui.confirm_delete = false;
+        pui.note_theme_change(pals);
     }
     let Some(cur) = pals.get(current).cloned() else { return changed };
     let custom = !cur.is_built_in();
