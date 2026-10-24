@@ -501,10 +501,10 @@ fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls:
         p.galley(pos2(rect.left(), y + label_h + 3.0), g, pal.text_faint);
     }
     let area = Rect::from_min_max(pos2(rect.left(), rect.top() + 10.0), pos2(rect.right(), rect.bottom() - 10.0));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)), |ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        controls(ui);
-    });
+    // A child of its own: the row has been allocated above, the controls must not allocate it again.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
+    child.spacing_mut().item_spacing.x = 8.0;
+    controls(&mut child);
 }
 
 /// A row with an on/off switch at the right.

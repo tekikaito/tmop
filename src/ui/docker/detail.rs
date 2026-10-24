@@ -1302,3 +1302,48 @@ fn files_tab(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::DARK;
+
+    #[test]
+    fn log_lines_are_tinted_by_severity() {
+        let st = theme::status(&DARK);
+        assert_eq!(log_color("12:00 ERROR payment webhook timeout", Stream::Stdout, &DARK), st.danger_text);
+        assert_eq!(log_color("12:00 WARN upstream latency", Stream::Stdout, &DARK), st.yellow);
+        assert_eq!(log_color("GET /healthz 200", Stream::Stderr, &DARK), st.warn);
+        assert_eq!(log_color("GET /healthz 200", Stream::Stdout, &DARK), DARK.text_code());
+    }
+
+    /// The aside offers the row-less actions without a selection, and places its parts inside its
+    /// rect for a narrow and a wide pane.
+    #[test]
+    fn aside_layout_stays_inside() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx, None);
+        let d = DockerUi::default();
+        let btns = aside_buttons(&d, &Subject::None);
+        assert_eq!(btns.iter().map(|b| b.label).collect::<Vec<_>>(), vec!["Run image...", "Prune stopped..."]);
+        assert!(btns.iter().all(|b| b.reason.is_none()));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let p = ui.painter().clone();
+                    for width in [260.0, 700.0, 1200.0] {
+                        let inner = Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 500.0));
+                        for titled in [false, true] {
+                            let lay = layout(&p, inner, &btns, titled, titled);
+                            assert!(lay.content.top() <= lay.content.bottom() && lay.content.bottom() <= inner.bottom());
+                            for r in &lay.buttons {
+                                assert!(r.left() >= inner.left() - 0.5 && r.right() <= inner.right() + 0.5, "{width}: {r:?}");
+                            }
+                            assert_eq!(lay.tabs.is_some(), titled);
+                        }
+                    }
+                });
+            });
+        }
+    }
+}

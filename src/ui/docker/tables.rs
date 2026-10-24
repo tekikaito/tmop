@@ -639,3 +639,43 @@ fn networks(d: &mut DockerUi, icons: &mut IconCache, ui: &mut egui::Ui, rect: Re
     );
     from_menu
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A narrow table keeps the columns that matter most, in table order; a wide one keeps all.
+    #[test]
+    fn narrow_tables_drop_the_least_important_columns() {
+        assert_eq!(visible_cols(&COLS_CONTAINERS, &PRIORITY_CONTAINERS, 5000.0), (0..9).collect::<Vec<_>>());
+        // Name, State, CPU and Memory come first (160 + 90 + 60 + 80), then Image (170) when it fits.
+        assert_eq!(visible_cols(&COLS_CONTAINERS, &PRIORITY_CONTAINERS, 420.0), vec![0, 1, 3, 4]);
+        assert_eq!(visible_cols(&COLS_CONTAINERS, &PRIORITY_CONTAINERS, 600.0), vec![0, 1, 2, 3, 4]);
+        assert_eq!(visible_cols(&COLS_CONTAINERS, &PRIORITY_CONTAINERS, 10.0), vec![0, 1], "the first two always stay");
+    }
+
+    /// Destructive actions are the ones drawn as red outlines.
+    #[test]
+    fn danger_actions() {
+        for label in ["Remove...", "Down...", "Prune stopped..."] {
+            assert!(is_danger(label), "{label}");
+        }
+        for label in ["Start", "Stop", "Run image...", "Pull image...", "Export..."] {
+            assert!(!is_danger(label), "{label}");
+        }
+    }
+
+    /// Without a selection the tab offers only what needs no row.
+    #[test]
+    fn no_selection_leaves_the_actions_that_need_no_row() {
+        let d = DockerUi::default();
+        let enabled: Vec<&str> = current_acts(&d)
+            .iter()
+            .filter_map(|a| match a {
+                Act::Item { label, reason: None, .. } => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(enabled, vec!["Run image...", "Prune stopped..."]);
+    }
+}
