@@ -1,8 +1,9 @@
 //! Disk Space deletion UI: row selection, context menu, the confirm dialog, the worker results
 //! and the "Restart as administrator" panel. The rules live in [`crate::pro::diskdelete`].
 
-use super::theme::{self, with_alpha, Palette};
-use super::widgets::{self, draw_icon, Icon};
+use super::pro_pages::confirm_row;
+use super::theme::{self, Palette};
+use super::widgets::{self, draw_icon, Button, ButtonKind, ButtonSize, Icon};
 use super::{kit, App};
 use crate::pro::diskdelete::{self, Assessed, ItemMeta, Mode, Report, Rules, Target, Verdict};
 use crate::pro::diskspace::Tree;
@@ -16,8 +17,8 @@ use std::time::Duration;
 
 /// Inventory and system paths older than this are rebuilt on the next request.
 const RULES_MAX_AGE: Duration = Duration::from_secs(120);
-/// Height of the "n selected" bar at the bottom of the side panel.
-pub const BAR_H: f32 = 34.0;
+/// Height of the strip kept free at the bottom of the side panel for the floating "n selected" bar.
+pub const BAR_H: f32 = 66.0;
 
 /// Selected rows of the current side-panel list (positions in the list as drawn).
 #[derive(Default)]
@@ -209,29 +210,66 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, out: &mut
     }
 }
 
-/// Soft highlight for a selected row (keeps the row text readable on any palette).
+/// Highlight for a selected row: the table's selected-row wash with a 1 px accent inset.
 pub fn paint_selected(p: &egui::Painter, r: Rect, pal: &Palette) {
-    p.rect_filled(r, 3.0, with_alpha(pal.selection, 0.5));
-    p.rect_filled(Rect::from_min_size(r.min, vec2(3.0, r.height())), 1.0, pal.accent);
+    p.rect_filled(r, 4.0, pal.selected_row());
+    p.rect_stroke(r.shrink(0.5), 4.0, Stroke::new(1.0_f32, pal.accent));
 }
 
-/// Red button for destructive actions.
-pub fn danger_button(ui: &mut egui::Ui, label: &str, pal: &Palette) -> egui::Response {
-    let font = theme::ui(13.0);
-    let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text).size().x + 24.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-    let enabled = ui.is_enabled();
-    let bg = if !enabled { pal.control } else if resp.hovered() { with_alpha(theme::RED, 0.3) } else { with_alpha(theme::RED, 0.14) };
-    let fg = if enabled { theme::RED } else { pal.text_faint };
-    let p = ui.painter();
-    p.rect_filled(rect, 4.0, bg);
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, if enabled { with_alpha(theme::RED, 0.7) } else { pal.control_stroke }));
-    p.text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
-    if enabled {
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        resp
+/// The warnings and the skipped items of a delete / clean up confirmation, in a scroll area:
+/// each warning with its reasons, then "Will be skipped" with why. Nothing is drawn when both are
+/// empty.
+pub fn verdict_lists(ui: &mut egui::Ui, pal: &Palette, warns: &[&Assessed], blocked: &[&Assessed]) {
+    if warns.is_empty() && blocked.is_empty() {
+        return;
     }
+    let st = theme::status(pal);
+    egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
+        for a in warns.iter().take(40) {
+            let Verdict::Warn(reasons) = &a.verdict else { continue };
+            ui.horizontal_top(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                draw_icon(ui.painter(), r, Icon::Warning, st.yellow);
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(RichText::new(a.target.path.display().to_string()).font(theme::mono(12.0)).color(pal.text)).truncate());
+                    ui.add(egui::Label::new(RichText::new(reasons.join(" \u{2022} ")).font(theme::ui(12.0)).color(pal.text_dim)).wrap());
+                });
+            });
+        }
+        if warns.len() > 40 {
+            ui.label(RichText::new(format!("+{} more with warnings", warns.len() - 40)).font(theme::ui(12.0)).color(pal.text_faint));
+        }
+        if !blocked.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Will be skipped").font(theme::semibold(13.0)).color(pal.text));
+            for a in blocked.iter().take(40) {
+                let Verdict::Blocked(why) = &a.verdict else { continue };
+                ui.horizontal_top(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                    draw_icon(ui.painter(), r, Icon::Shield, pal.text_faint);
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(RichText::new(a.target.path.display().to_string()).font(theme::mono(12.0)).color(pal.text_dim)).truncate());
+                        ui.label(RichText::new(why).font(theme::ui(12.0)).color(pal.text_faint));
+                    });
+                });
+            }
+        }
+    });
+    ui.add_space(6.0);
+}
+
+/// Paths in an inset box (the first `max`, then "+n more").
+pub fn path_box<'a>(ui: &mut egui::Ui, pal: &Palette, paths: impl ExactSizeIterator<Item = &'a std::path::Path>, max: usize) {
+    let total = paths.len();
+    egui::Frame::none().fill(pal.well()).stroke(Stroke::new(1.0_f32, pal.row_rule())).rounding(6.0).inner_margin(egui::Margin::symmetric(12.0, 8.0)).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        for p in paths.take(max) {
+            ui.add(egui::Label::new(RichText::new(p.display().to_string()).font(theme::mono(12.0)).color(pal.text_code())).truncate());
+        }
+        if total > max {
+            ui.label(RichText::new(format!("+{} more", total - max)).font(theme::ui(12.0)).color(pal.text_faint));
+        }
+    });
 }
 
 // ---------------------------------------------------------------- state machine
@@ -281,17 +319,20 @@ impl DiskDeleteUi {
         let mut mode = menu;
         if !picked.is_empty() {
             let total: u64 = picked.iter().map(|&i| size_of(i)).sum();
-            let p = ui.painter();
-            p.line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0_f32, pal.panel_stroke));
-            p.text(pos2(bar.left() + 4.0, bar.center().y + 1.0), Align2::LEFT_CENTER, format!("{} selected \u{2022} {}", picked.len(), format_bytes(total as f64)), theme::semibold(12.5), pal.text);
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(0.0, 2.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-                if danger_button(ui, "Delete permanently", pal).clicked() {
-                    mode = Some(Mode::Permanent);
-                }
-                if widgets::button(ui, "Move to Recycle Bin", pal, None).clicked() {
-                    mode = Some(Mode::Recycle);
-                }
-            });
+            // The bar floats above the bottom of the reserved strip (see [`BAR_H`]) and stays out
+            // of the way of a dialog that is open for this selection.
+            if self.pending.is_none() && !self.job.is_loading() {
+                kit::floating_bar(ui, bar.translate(vec2(0.0, 12.0)), "disk-selection", |ui| {
+                    ui.label(RichText::new(format!("{} selected \u{2022} {}", picked.len(), format_bytes(total as f64))).font(theme::semibold(13.0)).color(pal.text));
+                    ui.add_space(8.0);
+                    if Button::new("Move to Recycle Bin").size(ButtonSize::Medium).show(ui, pal).clicked() {
+                        mode = Some(Mode::Recycle);
+                    }
+                    if Button::danger("Delete permanently").size(ButtonSize::Medium).show(ui, pal).clicked() {
+                        mode = Some(Mode::Permanent);
+                    }
+                });
+            }
             if mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
                 let (del, shift) = ui.input(|i| (i.key_pressed(egui::Key::Delete), i.modifiers.shift));
                 if del {
@@ -308,21 +349,21 @@ impl DiskDeleteUi {
 // ---------------------------------------------------------------- App glue
 
 impl App {
-    /// Yellow strip at the top of Disk Space while TMOP is not elevated.
+    /// Amber banner at the top of Disk Space while TMOP is not elevated.
     pub fn disk_admin_panel(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
+        let st = theme::status(pal);
         let p = ui.painter().clone();
-        p.rect_filled(rect, 6.0, with_alpha(pal.warn, 0.18));
-        p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, with_alpha(pal.warn, 0.5)));
-        draw_icon(&p, Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0)), Icon::Warning, pal.warn);
+        widgets::tinted_card(&p, rect, pal, st.warn);
+        draw_icon(&p, Rect::from_center_size(pos2(rect.left() + 26.0, rect.center().y), vec2(18.0, 18.0)), Icon::Alert, st.warn);
         let busy = self.pro.del.relaunch.is_loading();
-        let btn_w = 200.0;
-        let txt_w = (rect.width() - 40.0 - btn_w - 16.0).max(40.0);
-        widgets::text_fit(&p, pos2(rect.left() + 38.0, rect.center().y), Align2::LEFT_CENTER, "Not running as administrator: slower scan, some folders unreadable, protected files can't be deleted.", theme::ui(12.5), pal.text, txt_w);
-        let btn = Rect::from_min_max(pos2(rect.right() - btn_w - 6.0, rect.top()), pos2(rect.right() - 6.0, rect.bottom()));
+        let btn_w = 210.0;
+        let txt_w = (rect.width() - 46.0 - btn_w - 28.0).max(40.0);
+        widgets::text_fit(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, "Not running as administrator: slower scan, some folders unreadable, protected files can't be deleted.", theme::ui(13.0), st.yellow, txt_w);
+        let btn = Rect::from_min_max(pos2(rect.right() - btn_w - 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
         let mut clicked = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(btn).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                clicked = widgets::button(ui, "Restart as administrator", pal, Some(Icon::Shield)).clicked();
+                clicked = Button::new("Restart as administrator").icon(Icon::Shield).size(ButtonSize::Small).show(ui, pal).clicked();
             });
         });
         if clicked {
@@ -421,33 +462,37 @@ impl App {
 
     fn disk_confirm_window(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(p) = self.pro.del.pending.as_mut() else { return };
+        let st = theme::status(pal);
         let assessed = p.assessed.as_deref();
-        let permanent_mode = p.mode == Mode::Permanent;
         let all: Vec<&Target> = match assessed {
             Some(a) => a.iter().filter(|x| !matches!(x.verdict, Verdict::Blocked(_))).map(|x| &x.target).collect(),
             None => p.targets.iter().collect(),
         };
         let size: u64 = all.iter().map(|t| t.size).sum();
-        let (line1, dest, permanent) = summary_text(all.len(), size, p.mode, p.has_bin, p.bin_capped);
-        let title = if permanent_mode { "Delete permanently" } else { "Move to Recycle Bin" };
+        let (_, dest, permanent) = summary_text(all.len(), size, p.mode, p.has_bin, p.bin_capped);
         let warns: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Warn(_))).collect()).unwrap_or_default();
         let blocked: Vec<&Assessed> = assessed.map(|a| a.iter().filter(|x| matches!(x.verdict, Verdict::Blocked(_))).collect()).unwrap_or_default();
         let skipped_in_use = assessed.map(diskdelete::in_use_skipped).unwrap_or(0);
         let mut ack = p.ack;
         let ok_to_go = assessed.map(|a| can_confirm(a, ack)).unwrap_or(false);
         let mut answer = None;
-        egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).frame(egui::Frame::window(&ctx.style()).fill(pal.panel)).show(ctx, |ui| {
-            ui.set_width(540.0);
-            ui.label(RichText::new(&line1).font(theme::semibold(14.0)).color(pal.text));
-            ui.label(RichText::new(&dest).font(theme::ui(12.5)).color(if permanent { theme::RED } else { pal.text_dim }));
-            ui.add_space(6.0);
-            for t in all.iter().take(5) {
-                ui.add(egui::Label::new(RichText::new(t.path.display().to_string()).font(theme::ui(12.0)).color(pal.text_dim)).truncate());
-            }
-            if all.len() > 5 {
-                ui.label(RichText::new(format!("+{} more", all.len() - 5)).font(theme::ui(12.0)).color(pal.text_faint));
-            }
-            ui.add_space(6.0);
+        let n = all.len();
+        let items = format!("{n} item{}", if n == 1 { "" } else { "s" });
+        let title = if permanent { format!("Delete **{items}** permanently?") } else { format!("Move **{items}** to the Recycle Bin?") };
+        let icon = if permanent { (Icon::Octagon, st.danger) } else { (Icon::Disk, st.info) };
+        let goes_to = if permanent { "Deleted for good" } else { "Recycle Bin" };
+        let warn_count = if assessed.is_none() { "Checking\u{2026}".to_string() } else if warns.is_empty() { "None".to_string() } else { warns.len().to_string() };
+        kit::dialog(ctx, "disk-delete", |ui| {
+            kit::dialog_header(ui, pal, Some(icon), &title, &dest);
+            ui.add_space(12.0);
+            kit::fact_box(
+                ui,
+                pal,
+                &[("Items", &n.to_string(), None), ("Size", &format_bytes(size as f64), None), ("Goes to", goes_to, Some(if permanent { st.danger_text } else { st.ok })), ("Warnings", &warn_count, (!warns.is_empty()).then_some(st.yellow))],
+            );
+            ui.add_space(10.0);
+            path_box(ui, pal, all.iter().map(|t| t.path.as_path()), 5);
+            ui.add_space(8.0);
             if assessed.is_none() {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -455,58 +500,15 @@ impl App {
                 });
             }
             if skipped_in_use > 0 {
-                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(theme::YELLOW));
+                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(st.yellow));
                 ui.add_space(4.0);
             }
-            if !warns.is_empty() || !blocked.is_empty() {
-                egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
-                    for a in warns.iter().take(40) {
-                        let Verdict::Warn(reasons) = &a.verdict else { continue };
-                        ui.horizontal_top(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                            draw_icon(ui.painter(), r, Icon::Warning, theme::YELLOW);
-                            ui.vertical(|ui| {
-                                ui.add(egui::Label::new(RichText::new(a.target.path.display().to_string()).font(theme::ui(12.0)).color(pal.text)).truncate());
-                                ui.add(egui::Label::new(RichText::new(reasons.join(" \u{2022} ")).font(theme::ui(11.5)).color(pal.text_dim)).wrap());
-                            });
-                        });
-                    }
-                    if warns.len() > 40 {
-                        ui.label(RichText::new(format!("+{} more with warnings", warns.len() - 40)).font(theme::ui(12.0)).color(pal.text_faint));
-                    }
-                    if !blocked.is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Will be skipped").font(theme::semibold(12.5)).color(pal.text));
-                        for a in blocked.iter().take(40) {
-                            let Verdict::Blocked(why) = &a.verdict else { continue };
-                            ui.horizontal_top(|ui| {
-                                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                                draw_icon(ui.painter(), r, Icon::Shield, pal.text_faint);
-                                ui.vertical(|ui| {
-                                    ui.add(egui::Label::new(RichText::new(a.target.path.display().to_string()).font(theme::ui(12.0)).color(pal.text_dim)).truncate());
-                                    ui.label(RichText::new(why).font(theme::ui(11.5)).color(pal.text_faint));
-                                });
-                            });
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-            }
+            verdict_lists(ui, pal, &warns, &blocked);
             if !warns.is_empty() {
                 ui.checkbox(&mut ack, "I know what I'm doing");
                 ui.add_space(4.0);
             }
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(ok_to_go, |ui| {
-                    let go = if permanent { danger_button(ui, "Delete permanently", pal) } else { widgets::button(ui, "Move to Recycle Bin", pal, None) };
-                    if go.clicked() {
-                        answer = Some(true);
-                    }
-                });
-                if widgets::button(ui, "Cancel", pal, None).clicked() {
-                    answer = Some(false);
-                }
-            });
+            answer = confirm_row(ui, pal, "Cancel", if permanent { "Delete permanently" } else { "Move to Recycle Bin" }, if permanent { ButtonKind::DangerFill } else { ButtonKind::Primary }, ok_to_go);
         });
         p.ack = ack;
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -540,33 +542,29 @@ impl App {
     }
 
     fn disk_progress_and_result_windows(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let frame = egui::Frame::window(&ctx.style()).fill(pal.panel);
+        let st = theme::status(pal);
         if self.pro.del.job.is_loading() {
-            egui::Window::new("Deleting").title_bar(false).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).frame(frame).show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new("Deleting\u{2026}").color(pal.text));
-                });
+            kit::dialog(ctx, "disk-deleting", |ui| {
+                kit::dialog_header(ui, pal, None, "**Deleting**\u{2026}", "");
+                ui.add_space(6.0);
+                ui.spinner();
             });
             return;
         }
         let Some(rep) = &self.pro.del.result else { return };
         let mut close = false;
-        egui::Window::new("Some items were skipped").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).frame(frame).show(ctx, |ui| {
-            ui.set_width(540.0);
-            ui.label(RichText::new(format!("{} deleted, {} skipped ({} freed)", rep.deleted.len(), rep.skipped.len(), format_bytes(rep.freed as f64))).color(pal.text_dim));
-            ui.add_space(4.0);
+        kit::dialog(ctx, "disk-skipped", |ui| {
+            kit::dialog_header(ui, pal, Some((Icon::Alert, st.warn)), "Some items were **skipped**", &format!("{} deleted, {} skipped ({} freed)", rep.deleted.len(), rep.skipped.len(), format_bytes(rep.freed as f64)));
+            ui.add_space(10.0);
             egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show(ui, |ui| {
                 for (t, why) in &rep.skipped {
-                    ui.add(egui::Label::new(RichText::new(t.path.display().to_string()).font(theme::ui(12.0)).color(pal.text)).truncate());
-                    ui.label(RichText::new(why).font(theme::ui(11.5)).color(pal.text_dim));
+                    ui.add(egui::Label::new(RichText::new(t.path.display().to_string()).font(theme::mono(12.0)).color(pal.text)).truncate());
+                    ui.label(RichText::new(why).font(theme::ui(12.0)).color(pal.text_dim));
                     ui.add_space(2.0);
                 }
             });
-            ui.add_space(6.0);
-            if widgets::button(ui, "Close", pal, None).clicked() {
-                close = true;
-            }
+            ui.add_space(8.0);
+            close = kit::dialog_buttons(ui, pal, &[kit::DialogButton::Secondary("Close")]).is_some();
         });
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.pro.del.result = None;
