@@ -73,17 +73,20 @@ impl App {
         }
     }
 
-    /// "Open Windows Task Manager" for the File menu, while a TMOP copy replaces it.
-    pub fn replace_menu_item(&mut self, ui: &mut egui::Ui) {
+    /// "Open Windows Task Manager" for the overflow menu, while a TMOP copy replaces it. True
+    /// when it was clicked.
+    pub fn replace_menu_item(&mut self, ui: &mut egui::Ui) -> bool {
         if !self.replace.state.is_tmop() {
-            return;
+            return false;
         }
-        if ui.add_enabled(!self.replace.job.is_loading(), egui::Button::new("Open Windows Task Manager")).clicked() {
+        let busy = self.replace.job.is_loading();
+        let clicked = ui.add_enabled_ui(!busy, |ui| super::kit::menu_item(ui, "Open Windows Task Manager", None, false)).inner;
+        if clicked {
             // Off the UI thread: Task Manager may need an elevated start, which waits for UAC.
             self.replace.job.start(|| taskmgr::open_real().map(|()| String::new()));
-            ui.close_menu();
         }
         ui.separator();
+        clicked
     }
 
     /// Banner shown when Task Manager launches point at a TMOP.exe that no longer exists.

@@ -3,12 +3,15 @@
 
 pub mod apps_page;
 pub mod bench_page;
+pub mod chrome;
 pub mod connections_page;
 pub mod disk_cleanup;
 pub mod disk_delete;
 pub mod diskspace_page;
 pub mod docker;
 pub mod drivers_page;
+pub mod hardware;
+pub mod health;
 pub mod icons;
 pub mod inventory_pages;
 pub mod kit;
@@ -34,14 +37,18 @@ use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
-use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
+use eframe::egui::{self, Color32, Key, Sense, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
 use std::time::{Duration, Instant};
 use theme::{MetricColors, Palette};
-use widgets::{draw_icon, Graph, GraphLine, Icon};
+use widgets::{Graph, GraphLine, Icon};
 
-pub const SIDEBAR_W: f32 = 216.0;
+/// Width of the navigation rail.
+pub const RAIL_W: f32 = 84.0;
 pub const STATUS_H: f32 = 30.0;
-pub const HEADER_H: f32 = 52.0;
+/// Height of the window's header bar (logo, search, readouts).
+pub const TOP_BAR_H: f32 = 64.0;
+/// Height of a page's title block (see [`App::page_title`]).
+pub const HEADER_H: f32 = 64.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -156,7 +163,7 @@ impl Page {
             Page::Docker => Icon::Container,
             Page::SystemInfo => Icon::Info,
             Page::AppHistory => Icon::History,
-            Page::StartupApps => Icon::Play,
+            Page::StartupApps => Icon::Power,
             Page::Users => Icon::User,
             Page::Services => Icon::Wrench,
             Page::PowerFreq => Icon::Bolt,
@@ -169,7 +176,30 @@ impl Page {
             Page::Settings => Icon::Gear,
         }
     }
-    fn shortcut(self) -> &'static str {
+    /// Short name under the rail icon.
+    pub fn rail_label(self) -> &'static str {
+        match self {
+            Page::Summary => "Summary",
+            Page::Performance => "Perform.",
+            Page::Processes => "Processes",
+            Page::Docker => "Docker",
+            Page::SystemInfo => "System",
+            Page::AppHistory => "History",
+            Page::StartupApps => "Startup",
+            Page::Users => "Users",
+            Page::Services => "Services",
+            Page::PowerFreq => "Power",
+            Page::FlightRecorder => "Recorder",
+            Page::Connections => "Connect.",
+            Page::InstalledApps => "Apps",
+            Page::Drivers => "Drivers",
+            Page::DiskSpace => "Disk",
+            Page::Benchmarks => "Bench",
+            Page::Settings => "Settings",
+        }
+    }
+    /// Keyboard shortcut of the page (empty when it has none).
+    pub fn shortcut(self) -> &'static str {
         match self {
             Page::Summary => "Ctrl+1",
             Page::Performance => "Ctrl+2",
@@ -296,9 +326,13 @@ pub struct FrameData<'a> {
 }
 
 impl FrameData<'_> {
-    /// The colour of metric `key` (`cpu`, `memory`, ...; see [`MetricColors`]).
+    /// The colour of metric `key` (`cpu`, `memory`, ...; see [`MetricColors`]). A built-in colour
+    /// is darkened on light palettes; a `graphs.metricColors` override is used as it is.
     pub fn metric(&self, key: &str) -> Color32 {
-        self.metric_colors.get(key)
+        match self.metric_colors.custom(key) {
+            Some(c) => c,
+            None => theme::darken_for(&self.pal, theme::default_metric_color(key)),
+        }
     }
 }
 
@@ -339,6 +373,10 @@ pub struct App {
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
     pending: Option<process_actions::Pending>,
+    /// "HOST {b7} user" shown in the header.
+    machine: String,
+    /// Ctrl+K was pressed: focus the header search on the next frame.
+    focus_search: bool,
     pub status: String,
     applied_top: Option<bool>,
     /// The palette last given to egui's style.
@@ -416,6 +454,8 @@ impl App {
             sort: (Column::Cpu, true),
             selected: None,
             pending: None,
+            machine: chrome::machine_line(),
+            focus_search: false,
             status,
             applied_top: None,
             applied_pal: None,
@@ -493,8 +533,15 @@ impl App {
         if matches!(dark_light_system(), Some(false)) { "light" } else { "dark" }.into()
     }
 
+    /// The palette in use, with `appearance.accent` applied.
     pub fn palette(&self) -> Palette {
-        self.palettes.get(&self.palette_id()).map(|p| p.palette).unwrap_or(theme::DARK)
+        let mut pal = self.palettes.get(&self.palette_id()).map(|p| p.palette).unwrap_or(theme::DARK);
+        if let Some(accent) = skin::Color::parse(&self.settings.appearance.accent).map(theme::from_skin) {
+            pal.accent = accent;
+            // Active entries are the accent washed over the page.
+            pal.selection = theme::mix(pal.body, accent, if pal.dark { 0.12 } else { 0.18 });
+        }
+        pal
     }
 
     /// Metric colours from `graphs.metricColors` (the built-in ones without colour keying).
@@ -578,6 +625,9 @@ impl App {
                 self.sampler.refresh();
             }
         });
+        if Self::search_shortcut(ctx) {
+            self.focus_search = true;
+        }
         if let Some(p) = go {
             self.page = p;
         }
@@ -596,237 +646,6 @@ impl App {
             Some(s) if s.source != skin::SkinSource::BuiltIn || s.id != "classic" => s.clone(),
             _ => popout::classic_skin(&self.palette(), &self.metric_colors()),
         }
-    }
-
-    // ------------------------------------------------------------------ chrome
-
-    fn menu_bar(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let frame = egui::Frame::none().fill(pal.chrome).inner_margin(egui::Margin::symmetric(6.0, 2.0));
-        egui::TopBottomPanel::top("menu").frame(frame).show_separator_line(false).show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Refresh now\tF5").clicked() {
-                        self.sampler.refresh();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    self.replace_menu_item(ui);
-                    if ui.button("Exit").clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    for p in self.visible_pages().iter().chain([Page::Settings].iter()) {
-                        if ui.button(format!("{}\t{}", p.title(), p.shortcut())).clicked() {
-                            self.page = *p;
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
-                    let label = if self.popout_open { "Popout: On" } else { "Popout: Off" };
-                    if ui.button(label).clicked() {
-                        let open = !self.popout_open;
-                        self.set_popout(open);
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("Help", |ui| {
-                    ui.label(format!("{} ({}): a skinnable system monitor for Windows.", crate::APP_NAME, crate::APP_LONG_NAME));
-                    ui.label("No network access, no licensing, no telemetry.");
-                });
-            });
-        });
-    }
-
-    fn sidebar(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let frame = egui::Frame::none().fill(pal.sidebar);
-        egui::SidePanel::left("sidebar").exact_width(SIDEBAR_W).resizable(false).frame(frame).show_separator_line(false).show(ctx, |ui| {
-            let full = ui.max_rect();
-            let p = ui.painter();
-            p.line_segment([pos2(full.right() - 0.5, full.top()), pos2(full.right() - 0.5, full.bottom())], Stroke::new(1.0_f32, pal.sidebar_rule));
-            // The nav list gets the space above the bottom controls. The wordmark is shown only when
-            // the list fits above it too; if the list doesn't fit at all, it scrolls (mouse wheel).
-            let bottom = full.bottom();
-            let pages = self.visible_pages();
-            let nav_h = 14.0 + pages.len() as f32 * 42.0;
-            let show_logo = full.top() + nav_h <= bottom - 136.0;
-            let nav_rect = Rect::from_min_max(full.min, pos2(full.right(), if show_logo { bottom - 136.0 } else { bottom - 56.0 }));
-            let scroll_id = ui.id().with("nav-scroll");
-            let max_scroll = (nav_h - nav_rect.height()).max(0.0);
-            let mut scroll = ui.data(|d| d.get_temp::<f32>(scroll_id)).unwrap_or(0.0);
-            if max_scroll > 0.0 && ui.rect_contains_pointer(nav_rect) {
-                scroll -= ui.input(|i| i.smooth_scroll_delta.y);
-            }
-            scroll = scroll.clamp(0.0, max_scroll);
-            ui.data_mut(|d| d.insert_temp(scroll_id, scroll));
-            let nav_painter = ui.painter().with_clip_rect(nav_rect);
-            // One plain list of all pages.
-            let mut y = full.top() + 14.0 - scroll;
-            for page in pages {
-                let rect = Rect::from_min_size(pos2(full.left() + 12.0, y), vec2(SIDEBAR_W - 26.0, 36.0));
-                y += 42.0;
-                let hit = rect.intersect(nav_rect);
-                if !hit.is_positive() {
-                    continue;
-                }
-                let resp = ui.interact(hit, ui.id().with(page.id()), Sense::click());
-                let selected = self.page == page;
-                let p = &nav_painter;
-                if selected {
-                    p.rect_filled(rect, 4.0, pal.selection);
-                } else if resp.hovered() {
-                    p.rect_filled(rect, 4.0, pal.hover);
-                }
-                let fg = if selected { pal.on_selection() } else { pal.text };
-                draw_icon(p, Rect::from_center_size(pos2(rect.left() + 26.0, rect.center().y), vec2(16.0, 16.0)), page.icon(), fg);
-                p.text(pos2(rect.left() + 50.0, rect.center().y), Align2::LEFT_CENTER, page.title(), theme::ui(13.0), fg);
-                if resp.clicked() {
-                    self.page = page;
-                }
-                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-            }
-            // Wordmark and bottom controls.
-            let p = ui.painter();
-            if show_logo {
-                let dark = pal.sidebar.r() as u32 + pal.sidebar.g() as u32 + pal.sidebar.b() as u32 <= 3 * 96;
-                wordmark(p, Rect::from_min_size(pos2(full.left() + 18.0, bottom - 128.0), vec2(SIDEBAR_W - 36.0, 48.0)), self.bloom(), ui.input(|i| i.time), dark);
-            }
-            let settings_rect = Rect::from_min_size(pos2(full.left() + 10.0, bottom - 46.0), vec2(96.0, 32.0));
-            let resp = ui.interact(settings_rect, ui.id().with("nav-settings"), Sense::click());
-            let p = ui.painter();
-            let on = self.page == Page::Settings;
-            if on {
-                p.rect_filled(settings_rect, 4.0, pal.selection);
-            } else if resp.hovered() {
-                p.rect_filled(settings_rect, 4.0, pal.hover);
-            }
-            let fg = if on { pal.on_selection() } else { pal.text };
-            draw_icon(p, Rect::from_center_size(pos2(settings_rect.left() + 20.0, settings_rect.center().y), vec2(15.0, 15.0)), Icon::Gear, fg);
-            p.text(pos2(settings_rect.left() + 36.0, settings_rect.center().y), Align2::LEFT_CENTER, "Settings", theme::ui(13.0), fg);
-            if resp.clicked() {
-                self.page = Page::Settings;
-            }
-            p.line_segment([pos2(full.left() + 110.5, bottom - 40.0), pos2(full.left() + 110.5, bottom - 20.0)], Stroke::new(1.0_f32, pal.sidebar_rule));
-            let pop_rect = Rect::from_min_size(pos2(full.left() + 116.0, bottom - 46.0), vec2(88.0, 32.0));
-            let resp = ui.interact(pop_rect, ui.id().with("nav-popout"), Sense::click());
-            let p = ui.painter();
-            if self.popout_open {
-                p.rect_filled(pop_rect, 4.0, pal.selection);
-            } else if resp.hovered() {
-                p.rect_filled(pop_rect, 4.0, pal.hover);
-            }
-            let fg = if self.popout_open { pal.on_selection() } else { pal.text };
-            draw_icon(p, Rect::from_center_size(pos2(pop_rect.left() + 18.0, pop_rect.center().y), vec2(15.0, 15.0)), Icon::Popout, fg);
-            p.text(pos2(pop_rect.left() + 34.0, pop_rect.center().y), Align2::LEFT_CENTER, "Popout", theme::ui(13.0), fg);
-            if resp.clicked() {
-                let open = !self.popout_open;
-                self.set_popout(open);
-            }
-        });
-    }
-
-    fn status_bar(&mut self, ctx: &egui::Context, pal: &Palette, snap: &Snapshot) {
-        // Transient messages fade out after a while; the provider line stays.
-        if self.status != self.status_seen.0 {
-            self.status_seen = (self.status.clone(), Instant::now());
-        }
-        if self.ip.1.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true) {
-            self.ip = (crate::pro::connections::primary_ipv4().map(|a| a.to_string()), Some(Instant::now()));
-        }
-        let frame = egui::Frame::none().fill(pal.chrome);
-        egui::TopBottomPanel::bottom("status").exact_height(STATUS_H).frame(frame).show_separator_line(false).show(ctx, |ui| {
-            let r = ui.max_rect();
-            let p = ui.painter();
-            p.rect_filled(Rect::from_min_max(r.min, pos2(r.left() + SIDEBAR_W, r.bottom())), 0.0, pal.sidebar);
-            let healthy = snap.errors.is_empty();
-            let dot = if healthy { pal.ok } else { pal.warn };
-            let mut x = r.left() + SIDEBAR_W + 16.0;
-            p.circle_filled(pos2(x, r.center().y), 3.0, dot);
-            x += 10.0;
-            let mut parts: Vec<(String, Color32)> = vec![
-                (if healthy { "Native providers healthy".to_string() } else { snap.errors[0].clone() }, pal.text_dim),
-                (format!("{} processes", snap.process_count), pal.text_dim),
-            ];
-            if let Some(ip) = &self.ip.0 {
-                parts.push((format!("IP {ip}"), pal.accent));
-            }
-            parts.push((format!("Generation {}", snap.seq), pal.text_dim));
-            if self.settings.window.uptime_visible {
-                parts.push((format!("Up {}", fmt_hms(snap.uptime)), pal.text_dim));
-            }
-            if !self.status_seen.0.is_empty() && self.status_seen.1.elapsed() < Duration::from_secs(10) {
-                parts.push((self.status_seen.0.clone(), pal.text));
-            }
-            let right_reserved = 300.0;
-            let clip = p.with_clip_rect(Rect::from_min_max(r.min, pos2(r.right() - right_reserved, r.bottom())));
-            for (i, (s, c)) in parts.iter().enumerate() {
-                if i > 0 {
-                    clip.text(pos2(x, r.center().y), Align2::LEFT_CENTER, "\u{2022}", theme::ui(12.0), pal.text_faint);
-                    x += 12.0;
-                }
-                let rr = clip.text(pos2(x, r.center().y), Align2::LEFT_CENTER, s, theme::ui(12.0), *c);
-                x += rr.width() + 10.0;
-            }
-            // Recorder transport and clock.
-            let rec = self.recorder.is_recording();
-            let clock = match self.recorder.elapsed() {
-                Some(d) => fmt_clock(d),
-                None => "00:00:00.00".to_string(),
-            };
-            let h = 15.0;
-            let cw = widgets::seven_segment_width(&clock, h);
-            let lcd = Rect::from_min_size(pos2(r.right() - 14.0 - cw - 14.0, r.center().y - 11.0), vec2(cw + 14.0, 22.0));
-            let lcd_pal = pal.lcd();
-            p.rect_filled(lcd, 3.0, lcd_pal.bg);
-            p.rect_stroke(lcd, 3.0, Stroke::new(1.0_f32, lcd_pal.rim));
-            let lit = if rec { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { lcd_pal.lit };
-            widgets::seven_segment(p, pos2(lcd.left() + 7.0, lcd.top() + 3.5), &clock, h, lit, lcd_pal.unlit, if rec { self.bloom() } else { 0.0 });
-            let lap = pos2(lcd.left() - 18.0, r.center().y);
-            p.circle_filled(lap, 3.5, pal.control_stroke);
-            let stop = Rect::from_center_size(pos2(lap.x - 34.0, r.center().y), vec2(24.0, 20.0));
-            let stop_resp = ui.interact(stop, ui.id().with("status-stop"), Sense::click());
-            let p = ui.painter();
-            p.rect_filled(stop, 3.0, if stop_resp.hovered() && rec { pal.hover } else { pal.control });
-            p.rect_filled(Rect::from_center_size(stop.center(), vec2(9.0, 9.0)), 1.0, if rec { pal.text } else { pal.control_stroke });
-            p.line_segment([pos2(stop.right() + 9.5, r.top() + 6.0), pos2(stop.right() + 9.5, r.bottom() - 6.0)], Stroke::new(1.0_f32, pal.panel_stroke));
-            let ball = pos2(stop.left() - 26.0, r.center().y);
-            let rec_resp = ui.interact(Rect::from_center_size(ball, vec2(22.0, 22.0)), ui.id().with("status-rec"), Sense::click());
-            let p = ui.painter();
-            let base = if rec { Color32::from_rgb(0xE0, 0x20, 0x20) } else { Color32::from_rgb(0x6A, 0x18, 0x18) };
-            if rec && self.bloom() > 0.0 {
-                p.circle_filled(ball, 13.0, theme::with_alpha(base, 0.22 * self.bloom()));
-            }
-            p.circle_filled(ball, 8.0, theme::dim(base, 0.75));
-            p.circle_filled(ball + vec2(-1.0, -1.0), 6.5, base);
-            p.circle_filled(ball + vec2(-2.5, -2.5), 2.5, theme::with_alpha(Color32::WHITE, if rec { 0.45 } else { 0.18 }));
-            if rec_resp.hovered() {
-                p.circle_stroke(ball, 9.5, Stroke::new(1.0_f32, pal.text_dim));
-            }
-            p.line_segment([pos2(ball.x - 17.5, r.top() + 6.0), pos2(ball.x - 17.5, r.bottom() - 6.0)], Stroke::new(1.0_f32, pal.panel_stroke));
-            p.line_segment([pos2(ball.x + 17.5, r.top() + 6.0), pos2(ball.x + 17.5, r.bottom() - 6.0)], Stroke::new(1.0_f32, pal.panel_stroke));
-            if rec_resp.clicked() && !rec {
-                if let Err(e) = self.recorder.start(None) {
-                    self.status = format!("Recording: {e}");
-                }
-            }
-            if stop_resp.clicked() && rec {
-                if let Some(path) = self.recorder.stop() {
-                    self.status = format!("Recording saved to {}", path.display());
-                }
-            }
-            rec_resp.on_hover_text(if rec { "Recording" } else { "Start recording to the recordings folder" });
-            stop_resp.on_hover_text("Stop recording");
-        });
-    }
-    /// Page title row inside the content area. Returns the rect left for the page body.
-    pub fn page_header(&self, ui: &mut egui::Ui, pal: &Palette, title: &str, icon: Icon) -> Rect {
-        let full = ui.max_rect();
-        let header = Rect::from_min_size(full.min, vec2(full.width(), HEADER_H));
-        let p = ui.painter();
-        p.rect_filled(header, 0.0, pal.chrome);
-        draw_icon(p, Rect::from_center_size(pos2(header.left() + 36.0, header.center().y + 2.0), vec2(16.0, 16.0)), icon, pal.text_dim);
-        p.text(pos2(header.left() + 60.0, header.center().y + 1.0), Align2::LEFT_CENTER, title, theme::display(26.0), pal.text);
-        Rect::from_min_max(pos2(full.left(), header.bottom()), full.max)
     }
 
     // ------------------------------------------------------------------ popout viewport
@@ -954,65 +773,6 @@ pub fn fmt_clock(d: Duration) -> String {
     format!("{:02}:{:02}:{:02}.{:02}", (t / 3600) % 100, (t / 60) % 60, t % 60, d.subsec_millis() / 10)
 }
 
-/// The TMOP wordmark: a glowing heartbeat trace and the name in neon outline style.
-fn wordmark(p: &egui::Painter, r: Rect, bloom: f32, time: f64, dark: bool) {
-    let cyan = Color32::from_rgb(0x2E, 0xC8, 0xFF);
-    let core = Color32::from_rgb(0xC8, 0xF2, 0xFF);
-    let cy = r.center().y;
-    let x0 = r.left();
-    let beat = [(0.0, 0.0), (0.16, 0.0), (0.2, -0.12), (0.24, 0.1), (0.27, -0.9), (0.31, 0.85), (0.35, -0.35), (0.38, 0.0), (0.44, 0.0)];
-    let pts: Vec<Pos2> = beat.iter().map(|(fx, fy)| pos2(x0 + fx * r.width() * 0.7, cy + fy * r.height() * 0.42)).collect();
-    // The beat's strokes sit close together and their glows add up, so it gets a lighter bloom.
-    widgets::glow_polyline(p, &pts, cyan, 1.8, bloom * 0.6, false, dark);
-    if !dark || bloom <= 0.0 {
-        p.add(egui::Shape::line(pts.clone(), Stroke::new(0.8_f32, core)));
-    }
-    // A pulse runs along the trace by arc length (up and down the spikes, not just across),
-    // then rests briefly before the next beat.
-    let cycle = 2.6;
-    let s = ((time % cycle) / cycle) as f32 * 1.35;
-    if s <= 1.0 {
-        let total: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
-        let head = s * total;
-        let tail_len = 26.0;
-        // Comet tail: points sampled backwards along the path, fading out.
-        let tail: Vec<Pos2> = (0..=16).map(|k| point_along(&pts, head - tail_len * (k as f32 / 16.0))).collect();
-        for (k, seg) in tail.windows(2).enumerate() {
-            let fade = 1.0 - k as f32 / 16.0;
-            p.line_segment([seg[0], seg[1]], Stroke::new(1.0 + 2.2 * fade, theme::with_alpha(core, 0.85 * fade * fade)));
-        }
-        let pos = point_along(&pts, head);
-        if bloom > 0.0 {
-            for (rad, a) in [(9.0, 0.10), (5.5, 0.22), (3.5, 0.45)] {
-                p.circle_filled(pos, rad * (0.6 + 0.4 * bloom), theme::with_alpha(cyan, a * bloom));
-            }
-        }
-        p.circle_filled(pos, 2.2, Color32::WHITE);
-    }
-    let tx = pts.last().map(|l| l.x + 4.0).unwrap_or(x0);
-    let font = theme::display(23.0);
-    let pos = pos2(tx, cy + 1.0);
-    if bloom > 0.0 {
-        for (dx, dy, a) in [(-1.5, 0.0, 0.18), (1.5, 0.0, 0.18), (0.0, -1.5, 0.18), (0.0, 1.5, 0.18), (0.0, 0.0, 0.3)] {
-            p.text(pos + vec2(dx, dy), Align2::LEFT_CENTER, "TMOP", font.clone(), theme::with_alpha(cyan, a * bloom));
-        }
-    }
-    p.text(pos, Align2::LEFT_CENTER, "TMOP", font, theme::lighten(cyan, 0.25));
-}
-
-/// The point `dist` along a polyline, measured by arc length and clamped to its ends.
-fn point_along(pts: &[Pos2], dist: f32) -> Pos2 {
-    let mut left = dist.max(0.0);
-    for w in pts.windows(2) {
-        let len = w[0].distance(w[1]);
-        if left <= len && len > 0.0 {
-            return w[0] + (w[1] - w[0]) * (left / len);
-        }
-        left -= len;
-    }
-    *pts.last().unwrap_or(&Pos2::ZERO)
-}
-
 pub fn fmt_hms(d: Duration) -> String {
     let t = d.as_secs();
     if t >= 86400 {
@@ -1057,7 +817,8 @@ impl eframe::App for App {
         if self.popout_only {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            let c = self.palette().body;
+            let pal = self.palette();
+            let c = pal.backdrop.map(|b| b[2]).unwrap_or(pal.body);
             [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
         }
     }
@@ -1116,6 +877,8 @@ impl App {
     fn update_inner(&mut self, ctx: &egui::Context) {
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
+        widgets::set_ink(&pal);
+        widgets::set_spark_smooth(self.settings.graphs.smooth_curves);
         // Any change of palette (another palette, or a role edited in the editor) restyles egui,
         // and so does a style that no longer matches it (egui swaps styles with the OS theme).
         let live = ctx.style();
@@ -1176,11 +939,14 @@ impl App {
             }
         } else {
             self.replace_poll(ctx);
-            self.menu_bar(ctx, &pal);
+            if let Some([hi, mid, edge]) = pal.backdrop {
+                widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.screen_rect(), hi, mid, edge);
+            }
+            self.header_bar(ctx, &pal, &snap);
             self.replace_banner(ctx, &pal);
             self.status_bar(ctx, &pal, &snap);
-            self.sidebar(ctx, &pal);
-            let frame = egui::Frame::none().fill(pal.body);
+            self.rail(ctx, &pal);
+            let frame = egui::Frame::none().inner_margin(egui::Margin { left: 8.0, right: 32.0, top: 12.0, bottom: 36.0 });
             egui::CentralPanel::default().frame(frame).show(ctx, |ui| match self.page {
                 Page::Summary => self.summary_page(ui, &fd),
                 Page::Performance => self.performance_page(ui, &fd),
