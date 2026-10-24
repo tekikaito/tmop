@@ -526,7 +526,6 @@ impl App {
         let pal = fd.pal;
         let st = theme::status(&pal);
         let p = ui.painter().clone();
-        let s = fd.snap;
         let lead = leader(groups, v.health.bottleneck);
         let hot = if v.levels[1] == Level::Critical { st.danger_text } else { st.warn };
         let (pad_x, pad_y) = (32.0, 26.0);
@@ -573,7 +572,7 @@ impl App {
         let parts: Vec<(&str, FontId, Color32)> = sentence.iter().map(|(t, f, c)| (t.as_str(), f.clone(), *c)).collect();
         let big = rich(&p, &parts, text_w, 31.0);
         let second = match v.health.bottleneck {
-            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, Windows may be paging.", s.disk.active_pct)),
+            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, Windows may be paging.", fd.smooth.disk)),
             None => Some("No resource is under pressure.".to_string()),
             _ => None,
         };
@@ -745,8 +744,7 @@ fn leader(groups: &[AppGroup], b: Option<Bottleneck>) -> Option<&AppGroup> {
     match b {
         Some(Bottleneck::Memory) => groups.iter().max_by_key(|g| g.memory),
         Some(Bottleneck::Disk) => groups.iter().max_by(|a, b| a.io_bps.total_cmp(&b.io_bps)),
-        // Groups come busiest first (see `Steady`), so the first one with CPU time leads.
-        _ => groups.iter().find(|g| g.cpu > 0.0),
+        _ => groups.iter().filter(|g| g.cpu > 0.0).max_by(|a, b| a.cpu.total_cmp(&b.cpu)),
     }
 }
 

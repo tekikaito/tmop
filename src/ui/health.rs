@@ -209,8 +209,12 @@ pub struct Steady {
 impl Steady {
     /// The groups of sample `seq` with averaged CPU, I/O and GPU, busiest (CPU) first.
     pub fn update(&mut self, seq: u64, mut groups: Vec<AppGroup>) -> Vec<AppGroup> {
-        let fresh = seq != self.seq || self.order.is_empty();
+        let fresh = seq != self.seq || self.order.is_empty() || groups.iter().any(|g| !self.avg.contains_key(&g.key));
         if fresh {
+            // After a gap (another page was open, the window was minimized) the old averages are stale.
+            if seq != self.seq.wrapping_add(1) {
+                self.avg.clear();
+            }
             self.seq = seq;
             let mut next = HashMap::with_capacity(groups.len());
             for g in &groups {
@@ -361,6 +365,9 @@ mod tests {
             s.update(seq, groups(1.0, 8.0));
         }
         assert_eq!(keys(&s.update(10, groups(1.0, 8.0))), ["b.exe", "a.exe"]);
+        // After a gap (seq jumps) the raw values count again.
+        let g = s.update(20, groups(5.0, 1.0));
+        assert_eq!((g[0].key.as_str(), g[0].cpu), ("a.exe", 5.0));
     }
 
     #[test]
