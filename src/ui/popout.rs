@@ -781,7 +781,7 @@ fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, 
     }
 
     // Health line: a ring in the verdict's colour and the busiest app.
-    let verdict = super::health::health(fd.snap, fd.rows, None);
+    let verdict = super::health::health(fd.snap, fd.rows, None, fd.lasting);
     let (word, level_color) = match verdict.level {
         super::health::Level::Good => ("good", st.ok),
         super::health::Level::Elevated => ("elevated", st.warn),
@@ -1073,7 +1073,7 @@ mod tests {
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false };
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default() };
                     let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
                     assert!(!ev.close && !ev.menu);
                 });

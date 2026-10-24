@@ -127,7 +127,7 @@ impl ClockTrace {
 
 /// Width kept for the title block when deciding whether the toolbar fits beside it.
 const TITLE_W: f32 = 340.0;
-const TOOLBAR_H: f32 = 36.0;
+pub(super) const TOOLBAR_H: f32 = 36.0;
 
 /// The toolbar rect and the content area of a page whose title block was drawn by
 /// [`super::App::page_title`] (`body` is what it returned). The toolbar sits at the right end of the

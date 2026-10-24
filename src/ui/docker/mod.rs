@@ -40,6 +40,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_TOASTS: usize = 5;
 /// Engine events kept in the snapshot for the engine tab.
 const EVENTS_SHOWN: usize = 30;
+/// Height of the switches row under the tabs when it is stacked: a 6 px gap and the 34 px row.
+const SWITCH_ROW_H: f32 = 40.0;
 
 /// Which table the page shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -414,8 +416,10 @@ impl App {
         self.docker_toolbar(ui, bar, &pal, &active);
 
         let tabs = Rect::from_min_size(pos2(area.left(), tabs_top), vec2(area.width(), 36.0));
-        self.tab_strip(ui, tabs, &pal, &active);
-        let content = Rect::from_min_max(pos2(area.left(), tabs.bottom() + 14.0), area.max);
+        // Below this width the six tabs and the switches no longer fit in one row.
+        let stacked = area.width() < 1000.0;
+        self.tab_strip(ui, tabs, &pal, &active, stacked);
+        let content = Rect::from_min_max(pos2(area.left(), tabs.bottom() + if stacked { SWITCH_ROW_H } else { 0.0 } + 14.0), area.max);
         if self.docker.ui.tab == Tab::Engine {
             // The engine tab has no detail aside, so its content takes the whole width.
             self.docker.ui.detail.terminals.set_visible(None);
@@ -580,7 +584,8 @@ impl App {
     }
 
     /// Tabs with counts, and the switches on the right.
-    fn tab_strip(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, active: &str) {
+    /// With `stacked` the switches get a row of their own under the tabs.
+    fn tab_strip(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, active: &str, stacked: bool) {
         let snap = &self.docker.ui.snap;
         let tabs: [(&str, Option<usize>); 6] = [
             ("Containers", Some(snap.containers.len())),
@@ -596,7 +601,8 @@ impl App {
         if let Some(i) = widgets::tab_bar(ui, rect, pal, &tabs, selected, None) {
             self.docker.ui.tab = ORDER[i];
         }
-        let switches_rect = Rect::from_min_max(pos2(rect.right() - 320.0, rect.top()), pos2(rect.right(), rect.top() + 34.0));
+        let top = if stacked { rect.bottom() + 6.0 } else { rect.top() };
+        let switches_rect = Rect::from_min_max(pos2(rect.right() - 320.0, top), pos2(rect.right(), top + 34.0));
         self.switches(ui, switches_rect, pal, active);
     }
 

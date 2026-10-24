@@ -1,7 +1,7 @@
 //! Flight Recorder page: live graph, process events and recordings.
 
 use super::kit::{self, empty_state, hsplit, section_card, vsplit};
-use super::pro_pages::{clock_of, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
+use super::pro_pages::{clock_of, TOOLBAR_H, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
 use super::theme::{self, with_alpha};
 use super::widgets::{self, draw_graph, Button, ButtonKind, Graph, GraphLine, Icon};
 use super::{fmt_hms, App, FrameData};
@@ -41,7 +41,17 @@ impl App {
         // The subtitle is drawn here (it needs a colour and the recording dot); the title block only
         // gets a blank one so it keeps its two-line layout.
         let body = self.page_title(ui, &pal, "Flight Recorder", " ");
-        let (tools, area) = page_layout(body, TOOLBAR_W);
+        let (tools, mut area) = page_layout(body, TOOLBAR_W);
+        // On a row of its own that is narrower than the toolbar, the folder controls get a row above
+        // the recording controls, so nothing is pushed off the left edge.
+        let two_rows = tools.bottom() > body.top() && tools.width() < TOOLBAR_W;
+        let control_row = if two_rows {
+            let dy = TOOLBAR_H + 6.0;
+            area.min.y += dy;
+            tools.translate(vec2(0.0, dy))
+        } else {
+            tools
+        };
         let p = ui.painter().clone();
         {
             let (x, y) = (body.left() + 13.0, body.top() - super::HEADER_H + 44.0);
@@ -64,7 +74,7 @@ impl App {
         let mut apply_dir = false;
         let mut default_dir = false;
         let ring_len = self.recorder.ring.len();
-        toolbar(ui, tools, |ui| {
+        let mut controls = |ui: &mut egui::Ui| {
             save_flight = Button::new(&format!("Save flight recorder ({ring_len})")).show(ui, &pal).clicked();
             toggle = if recording { Button::new("\u{25a0} Stop recording").kind(ButtonKind::DangerFill) } else { Button::primary("\u{25cf} Start recording") }.show(ui, &pal).clicked();
             egui::ComboBox::from_id_salt("rec-limit").width(130.0).selected_text(LIMITS[self.pro.rec_limit].0).show_ui(ui, |ui| {
@@ -73,11 +83,22 @@ impl App {
                 }
             });
             ui.label(RichText::new("Stop after").font(theme::ui(12.0)).color(pal.text_faint));
+        };
+        let mut folder = |ui: &mut egui::Ui| {
             open_folder = Button::ghost("Open folder").show(ui, &pal).clicked();
             default_dir = Button::ghost("Default").show(ui, &pal).clicked();
             apply_dir = mono_input(ui, &mut self.pro.rec_dir_text, "Recording folder", 220.0, &pal).lost_focus();
             ui.label(RichText::new("Folder").font(theme::ui(12.0)).color(pal.text_faint));
-        });
+        };
+        if two_rows {
+            toolbar(ui, tools, folder);
+            toolbar(ui, control_row, controls);
+        } else {
+            toolbar(ui, tools, |ui| {
+                controls(ui);
+                folder(ui);
+            });
+        }
         if default_dir {
             self.pro.rec_dir_text = recorder::default_dir().display().to_string();
             apply_dir = true;

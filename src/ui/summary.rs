@@ -101,9 +101,9 @@ impl App {
     fn verdict(&mut self, fd: &FrameData<'_>, now: Instant) -> Verdict {
         let s = fd.snap;
         let levels = [
-            level_of(s.cpu.total_pct, CPU_LEVELS),
+            health::settled(level_of(s.cpu.total_pct, CPU_LEVELS), fd.lasting.cpu),
             level_of(s.memory.used_pct, MEMORY_LEVELS),
-            level_of(s.disk.active_pct, DISK_LEVELS),
+            health::settled(level_of(s.disk.active_pct, DISK_LEVELS), fd.lasting.disk),
             if s.gpu.available { level_of(s.gpu.utilization_pct, GPU_LEVELS) } else { Level::Good },
         ];
         let st = &mut self.summary;
@@ -112,7 +112,7 @@ impl App {
                 *slot = (level, Some(now));
             }
         }
-        let health = health::health(s, fd.rows, st.since);
+        let health = health::health(s, fd.rows, st.since, fd.lasting);
         if health.level == Level::Critical {
             st.since.get_or_insert(now);
         } else {
@@ -371,7 +371,11 @@ impl App {
                 super::hardware::draw(&p, icon, c.hardware, pal.text_rail());
             }
             let spark = Rect::from_min_size(pos2(r.left() + 20.0, r.top() + 20.0 + 52.0 + 10.0), vec2(r.width() - 40.0, 40.0));
-            widgets::sparkline(&p, spark, &c.lines, 0.12, false);
+            if self.settings.graphs.dashed_summary {
+                widgets::sparkline_dashed(&p, spark, &c.lines);
+            } else {
+                widgets::sparkline(&p, spark, &c.lines, 0.12, false);
+            }
             widgets::text_fit(&p, pos2(r.left() + 20.0, spark.bottom() + 10.0), Align2::LEFT_TOP, &c.footer, theme::mono(12.0), pal.text_faint, r.width() - 40.0);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 *go = Some(Go::Device(c.device));

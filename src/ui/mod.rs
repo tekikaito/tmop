@@ -323,6 +323,8 @@ pub struct FrameData<'a> {
     pub time: f64,
     /// `showSelfInReports`: list TMOP itself in process lists.
     pub show_self: bool,
+    /// How long CPU and disk have been critical (see [`health::health`]).
+    pub lasting: health::Lasting,
 }
 
 impl FrameData<'_> {
@@ -401,6 +403,8 @@ pub struct App {
     pub perf_docker: performance::DockerPerfCache,
     /// State of the Summary and Performance pages.
     pub summary: summary::SummaryState,
+    /// Follows how long CPU and disk load stay critical.
+    pressure: health::Tracker,
     pub perf: performance::PerfState,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
@@ -439,6 +443,7 @@ impl App {
             docker,
             perf_docker: performance::DockerPerfCache::default(),
             summary: summary::SummaryState::default(),
+            pressure: health::Tracker::default(),
             perf: performance::PerfState::default(),
             settings,
             settings_dirty: false,
@@ -568,7 +573,7 @@ impl App {
         if !self.settings.graphs.color_keyed {
             // Without colour keying every trace uses one neutral blue, later traces dimmer.
             for (i, l) in lines.iter_mut().enumerate() {
-                l.color = theme::dim(Color32::from_rgb(0x4F, 0xB4, 0xFF), 1.0 - 0.3 * i.min(2) as f32);
+                l.color = widgets::neutral_graph_color(i);
             }
         }
         let mut g = Graph::new(lines);
@@ -879,6 +884,7 @@ impl App {
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
         widgets::set_ink(&pal);
         widgets::set_spark_smooth(self.settings.graphs.smooth_curves);
+        widgets::set_spark_neutral(!self.settings.graphs.color_keyed);
         // Any change of palette (another palette, or a role edited in the editor) restyles egui,
         // and so does a style that no longer matches it (egui swaps styles with the OS theme).
         let live = ctx.style();
@@ -931,7 +937,8 @@ impl App {
             self.applied_top = Some(self.settings.window.always_on_top);
         }
         let smooth = self.smooth.clone();
-        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports };
+        let lasting = self.pressure.update(&snap, now);
+        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting };
 
         if self.popout_only {
             if self.popout_ui(ctx, &fd) {

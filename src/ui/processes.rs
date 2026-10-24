@@ -25,6 +25,8 @@ const SPARK_H: f32 = 24.0;
 const SHOWN_MEMBERS: usize = 3;
 /// Height of the system history strip.
 const STRIP_H: f32 = 108.0;
+/// Width of the "Columns" button at the right end of the filter tabs.
+const COLUMNS_W: f32 = 140.0;
 const VIEWS: [&str; 6] = ["All", "Apps", "Background", "Windows", "Services", "Suspended"];
 
 /// Column display order; the first entries are the ones shown by default.
@@ -651,10 +653,13 @@ impl App {
         history_strip(ui.painter(), strip, fd, &pal, iv);
         let tabs_rect = Rect::from_min_size(pos2(area.left(), strip.bottom() + 14.0), vec2(area.width(), 36.0));
         let tab_items: Vec<(&str, Option<usize>)> = VIEWS.iter().zip(counts).map(|(l, c)| (*l, c)).collect();
-        if let Some(v) = widgets::tab_bar(ui, tabs_rect, &pal, &tab_items, view, None) {
+        // The tabs stop short of the Columns button; the hairline carries on under it.
+        let tabs_only = Rect::from_min_max(tabs_rect.min, pos2(tabs_rect.right() - COLUMNS_W - 8.0, tabs_rect.bottom()));
+        ui.painter().line_segment([pos2(tabs_only.right(), tabs_rect.bottom() - 0.5), pos2(tabs_rect.right(), tabs_rect.bottom() - 0.5)], Stroke::new(1.0_f32, pal.sidebar_rule));
+        if let Some(v) = widgets::tab_bar(ui, tabs_only, &pal, &tab_items, view, None) {
             self.proc.view = v;
         }
-        kit::row_ui(ui, Rect::from_min_max(pos2(tabs_rect.right() - 140.0, tabs_rect.top()), pos2(tabs_rect.right(), tabs_rect.bottom() - 2.0)), |ui| {
+        kit::row_ui(ui, Rect::from_min_max(pos2(tabs_rect.right() - COLUMNS_W, tabs_rect.top()), pos2(tabs_rect.right(), tabs_rect.bottom() - 2.0)), |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let resp = Button::ghost("Columns").icon(Icon::ChevronDown).size(ButtonSize::Compact).show(ui, &pal);
                 let id = ui.make_persistent_id("proc-columns");
@@ -1831,7 +1836,7 @@ mod tests {
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let fd = FrameData { snap: &snap, hist: &hist, rows: &[], smooth: &smooth, pal, metric_colors: theme::MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: true };
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &[], smooth: &smooth, pal, metric_colors: theme::MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: true, lasting: Default::default() };
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 10.0), vec2(900.0, STRIP_H)), &fd, &pal, Some(Duration::from_secs(1)));
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 130.0), vec2(900.0, STRIP_H)), &fd, &pal, None);
                     let mut r = row(10, 4, 1, "chrome.exe");

@@ -360,7 +360,7 @@ mod tests {
         ];
         let (snap, hist, smooth) = (Snapshot::default(), History::new(8), super::super::Smooth::default());
         let rows = vec![ProcessRow { pid: 2112, name: "svchost.exe".into(), create_time: 7, cpu_pct: 0.1, ..Default::default() }];
-        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: Default::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false };
+        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: Default::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default() };
         let mut info = InfoCache::default();
         for (width, drivers, selected) in [(1500.0, false, None), (1500.0, false, Some("Dnscache")), (900.0, false, Some("Spooler")), (1500.0, true, None), (900.0, true, Some("Spooler"))] {
             let mut state = TableState { selected: selected.map(String::from), ..Default::default() };

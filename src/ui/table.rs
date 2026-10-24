@@ -63,7 +63,7 @@ pub struct Cell {
     pub badge: Option<&'static str>,
     /// Show the text as a status chip in this colour instead of plain text.
     pub chip: Option<Color32>,
-    /// Second, dim line under the text (rows become [`TALL_ROW_H`] when any cell has one).
+    /// Second, dim line under the text (rows become [`TALL_ROW_H`] when a first-column cell has one).
     pub sub: Option<String>,
     pub spark: Option<Spark>,
 }
@@ -188,8 +188,8 @@ pub fn show_with_menu(
     let mut activated = None;
     let selected = state.selected.clone();
     let (sort_col, desc) = (state.sort, state.desc);
-    // Rows are taller when the first rows have a second line.
-    let row_h = if order.iter().take(3).any(|i| (0..cols.len()).any(|c| cell(*i, c).sub.is_some())) { TALL_ROW_H } else { ROW_H };
+    // Rows are taller when any row has a second line (only the first column carries one).
+    let row_h = if !cols.is_empty() && order.iter().any(|i| cell(*i, 0).sub.is_some()) { TALL_ROW_H } else { ROW_H };
     // The table sits in a rounded box with a faint wash and a hairline.
     ui.painter().rect_filled(rect, 8.0, with_alpha(pal.text, 0.03));
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink(1.0)).id_salt(id), |ui| {

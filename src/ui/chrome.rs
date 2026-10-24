@@ -122,8 +122,13 @@ impl App {
                 self.settings_dirty = true;
             }
             // Theme: the other polarity.
-            let (icon, tip) = if pal.dark { (Icon::Moon, "Switch to light theme") } else { (Icon::Sun, "Switch to dark theme") };
-            if icon_button(ui, theme_rect, "hdr-theme", icon, pal, false, tip).clicked() {
+            let (icon, polarity) = if pal.dark { (Icon::Moon, "light") } else { (Icon::Sun, "dark") };
+            // The button always lands on the built-in theme of the other polarity.
+            let tip = match self.settings.appearance.theme.as_str() {
+                "dark" | "light" => format!("Switch to {polarity} theme"),
+                _ => format!("Switch to the built-in {polarity} theme (your palette stays available in Settings)"),
+            };
+            if icon_button(ui, theme_rect, "hdr-theme", icon, pal, false, &tip).clicked() {
                 self.settings.appearance.theme = if pal.dark { "light" } else { "dark" }.into();
                 self.settings_dirty = true;
                 self.palette_ui.note_theme_change(&self.palettes);

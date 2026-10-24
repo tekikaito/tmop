@@ -211,7 +211,7 @@ fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs)
         let text = if g.color_keyed {
             "Colours that identify each metric in graphs, sparklines, meters and the popout."
         } else {
-            "Color Keyed Graphs is off: graphs use a single blue and these colours aren't used."
+            "Color Keyed Graphs is off: graphs and sparklines use a single blue and these colours aren't used."
         };
         hint(ui, pal, text);
     });
@@ -641,10 +641,10 @@ impl App {
                         section(ui, &pal, &mut sections, SECTIONS[1], |ui| {
                             changed |= toggle_row(ui, &pal, &mut s.graphs.color_keyed, "Color keyed graphs");
                             changed |= metric_color_rows(ui, &pal, &mut s.graphs);
-                            changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graph");
+                            changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graphs");
                             changed |= toggle_row(ui, &pal, &mut s.graphs.smooth_curves, "Smooth graph curves");
                             changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress older history");
-                            let history_hint = "Older time is compressed smoothly. At 15\u{d7}, the live quarter on the right tracks the grid 1:1 and older time is compressed progressively, so the whole graph holds 15\u{d7} history.";
+                            let history_hint = "How much history is kept. With Compress older history on, the live part on the right of the Performance and Docker graphs tracks the grid 1:1 and older time is compressed progressively; with it off the Performance graphs fit the whole history.";
                             row_hint(ui, &pal, "History multiplier", history_hint, |ui| {
                                 egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graphs.history_multiplier)).show_ui(ui, |ui| {
                                     for m in [1u32, 3, 7, 15] {
@@ -652,7 +652,7 @@ impl App {
                                     }
                                 });
                             });
-                            row_hint(ui, &pal, "Pixels per update", "Each data update advances the graph by this many pixels; traces glide smoothly between updates.", |ui| {
+                            row_hint(ui, &pal, "Pixels per update", "With Compress older history on, each data update advances the Performance and Docker graphs by this many pixels; traces glide smoothly between updates.", |ui| {
                                 egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graphs.pixels_per_update.to_string()).show_ui(ui, |ui| {
                                     for px in [4u32, 8, 12, 16, 24, 32] {
                                         changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, px.to_string()).changed();

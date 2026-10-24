@@ -60,6 +60,48 @@ pub fn level_of(pct: f32, (elevated, critical): (f32, f32)) -> Level {
     }
 }
 
+/// How long CPU or disk load must stay at its Critical level before the verdict calls it Critical;
+/// a shorter spike (an app launch, a scan burst) stays Elevated. Memory is Critical at once.
+pub const CRITICAL_AFTER: Duration = Duration::from_secs(30);
+
+/// How long CPU and disk have been at their Critical level without a break (zero when they are not).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lasting {
+    pub cpu: Duration,
+    pub disk: Duration,
+}
+
+/// Follows [`Lasting`] from one sample to the next.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Tracker {
+    cpu: Option<Instant>,
+    disk: Option<Instant>,
+}
+
+impl Tracker {
+    pub fn update(&mut self, snap: &Snapshot, now: Instant) -> Lasting {
+        fn track(since: &mut Option<Instant>, pct: f32, levels: (f32, f32), now: Instant) -> Duration {
+            if level_of(pct, levels) == Level::Critical {
+                now.saturating_duration_since(*since.get_or_insert(now))
+            } else {
+                *since = None;
+                Duration::ZERO
+            }
+        }
+        Lasting { cpu: track(&mut self.cpu, snap.cpu.total_pct, CPU_LEVELS, now), disk: track(&mut self.disk, snap.disk.active_pct, DISK_LEVELS, now) }
+    }
+}
+
+/// `level` for a CPU or disk load that has been at its Critical level for `held`: Critical only
+/// from [`CRITICAL_AFTER`] on, Elevated before.
+pub fn settled(level: Level, held: Duration) -> Level {
+    if level == Level::Critical && held < CRITICAL_AFTER {
+        Level::Elevated
+    } else {
+        level
+    }
+}
+
 /// One app: the processes sharing an image name, summed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppGroup {
@@ -164,10 +206,11 @@ fn lasted(since: Option<Instant>) -> String {
 }
 
 /// How the machine is doing. `since` is when the current Critical level began, if the caller
-/// tracks it.
-pub fn health(snap: &Snapshot, rows: &[ProcessRow], since: Option<Instant>) -> Health {
+/// tracks it; `lasting` says how long CPU and disk have been at their Critical level, which they
+/// need to be for [`CRITICAL_AFTER`] before the verdict is Critical.
+pub fn health(snap: &Snapshot, rows: &[ProcessRow], since: Option<Instant>, lasting: Lasting) -> Health {
     let (mem, cpu, disk) = (snap.memory.used_pct, snap.cpu.total_pct, snap.disk.active_pct);
-    let levels = [(level_of(mem, MEMORY_LEVELS), 0), (level_of(cpu, CPU_LEVELS), 1), (level_of(disk, DISK_LEVELS), 2)];
+    let levels = [(level_of(mem, MEMORY_LEVELS), 0), (settled(level_of(cpu, CPU_LEVELS), lasting.cpu), 1), (settled(level_of(disk, DISK_LEVELS), lasting.disk), 2)];
     // The worst resource decides; on a tie memory beats CPU beats disk.
     let (level, which) = levels.iter().rev().fold((Level::Good, 0), |best, &(l, i)| if l >= best.0 && l != Level::Good { (l, i) } else { best });
     let busiest = busiest_app(rows);
@@ -205,6 +248,9 @@ mod tests {
     fn row(pid: u32, name: &str, cpu: f32, desc: Option<&str>) -> ProcessRow {
         ProcessRow { pid, name: name.into(), cpu_pct: cpu, description: desc.map(String::from), ..Default::default() }
     }
+
+    /// CPU and disk have been critical for as long as it takes to count.
+    const LONG: Lasting = Lasting { cpu: CRITICAL_AFTER, disk: CRITICAL_AFTER };
 
     fn snap(mem: f32, cpu: f32, disk: f32) -> Snapshot {
         let mut s = Snapshot::default();
@@ -255,23 +301,47 @@ mod tests {
     #[test]
     fn verdict_names_the_worst_resource() {
         let rows = [row(1, "chrome.exe", 18.0, Some("Chrome"))];
-        let good = health(&snap(40.0, 20.0, 5.0), &rows, None);
+        let good = health(&snap(40.0, 20.0, 5.0), &rows, None, Lasting::default());
         assert_eq!((good.level, good.headline.as_str(), good.emphasis, good.bottleneck), (Level::Good, "Everything looks good.", "good", None));
         assert!(good.detail.starts_with("Chrome is the busiest app right now (18% CPU)."), "{}", good.detail);
         assert_eq!((good.busiest.as_deref(), good.busiest_cpu), (Some("Chrome"), 18.0));
-        let slow = health(&snap(93.0, 97.0, 10.0), &rows, None);
+        let slow = health(&snap(93.0, 97.0, 10.0), &rows, None, LONG);
         assert_eq!((slow.level, slow.headline.as_str(), slow.bottleneck), (Level::Critical, "Memory is almost full.", Some(Bottleneck::Memory)));
-        let cpu = health(&snap(50.0, 97.0, 10.0), &rows, None);
+        let cpu = health(&snap(50.0, 97.0, 10.0), &rows, None, LONG);
         assert_eq!((cpu.headline.as_str(), cpu.bottleneck), ("CPU is under heavy load.", Some(Bottleneck::Cpu)));
-        assert_eq!(health(&snap(80.0, 10.0, 10.0), &[], None).level, Level::Elevated);
-        assert_eq!(health(&snap(10.0, 10.0, 65.0), &[], None).headline, "Disk is busy.");
-        assert_eq!(health(&snap(10.0, 10.0, 10.0), &[], None).detail, "No resource is under pressure.");
+        assert_eq!(health(&snap(80.0, 10.0, 10.0), &[], None, LONG).level, Level::Elevated);
+        assert_eq!(health(&snap(10.0, 10.0, 65.0), &[], None, LONG).headline, "Disk is busy.");
+        assert_eq!(health(&snap(10.0, 10.0, 10.0), &[], None, LONG).detail, "No resource is under pressure.");
+    }
+
+    #[test]
+    fn a_short_spike_is_not_critical() {
+        let spike = snap(40.0, 99.0, 95.0);
+        let fresh = health(&spike, &[], None, Lasting::default());
+        assert_eq!((fresh.level, fresh.headline.as_str(), fresh.bottleneck), (Level::Elevated, "CPU is busy.", Some(Bottleneck::Cpu)));
+        let old = health(&spike, &[], None, Lasting { cpu: CRITICAL_AFTER, disk: Duration::ZERO });
+        assert_eq!((old.level, old.headline.as_str()), (Level::Critical, "CPU is under heavy load."));
+        let disk = health(&snap(40.0, 10.0, 95.0), &[], None, Lasting { cpu: Duration::ZERO, disk: CRITICAL_AFTER });
+        assert_eq!((disk.level, disk.headline.as_str()), (Level::Critical, "Disk is saturated."));
+        // Memory does not wait.
+        assert_eq!(health(&snap(95.0, 10.0, 10.0), &[], None, Lasting::default()).level, Level::Critical);
+    }
+
+    #[test]
+    fn the_tracker_counts_an_unbroken_critical_stretch() {
+        let t0 = Instant::now();
+        let secs = Duration::from_secs;
+        let mut t = Tracker::default();
+        assert_eq!(t.update(&snap(10.0, 99.0, 10.0), t0).cpu, Duration::ZERO);
+        assert_eq!(t.update(&snap(10.0, 99.0, 10.0), t0 + secs(31)).cpu, secs(31));
+        assert_eq!(t.update(&snap(10.0, 50.0, 10.0), t0 + secs(32)), Lasting::default());
+        assert_eq!(t.update(&snap(10.0, 99.0, 10.0), t0 + secs(33)).cpu, Duration::ZERO, "a break restarts the count");
     }
 
     #[test]
     fn the_emphasis_is_part_of_the_headline() {
         for s in [snap(10.0, 10.0, 10.0), snap(80.0, 10.0, 10.0), snap(95.0, 10.0, 10.0), snap(10.0, 85.0, 10.0), snap(10.0, 99.0, 10.0), snap(10.0, 10.0, 65.0), snap(10.0, 10.0, 95.0)] {
-            let h = health(&s, &[], None);
+            let h = health(&s, &[], None, LONG);
             assert!(h.headline.contains(h.emphasis), "{} / {}", h.headline, h.emphasis);
         }
     }

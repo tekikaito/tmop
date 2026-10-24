@@ -494,12 +494,16 @@ pub fn regions_for(multiplier: u32, compressed: bool) -> u32 {
     }
 }
 
+/// Smallest px per update a graph is drawn at: a long history squeezed into a small sparkline
+/// stays complete (the point vector is still only a few thousand entries).
+pub const MIN_PX_PER_UPDATE: f32 = 0.02;
+
 /// Maps a sample's age (updates, fractional) to x. The newest `width / regions` (the live part)
 /// advances `p` px per update. Older time is compressed continuously: the px-per-update rate
 /// decays exponentially with distance, so spacing never jumps. The decay is chosen so the whole
 /// width holds as much history as `regions` equal regions of 1x, 2x, 4x, 8x... would.
 #[derive(Clone, Copy)]
-struct TimeAxis {
+pub struct TimeAxis {
     right: f32,
     p: f32,
     /// Width of the uncompressed live part.
@@ -509,7 +513,7 @@ struct TimeAxis {
 }
 
 impl TimeAxis {
-    fn new(right: f32, width: f32, p: f32, regions: u32) -> Self {
+    pub fn new(right: f32, width: f32, p: f32, regions: u32) -> Self {
         let r = regions.max(1);
         let live = width / r as f32;
         if r == 1 {
@@ -537,8 +541,17 @@ impl TimeAxis {
         self.live + (1.0 + self.k * (u - self.live)).ln() / self.k
     }
 
-    fn x_of(&self, age: f32) -> f32 {
+    pub fn x_of(&self, age: f32) -> f32 {
         self.right - self.dist(age)
+    }
+
+    /// Age (updates, fractional) of the sample drawn `d` px from the right edge; inverse of [`Self::x_of`].
+    pub fn age_at(&self, d: f32) -> f32 {
+        let d = d.max(0.0);
+        if self.k == 0.0 || d <= self.live {
+            return d / self.p;
+        }
+        (self.live + ((self.k * (d - self.live)).exp() - 1.0) / self.k) / self.p
     }
 
     /// Pixels per update at distance `d` from the right edge.
@@ -553,7 +566,7 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
     if let Some(bg) = g.background {
         painter.rect_filled(rect, 0.0, bg);
     }
-    let p = g.px_per_update.max(0.25);
+    let p = g.px_per_update.max(MIN_PX_PER_UPDATE);
     let axis = TimeAxis::new(rect.right(), rect.width(), p, g.regions);
     // Sub-pixel motion between updates: anti-aliased traces glide instead of stepping.
     let shift = g.phase.clamp(0.0, 1.0);
@@ -1377,19 +1390,48 @@ pub fn legend(p: &egui::Painter, pos: Pos2, items: &[(&str, Color32)], font: Fon
     x - pos.x
 }
 
+/// Whether sparklines use one neutral blue instead of their metric colours (`graphs.colorKeyed`
+/// off); set once per frame.
+static SPARK_NEUTRAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_spark_neutral(on: bool) {
+    SPARK_NEUTRAL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The colour of the `i`-th trace of a graph without colour keying: one neutral blue, later
+/// traces dimmer.
+pub fn neutral_graph_color(i: usize) -> Color32 {
+    theme::dim(Color32::from_rgb(0x4F, 0xB4, 0xFF), 1.0 - 0.3 * i.min(2) as f32)
+}
+
+/// `color` for the `i`-th trace of a sparkline: itself, or the neutral blue without colour keying.
+pub fn spark_color(i: usize, color: Color32) -> Color32 {
+    if SPARK_NEUTRAL.load(std::sync::atomic::Ordering::Relaxed) { neutral_graph_color(i) } else { color }
+}
+
 /// A line chart without chrome: every series fitted across the whole width (oldest left, newest
 /// right) at 1.4 px with an area fill of alpha `fill` (0 for none) and no markers, bloom or grid.
 /// Each line is `(series, colour, (low, high))`. With `dashed_second` the second series is dashed
 /// and unfilled (network down solid, up dashed).
 pub fn sparkline(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_second: bool) {
+    spark_lines(p, rect, lines, fill, |i| dashed_second && i == 1);
+}
+
+/// [`sparkline`] with every line dashed and unfilled (`graphs.dashedSummary`).
+pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))]) {
+    spark_lines(p, rect, lines, 0.0, |_| true);
+}
+
+fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_at: impl Fn(usize) -> bool) {
     let n = lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0);
     if n < 2 {
         return;
     }
     let smooth = SPARK_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
     for (i, (series, color, range)) in lines.iter().enumerate() {
-        let dashed = dashed_second && i == 1;
-        let mut g = Graph::new(vec![GraphLine { series, color: *color, range: *range }]);
+        let dashed = dashed_at(i);
+        let color = spark_color(i, *color);
+        let mut g = Graph::new(vec![GraphLine { series, color, range: *range }]);
         g.regions = 1;
         g.px_per_update = rect.width() / (n - 1) as f32;
         g.bloom = 0.0;
@@ -1981,6 +2023,17 @@ mod tests {
                     add(&p, ui, &pal);
                 });
             });
+        }
+    }
+
+    #[test]
+    fn the_time_axis_maps_back_to_ages() {
+        for regions in [1, 2, 4] {
+            let axis = TimeAxis::new(700.0, 700.0, 16.0, regions);
+            for age in [0.0_f32, 1.0, 10.0, 43.0, 120.0, 300.0] {
+                let back = axis.age_at(700.0 - axis.x_of(age));
+                assert!((back - age).abs() < 0.05 * age.max(1.0), "{regions} regions: {age} -> {back}");
+            }
         }
     }
 

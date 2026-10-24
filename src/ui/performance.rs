@@ -319,7 +319,8 @@ impl App {
         let (ix, iw) = (x + 24.0, w - 48.0);
         let mut cy = y + 20.0;
         let iv = self.settings.update_speed().interval();
-        let pc = PlotCtx { pal: &pal, smooth: self.settings.graphs.smooth_curves, interval: iv };
+        let gs = &self.settings.graphs;
+        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv };
         let s = fd.snap;
         match self.device {
             Device::Cpu => {
@@ -831,6 +832,15 @@ struct PlotCtx<'a> {
     pal: &'a Palette,
     /// Smooth the curves (`graphs.smoothCurves`).
     smooth: bool,
+    /// Glow of the traces (the appearance bloom, 0 = none).
+    bloom: f32,
+    /// Every trace in one neutral blue (`graphs.colorKeyed` off).
+    neutral: bool,
+    /// History compression: the regions and the px per update of the live part
+    /// (`graphs.compressedTime`, `historyMultiplier`, `pixelsPerUpdate`); 1 region fits the whole
+    /// history across the width.
+    regions: u32,
+    px_per_update: f32,
     /// The update interval, for the time labels.
     interval: Option<Duration>,
 }
@@ -849,12 +859,17 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
         p.line_segment([pos2(gr.left(), ly), pos2(gr.right(), ly)], Stroke::new(1.0_f32, pal.grid));
     }
     let cap = lines.first().map_or(2, |l| l.series.capacity).max(2);
-    let ppu = gr.width() / (cap - 1) as f32;
-    for l in lines {
-        let mut g = Graph::new(vec![GraphLine { series: l.series, color: l.color, range: l.range }]);
-        g.regions = 1;
+    // Uniform time fits the whole history across the width; compressed time keeps the configured
+    // px per update in the live part and squeezes the older history into the rest.
+    let (regions, ppu) = if cx.regions > 1 { (cx.regions, cx.px_per_update) } else { (1, gr.width() / (cap - 1) as f32) };
+    let ppu = ppu.max(widgets::MIN_PX_PER_UPDATE);
+    let axis = widgets::TimeAxis::new(gr.right(), gr.width(), ppu, regions);
+    for (i, l) in lines.iter().enumerate() {
+        let color = if cx.neutral { widgets::neutral_graph_color(i) } else { l.color };
+        let mut g = Graph::new(vec![GraphLine { series: l.series, color, range: l.range }]);
+        g.regions = regions;
         g.px_per_update = ppu;
-        g.bloom = 0.0;
+        g.bloom = cx.bloom;
         g.markers = false;
         g.smooth = cx.smooth;
         g.line_width = l.width;
@@ -865,9 +880,8 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
     // Time labels from the history length and the update interval.
     let label_y = gr.bottom() + 6.0;
     if let Some(iv) = cx.interval {
-        let span = (cap - 1) as f32 * iv.as_secs_f32();
         for i in 0..6 {
-            let secs = (span * (5 - i) as f32 / 5.0).round() as u64;
+            let secs = (axis.age_at(gr.width() * (5 - i) as f32 / 5.0) * iv.as_secs_f32()).round() as u64;
             let text = if i == 5 { "now".to_string() } else { format!("\u{2212}{}:{:02}", secs / 60, secs % 60) };
             let lx = gr.left() + gr.width() * i as f32 / 5.0;
             let anchor = match i {
@@ -883,9 +897,9 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
     let mut text = None;
     if let (Some(pos), Some(first)) = (resp.hover_pos(), lines.first()) {
         let n = first.series.values.len();
-        let age = ((gr.right() - pos.x) / ppu).round().max(0.0) as usize;
+        let age = axis.age_at(gr.right() - pos.x).round().max(0.0) as usize;
         if age < n {
-            let cx = gr.right() - age as f32 * ppu;
+            let cx = axis.x_of(age as f32);
             p.line_segment([pos2(cx, gr.top()), pos2(cx, gr.bottom())], Stroke::new(1.0_f32, pal.raise(0.3)));
             for l in lines {
                 if let Some(v) = l.series.values.len().checked_sub(1 + age).and_then(|i| l.series.values.get(i)) {
@@ -948,7 +962,7 @@ fn spark_fixed(p: &egui::Painter, rect: Rect, s: &Series, color: Color32, range:
     if s.values.len() < 2 {
         return;
     }
-    let mut g = Graph::new(vec![GraphLine { series: s, color, range }]);
+    let mut g = Graph::new(vec![GraphLine { series: s, color: widgets::spark_color(0, color), range }]);
     g.regions = 1;
     g.px_per_update = rect.width() / cap.saturating_sub(1).max(1) as f32;
     g.bloom = 0.0;
@@ -1063,7 +1077,7 @@ mod tests {
             let p = ui.painter().clone();
             let head = Head { title: "Intel(R) Core(TM) Ultra 9 285K Processor", sub: "8 cores".into(), value: ("23".into(), "%".into()), side: "8% kernel".into() };
             assert_eq!(super::head(&p, &pal, 20.0, 20.0, 600.0, &head), 48.0);
-            let cx = PlotCtx { pal: &pal, smooth: true, interval: Some(Duration::from_secs(1)) };
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)) };
             let lines = [PlotLine::new(&a, pal.accent, (0.0, 100.0)), PlotLine::new(&b, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
             let (h, text) = plot(ui, &cx, "t", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| ago(cx.interval, age));
             assert_eq!(h, 220.0);
@@ -1081,7 +1095,7 @@ mod tests {
         let pal = theme::LIGHT;
         let empty = Series::new(4);
         frames(|ui| {
-            let cx = PlotCtx { pal: &pal, smooth: false, interval: None };
+            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None };
             let lines = [PlotLine::new(&empty, pal.accent, (0.0, 100.0))];
             let (_, text) = plot(ui, &cx, "empty", 20.0, 20.0, 300.0, 100.0, 36.0, &percent_labels(), &lines, &|_| String::new());
             assert!(text.is_none());
