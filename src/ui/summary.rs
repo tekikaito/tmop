@@ -568,7 +568,7 @@ impl App {
         let parts: Vec<(&str, FontId, Color32)> = sentence.iter().map(|(t, f, c)| (t.as_str(), f.clone(), *c)).collect();
         let big = rich(&p, &parts, text_w, 31.0);
         let second = match v.health.bottleneck {
-            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is {:.0}% because Windows is writing memory to disk.", s.disk.active_pct)),
+            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, Windows may be paging.", s.disk.active_pct)),
             None => Some("No resource is under pressure.".to_string()),
             _ => None,
         };
