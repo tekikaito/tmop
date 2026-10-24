@@ -4,20 +4,31 @@ use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId,
 use std::sync::Arc;
 
 pub const MICHROMA: &[u8] = include_bytes!("../../assets/fonts/Michroma-Regular.ttf");
+pub const INTER_LIGHT: &[u8] = include_bytes!("../../assets/fonts/Inter-Light.ttf");
+pub const INTER: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
+pub const INTER_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Inter-Medium.ttf");
+pub const JBMONO: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+pub const JBMONO_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf");
 
 /// Named font families registered by [`install_fonts`].
 pub const F_UI: &str = "ui";
+pub const F_UI_LIGHT: &str = "ui-light";
+/// Inter has no heavier weight embedded: bold and semibold are both Medium.
 pub const F_UI_BOLD: &str = "ui-bold";
 pub const F_UI_SEMIBOLD: &str = "ui-semibold";
-/// The display font: Michroma or the `appearance.displayFont` family (see [`crate::fonts`]).
+/// The display font: Inter Light or the `appearance.displayFont` family (see [`crate::fonts`]).
 pub const F_DISPLAY: &str = "display";
 pub const F_MONO: &str = "mono";
+pub const F_MONO_MEDIUM: &str = "mono-medium";
 
 pub fn display(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_DISPLAY.into()))
 }
 pub fn ui(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_UI.into()))
+}
+pub fn light(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(F_UI_LIGHT.into()))
 }
 pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_UI_BOLD.into()))
@@ -28,54 +39,46 @@ pub fn semibold(size: f32) -> FontId {
 pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_MONO.into()))
 }
+pub fn mono_medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(F_MONO_MEDIUM.into()))
+}
 
 /// Installs the application fonts (see [`font_definitions`]). Takes effect from the next frame.
 pub fn install_fonts(ctx: &egui::Context, display: Option<crate::fonts::FontFile>) {
     ctx.set_fonts(font_definitions(display));
 }
 
-/// The application fonts: `display` (an installed font, see [`crate::fonts::resolve`]) or else
-/// the embedded Michroma (SIL OFL) for display text and, when present on this machine,
-/// Segoe UI / Consolas from the Windows font folder for body text. Missing fonts fall back
-/// to egui's bundled ones.
+/// The application fonts, all embedded (SIL OFL): Inter for text, JetBrains Mono for numbers and
+/// code, and `display` (an installed font, see [`crate::fonts::resolve`]) or else Inter Light for
+/// display text. egui's bundled fonts stay behind them for symbols and emoji.
 pub fn font_definitions(display: Option<crate::fonts::FontFile>) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     let display = match display {
         Some(f) => FontData { index: f.index, ..FontData::from_owned(f.bytes) },
-        None => FontData::from_static(MICHROMA),
+        None => FontData::from_static(INTER_LIGHT),
     };
     defs.font_data.insert(F_DISPLAY.into(), display);
-    let win = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into());
-    let fonts = win.join("Fonts");
-    let mut load = |name: &str, file: &str| -> bool {
-        match std::fs::read(fonts.join(file)) {
-            Ok(bytes) => {
-                defs.font_data.insert(name.into(), FontData::from_owned(bytes));
-                true
-            }
-            Err(_) => false,
-        }
-    };
-    let have_ui = load(F_UI, "segoeui.ttf");
-    let have_bold = load(F_UI_BOLD, "segoeuib.ttf");
-    let have_semi = load(F_UI_SEMIBOLD, "seguisb.ttf");
-    let have_mono = load(F_MONO, "consola.ttf");
+    for (name, bytes) in [("inter-light", INTER_LIGHT), ("inter", INTER), ("inter-medium", INTER_MEDIUM), ("jbmono", JBMONO), ("jbmono-medium", JBMONO_MEDIUM)] {
+        defs.font_data.insert(name.into(), FontData::from_static(bytes));
+    }
     let default_prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let default_mono = defs.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
-    let fam = |primary: Option<&str>, rest: &[String]| -> Vec<String> {
-        let mut v: Vec<String> = primary.map(|p| vec![p.to_string()]).unwrap_or_default();
+    let fam = |primary: &str, rest: &[String]| -> Vec<String> {
+        let mut v = vec![primary.to_string()];
         v.extend(rest.iter().cloned());
         v
     };
-    let ui_fam = fam(have_ui.then_some(F_UI), &default_prop);
+    let ui_fam = fam("inter", &default_prop);
     defs.families.insert(FontFamily::Proportional, ui_fam.clone());
     defs.families.insert(FontFamily::Name(F_UI.into()), ui_fam.clone());
-    defs.families.insert(FontFamily::Name(F_UI_BOLD.into()), fam(have_bold.then_some(F_UI_BOLD), &ui_fam));
-    defs.families.insert(FontFamily::Name(F_UI_SEMIBOLD.into()), fam(have_semi.then_some(F_UI_SEMIBOLD), &ui_fam));
-    defs.families.insert(FontFamily::Name(F_DISPLAY.into()), fam(Some(F_DISPLAY), &ui_fam));
-    let mono_fam = fam(have_mono.then_some(F_MONO), &default_mono);
+    defs.families.insert(FontFamily::Name(F_UI_LIGHT.into()), fam("inter-light", &ui_fam));
+    defs.families.insert(FontFamily::Name(F_UI_BOLD.into()), fam("inter-medium", &ui_fam));
+    defs.families.insert(FontFamily::Name(F_UI_SEMIBOLD.into()), fam("inter-medium", &ui_fam));
+    defs.families.insert(FontFamily::Name(F_DISPLAY.into()), fam(F_DISPLAY, &ui_fam));
+    let mono_fam = fam("jbmono", &default_mono);
     defs.families.insert(FontFamily::Monospace, mono_fam.clone());
-    defs.families.insert(FontFamily::Name(F_MONO.into()), mono_fam);
+    defs.families.insert(FontFamily::Name(F_MONO.into()), mono_fam.clone());
+    defs.families.insert(FontFamily::Name(F_MONO_MEDIUM.into()), fam("jbmono-medium", &mono_fam));
     defs
 }
 
@@ -110,9 +113,73 @@ pub struct Palette {
     pub warn: Color32,
     pub control: Color32,
     pub control_stroke: Color32,
+    /// Window background gradient stops (highlight, mid, edge). Not a palette-file role: only the
+    /// built-in Dark and Light have one, every other palette is flat `body`.
+    pub backdrop: Option<[Color32; 3]>,
 }
 
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// The default dark palette (the redesign): navy surfaces, teal accent.
 pub const DARK: Palette = Palette {
+    dark: true,
+    chrome: rgb(0x0B0F1C),
+    body: rgb(0x0B0F1C),
+    sidebar: rgb(0x0B0F1C),
+    sidebar_rule: rgb(0x1F222E),
+    card: rgb(0x141724),
+    card_stroke: rgb(0x1C202C),
+    panel: rgb(0x0E1322),
+    panel_stroke: rgb(0x1F222E),
+    hover: rgb(0x1A1D2A),
+    selection: rgb(0x152932),
+    accent: rgb(0x5EEAD4),
+    text: rgb(0xE8ECF5),
+    text_dim: rgb(0xA7B2C9),
+    text_faint: rgb(0x7C8AA5),
+    grid: rgb(0x1C202C),
+    led_bg: rgb(0x070A12),
+    led_dim: rgb(0x1C463F),
+    led_lit: rgb(0x5EEAD4),
+    ok: rgb(0x6EE7A8),
+    warn: rgb(0xF5B86B),
+    control: rgb(0x171B27),
+    control_stroke: rgb(0x1F222E),
+    backdrop: Some([rgb(0x16213A), rgb(0x0B0F1C), rgb(0x070A12)]),
+};
+
+/// The default light palette: the same structure as [`DARK`] on pale surfaces.
+pub const LIGHT: Palette = Palette {
+    dark: false,
+    chrome: rgb(0xEEF1F7),
+    body: rgb(0xEEF1F7),
+    sidebar: rgb(0xEEF1F7),
+    sidebar_rule: rgb(0xD5DAE5),
+    card: rgb(0xFAFBFD),
+    card_stroke: rgb(0xDCE1EA),
+    panel: rgb(0xF3F5F9),
+    panel_stroke: rgb(0xD5DAE5),
+    hover: rgb(0xE3E7EF),
+    selection: rgb(0xCFEFEA),
+    accent: rgb(0x0B7F75),
+    text: rgb(0x141A2B),
+    text_dim: rgb(0x4A5670),
+    text_faint: rgb(0x6F7A92),
+    grid: rgb(0xDCE1EA),
+    led_bg: rgb(0x141A2B),
+    led_dim: rgb(0x1F3A3A),
+    led_lit: rgb(0x0B7F75),
+    ok: rgb(0x1A8F5B),
+    warn: rgb(0xB5721C),
+    control: rgb(0xFFFFFF),
+    control_stroke: rgb(0xD5DAE5),
+    backdrop: Some([rgb(0xFFFFFF), rgb(0xEEF1F7), rgb(0xE4E8F0)]),
+};
+
+/// The previous Dark palette, kept as a built-in.
+pub const CLASSIC_DARK: Palette = Palette {
     dark: true,
     chrome: Color32::from_rgb(0x20, 0x20, 0x20),
     body: Color32::from_rgb(0x18, 0x18, 0x18),
@@ -136,9 +203,11 @@ pub const DARK: Palette = Palette {
     warn: Color32::from_rgb(0xE0, 0x9A, 0x3C),
     control: Color32::from_rgb(0x33, 0x33, 0x33),
     control_stroke: Color32::from_rgb(0x4A, 0x4A, 0x4A),
+    backdrop: None,
 };
 
-pub const LIGHT: Palette = Palette {
+/// The previous Light palette, kept as a built-in.
+pub const CLASSIC_LIGHT: Palette = Palette {
     dark: false,
     chrome: Color32::from_rgb(0xF0, 0xF0, 0xF0),
     body: Color32::from_rgb(0xE9, 0xE9, 0xE9),
@@ -162,6 +231,7 @@ pub const LIGHT: Palette = Palette {
     warn: Color32::from_rgb(0xB8, 0x70, 0x10),
     control: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     control_stroke: Color32::from_rgb(0xBE, 0xBE, 0xBE),
+    backdrop: None,
 };
 
 pub const HIGH_CONTRAST: Palette = Palette {
@@ -188,6 +258,7 @@ pub const HIGH_CONTRAST: Palette = Palette {
     warn: Color32::from_rgb(0xFF, 0xB0, 0x00),
     control: Color32::from_rgb(0x00, 0x00, 0x00),
     control_stroke: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    backdrop: None,
 };
 
 /// Nord (Arctic Ice Studio): polar night surfaces, snow storm text, frost accent.
@@ -215,6 +286,7 @@ pub const NORD: Palette = Palette {
     warn: Color32::from_rgb(0xD0, 0x87, 0x70),
     control: Color32::from_rgb(0x43, 0x4C, 0x5E),
     control_stroke: Color32::from_rgb(0x4C, 0x56, 0x6A),
+    backdrop: None,
 };
 
 /// Solarized Light (Ethan Schoonover): base3/base2 surfaces, base02 text.
@@ -242,6 +314,7 @@ pub const SOLARIZED_LIGHT: Palette = Palette {
     warn: Color32::from_rgb(0xCB, 0x4B, 0x16),
     control: Color32::from_rgb(0xFF, 0xFB, 0xEF),
     control_stroke: Color32::from_rgb(0xC9, 0xC2, 0xAC),
+    backdrop: None,
 };
 
 /// A colour role of a [`Palette`]: its `.tmoptheme` key and its label in the editor.
@@ -377,6 +450,42 @@ impl Palette {
         }
     }
 
+    /// Table body text (between `text` and `text_dim`).
+    pub fn text_table(&self) -> Color32 {
+        mix(self.text, self.text_dim, 0.3)
+    }
+
+    /// Inactive navigation icons and labels.
+    pub fn text_rail(&self) -> Color32 {
+        mix(self.text_faint, self.text_dim, 0.35)
+    }
+
+    /// Code and log text.
+    pub fn text_code(&self) -> Color32 {
+        mix(self.text, self.text_dim, 0.5)
+    }
+
+    /// Inset boxes (paths, command lines, per-core cells, log panes).
+    pub fn well(&self) -> Color32 {
+        with_alpha(self.led_bg, 0.3)
+    }
+
+    /// A hairline wash of `text` over whatever is below: secondary buttons (0.06), their border
+    /// (0.10..0.12), segmented-control highlights (0.12).
+    pub fn raise(&self, alpha: f32) -> Color32 {
+        with_alpha(self.text, alpha)
+    }
+
+    /// Rule between table rows and list entries.
+    pub fn row_rule(&self) -> Color32 {
+        with_alpha(self.text, 0.06)
+    }
+
+    /// Fill of a selected table row (the row also gets a 1 px accent inset).
+    pub fn selected_row(&self) -> Color32 {
+        with_alpha(self.accent, 0.07)
+    }
+
     /// The lowest text contrast that involves role `key`, if it is a text or surface role:
     /// a text role over every surface, or every text role over a surface.
     pub fn worst_contrast(&self, key: &str) -> Option<f32> {
@@ -428,10 +537,11 @@ impl Palette {
         let mut style = (*ctx.style()).clone();
         let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = self.body;
-        v.window_fill = self.panel;
-        v.window_stroke = Stroke::new(1.0_f32, self.card_stroke);
-        v.window_rounding = Rounding::same(6.0);
-        v.menu_rounding = Rounding::same(6.0);
+        // Glass: dialogs, menus and popups let the backdrop show through a little.
+        v.window_fill = with_alpha(mix(self.body, self.card, 0.6), 0.95);
+        v.window_stroke = Stroke::new(1.0_f32, with_alpha(self.text, 0.10));
+        v.window_rounding = Rounding::same(10.0);
+        v.menu_rounding = Rounding::same(8.0);
         v.extreme_bg_color = self.control;
         v.faint_bg_color = self.hover;
         v.code_bg_color = self.control;
@@ -447,30 +557,30 @@ impl Palette {
         v.widgets.inactive.weak_bg_fill = self.control;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, self.control_stroke);
         v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.inactive.rounding = Rounding::same(4.0);
+        v.widgets.inactive.rounding = Rounding::same(6.0);
         v.widgets.hovered.bg_fill = self.hover;
         v.widgets.hovered.weak_bg_fill = self.hover;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.hovered.rounding = Rounding::same(4.0);
+        v.widgets.hovered.rounding = Rounding::same(6.0);
         v.widgets.active.bg_fill = self.selection;
         v.widgets.active.weak_bg_fill = self.selection;
         v.widgets.active.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.on_selection());
-        v.widgets.active.rounding = Rounding::same(4.0);
+        v.widgets.active.rounding = Rounding::same(6.0);
         v.widgets.open.bg_fill = self.control;
         v.widgets.open.weak_bg_fill = self.control;
         v.widgets.open.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.open.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.open.rounding = Rounding::same(4.0);
+        v.widgets.open.rounding = Rounding::same(6.0);
         v.slider_trailing_fill = true;
-        v.popup_shadow = egui::epaint::Shadow { offset: Vec2::new(0.0, 4.0), blur: 12.0, spread: 0.0, color: Color32::from_black_alpha(120) };
+        v.popup_shadow = egui::epaint::Shadow { offset: Vec2::new(0.0, 16.0), blur: 48.0, spread: 0.0, color: Color32::from_black_alpha(140) };
         v.window_shadow = v.popup_shadow;
         v.striped = false;
         style.visuals = v;
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(10.0, 4.0);
-        style.spacing.interact_size = Vec2::new(40.0, 22.0);
+        style.spacing.button_padding = Vec2::new(12.0, 6.0);
+        style.spacing.interact_size = Vec2::new(40.0, 30.0);
         style.spacing.combo_width = 180.0;
         style.spacing.slider_width = 160.0;
         style.spacing.menu_margin = Margin::same(6.0);
@@ -478,8 +588,8 @@ impl Palette {
         style.text_styles = [
             (TextStyle::Small, ui(11.0)),
             (TextStyle::Body, ui(13.0)),
-            (TextStyle::Button, ui(13.0)),
-            (TextStyle::Heading, display(18.0)),
+            (TextStyle::Button, semibold(13.0)),
+            (TextStyle::Heading, light(20.0)),
             (TextStyle::Monospace, mono(12.0)),
         ]
         .into_iter()
@@ -508,23 +618,60 @@ pub const METRICS: [(&str, &str); 10] = [
 // Fixed accent colours: the built-in metric colours, plus yellow for the middle of the
 // green/yellow/red ramps. Status and severity colours (ok/warning/danger ramps, process,
 // connection and service states, summary-card accents) use these rather than a metric's colour,
-// so `graphs.metricColors` overrides never reach them.
-pub const GREEN: Color32 = Color32::from_rgb(0x1F, 0xC4, 0x48);
-pub const PURPLE: Color32 = Color32::from_rgb(0xC0, 0x40, 0xFF);
-pub const BLUE: Color32 = Color32::from_rgb(0x2F, 0x8B, 0xFF);
-pub const ORANGE: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x2E);
-pub const RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x3B);
-pub const YELLOW: Color32 = Color32::from_rgb(0xE8, 0xD0, 0x2A);
+// so `graphs.metricColors` overrides never reach them. They are pastels meant for dark surfaces:
+// on light palettes read them through [`status`].
+pub const GREEN: Color32 = rgb(0x6EE7A8);
+pub const YELLOW: Color32 = rgb(0xF5D28F);
+pub const RED: Color32 = rgb(0xFF7A8A);
+pub const ORANGE: Color32 = rgb(0xF5B86B);
+pub const BLUE: Color32 = rgb(0x8FB4FF);
+pub const PURPLE: Color32 = rgb(0xC9A6FF);
+pub const INDIGO: Color32 = rgb(0x8B9CFF);
+pub const PINK: Color32 = rgb(0xFFB4C8);
+/// Danger text (labels, "Remove…" buttons).
+pub const RED_TEXT: Color32 = rgb(0xFF9AA6);
+/// Fill of the primary danger button, and the text on it.
+pub const DANGER_FILL: Color32 = rgb(0xFF6B7E);
+pub const ON_DANGER: Color32 = rgb(0x1A0E12);
+
+/// Severity colours that read on `pal`: the pastel constants on dark palettes, darkened on light ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Status {
+    pub ok: Color32,
+    pub warn: Color32,
+    pub danger: Color32,
+    pub danger_text: Color32,
+    pub info: Color32,
+    pub yellow: Color32,
+}
+
+/// The severity colours for `pal` (see [`Status`]).
+pub fn status(pal: &Palette) -> Status {
+    let c = |c: Color32| darken_for(pal, c);
+    Status { ok: c(GREEN), warn: c(ORANGE), danger: c(RED), danger_text: c(RED_TEXT), info: c(BLUE), yellow: c(YELLOW) }
+}
+
+/// `c` as is on a dark palette, darkened to stay readable on a light one.
+pub fn darken_for(pal: &Palette, c: Color32) -> Color32 {
+    if pal.dark {
+        c
+    } else {
+        dim(c, 0.62)
+    }
+}
 
 /// Built-in metric colours. Unknown keys are grey.
 pub fn default_metric_color(key: &str) -> Color32 {
     match key {
-        "cpu" | "disk" => GREEN,
-        "memory" => PURPLE,
-        "gpu" | "network" => BLUE,
-        "thermal" => ORANGE,
-        "clock" | "power" | "kernel" => RED,
-        "docker" => Color32::from_rgb(36, 150, 237),
+        "cpu" => rgb(0x5EEAD4),
+        "memory" => INDIGO,
+        "disk" => PURPLE,
+        "gpu" => PINK,
+        "network" => rgb(0xE8ECF5),
+        "thermal" | "clock" => ORANGE,
+        "power" => YELLOW,
+        "kernel" => rgb(0x7C8AA5),
+        "docker" => BLUE,
         _ => Color32::from_rgb(0x9A, 0x9A, 0x9A),
     }
 }
@@ -615,33 +762,56 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 mod tests {
     use super::*;
 
-    /// Dark's derived LCD stays (within a few levels) the fixed LCD it replaced.
+    /// The recorder's LCD stays readable on every built-in look: lit segments against the glass.
     #[test]
-    fn dark_lcd_keeps_its_look() {
-        let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| (*x as i32 - y as i32).abs() <= 6);
-        let l = DARK.lcd();
-        for (a, b) in [(l.bg, Color32::from_rgb(0x0A, 0x16, 0x26)), (l.rim, Color32::from_rgb(0x1A, 0x2C, 0x44)), (l.lit, Color32::from_rgb(0x9C, 0xB8, 0xD8)), (l.unlit, Color32::from_rgb(0x16, 0x26, 0x3A))] {
-            assert!(close(a, b), "{a:?} vs {b:?}");
+    fn lcd_stays_readable() {
+        for (name, p) in [("dark", DARK), ("light", LIGHT), ("classic dark", CLASSIC_DARK), ("classic light", CLASSIC_LIGHT), ("nord", NORD)] {
+            let l = p.lcd();
+            let r = contrast(l.lit, l.bg);
+            assert!(r >= 3.0, "{name}: lit vs bg is {r:.2}:1");
         }
     }
 
-    /// Without overrides every metric keeps the colour it had before overrides existed,
-    /// including the ones that shared a colour.
+    /// Without overrides every metric has its built-in colour; each key has one of its own.
     #[test]
     fn metric_colors_default_to_the_built_in_ones() {
         let m = MetricColors::from_settings(&crate::settings::Graphs::default());
         assert_eq!(m, MetricColors::default());
-        let green = Color32::from_rgb(0x1F, 0xC4, 0x48);
-        let blue = Color32::from_rgb(0x2F, 0x8B, 0xFF);
-        let red = Color32::from_rgb(0xFF, 0x3B, 0x3B);
-        for (k, c) in [("cpu", green), ("disk", green), ("gpu", blue), ("network", blue), ("clock", red), ("power", red), ("kernel", red)] {
+        let hex = Color32::from_rgb;
+        for (k, c) in [
+            ("cpu", hex(0x5E, 0xEA, 0xD4)),
+            ("memory", hex(0x8B, 0x9C, 0xFF)),
+            ("disk", hex(0xC9, 0xA6, 0xFF)),
+            ("gpu", hex(0xFF, 0xB4, 0xC8)),
+            ("network", hex(0xE8, 0xEC, 0xF5)),
+            ("thermal", hex(0xF5, 0xB8, 0x6B)),
+            ("clock", hex(0xF5, 0xB8, 0x6B)),
+            ("power", hex(0xF5, 0xD2, 0x8F)),
+            ("kernel", hex(0x7C, 0x8A, 0xA5)),
+            ("docker", hex(0x8F, 0xB4, 0xFF)),
+        ] {
             assert_eq!(m.get(k), c, "{k}");
             assert_eq!(m.custom(k), None);
         }
-        assert_eq!(m.get("memory"), Color32::from_rgb(0xC0, 0x40, 0xFF));
-        assert_eq!(m.get("thermal"), Color32::from_rgb(0xFF, 0x9A, 0x2E));
+        assert_ne!(m.get("cpu"), m.get("disk"));
         assert_eq!(m.get("yellow"), default_metric_color("yellow"));
         assert_eq!(m.get("nope"), default_metric_color("nope"));
+    }
+
+    /// Severity colours are the pastel constants on dark palettes and darker on light ones, where
+    /// they must stay readable on a card.
+    #[test]
+    fn status_colors_follow_the_palette() {
+        assert_eq!(status(&DARK).ok, GREEN);
+        assert_eq!(status(&NORD).danger, RED);
+        for pal in [LIGHT, CLASSIC_LIGHT, SOLARIZED_LIGHT] {
+            let s = status(&pal);
+            assert_ne!(s.ok, GREEN);
+            for (name, c) in [("ok", s.ok), ("warn", s.warn), ("danger", s.danger), ("danger_text", s.danger_text), ("info", s.info), ("yellow", s.yellow)] {
+                let r = contrast(c, pal.card);
+                assert!(r >= 3.0, "{name} on a light card is {r:.2}:1");
+            }
+        }
     }
 
     /// Each key is its own override: changing CPU leaves Disk (which shared its colour) alone.
@@ -666,21 +836,23 @@ mod tests {
         assert_eq!(MetricColors::from_map(&g.metric_colors), m);
     }
 
-    /// The display font is Michroma or the installed one, falling back to the UI fonts for
+    /// The display font is Inter Light, Michroma or the installed one, falling back to the UI fonts for
     /// missing glyphs; body text never uses it.
     #[test]
     fn display_font_only_changes_the_display_family() {
         let family = |d: &FontDefinitions, f: FontFamily| d.families.get(&f).cloned().unwrap_or_default();
         let builtin = font_definitions(None);
-        assert_eq!(builtin.font_data[F_DISPLAY].font.as_ref(), MICHROMA);
+        assert_eq!(builtin.font_data[F_DISPLAY].font.as_ref(), INTER_LIGHT);
+        let classic = font_definitions(crate::fonts::resolve(crate::fonts::CLASSIC, crate::fonts::load).0);
+        assert_eq!(classic.font_data[F_DISPLAY].font.as_ref(), MICHROMA);
         let file = crate::fonts::FontFile { family: "Other".into(), bytes: vec![7; 16], index: 2 };
         let custom = font_definitions(Some(file));
         assert_eq!((custom.font_data[F_DISPLAY].font.as_ref(), custom.font_data[F_DISPLAY].index), (&[7u8; 16][..], 2));
-        for d in [&builtin, &custom] {
+        for d in [&builtin, &classic, &custom] {
             let display = family(d, FontFamily::Name(F_DISPLAY.into()));
             assert_eq!(display[0], F_DISPLAY);
             assert_eq!(display[1..], family(d, FontFamily::Name(F_UI.into())));
-            for f in [FontFamily::Proportional, FontFamily::Name(F_UI.into()), FontFamily::Name(F_UI_BOLD.into()), FontFamily::Monospace] {
+            for f in [FontFamily::Proportional, FontFamily::Name(F_UI.into()), FontFamily::Name(F_UI_LIGHT.into()), FontFamily::Name(F_UI_BOLD.into()), FontFamily::Name(F_MONO.into()), FontFamily::Monospace] {
                 assert!(!family(d, f.clone()).iter().any(|n| n == F_DISPLAY), "{f:?}");
             }
         }
