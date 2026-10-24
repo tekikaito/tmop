@@ -34,6 +34,8 @@ pub struct SummaryState {
     pub since: Option<Instant>,
     /// Level of CPU, memory, disk and GPU, and since when it has been that.
     levels: [(Level, Option<Instant>); 4],
+    /// App groups averaged over a few samples, in a calm order.
+    steady: health::Steady,
 }
 
 /// Where a click on the page leads, applied after the page is drawn.
@@ -67,14 +69,15 @@ impl App {
     pub fn summary_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let now = Instant::now();
-        let v = self.verdict(fd, now);
+        let groups = self.summary.steady.update(fd.snap.seq, app_groups(fd.rows, fd.show_self));
+        let busiest = groups.iter().find(|g| g.cpu > 0.0).map(|g| (g.name.clone(), g.cpu));
+        let v = self.verdict(fd, busiest, now);
         let area = ui.max_rect();
         if let (true, Some([hi, mid, edge])) = (v.pressure, pal.backdrop) {
             // The page paints its own, warmer backdrop over the whole panel (margins included).
             let panel = egui::Rect::from_min_max(area.min - vec2(8.0, 12.0), area.max + vec2(32.0, 36.0));
             widgets::fill_radial_backdrop(ui.painter(), panel, mix(hi, theme::RED, 0.25), mid, edge);
         }
-        let groups = app_groups(fd.rows, fd.show_self);
         let n_rows = ((area.height() - 540.0) / CONSUMER_ROW_H).floor().clamp(4.0, 6.0) as usize;
         let mut go = None;
         egui::ScrollArea::vertical().id_salt("summary-scroll").auto_shrink([false, false]).show(ui, |ui| {
@@ -98,7 +101,7 @@ impl App {
     }
 
     /// The verdict, with the bookkeeping of how long each level has lasted.
-    fn verdict(&mut self, fd: &FrameData<'_>, now: Instant) -> Verdict {
+    fn verdict(&mut self, fd: &FrameData<'_>, busiest: Option<(String, f32)>, now: Instant) -> Verdict {
         let s = fd.snap;
         let levels = [
             health::settled(level_of(s.cpu.total_pct, CPU_LEVELS), fd.lasting.cpu),
@@ -112,7 +115,7 @@ impl App {
                 *slot = (level, Some(now));
             }
         }
-        let health = health::health(s, fd.rows, st.since, fd.lasting);
+        let health = health::health_with(s, busiest, st.since, fd.lasting);
         if health.level == Level::Critical {
             st.since.get_or_insert(now);
         } else {
@@ -188,16 +191,18 @@ impl App {
         };
         let h1 = rich(&p, &[(pre, theme::light(44.0), pal.text), (h.emphasis, theme::ui(44.0), key_color), (post, theme::light(44.0), pal.text)], text_w, 46.0);
         let para = rich(&p, &[(h.detail.as_str(), theme::ui(15.0), pal.text_dim)], text_w.min(580.0), 22.5);
+        // Room for two lines either way, so the card does not change height when the detail wraps.
+        let para_h = para.size().y.max(2.0 * 22.5);
         let cpu_c = ring_color(&st, pal.accent, v.levels[0]);
         let mem_c = ring_color(&st, fd.metric("memory"), v.levels[1]);
         let disk_c = ring_color(&st, fd.metric("disk"), v.levels[2]);
         let gpu_c = ring_color(&st, fd.metric("gpu"), v.levels[3]);
         let s = fd.snap;
-        let gpu_text = if s.gpu.available { format!("GPU {:.0}%", s.gpu.utilization_pct) } else { "GPU \u{2014}".to_string() };
+        let gpu_text = if s.gpu.available { format!("GPU {:.0}%", fd.smooth.gpu) } else { "GPU \u{2014}".to_string() };
         let items = [
-            (format!("CPU {:.0}%", s.cpu.total_pct), cpu_c, v.levels[0]),
-            (format!("Memory {:.0}%", s.memory.used_pct), mem_c, v.levels[1]),
-            (format!("Disk {:.0}%", s.disk.active_pct), disk_c, v.levels[2]),
+            (format!("CPU {:.0}%", fd.smooth.cpu), cpu_c, v.levels[0]),
+            (format!("Memory {:.0}%", fd.smooth.memory), mem_c, v.levels[1]),
+            (format!("Disk {:.0}%", fd.smooth.disk), disk_c, v.levels[2]),
             (gpu_text, gpu_c, v.levels[3]),
         ];
         let font = theme::ui(12.0);
@@ -206,7 +211,7 @@ impl App {
         let legend_rows = if legend_w <= text_w { 1 } else { 2 };
         let legend_h = legend_rows as f32 * 16.0 + (legend_rows - 1) as f32 * 6.0;
 
-        let text_h = 14.0 + 8.0 + h1.size().y + 12.0 + para.size().y + 18.0 + legend_h;
+        let text_h = 14.0 + 8.0 + h1.size().y + 12.0 + para_h + 18.0 + legend_h;
         let main_h = ring.max(text_h);
         let content_h = main_h + if wide { 0.0 } else { 16.0 + 44.0 };
         let rect = Rect::from_min_size(pos2(x, y), vec2(w, content_h + 2.0 * pad_y));
@@ -239,7 +244,7 @@ impl App {
         p.galley(pos2(tx, ty), h1.clone(), pal.text);
         ty += h1.size().y + 12.0;
         p.galley(pos2(tx, ty), para.clone(), pal.text_dim);
-        ty += para.size().y + 18.0;
+        ty += para_h + 18.0;
         let mut lx = tx;
         let mut ly = ty + 8.0;
         for (i, ((text, color, level), iw)) in items.iter().zip(&widths).enumerate() {
@@ -291,7 +296,7 @@ impl App {
         };
         let gpu_footer = if s.gpu.available || s.gpu.dedicated_used > 0 { format!("VRAM {}", format_bytes(s.gpu.dedicated_used as f64)) } else { "No GPU engine counters".to_string() };
         let (net_value, net_unit) = split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps));
-        let gpu_value = if s.gpu.available { (format!("{:.0}", s.gpu.utilization_pct), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
+        let gpu_value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
         let st = theme::status(&pal);
         let lc = |base: Color32, l: Level| ring_color(&st, base, l);
         let cards = [
@@ -300,7 +305,7 @@ impl App {
                 device: Device::Cpu,
                 frac: frac(fd.smooth.cpu),
                 color: lc(pal.accent, v.levels[0]),
-                value: (format!("{:.0}", s.cpu.total_pct), "%".into()),
+                value: (format!("{:.0}", fd.smooth.cpu), "%".into()),
                 hardware: Hardware::Cpu,
                 lines: vec![(&fd.hist.cpu, lc(pal.accent, v.levels[0]), (0.0, 100.0))],
                 footer: cpu_footer,
@@ -310,7 +315,7 @@ impl App {
                 device: Device::Memory,
                 frac: frac(fd.smooth.memory),
                 color: lc(fd.metric("memory"), v.levels[1]),
-                value: (format!("{:.0}", s.memory.used_pct), "%".into()),
+                value: (format!("{:.0}", fd.smooth.memory), "%".into()),
                 hardware: Hardware::Memory,
                 lines: vec![(&fd.hist.memory, lc(fd.metric("memory"), v.levels[1]), (0.0, 100.0))],
                 footer: format!("{} / {}", format_bytes(s.memory.total.saturating_sub(s.memory.available) as f64), format_bytes(s.memory.total as f64)),
@@ -320,7 +325,7 @@ impl App {
                 device: Device::Disk,
                 frac: frac(fd.smooth.disk),
                 color: lc(fd.metric("disk"), v.levels[2]),
-                value: (format!("{:.0}", s.disk.active_pct), "%".into()),
+                value: (format!("{:.0}", fd.smooth.disk), "%".into()),
                 hardware: Hardware::Disk,
                 lines: vec![(&fd.hist.disk, lc(fd.metric("disk"), v.levels[2]), (0.0, 100.0))],
                 footer: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)),
@@ -389,8 +394,8 @@ impl App {
     /// Top consumers and the timeline, side by side when there is room. Returns the height.
     #[allow(clippy::too_many_arguments)]
     fn consumers_row(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>, x: f32, y: f32, w: f32, groups: &[AppGroup], n_rows: usize, go: &mut Option<Go>) -> f32 {
+        // Already busiest first, in the calm order of `Steady`.
         let mut order: Vec<&AppGroup> = groups.iter().collect();
-        order.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)));
         order.truncate(n_rows);
         let wide = w >= 760.0;
         let (lw, rw) = if wide { ((w - GAP_X) * 0.6, (w - GAP_X) * 0.4) } else { (w, w) };
@@ -670,11 +675,11 @@ impl App {
         let (tiles_x, tiles_y, tiles_w) = if wide { (x + lw + GAP_X, y, rw) } else { (x, y + h + GAP_X, rw) };
         let th = if wide { (h - GAP_X) / 2.0 } else { tile_h };
         let tw = (tiles_w - GAP_X) / 2.0;
-        let gpu_value = if s.gpu.available { format!("{:.0}", s.gpu.utilization_pct) } else { "\u{2014}".to_string() };
+        let gpu_value = if s.gpu.available { format!("{:.0}", fd.smooth.gpu) } else { "\u{2014}".to_string() };
         let tiles = [
-            ("CPU", Device::Cpu, format!("{:.0}", s.cpu.total_pct), 0usize, String::new()),
-            ("Memory", Device::Memory, format!("{:.0}", s.memory.used_pct), 1, format!("{} free", format_bytes(s.memory.available as f64))),
-            ("Disk", Device::Disk, format!("{:.0}", s.disk.active_pct), 2, String::new()),
+            ("CPU", Device::Cpu, format!("{:.0}", fd.smooth.cpu), 0usize, String::new()),
+            ("Memory", Device::Memory, format!("{:.0}", fd.smooth.memory), 1, format!("{} free", format_bytes(s.memory.available as f64))),
+            ("Disk", Device::Disk, format!("{:.0}", fd.smooth.disk), 2, String::new()),
             ("GPU", Device::Gpu, gpu_value, 3, String::new()),
         ];
         for (i, (label, dev, value, li, free_text)) in tiles.iter().enumerate() {
@@ -740,7 +745,8 @@ fn leader(groups: &[AppGroup], b: Option<Bottleneck>) -> Option<&AppGroup> {
     match b {
         Some(Bottleneck::Memory) => groups.iter().max_by_key(|g| g.memory),
         Some(Bottleneck::Disk) => groups.iter().max_by(|a, b| a.io_bps.total_cmp(&b.io_bps)),
-        _ => groups.iter().filter(|g| g.cpu > 0.0).max_by(|a, b| a.cpu.total_cmp(&b.cpu)),
+        // Groups come busiest first (see `Steady`), so the first one with CPU time leads.
+        _ => groups.iter().find(|g| g.cpu > 0.0),
     }
 }
 

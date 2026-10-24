@@ -193,6 +193,75 @@ pub fn app_groups(rows: &[ProcessRow], show_self: bool) -> Vec<AppGroup> {
 
 /// The app group with the most CPU: processes are grouped by lowercase image name, a group is
 /// named after its description (else its image name).
+/// How fast [`Steady`] follows a new sample (share of the difference per sample).
+const STEADY_K: f32 = 0.35;
+
+/// App groups averaged over the last few samples, in an order that changes only when an app
+/// clearly overtakes another, so lists and "the busiest app" don't reshuffle on every refresh.
+#[derive(Default)]
+pub struct Steady {
+    seq: u64,
+    /// key -> averaged (CPU %, I/O bytes/s, GPU %).
+    avg: HashMap<String, (f32, f64, f32)>,
+    order: Vec<String>,
+}
+
+impl Steady {
+    /// The groups of sample `seq` with averaged CPU, I/O and GPU, busiest (CPU) first.
+    pub fn update(&mut self, seq: u64, mut groups: Vec<AppGroup>) -> Vec<AppGroup> {
+        let fresh = seq != self.seq || self.order.is_empty();
+        if fresh {
+            self.seq = seq;
+            let mut next = HashMap::with_capacity(groups.len());
+            for g in &groups {
+                let v = match self.avg.get(&g.key) {
+                    Some(&(c, io, gpu)) => (c + (g.cpu - c) * STEADY_K, io + (g.io_bps - io) * STEADY_K as f64, gpu + (g.gpu - gpu) * STEADY_K),
+                    None => (g.cpu, g.io_bps, g.gpu),
+                };
+                next.insert(g.key.clone(), v);
+            }
+            self.avg = next;
+        }
+        for g in &mut groups {
+            if let Some(&(c, io, gpu)) = self.avg.get(&g.key) {
+                (g.cpu, g.io_bps, g.gpu) = (c, io, gpu);
+            }
+        }
+        if fresh {
+            self.order = sticky_order(&self.order, &groups);
+        }
+        let rank: HashMap<&str, usize> = self.order.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+        groups.sort_by_key(|g| rank.get(g.key.as_str()).copied().unwrap_or(usize::MAX));
+        groups
+    }
+}
+
+/// `prev` with gone groups dropped and new ones appended (busiest first); an app moves up only when
+/// it uses clearly more CPU than the one above it.
+fn sticky_order(prev: &[String], groups: &[AppGroup]) -> Vec<String> {
+    let cpu: HashMap<&str, f32> = groups.iter().map(|g| (g.key.as_str(), g.cpu)).collect();
+    let mut order: Vec<String> = prev.iter().filter(|k| cpu.contains_key(k.as_str())).cloned().collect();
+    let known: HashSet<&str> = order.iter().map(String::as_str).collect();
+    let mut new: Vec<&AppGroup> = groups.iter().filter(|g| !known.contains(g.key.as_str())).collect();
+    new.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)));
+    order.extend(new.into_iter().map(|g| g.key.clone()));
+    let lead = |a: f32| 0.3 + 0.15 * a;
+    for _ in 0..order.len() {
+        let mut swapped = false;
+        for i in 1..order.len() {
+            let (a, b) = (cpu[order[i - 1].as_str()], cpu[order[i].as_str()]);
+            if b > a + lead(a) {
+                order.swap(i - 1, i);
+                swapped = true;
+            }
+        }
+        if !swapped {
+            break;
+        }
+    }
+    order
+}
+
 pub fn busiest_app(rows: &[ProcessRow]) -> Option<(String, f32)> {
     app_groups(rows, true).into_iter().filter(|g| g.cpu > 0.0).max_by(|a, b| a.cpu.total_cmp(&b.cpu).then_with(|| b.name.cmp(&a.name))).map(|g| (g.name, g.cpu))
 }
@@ -209,11 +278,15 @@ fn lasted(since: Option<Instant>) -> String {
 /// tracks it; `lasting` says how long CPU and disk have been at their Critical level, which they
 /// need to be for [`CRITICAL_AFTER`] before the verdict is Critical.
 pub fn health(snap: &Snapshot, rows: &[ProcessRow], since: Option<Instant>, lasting: Lasting) -> Health {
+    health_with(snap, busiest_app(rows), since, lasting)
+}
+
+/// [`health`] with the busiest app (name, CPU %) given by the caller, e.g. smoothed over several samples.
+pub fn health_with(snap: &Snapshot, busiest: Option<(String, f32)>, since: Option<Instant>, lasting: Lasting) -> Health {
     let (mem, cpu, disk) = (snap.memory.used_pct, snap.cpu.total_pct, snap.disk.active_pct);
     let levels = [(level_of(mem, MEMORY_LEVELS), 0), (settled(level_of(cpu, CPU_LEVELS), lasting.cpu), 1), (settled(level_of(disk, DISK_LEVELS), lasting.disk), 2)];
     // The worst resource decides; on a tie memory beats CPU beats disk.
     let (level, which) = levels.iter().rev().fold((Level::Good, 0), |best, &(l, i)| if l >= best.0 && l != Level::Good { (l, i) } else { best });
-    let busiest = busiest_app(rows);
     let busy = busiest.as_ref().map(|(n, c)| format!("{n} is the busiest app right now ({c:.0}% CPU)."));
     let (headline, emphasis, detail) = match (level, which) {
         (Level::Good, _) => ("Everything looks good.".to_string(), "good", format!("{} No resource is under pressure.", busy.unwrap_or_default()).trim().to_string()),
@@ -269,6 +342,25 @@ mod tests {
         assert_eq!(level_of(95.0, CPU_LEVELS), Level::Critical);
         assert_eq!(level_of(60.0, DISK_LEVELS), Level::Elevated);
         assert_eq!(level_of(90.0, DISK_LEVELS), Level::Critical);
+    }
+
+    #[test]
+    fn steady_order_needs_a_clear_lead_and_averages() {
+        let groups = |a: f32, b: f32| app_groups(&[row(1, "a.exe", a, None), row(2, "b.exe", b, None)], true);
+        let keys = |g: &[AppGroup]| g.iter().map(|g| g.key.clone()).collect::<Vec<_>>();
+        let mut s = Steady::default();
+        assert_eq!(keys(&s.update(1, groups(2.0, 1.0))), ["a.exe", "b.exe"]);
+        // A small lead does not reorder; the values are averaged.
+        let g = s.update(2, groups(1.0, 2.2));
+        assert_eq!(keys(&g), ["a.exe", "b.exe"]);
+        assert!((g[0].cpu - 1.65).abs() < 1e-4);
+        // The same sample drawn again changes nothing.
+        assert_eq!(s.update(2, groups(1.0, 2.2))[0].cpu, g[0].cpu);
+        // A clear, lasting lead does.
+        for seq in 3..10 {
+            s.update(seq, groups(1.0, 8.0));
+        }
+        assert_eq!(keys(&s.update(10, groups(1.0, 8.0))), ["b.exe", "a.exe"]);
     }
 
     #[test]

@@ -61,9 +61,9 @@ impl App {
             let theme_rect = button(right - 84.0);
             let pin_rect = button(right - 128.0);
             right -= 128.0 + 14.0;
-            let mut readouts: Vec<(&str, String)> = vec![("CPU", format!("{:.0}%", snap.cpu.total_pct)), ("RAM", format!("{:.0}%", snap.memory.used_pct)), ("DISK", format!("{:.0}%", snap.disk.active_pct))];
+            let mut readouts: Vec<(&str, String)> = vec![("CPU", format!("{:.0}%", self.smooth.cpu)), ("RAM", format!("{:.0}%", self.smooth.memory)), ("DISK", format!("{:.0}%", self.smooth.disk))];
             if snap.gpu.available {
-                readouts.push(("GPU", format!("{:.0}%", snap.gpu.utilization_pct)));
+                readouts.push(("GPU", format!("{:.0}%", self.smooth.gpu)));
             }
             let show_readouts = full.width() >= READOUTS_MIN_W;
             if show_readouts {
