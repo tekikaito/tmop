@@ -405,9 +405,9 @@ impl App {
 
         let area = Rect::from_min_max(pos2(full.left() + 12.0, body.top()), pos2(full.right() - 16.0, body.bottom()));
         // The toolbar shares the title row when there is room, else it gets a row of its own.
-        let beside = area.width() >= 1280.0;
+        let beside = area.width() >= 1560.0;
         let (bar, tabs_top) = if beside {
-            (Rect::from_min_max(pos2(area.left() + 560.0, full.top() + 14.0), pos2(area.right(), full.top() + 50.0)), body.top())
+            (Rect::from_min_max(pos2(area.left() + 700.0, full.top() + 14.0), pos2(area.right(), full.top() + 50.0)), body.top())
         } else {
             (Rect::from_min_size(pos2(area.left(), body.top() - 4.0), vec2(area.width(), 36.0)), body.top() + 40.0)
         };
