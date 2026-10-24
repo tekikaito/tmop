@@ -149,9 +149,13 @@ impl App {
                 }
                 ui.separator();
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new(format!("{} ({})", crate::APP_NAME, crate::APP_LONG_NAME)).font(theme::semibold(13.0)).color(pal.text));
-                ui.label(egui::RichText::new("A skinnable system monitor for Windows.").font(theme::ui(12.0)).color(pal.text_dim));
-                ui.label(egui::RichText::new("No network access, no licensing, no telemetry.").font(theme::ui(12.0)).color(pal.text_dim));
+                // A top-down, unjustified layout: the popup's own would spread the words of these lines.
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    let line = |ui: &mut egui::Ui, text: egui::RichText| ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
+                    line(ui, egui::RichText::new(format!("{} ({})", crate::APP_NAME, crate::APP_LONG_NAME)).font(theme::semibold(13.0)).color(pal.text));
+                    line(ui, egui::RichText::new("A skinnable system monitor for Windows.").font(theme::ui(12.0)).color(pal.text_dim));
+                    line(ui, egui::RichText::new("No network access, no licensing, no telemetry.").font(theme::ui(12.0)).color(pal.text_dim));
+                });
                 ui.separator();
                 if kit::menu_item(ui, "Exit", None, false) {
                     ctx.send_viewport_cmd(ViewportCommand::Close);

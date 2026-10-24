@@ -315,3 +315,44 @@ pub fn cpu_exploded(p: &Painter, rect: Rect, color: Color32, accent: Color32, la
         widgets::text(p, pos2(x, r.bottom() + 1.0), Align2::LEFT_TOP, sub, super::theme::mono(11.0), pal.text_faint);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme;
+    use eframe::egui;
+
+    /// Every drawing and the exploded CPU with its labels draw without trouble.
+    #[test]
+    fn every_drawing_draws() {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let kinds = [Hardware::Cpu, Hardware::Memory, Hardware::Disk, Hardware::Hdd, Hardware::Gpu, Hardware::Network, Hardware::Battery, Hardware::Npu, Hardware::Mainboard, Hardware::CpuExploded];
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let p = ui.painter().clone();
+                    for kind in kinds {
+                        let (vw, vh) = kind.view_box();
+                        let rect = Rect::from_min_size(pos2(40.0, 40.0), vec2(vw, vh));
+                        draw(&p, rect, kind, theme::DARK.text);
+                    }
+                    cpu_exploded(&p, Rect::from_min_size(pos2(40.0, 40.0), vec2(150.0, 180.0)), theme::DARK.text, theme::DARK.accent, &[("a", "b"), ("c", "d"), ("e", "f"), ("g", "h")], &theme::DARK);
+                });
+            });
+        }
+    }
+
+    /// The iso transform: local (0, 0) lands at the origin, x moves right and down, y left and down.
+    #[test]
+    fn iso_axes() {
+        let ctx = egui::Context::default();
+        let p = Painter::new(ctx, egui::LayerId::background(), Rect::EVERYTHING);
+        let g = Iso { p: &p, origin: pos2(72.0, 10.0), kx: 1.04, ky: 0.6, scale: 1.0, width: 1.2, color: Color32::WHITE };
+        assert_eq!(g.pt(0.0, 0.0), pos2(72.0, 10.0));
+        let (x, y) = (g.pt(10.0, 0.0), g.pt(0.0, 10.0));
+        assert!(x.x > 72.0 && x.y > 10.0 && y.x < 72.0 && y.y > 10.0);
+        assert!((x.x - 72.0 + (y.x - 72.0)).abs() < 1e-4, "x and y mirror each other");
+    }
+}

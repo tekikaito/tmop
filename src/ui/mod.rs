@@ -1,5 +1,5 @@
-//! eframe/egui front end: window chrome (menu bar, sidebar, page header, status bar),
-//! the pages, and the skinnable popout window.
+//! eframe/egui front end: window chrome (header bar, navigation rail, page title, status bar,
+//! see [`chrome`]), the pages, and the skinnable popout window.
 
 pub mod apps_page;
 pub mod bench_page;

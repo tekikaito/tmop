@@ -1211,7 +1211,7 @@ pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32, pal: &
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 draw_icon(ui.painter(), Rect::from_center_size(icon.center(), vec2(15.0, 15.0)), Icon::Search, pal.text_faint);
-                ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 52.0).frame(false).font(theme::ui(13.0)))
+                ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 46.0).frame(false).font(theme::ui(13.0)))
             })
             .inner
         })
@@ -1961,5 +1961,92 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             capsule((0.40, 0.60));
             capsule((0.60, 0.40));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::Series;
+
+    fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let p = ui.painter().clone();
+                    add(&p, ui, &pal);
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn every_icon_draws() {
+        let icons = [
+            Icon::Home, Icon::Chart, Icon::List, Icon::Container, Icon::Info, Icon::History, Icon::Power, Icon::User, Icon::Wrench, Icon::Bolt, Icon::Record, Icon::Globe, Icon::Apps, Icon::Driver, Icon::Disk, Icon::Gauge, Icon::Gear,
+            Icon::Popout, Icon::Refresh, Icon::Pulse, Icon::Cpu, Icon::Memory, Icon::Gpu, Icon::Network, Icon::Thermal, Icon::Close, Icon::Chevron, Icon::ChevronDown, Icon::ChevronRight, Icon::Play, Icon::Pause, Icon::Stop,
+            Icon::Folder, Icon::Warning, Icon::Alert, Icon::Octagon, Icon::Shield, Icon::Search, Icon::Pin, Icon::Moon, Icon::Sun, Icon::Dots, Icon::Copy, Icon::Check, Icon::ArrowRight, Icon::Link,
+        ];
+        run(|p, _, pal| {
+            for (i, icon) in icons.iter().enumerate() {
+                draw_icon(p, Rect::from_min_size(pos2(10.0 + 30.0 * i as f32, 10.0), vec2(22.0, 22.0)), *icon, pal.text);
+                draw_icon(p, Rect::from_min_size(pos2(10.0 + 30.0 * i as f32, 50.0), vec2(14.0, 14.0)), *icon, pal.text);
+            }
+        });
+    }
+
+    #[test]
+    fn components_draw() {
+        let mut series = Series::new(60);
+        let mut second = Series::new(60);
+        for i in 0..60 {
+            series.push((i % 17) as f32 * 5.0);
+            second.push((i % 9) as f32 * 3.0);
+        }
+        run(|p, ui, pal| {
+            let r = Rect::from_min_size(pos2(20.0, 20.0), vec2(200.0, 40.0));
+            sparkline(p, r, &[(&series, pal.accent, (0.0, 100.0)), (&second, pal.text, (0.0, 100.0))], 0.15, true);
+            sparkline(p, r, &[(&series, pal.accent, (0.0, 100.0))], 0.0, false);
+            sparkline(p, r, &[], 0.0, false);
+            baseline(p, r, 0.5, pal.text_faint);
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.7, pal.accent, pal.raise(0.08));
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.0, pal.accent, pal.raise(0.08));
+            rings(p, pos2(200.0, 100.0), &[52.0, 44.0], 5.0, &[(0.5, pal.accent), (1.0, pal.ok)], pal.raise(0.08));
+            bar(p, Rect::from_min_size(pos2(20.0, 150.0), vec2(100.0, 3.0)), 0.4, pal.accent);
+            share_bar(p, Rect::from_min_size(pos2(20.0, 170.0), vec2(200.0, 12.0)), &[(1.0, pal.accent), (0.0, pal.ok), (2.0, pal.warn)], 3.0);
+            share_bar(p, Rect::from_min_size(pos2(20.0, 170.0), vec2(200.0, 12.0)), &[], 3.0);
+            assert!(legend(p, pos2(20.0, 200.0), &[("CPU", pal.accent), ("RAM", pal.ok)], theme::ui(12.0)) > 40.0);
+            let c = chip(p, pos2(20.0, 220.0), "Running", pal.ok, Some(Icon::Check));
+            assert_eq!(c.width(), chip_width(p, "Running", true));
+            let b = badge(p, pos2(20.0, 250.0), "WINDOWS", pal);
+            assert_eq!(b.width(), badge_width(p, "WINDOWS"));
+            key_hint(p, pos2(20.0, 270.0), "Ctrl K", pal);
+            for kind in [Dot::Full, Dot::Hollow, Dot::Half] {
+                status_text(p, pos2(20.0, 290.0), "Paused", pal.warn, kind);
+            }
+            icon_box(p, Rect::from_min_size(pos2(20.0, 300.0), vec2(28.0, 28.0)), pal, None, 'c');
+            let t = tracked_text(p, pos2(20.0, 340.0), Align2::LEFT_TOP, "TMOP", theme::semibold(15.0), pal.text, 0.18);
+            let plain = tracked_text(p, pos2(20.0, 340.0), Align2::LEFT_TOP, "TMOP", theme::semibold(15.0), pal.text, 0.0);
+            assert!(t.width() > plain.width(), "tracking widens the text");
+            logo(p, pos2(300.0, 300.0), 28.0, pal.accent);
+            fill_radial_backdrop(p, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)), pal.accent, pal.body, pal.card);
+            // Controls.
+            for kind in [ButtonKind::Secondary, ButtonKind::Primary, ButtonKind::Ghost, ButtonKind::Danger, ButtonKind::DangerFill] {
+                let r = Button::new("Go").kind(kind).size(ButtonSize::Hero).icon(Icon::Play).show(ui, pal);
+                assert_eq!(r.rect.height(), 44.0);
+            }
+            assert_eq!(segmented(ui, &["a", "b"], 0, pal, false), None);
+            assert_eq!(segmented(ui, &["a", "b"], 1, pal, true), None);
+            assert_eq!(tab_bar(ui, Rect::from_min_size(pos2(20.0, 400.0), vec2(300.0, 36.0)), pal, &[("All", Some(3)), ("Apps", None)], 0, Some("x")), None);
+        });
+    }
+
+    #[test]
+    fn button_sizes() {
+        assert_eq!([ButtonSize::Compact, ButtonSize::Small, ButtonSize::Medium, ButtonSize::Toolbar, ButtonSize::Hero].map(ButtonSize::height), [28.0, 32.0, 34.0, 36.0, 44.0]);
     }
 }

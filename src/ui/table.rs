@@ -373,8 +373,49 @@ mod tests {
         assert!(!matches("excel", &["Microsoft Word"]));
     }
 
+    /// Cells with every decoration draw in a table, and a second line makes the rows taller.
+    #[test]
+    fn decorated_cells_draw() {
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut icons = super::super::icons::IconCache::new(&ctx);
+        let cols = [Col::text("Name", 200.0), Col::num("CPU", 100.0), Col::spark("CPU 60s", 120.0), Col::text("Status", 100.0)];
+        let order = [0usize, 1, 2];
+        let mut state = TableState::sorted_by(1, true);
+        state.selected = Some("1".into());
+        for tall in [false, true] {
+            let cell = |i: usize, c: usize| -> Cell {
+                match c {
+                    0 => {
+                        let cell = Cell::new(format!("app{i}.exe")).badge("WINDOWS").dot(pal.ok).icon(None);
+                        if tall && i == 0 {
+                            cell.sub("folder")
+                        } else {
+                            cell
+                        }
+                    }
+                    1 => Cell::new("12.5%").bar(0.4, pal.accent).heat(0.5),
+                    2 => Cell::new("").spark((0..30).map(|v| (v % 7) as f32).collect(), pal.accent, true),
+                    _ => Cell::new("Running").chip(pal.ok),
+                }
+            };
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(700.0, 300.0));
+                        show(ui, rect, "t", &pal, &cols, &order, &mut state, &|i| i.to_string(), &cell, &mut icons);
+                    });
+                });
+            }
+        }
+        assert_eq!((state.sort, state.desc), (1, true));
+    }
+
     #[test]
     fn sorting_respects_direction() {
+
         let items = [3, 1, 2];
         let mut order = vec![0, 1, 2];
         let s = TableState::sorted_by(0, true);

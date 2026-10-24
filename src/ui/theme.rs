@@ -538,7 +538,7 @@ impl Palette {
         let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = self.body;
         // Glass: dialogs, menus and popups let the backdrop show through a little.
-        v.window_fill = with_alpha(mix(self.body, self.card, 0.6), 0.92);
+        v.window_fill = with_alpha(mix(self.body, self.card, 0.6), 0.95);
         v.window_stroke = Stroke::new(1.0_f32, with_alpha(self.text, 0.10));
         v.window_rounding = Rounding::same(10.0);
         v.menu_rounding = Rounding::same(8.0);

@@ -56,7 +56,6 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(egui::Frame::window(&ctx.style()).fill(pal.panel))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
                 ui.label(question);

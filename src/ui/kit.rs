@@ -437,7 +437,7 @@ pub enum DialogButton<'a> {
 pub fn dialog_buttons(ui: &mut egui::Ui, pal: &Palette, buttons: &[DialogButton<'_>]) -> Option<usize> {
     let mut clicked = None;
     ui.add_space(4.0);
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), ButtonSize::Hero.height()), Layout::right_to_left(Align::Center), |ui| {
         for (i, b) in buttons.iter().enumerate().rev() {
             let (label, kind) = match b {
                 DialogButton::Ghost(l) => (*l, ButtonKind::Ghost),
@@ -504,4 +504,72 @@ mod tests {
         assert_eq!(v[1].height(), 40.0);
         assert_eq!(v[2].top(), 70.0);
     }
+
+    fn frame(add: impl Fn(&egui::Context, &egui::Painter)) {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| add(ctx, &ui.painter().clone()));
+            });
+        }
+    }
+
+    /// Tiles flow into as many columns as fit; the strip hands out one inner rect per tile.
+    #[test]
+    fn tile_layouts() {
+        frame(|_, p| {
+            let pal = theme::DARK;
+            let tiles: Vec<StatTile> = (0..5).map(|i| StatTile::new(format!("T{i}"), "1", "sub").bar(0.5, pal.accent)).collect();
+            let wide = Rect::from_min_size(pos2(10.0, 10.0), vec2(1000.0, 400.0));
+            assert_eq!(stat_grid(p, wide, &pal, &tiles, 190.0), STAT_TILE_H, "five 190 px tiles fit in one row of 1000 px");
+            let narrow = Rect::from_min_size(pos2(10.0, 10.0), vec2(400.0, 400.0));
+            assert_eq!(stat_grid(p, narrow, &pal, &tiles, 190.0), 3.0 * STAT_TILE_H + 2.0 * STAT_GAP, "two columns, three rows");
+            assert_eq!(stat_grid(p, narrow, &pal, &[], 190.0), 0.0);
+            let strip = tile_strip(p, Rect::from_min_size(pos2(0.0, 0.0), vec2(303.0, 80.0)), &pal, 3);
+            assert_eq!(strip.len(), 3);
+            assert!(strip[0].right() < strip[1].left() && strip[1].right() < strip[2].left(), "a hairline between tiles");
+            let inner = section_card(p, Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 200.0)), &pal, "Events", "6");
+            assert_eq!((inner.left(), inner.top(), inner.right(), inner.bottom()), (22.0, 40.0, 378.0, 182.0));
+            let items = [("A".to_string(), "1".to_string(), false, None), ("B".to_string(), "2".to_string(), true, Some(pal.ok))];
+            assert_eq!(kv_grid(p, Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 100.0)), &pal, &items, 100.0, 24.0), 48.0);
+        });
+    }
+
+    /// Code boxes, filter boxes, menu rows and the floating bar lay out inside a page.
+    #[test]
+    fn controls_lay_out() {
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut filter = String::new();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(!code_box(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 70.0)), &pal, "Path", "svchost.exe -k netsvcs"));
+                    let r = filter_box(ui, &mut filter, "Filter", 220.0, &pal);
+                    assert!((r.rect.height() - 20.0).abs() < 40.0);
+                    assert!(!menu_item(ui, "End task", Some("Del"), true));
+                    menu_header(ui, "chrome.exe \u{b7} PID 4821");
+                    floating_bar(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)), "sel", |ui| ui.label("selected"));
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn dialog_pieces_draw() {
+        frame(|ctx, _| {
+            let pal = theme::DARK;
+            let shown = dialog(ctx, "t", |ui| {
+                dialog_header(ui, &pal, Some((Icon::Octagon, theme::RED)), "End **chrome** and all **24 processes**?", "Unsaved data is lost.");
+                fact_box(ui, &pal, &[("Frees about", "3.4 GB", Some(pal.ok)), ("Open windows", "3", None), ("System", "None affected", None)]);
+                dialog_buttons(ui, &pal, &[DialogButton::Ghost("Cancel"), DialogButton::Secondary("End one"), DialogButton::Primary("Keep"), DialogButton::Danger("End all")])
+            });
+            assert_eq!(shown, Some(None));
+        });
+    }
 }
+

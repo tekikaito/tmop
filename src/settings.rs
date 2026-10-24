@@ -653,6 +653,17 @@ mod tests {
         assert_eq!(s.appearance.theme, "dark");
     }
 
+    /// `appearance.accent` is new: files without it load with the palette's own accent, and a
+    /// colour round-trips.
+    #[test]
+    fn accent_is_optional() {
+        let load = parse(r#"{"version":1,"appearance":{"theme":"dark"}}"#);
+        assert_eq!((load.settings.appearance.theme.as_str(), load.settings.appearance.accent.as_str()), ("dark", ""));
+        let mut s = Settings::default();
+        s.appearance.accent = "#8B9CFF".into();
+        assert_eq!(parse(&s.to_json()).settings.appearance.accent, "#8B9CFF");
+    }
+
     #[test]
     fn v1_round_trips() {
         let mut s = Settings::default();
