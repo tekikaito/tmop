@@ -1,7 +1,7 @@
 //! Windows Disk Cleanup handlers (`HKLM\...\Explorer\VolumeCaches`) for Disk Space "Clean up".
 //!
 //! The COM handlers (`IEmptyVolumeCache`/`IEmptyVolumeCache2`) run in a HELPER PROCESS, this exe started with
-//! `--volume-caches=query:<drive>` (one JSON line per handler: id, names, size, needs_admin/error, ms) or
+//! `--volume-caches=query:<drive>[:<ids>]` (one JSON line per handler: id, names, size, needs_admin/error, ms) or
 //! `--volume-caches=purge:<drive>:<id1,id2,...>`. A crashing or hanging third-party handler cannot take the app
 //! down, and the parent kills the helper after a timeout. Purge only ever touches ids that were passed AND are
 //! registered ([`select_purge`]); `DownloadsFolder` (the user's files) is never listed and never purged.
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::time::{Duration, Instant};
 
-/// Helper switch; the value is `query:<drive>` or `purge:<drive>:<ids>`.
+/// Helper switch; the value is `query:<drive>[:<ids>]` or `purge:<drive>:<ids>`.
 pub const ARG: &str = "--volume-caches=";
 
 /// Handlers that are never listed, queried or purged (they hold the user's own files).
@@ -105,7 +105,8 @@ pub fn select_purge(requested: &[String], enumerated: &[String]) -> Vec<String> 
 /// What the helper was asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cmd {
-    Query { drive: String },
+    /// `ids` empty: every handler.
+    Query { drive: String, ids: Vec<String> },
     Purge { drive: String, ids: Vec<String> },
 }
 
@@ -116,19 +117,34 @@ fn parse_drive(s: &str) -> Option<String> {
     (b.len() <= 2 && !b.is_empty() && b[0].is_ascii_alphabetic() && (b.len() == 1 || b[1] == b':')).then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()))
 }
 
-/// Parses the value of [`ARG`]: `query:C` or `purge:C:id1,id2`.
+/// Parses the value of [`ARG`]: `query:C`, `query:C:id1,id2` or `purge:C:id1,id2`.
 pub fn parse_cmd(v: &str) -> Option<Cmd> {
     let (mode, rest) = v.split_once(':')?;
+    // `C:ids` (the drive letter, its colon, then the ids)
+    let with_ids = |rest: &str| -> Option<(String, Vec<String>)> {
+        let (drive, ids) = rest.split_once(':').map(|(d, i)| (d, i.trim_start_matches(['\\', ':'])))?;
+        Some((parse_drive(drive)?, ids.split(',').map(str::trim).filter(|i| !i.is_empty()).map(str::to_string).collect()))
+    };
     match mode {
-        "query" => Some(Cmd::Query { drive: parse_drive(rest)? }),
-        "purge" => {
-            // `C:ids` (the drive letter, its colon, then the ids)
-            let (drive, ids) = rest.split_once(':').map(|(d, i)| (d, i.trim_start_matches(['\\', ':'])))?;
-            let ids: Vec<String> = ids.split(',').map(str::trim).filter(|i| !i.is_empty()).map(str::to_string).collect();
-            Some(Cmd::Purge { drive: parse_drive(drive)?, ids })
-        }
+        "query" => match parse_drive(rest) {
+            Some(drive) => Some(Cmd::Query { drive, ids: Vec::new() }),
+            None => with_ids(rest).map(|(drive, ids)| Cmd::Query { drive, ids }),
+        },
+        "purge" => with_ids(rest).map(|(drive, ids)| Cmd::Purge { drive, ids }),
         _ => None,
     }
+}
+
+/// `prev` with every handler in `fresh` replaced by its new answer (matched by id); handlers `fresh` lacks keep
+/// their previous answer.
+pub fn merge(mut prev: Vec<Handler>, fresh: Vec<Handler>) -> Vec<Handler> {
+    for h in fresh {
+        match prev.iter_mut().find(|p| p.id.eq_ignore_ascii_case(&h.id)) {
+            Some(p) => *p = h,
+            None => prev.push(h),
+        }
+    }
+    prev
 }
 
 /// The helper's output: one JSON object per line (anything else is ignored).
@@ -171,7 +187,17 @@ pub fn system_drive() -> String {
 
 /// Handlers of `drive`, or why the helper failed (crash, timeout, cannot start).
 pub fn query(drive: &str) -> Result<Vec<Handler>, String> {
-    let (lines, failure) = run_helper(&format!("query:{}", drive.trim_end_matches('\\')), QUERY_TIMEOUT);
+    query_ids(drive, &[])
+}
+
+/// Only the handlers `ids` (all when empty); measuring all takes seconds (Temporary Files alone ~4 s).
+pub fn query_ids(drive: &str, ids: &[String]) -> Result<Vec<Handler>, String> {
+    let ids: Vec<&str> = ids.iter().map(String::as_str).filter(|i| !is_excluded(i) && !i.contains(',')).collect();
+    let what = match ids.is_empty() {
+        true => format!("query:{}", drive.trim_end_matches('\\')),
+        false => format!("query:{}:{}", drive.trim_end_matches('\\'), ids.join(",")),
+    };
+    let (lines, failure) = run_helper(&what, QUERY_TIMEOUT);
     match failure {
         Some(why) if lines.is_empty() => Err(why),
         _ => Ok(lines), // handlers that answered before a failure are still shown
@@ -284,7 +310,7 @@ pub fn run_switches(args: &[String]) -> Option<i32> {
     Some(match parse_cmd(v) {
         Some(c) => helper_main(c),
         None => {
-            eprintln!("usage: TMOP.exe {ARG}query:<drive> | {ARG}purge:<drive>:<id1,id2,...>");
+            eprintln!("usage: TMOP.exe {ARG}query:<drive>[:<id1,id2,...>] | {ARG}purge:<drive>:<id1,id2,...>");
             2
         }
     })
@@ -309,8 +335,8 @@ fn helper_main(_: Cmd) -> i32 {
 #[cfg(windows)]
 fn helper_main(cmd: Cmd) -> i32 {
     match cmd {
-        Cmd::Query { drive } => {
-            for reg in com::enumerate() {
+        Cmd::Query { drive, ids } => {
+            for reg in com::enumerate().into_iter().filter(|r| ids.is_empty() || ids.iter().any(|i| i.eq_ignore_ascii_case(&r.id))) {
                 match com::run_one(reg.clone(), &drive, false, com::QUERY_EACH) {
                     Some(h) => emit(&h),
                     None => emit(&Handler { id: reg.id, name: reg.name, error: Some("timed out".into()), ..Default::default() }),
@@ -612,8 +638,9 @@ mod tests {
 
     #[test]
     fn command_line_parsing() {
-        assert_eq!(parse_cmd("query:C"), Some(Cmd::Query { drive: r"C:\".into() }));
-        assert_eq!(parse_cmd(r"query:d:\"), Some(Cmd::Query { drive: r"D:\".into() }));
+        assert_eq!(parse_cmd("query:C"), Some(Cmd::Query { drive: r"C:\".into(), ids: vec![] }));
+        assert_eq!(parse_cmd(r"query:d:\"), Some(Cmd::Query { drive: r"D:\".into(), ids: vec![] }));
+        assert_eq!(parse_cmd("query:C:Thumbnail Cache,D3D Shader Cache"), Some(Cmd::Query { drive: r"C:\".into(), ids: s(&["Thumbnail Cache", "D3D Shader Cache"]) }));
         assert_eq!(parse_cmd("purge:C:Temporary Files,Thumbnail Cache"), Some(Cmd::Purge { drive: r"C:\".into(), ids: s(&["Temporary Files", "Thumbnail Cache"]) }));
         assert_eq!(parse_cmd("purge:C:"), Some(Cmd::Purge { drive: r"C:\".into(), ids: vec![] }));
         for bad in ["", "query", "query:", "query:CC", "query:1", "query:\\\\srv\\share", "purge", "purge:Temporary Files", "wipe:C", "purge:::x"] {
@@ -663,6 +690,13 @@ mod tests {
         for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts] {
             assert!(!hidden.contains(&kept), "{kept:?}");
         }
+    }
+
+    #[test]
+    fn merge_replaces_only_requeried_handlers() {
+        let h = |id: &str, size| Handler { id: id.into(), name: id.into(), size, ..Default::default() };
+        let got = merge(vec![h("Temporary Files", 10), h("Thumbnail Cache", 20)], vec![h("thumbnail cache", 0), h("New", 1)]);
+        assert_eq!(got.iter().map(|x| (x.id.as_str(), x.size)).collect::<Vec<_>>(), vec![("Temporary Files", 10), ("thumbnail cache", 0), ("New", 1)]);
     }
 
     #[test]

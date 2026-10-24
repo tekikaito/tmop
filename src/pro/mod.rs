@@ -101,6 +101,10 @@ impl<T: Send + 'static> Loader<T> {
         self.value.as_ref().and_then(|r| r.as_ref().ok())
     }
 
+    pub fn ok_mut(&mut self) -> Option<&mut T> {
+        self.value.as_mut().and_then(|r| r.as_mut().ok())
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.value.as_ref().and_then(|r| r.as_ref().err()).map(|s| s.as_str())
     }

@@ -88,10 +88,33 @@ pub struct CleanupUi {
     /// The handlers must be queried again; done as soon as no query is running. The previous answer stays
     /// in place meanwhile (the Loader keeps its value), so covered categories do not reappear.
     pub vols_dirty: bool,
+    /// Set after a Clean up: measure again only the handlers it purged (the rest did not change); a full
+    /// query takes seconds and keeps "Clean up selected" disabled meanwhile.
+    pub vols_only: Option<Vec<String>>,
     next_id: u64,
 }
 
 impl CleanupUi {
+    /// After a Clean up: drop what it deleted from the fixed locations instead of measuring them all again
+    /// (seconds), read the Recycle Bin again, and query only the handlers it purged.
+    pub fn after_clean(&mut self, report: &Report, purged: Vec<String>) {
+        let gone: HashSet<&std::path::Path> = report.deleted.iter().map(|t| t.path.as_path()).collect();
+        match self.fixed.ok_mut() {
+            Some(f) => {
+                for m in &mut f.measured {
+                    if m.cat == Category::RecycleBin {
+                        *m = cleanup::measure_recycle_bin();
+                    } else {
+                        m.forget(&gone);
+                    }
+                }
+            }
+            None => self.started = false,
+        }
+        self.vols_only = Some(purged);
+        self.vols_dirty = true;
+    }
+
     pub fn is_checked(&self, c: Category) -> bool {
         self.checked.get(&c).copied().unwrap_or(c.preselected())
     }
@@ -227,7 +250,15 @@ impl App {
             }
             if c.vols_dirty && !c.vols.is_loading() {
                 c.vols_dirty = false;
-                c.vols.start(|| volcache::query(&volcache::system_drive()));
+                match (c.vols_only.take(), c.vols.ok().cloned()) {
+                    (Some(ids), _) if ids.is_empty() => {}
+                    (Some(ids), Some(prev)) => c.vols.start(move || {
+                        let drive = volcache::system_drive();
+                        // Should the partial query fail, measure everything rather than keep stale sizes.
+                        volcache::query_ids(&drive, &ids).map(|fresh| volcache::merge(prev, fresh)).or_else(|_| volcache::query(&drive))
+                    }),
+                    _ => c.vols.start(|| volcache::query(&volcache::system_drive())),
+                }
             }
             match tree {
                 None => c.tree_for = None,
@@ -438,6 +469,7 @@ impl App {
         }
         if refresh {
             c.started = false;
+            c.vols_only = None;
             c.tree_for = None;
         }
         if want_clean {
@@ -675,6 +707,7 @@ impl App {
             .collect();
         let bin = p.bin_bytes;
         let (vols, drive) = (p.vols, p.drive);
+        let purged = Some(vols.iter().map(|v| v.id.clone()).collect());
         let epoch = p.epoch;
         let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
@@ -696,7 +729,7 @@ impl App {
             }
             purge_vols(&vols, &drive, &mut report);
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
-            Ok(JobOut { report, tree, epoch })
+            Ok(JobOut { report, tree, epoch, purged })
         });
     }
 }
@@ -824,6 +857,23 @@ mod tests {
         let failed = with_vols(Err("timed out".into()));
         assert_eq!(failed.visible(true), Category::ALL.to_vec());
         assert_eq!(CleanupUi::default().visible(true), Category::ALL.to_vec());
+    }
+
+    #[test]
+    fn after_clean_forgets_deleted_items_and_requeries_only_purged_handlers() {
+        let mut c = with_vols(Ok(vec![handler("Temporary Files", 10, false)]));
+        let (a, b) = (CleanItem { path: PathBuf::from("a"), ..item(5, false) }, CleanItem { path: PathBuf::from("b"), ..item(7, false) });
+        c.fixed.start(move || Ok(Fixed { sys: Default::default(), measured: vec![measured(Category::BrowserCaches, vec![a, b])] }));
+        while !c.fixed.poll() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        c.started = true;
+        let gone = Target { path: PathBuf::from("a"), size: 5, is_dir: false, node: None, file: None };
+        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, vec!["Thumbnail Cache".into()]);
+        let m = c.measured(Category::BrowserCaches, 0).unwrap();
+        assert_eq!((m.bytes, m.count), (7, 1));
+        assert!(c.started, "fixed locations are not measured again");
+        assert!(c.vols_dirty && c.vols_only == Some(vec!["Thumbnail Cache".to_string()]));
     }
 
     #[test]

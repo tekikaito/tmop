@@ -126,6 +126,13 @@ impl Measured {
         Measured { cat, bytes: items.iter().map(|i| i.size).sum(), count: items.len() as u64, items, error: None }
     }
 
+    /// Drops the items at the paths in `gone` (deleted meanwhile).
+    pub fn forget(&mut self, gone: &std::collections::HashSet<&Path>) {
+        self.items.retain(|i| !gone.contains(i.path.as_path()));
+        self.bytes = self.items.iter().map(|i| i.size).sum();
+        self.count = self.items.len() as u64;
+    }
+
     fn failed(cat: Category, why: &str) -> Self {
         Measured { error: Some(why.to_string()), ..Measured::new(cat) }
     }

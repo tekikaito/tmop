@@ -15,7 +15,7 @@
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
 //!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
 //!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
-//!   TMOP --volume-caches=query:<drive>   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:) as JSON lines (Windows only)
+//!   TMOP --volume-caches=query:<drive>[:<ids>]   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:; only <ids> when given) as JSON lines (Windows only)
 //!   TMOP --volume-caches=purge:<drive>:<id1,id2,...>   helper: purge exactly those handler ids (Clean up starts it after the confirm dialog)
 //!
 //! The `--engine-relay` modes honour the `TMOP_ENGINE_*` test overrides (`tmop::engine::Overrides`).
