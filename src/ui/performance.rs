@@ -129,7 +129,7 @@ impl App {
                 Device::Gpu => ("GPU".into(), "GPU adapter".into(), if s.gpu.available { format!("{:.1}%", s.gpu.utilization_pct) } else { "no counters".into() }, &fd.hist.gpu, (0.0, 100.0)),
                 Device::Disk => ("Disk".into(), "Physical disks".into(), format!("{:.1}%", s.disk.active_pct), &fd.hist.disk, (0.0, 100.0)),
                 Device::Network => ("Network".into(), "All network adapters".into(), format!("S: {}  R: {}", format_rate(s.network.tx_bps), format_rate(s.network.rx_bps)), &net, (0.0, net_peak)),
-                Device::Thermal => ("Thermals".into(), "ACPI thermal zones".into(), s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("no sensor".into()), &fd.hist.thermal, (0.0, 110.0)),
+                Device::Thermal => ("Thermals".into(), if s.thermal.sources.is_empty() { "ACPI thermal zones".into() } else { s.thermal.sources.clone() }, s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("no sensor".into()), &fd.hist.thermal, (0.0, 110.0)),
                 Device::Docker => {
                     let t = self.docker.ui.snap.totals;
                     ("Docker".into(), format!("{} running", t.running), format!("{:.1}% CPU", t.cpu_pct), &self.perf_docker.totals_cpu, (0.0, 100.0))
@@ -275,7 +275,7 @@ impl App {
         y = graph_bottom + 24.0;
         let items = [
             ("Utilization", format!("{:.1}%", s.cpu.total_pct)),
-            ("Speed", s.cpu.current_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or("N/A".into())),
+            ("Speed", s.cpu.current_mhz.map(|m| format!("{:.2} GHz{}", m as f32 / 1000.0, if s.cpu.clock_live { "" } else { " (static)" })).unwrap_or("N/A".into())),
             ("Processes", s.process_count.to_string()),
             ("Threads", s.thread_count.to_string()),
         ];
@@ -294,13 +294,14 @@ impl App {
             ("L2 cache", format_bytes(det.l2 as f64)),
             ("Kernel time", format!("{:.1}%", s.cpu.kernel_pct)),
             ("Power plan", plan),
-            ("Base speed", s.cpu.max_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or("N/A".into())),
+            ("Base speed", s.cpu.base_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or("N/A".into())),
             ("Physical cores", det.cores.to_string()),
             ("Virtualization", det.virtualization.map(|v| if v { "Enabled" } else { "Disabled" }.to_string()).unwrap_or("Unknown".into())),
             ("L1 cache", format_bytes(det.l1 as f64)),
             ("L3 cache", format_bytes(det.l3 as f64)),
             ("Fastest core", s.cpu.per_core_mhz.iter().max().map(|m| format!("{:.2} GHz", *m as f32 / 1000.0)).unwrap_or("N/A".into())),
             ("Handles", s.handle_count.to_string()),
+            ("Boost speed", s.cpu.boost_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or("N/A".into())),
         ];
         self.kv_grid(ui, rect, y, &kv, fd);
     }
@@ -444,7 +445,8 @@ impl App {
         let orange = fd.metric("thermal");
         let mut y = self.detail_title(ui, rect, "Thermals", &s.thermal.max_c().map(|c| self.temp(c)).unwrap_or("N/A".into()), fd.smooth.thermal / 110.0, [theme::GREEN, theme::YELLOW, theme::RED], fd);
         let p = ui.painter().clone();
-        p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "ACPI thermal zones (firmware sensors, not the CPU package)", theme::ui(12.0), pal.text_dim);
+        let src = if s.thermal.sources.is_empty() { "ACPI thermal zones (firmware sensors, not the CPU package)" } else { s.thermal.sources.as_str() };
+        p.text(pos2(rect.left(), y), Align2::LEFT_TOP, src, theme::ui(12.0), pal.text_dim);
         y += 19.0;
         let gr = Rect::from_min_max(pos2(rect.left(), y), pos2(rect.right(), rect.bottom() - 120.0));
         let mut g = self.graph(vec![GraphLine { series: &fd.hist.thermal, color: orange, range: (0.0, 110.0) }], fd);
@@ -453,10 +455,11 @@ impl App {
         draw_graph(&p, gr, &g);
         p.text(pos2(gr.left() + 6.0, gr.top() + 4.0), Align2::LEFT_TOP, "110\u{b0}", theme::ui(11.0), orange);
         y = gr.bottom() + 14.0;
-        if s.thermal.zones.is_empty() {
-            p.text(pos2(rect.left(), y), Align2::LEFT_TOP, "This machine's firmware publishes no ACPI thermal zones. Vendor SDK sensors are not implemented.", theme::ui(12.0), pal.warn);
+        if s.thermal.max_c().is_none() {
+            p.text(pos2(rect.left(), y), Align2::LEFT_TOP, format!("No temperature source available. {}.", crate::metrics::HWINFO_HINT), theme::ui(12.0), pal.warn);
         } else {
-            let items: Vec<(&str, String)> = s.thermal.zones.iter().map(|(z, c)| (z.as_str(), self.temp(*c))).collect();
+            let mut items: Vec<(&str, String)> = s.thermal.cpu.iter().map(|(l, c)| (l.as_str(), self.temp(*c))).collect();
+            items.extend(s.thermal.zones.iter().map(|(z, c)| (z.as_str(), self.temp(*c))));
             self.stat_row(ui, rect, y, &items, fd);
         }
     }

@@ -8,12 +8,15 @@
 //!                         open a terminal session in a container on the Docker page
 //!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
+//!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
 //!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
 //!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
+//!   TMOP --volume-caches=query:<drive>[:<ids>]   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:; only <ids> when given) as JSON lines (Windows only)
+//!   TMOP --volume-caches=purge:<drive>:<id1,id2,...>   helper: purge exactly those handler ids (Clean up starts it after the confirm dialog)
 //!
 //! The `--engine-relay` modes honour the `TMOP_ENGINE_*` test overrides (`tmop::engine::Overrides`).
 
@@ -27,11 +30,15 @@ fn dump() {
     std::thread::sleep(std::time::Duration::from_secs(1));
     let (s, procs) = c.collect();
     println!("CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz);
+    println!(
+        "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
+        s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
+    );
     println!("Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total - s.memory.available, s.memory.total);
     println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
     println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
     println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
-    println!("Thermal  {:?}", s.thermal.zones);
+    println!("Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources);
     println!("Procs    {} processes, {} threads, {} handles", s.process_count, s.thread_count, s.handle_count);
     let mut top: Vec<_> = procs.iter().collect();
     top.sort_by_key(|p| std::cmp::Reverse(p.private_working_set));
@@ -175,6 +182,10 @@ fn main() -> eframe::Result<()> {
     if let Some(code) = tmop::taskmgr::run_switches(&args) {
         std::process::exit(code);
     }
+    // Windows Disk Cleanup helper: runs the COM handlers in this separate process.
+    if let Some(code) = tmop::pro::volcache::run_switches(&args) {
+        std::process::exit(code);
+    }
     // Started in place of Task Manager: a running TMOP window takes it over if there is one.
     let taskmgr = tmop::taskmgr::taskmgr_launch(&args);
     if let Some(l) = &taskmgr {
@@ -222,7 +233,7 @@ fn main() -> eframe::Result<()> {
                 v.split(',').filter_map(tmop::pro::bench::Test::from_id).collect()
             }
         }),
-        disk_scan: value(&["--disk-scan="]).map(std::path::PathBuf::from),
+        disk_scan: value(&["--disk-scan=", "--disk-root="]).map(std::path::PathBuf::from),
         docker_terminal: value(&["--docker-terminal="]).and_then(|v| {
             let (container, command) = v.split_once(';').unwrap_or((v.as_str(), ""));
             let container = container.trim();

@@ -42,6 +42,11 @@ impl Key {
         (st == ERROR_SUCCESS).then_some(Key(h))
     }
 
+    /// The raw handle, for COM calls that take an open key. Valid while `self` lives.
+    pub fn raw(&self) -> HKEY {
+        self.0
+    }
+
     pub fn subkey(&self, name: &str) -> Option<Key> {
         let w = wide(name);
         let mut h = HKEY::default();
@@ -166,7 +171,49 @@ fn decode(ty: REG_VALUE_TYPE, data: Vec<u8>) -> Value {
     }
 }
 
+/// True when the process runs elevated (administrator token).
+pub fn is_elevated() -> bool {
+    // SAFETY: no arguments.
+    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
+}
+
+/// Path of a known folder (`FOLDERID_*`).
+pub fn known_folder(id: &windows::core::GUID) -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: the returned string is copied and then freed with CoTaskMemFree.
+    unsafe {
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let s = p.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+        s.map(std::path::PathBuf::from)
+    }
+}
+
+/// Expands 8.3 short names (`GetLongPathNameW`); `None` when the path does not exist.
+pub fn long_path(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let w = wide(&p.to_string_lossy());
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: NUL-terminated input, output buffer sized as passed.
+    let n = unsafe { GetLongPathNameW(PCWSTR(w.as_ptr()), Some(&mut buf)) } as usize;
+    (n > 0 && n < buf.len()).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+}
+
 pub use super::expand_env;
+
+/// Test helper: a directory junction `link` -> `target` (needs no privilege, unlike a symlink).
+#[cfg(test)]
+pub(crate) fn make_junction(link: &std::path::Path, target: &std::path::Path) -> bool {
+    std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+        && std::fs::symlink_metadata(link).is_ok()
+}
 
 #[cfg(test)]
 mod tests {
