@@ -1,21 +1,27 @@
 //! Flight Recorder page: live graph, process events and recordings.
 
-use super::kit::{self, empty_state, hsplit, row_ui, titled_card, vsplit, GAP, MARGIN};
-use super::pro_pages::LIMITS;
+use super::kit::{self, empty_state, hsplit, section_card, vsplit};
+use super::pro_pages::{clock_of, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
 use super::theme::{self, with_alpha};
-use super::widgets::{self, card, draw_graph, GraphLine, Icon};
-use super::{App, FrameData};
+use super::widgets::{self, draw_graph, Button, ButtonKind, Graph, GraphLine, Icon};
+use super::{fmt_hms, App, FrameData};
 use crate::metrics::Series;
 use crate::pro::recorder::{self, EventKind, Record};
 use crate::process::format_bytes;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Width the toolbar needs: folder field, three buttons, the limit box and the two main buttons.
+const TOOLBAR_W: f32 = 1060.0;
+/// Space left of the graph for the mono percentage labels.
+const LABEL_W: f32 = 38.0;
 
 impl App {
     pub fn recorder_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        let body = self.page_header(ui, &pal, "Flight Recorder", Icon::Record);
+        let st = theme::status(&pal);
         if self.pro.rec_dir_text.is_empty() {
             self.pro.rec_dir_text = self.recorder.dir.display().to_string();
         }
@@ -23,72 +29,54 @@ impl App {
             self.pro.recordings = recorder::list(&self.recorder.dir);
             self.pro.recordings_listed = true;
         }
-        let area = body.shrink(MARGIN);
-        let rows = vsplit(area, &[128.0, -1.0, 230.0], GAP);
-        let p = ui.painter().clone();
-        let red = Color32::from_rgb(0xFF, 0x3B, 0x3B);
-        // Control card.
-        card(&p, rows[0], &pal);
-        let inner = rows[0].shrink(14.0);
         let recording = self.recorder.is_recording();
-        let btn = Rect::from_center_size(pos2(inner.left() + 46.0, inner.center().y), vec2(84.0, 84.0));
-        let resp = ui.interact(btn, ui.id().with("rec-button"), Sense::click());
-        let pulse = if recording { 0.6 + 0.4 * ((fd.time * 3.0).sin() as f32 * 0.5 + 0.5) } else { 0.0 };
-        p.circle_filled(btn.center(), 40.0, if resp.hovered() { pal.hover } else { pal.panel });
-        p.circle_stroke(btn.center(), 40.0, Stroke::new(2.0_f32, if recording { red } else { pal.control_stroke }));
-        if recording {
-            if fd.bloom > 0.0 {
-                p.circle_filled(btn.center(), 30.0, with_alpha(red, 0.18 * fd.bloom * pulse));
-            }
-            p.rect_filled(Rect::from_center_size(btn.center(), vec2(26.0, 26.0)), 3.0, red);
-        } else {
-            p.circle_filled(btn.center(), 18.0, theme::dim(red, 0.85));
-        }
-        resp.clone().on_hover_text(if recording { "Stop recording" } else { "Start recording" });
-        let mut toggle = resp.clicked();
-        // Stopwatch + status.
-        let clock = super::fmt_clock(self.recorder.elapsed().unwrap_or_default());
-        let h = 26.0;
-        let lcd = Rect::from_min_size(pos2(inner.left() + 110.0, inner.top()), vec2(widgets::seven_segment_width(&clock, h) + 20.0, h + 12.0));
-        let lcd_pal = pal.lcd();
-        p.rect_filled(lcd, 4.0, lcd_pal.bg);
-        p.rect_stroke(lcd, 4.0, Stroke::new(1.0_f32, lcd_pal.rim));
-        let lit = if recording { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { lcd_pal.lit };
-        widgets::seven_segment(&p, lcd.min + vec2(10.0, 6.0), &clock, h, lit, lcd_pal.unlit, if recording { fd.bloom } else { 0.0 });
-        let status = match (self.recorder.recording_path(), &self.recorder.last_error) {
-            (Some(path), _) => format!("Recording {} samples to {}", self.recorder.recorded_rows(), path.display()),
-            (None, Some(e)) => e.clone(),
+        let (subtitle, sub_color) = match (self.recorder.recording_path(), &self.recorder.last_error) {
+            (Some(path), _) => (format!("REC {} \u{b7} {} samples \u{b7} Recording to {}", fmt_hms(self.recorder.elapsed().unwrap_or_default()), self.recorder.recorded_rows(), path.display()), pal.text_faint),
+            (None, Some(e)) => (e.clone(), st.warn),
             (None, None) => match &self.recorder.last_saved {
-                Some(sv) => format!("Saved {}", sv.display()),
-                None => "Not recording. Every sample is also kept in the flight recorder below.".into(),
+                Some(sv) => (format!("Saved {}", sv.display()), pal.text_faint),
+                None => (format!("Not recording \u{b7} {} samples in the flight ring", self.recorder.ring.len()), pal.text_faint),
             },
         };
-        let clip = p.with_clip_rect(Rect::from_min_max(pos2(lcd.right() + 16.0, inner.top()), pos2(inner.right() - 390.0, inner.bottom())));
-        clip.text(pos2(lcd.right() + 16.0, lcd.center().y), Align2::LEFT_CENTER, &status, theme::ui(12.5), if self.recorder.last_error.is_some() && !recording { pal.warn } else { pal.text_dim });
+        // The subtitle is drawn here (it needs a colour and the recording dot); the title block only
+        // gets a blank one so it keeps its two-line layout.
+        let body = self.page_title(ui, &pal, "Flight Recorder", " ");
+        let (tools, area) = page_layout(body, TOOLBAR_W);
+        let p = ui.painter().clone();
+        {
+            let (x, y) = (body.left() + 13.0, body.top() - super::HEADER_H + 44.0);
+            let on_title_row = tools.bottom() <= body.top();
+            let max_w = if on_title_row { tools.left() - x - 16.0 } else { body.right() - x - 8.0 }.max(120.0);
+            let mut text_x = x;
+            if recording {
+                let c = pos2(x + 4.0, y + 8.0);
+                let pulse = 0.5 + 0.5 * (fd.time * 3.0).sin() as f32;
+                p.circle_filled(c, 8.0, with_alpha(st.danger, 0.10 + 0.14 * pulse * fd.bloom.max(0.4)));
+                p.circle_filled(c, 4.0, st.danger);
+                text_x += 16.0;
+            }
+            widgets::text_fit(&p, pos2(text_x, y), Align2::LEFT_TOP, &subtitle, theme::mono(12.0), sub_color, max_w - (text_x - x));
+        }
+
+        let mut toggle = false;
         let mut save_flight = false;
         let mut open_folder = false;
         let mut apply_dir = false;
         let mut default_dir = false;
-        row_ui(ui, Rect::from_min_max(pos2(inner.left() + 110.0, inner.bottom() - 32.0), pos2(inner.right() - 390.0, inner.bottom())), |ui| {
-            ui.label(RichText::new("Folder").font(theme::ui(12.5)).color(pal.text_dim));
-            let w = (ui.available_width() - 260.0).max(160.0);
-            let r = widgets::search_box(ui, &mut self.pro.rec_dir_text, "Recording folder", w, &pal);
-            apply_dir |= r.lost_focus();
-            default_dir |= widgets::button(ui, "Default", &pal, None).clicked();
-            open_folder |= widgets::button(ui, "Open folder", &pal, Some(Icon::Folder)).clicked();
-        });
-        row_ui(ui, Rect::from_min_max(pos2(inner.right() - 370.0, inner.top()), pos2(inner.right(), inner.top() + 32.0)), |ui| {
-            ui.label(RichText::new("Stop after").font(theme::ui(12.5)).color(pal.text_dim));
-            egui::ComboBox::from_id_salt("rec-limit").width(150.0).selected_text(LIMITS[self.pro.rec_limit].0).show_ui(ui, |ui| {
+        let ring_len = self.recorder.ring.len();
+        toolbar(ui, tools, |ui| {
+            save_flight = Button::new(&format!("Save flight recorder ({ring_len})")).show(ui, &pal).clicked();
+            toggle = if recording { Button::new("\u{25a0} Stop recording").kind(ButtonKind::DangerFill) } else { Button::primary("\u{25cf} Start recording") }.show(ui, &pal).clicked();
+            egui::ComboBox::from_id_salt("rec-limit").width(130.0).selected_text(LIMITS[self.pro.rec_limit].0).show_ui(ui, |ui| {
                 for (i, (l, _)) in LIMITS.iter().enumerate() {
                     ui.selectable_value(&mut self.pro.rec_limit, i, *l);
                 }
             });
-        });
-        row_ui(ui, Rect::from_min_max(pos2(inner.right() - 370.0, inner.bottom() - 32.0), inner.right_bottom()), |ui| {
-            let label = if recording { "Stop recording" } else { "Start recording" };
-            toggle |= widgets::button(ui, label, &pal, Some(if recording { Icon::Stop } else { Icon::Record })).clicked();
-            save_flight |= widgets::button(ui, &format!("Save flight recorder ({})", self.recorder.ring.len()), &pal, None).clicked();
+            ui.label(RichText::new("Stop after").font(theme::ui(12.0)).color(pal.text_faint));
+            open_folder = Button::ghost("Open folder").show(ui, &pal).clicked();
+            default_dir = Button::ghost("Default").show(ui, &pal).clicked();
+            apply_dir = mono_input(ui, &mut self.pro.rec_dir_text, "Recording folder", 220.0, &pal).lost_focus();
+            ui.label(RichText::new("Folder").font(theme::ui(12.0)).color(pal.text_faint));
         });
         if default_dir {
             self.pro.rec_dir_text = recorder::default_dir().display().to_string();
@@ -127,126 +115,57 @@ impl App {
             let _ = kit::reveal(&self.recorder.dir);
         }
 
-        // Graph of the flight ring (or of an opened recording).
-        let (title, records): (String, Vec<&Record>) = match &self.pro.playback {
-            Some((path, recs)) => (format!("Playback {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()), recs.iter().collect()),
-            None => ("Flight recorder".into(), self.recorder.ring.iter().collect()),
-        };
-        let span = match (records.first(), records.last()) {
-            (Some(a), Some(b)) if records.len() > 1 => format!("{} \u{2192} {}", &a.time[11.min(a.time.len())..], &b.time[11.min(b.time.len())..]),
-            _ => String::new(),
-        };
-        let content = titled_card(&p, rows[1], &pal, fd.bloom, &title, &span);
-        let mut close_playback = false;
-        let mk = |f: &dyn Fn(&Record) -> f32| {
-            let mut s = Series::new(records.len().max(2));
-            for r in &records {
-                s.push(f(r));
-            }
-            s
-        };
-        let cpu = mk(&|r| r.cpu);
-        let mem = mk(&|r| r.mem_pct);
-        let disk = mk(&|r| r.disk_pct);
-        let gpu = mk(&|r| r.gpu);
-        let legend = [("CPU", fd.metric("cpu")), ("Memory", fd.metric("memory")), ("Disk", fd.metric("disk")), ("GPU", fd.metric("gpu"))];
-        let mut lx = content.left() + 44.0;
-        for (t, c) in legend {
-            p.circle_filled(pos2(lx + 4.0, content.top() + 8.0), 4.0, c);
-            let r = p.text(pos2(lx + 12.0, content.top() + 8.0), Align2::LEFT_CENTER, t, theme::ui(12.0), c);
-            lx = r.right() + 18.0;
-        }
-        if self.pro.playback.is_some() {
-            let close = Rect::from_min_size(pos2(content.right() - 120.0, content.top()), vec2(120.0, 18.0));
-            let r = p.text(close.right_center(), Align2::RIGHT_CENTER, "Close playback \u{2715}", theme::ui(12.0), pal.accent);
-            close_playback = ui.interact(r, ui.id().with("close-playback"), Sense::click()).clicked();
-        }
-        let graph = Rect::from_min_max(pos2(content.left() + 44.0, content.top() + 22.0), pos2(content.right() - 4.0, content.bottom() - 4.0));
-        if records.len() < 2 {
-            p.rect_stroke(graph, 0.0, Stroke::new(1.0_f32, pal.grid));
-            empty_state(&p, graph, &pal, "Collecting samples\u{2026}");
-        } else {
-            let mut g = self.graph(
-                vec![
-                    GraphLine { series: &cpu, color: fd.metric("cpu"), range: (0.0, 100.0) },
-                    GraphLine { series: &mem, color: fd.metric("memory"), range: (0.0, 100.0) },
-                    GraphLine { series: &disk, color: fd.metric("disk"), range: (0.0, 100.0) },
-                    GraphLine { series: &gpu, color: fd.metric("gpu"), range: (0.0, 100.0) },
-                ],
-                fd,
-            );
-            // Fit the whole recording into the graph width.
-            g.px_per_update = (graph.width() / records.len().max(1) as f32).clamp(0.25, 16.0);
-            g.regions = 1;
-            g.phase = if self.pro.playback.is_some() { 0.0 } else { fd.phase };
-            g.glide = self.pro.playback.is_none() && fd.glide;
-            g.border = Some(pal.card_stroke);
-            g.line_width = 1.6;
-            draw_graph(&p, graph, &g);
-            for (frac, l) in [(1.0, "100%"), (0.5, "50%"), (0.0, "0%")] {
-                p.text(pos2(graph.left() - 6.0, graph.bottom() - graph.height() * frac), Align2::RIGHT_CENTER, l, theme::ui(11.5), pal.text_dim);
-            }
-            // Hover readout.
-            if let Some(hp) = ui.ctx().pointer_hover_pos().filter(|h| graph.contains(*h)) {
-                let n = records.len();
-                let px = g.px_per_update;
-                let age = ((graph.right() - hp.x) / px).round() as usize;
-                if age < n {
-                    let r = records[n - 1 - age];
-                    p.line_segment([pos2(hp.x, graph.top()), pos2(hp.x, graph.bottom())], Stroke::new(1.0_f32, with_alpha(pal.text, 0.4)));
-                    let text = format!("{}\nCPU {:.1}%  Mem {:.1}%  Disk {:.1}%  GPU {:.1}%\n{}", r.time, r.cpu, r.mem_pct, r.disk_pct, r.gpu, r.top.replace('|', ", "));
-                    let gal = p.layout(text, theme::ui(12.0), pal.text, 420.0);
-                    let at = pos2((hp.x + 12.0).min(graph.right() - gal.size().x - 12.0), graph.top() + 8.0);
-                    let bg = Rect::from_min_size(at, gal.size()).expand(6.0);
-                    p.rect_filled(bg, 4.0, with_alpha(pal.panel, 0.95));
-                    p.rect_stroke(bg, 4.0, Stroke::new(1.0_f32, pal.card_stroke));
-                    p.galley(at, gal, pal.text);
-                }
-            }
-        }
-        if close_playback {
-            self.pro.playback = None;
-        }
-        // Events and saved recordings.
-        let low = hsplit(rows[2], &[1.0, 1.0], GAP);
-        let content = titled_card(&p, low[0], &pal, fd.bloom, "Process events", &format!("{}", self.recorder.events.len()));
-        let row_h = 19.0;
+        let low_h = (area.height() * 0.36).clamp(170.0, 250.0);
+        let rows = vsplit(area, &[-1.0, low_h], 14.0);
+        let close_playback = self.flight_graph(ui, rows[0], fd);
+
+        // Process events and saved recordings.
+        let low = hsplit(rows[1], &[3.0, 2.0], 14.0);
+        let content = section_card(&p, low[0], &pal, "Process events", &self.recorder.events.len().to_string());
+        let row_h = 32.0;
         let max_rows = (content.height() / row_h).floor() as usize;
         if self.recorder.events.is_empty() {
             empty_state(&p, content, &pal, "Process starts and exits appear here");
         }
         for (i, e) in self.recorder.events.iter().rev().take(max_rows).enumerate() {
-            let y = content.top() + i as f32 * row_h + row_h / 2.0;
+            let top = content.top() + i as f32 * row_h;
+            let y = top + row_h / 2.0;
             let (tag, c) = match e.kind {
-                EventKind::Started => ("\u{25b2}", theme::GREEN),
-                EventKind::Exited => ("\u{25bc}", theme::RED),
-                EventKind::Note => ("\u{25cf}", theme::BLUE),
+                EventKind::Started => ("Start", st.ok),
+                EventKind::Exited => ("Exit", st.danger_text),
+                EventKind::Note => ("Note", st.info),
             };
-            p.text(pos2(content.left() + 2.0, y), Align2::LEFT_CENTER, &e.time[11.min(e.time.len())..], theme::mono(11.5), pal.text_dim);
-            p.text(pos2(content.left() + 70.0, y), Align2::LEFT_CENTER, tag, theme::ui(11.0), c);
-            let clip = p.with_clip_rect(Rect::from_min_max(pos2(content.left() + 86.0, y - 10.0), pos2(content.right(), y + 10.0)));
-            clip.text(pos2(content.left() + 86.0, y), Align2::LEFT_CENTER, &e.text, theme::ui(12.0), pal.text);
+            p.hline(content.x_range(), top, Stroke::new(1.0_f32, pal.row_rule()));
+            p.text(pos2(content.left(), y), Align2::LEFT_CENTER, clock_of(&e.time), theme::mono(12.0), pal.text_faint);
+            p.text(pos2(content.left() + 84.0, y), Align2::LEFT_CENTER, tag, theme::ui(13.0), c);
+            widgets::text_fit(&p, pos2(content.left() + 140.0, y), Align2::LEFT_CENTER, &e.text, theme::ui(13.0), pal.text_table(), content.width() - 140.0);
         }
-        let content = titled_card(&p, low[1], &pal, fd.bloom, "Recordings", &format!("{}", self.pro.recordings.len()));
+
+        let content = section_card(&p, low[1], &pal, "Recordings", &format!("{} \u{b7} click to play back", self.pro.recordings.len()));
+        let list = Rect::from_min_max(content.min, pos2(content.right(), content.bottom() - 20.0));
         if self.pro.recordings.is_empty() {
-            empty_state(&p, content, &pal, "No recordings in this folder yet");
+            empty_state(&p, list, &pal, "No recordings in this folder yet");
         }
+        let writing = self.recorder.recording_path().and_then(|w| w.file_name()).map(|n| n.to_os_string());
+        let elapsed = self.recorder.elapsed().map(|d| fmt_span(d.as_secs())).unwrap_or_default();
         let mut open: Option<PathBuf> = None;
         let mut reveal: Option<PathBuf> = None;
-        for (i, r) in self.pro.recordings.iter().take(((content.height()) / 26.0).floor() as usize).enumerate() {
-            let rr = Rect::from_min_size(pos2(content.left(), content.top() + i as f32 * 26.0), vec2(content.width(), 24.0));
+        for (i, r) in self.pro.recordings.iter().take((list.height() / 42.0).floor() as usize).enumerate() {
+            let rr = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * 42.0), vec2(list.width(), 38.0));
             let resp = ui.interact(rr, ui.id().with(("recording", i)), Sense::click());
             let playing = self.pro.playback.as_ref().map(|(pp, _)| *pp == r.path).unwrap_or(false);
-            if playing {
-                p.rect_filled(rr, 3.0, pal.selection);
-            } else if resp.hovered() {
-                p.rect_filled(rr, 3.0, pal.hover);
+            let live = writing.as_deref().is_some_and(|n| r.path.file_name() == Some(n));
+            if live {
+                widgets::tinted_card(&p, rr, &pal, st.danger);
+                if playing {
+                    p.rect_stroke(rr, 10.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.8)));
+                }
+            } else {
+                list_row(&p, rr, &pal, if playing { RowLook::Marked(pal.accent) } else { RowLook::Plain }, resp.hovered());
             }
-            widgets::draw_icon(&p, Rect::from_center_size(pos2(rr.left() + 12.0, rr.center().y), vec2(13.0, 13.0)), Icon::Chart, theme::GREEN);
-            let clip = p.with_clip_rect(Rect::from_min_max(rr.min, pos2(rr.right() - 90.0, rr.bottom())));
-            let (fg, fg_dim) = if playing { (pal.on_selection(), pal.on_selection()) } else { (pal.text, pal.text_dim) };
-            clip.text(pos2(rr.left() + 26.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::ui(12.5), fg);
-            p.text(pos2(rr.right() - 6.0, rr.center().y), Align2::RIGHT_CENTER, format_bytes(r.size as f64), theme::ui(12.0), fg_dim);
+            let (right, right_color) = if live { (format!("recording \u{b7} {elapsed}"), st.danger_text) } else { (format_bytes(r.size as f64), pal.text_faint) };
+            let rt = p.text(pos2(rr.right() - 12.0, rr.center().y), Align2::RIGHT_CENTER, right, theme::ui(12.0), right_color);
+            widgets::text_fit(&p, pos2(rr.left() + 12.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::mono(12.0), pal.text, rr.width() - 36.0 - rt.width());
             if resp.clicked() {
                 open = Some(r.path.clone());
             }
@@ -254,6 +173,10 @@ impl App {
                 reveal = Some(r.path.clone());
             }
             resp.on_hover_text("Click to play back, right-click to show in Explorer");
+        }
+        widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, "Right-click shows the file in Explorer.", theme::ui(11.0), pal.text_faint, content.width());
+        if close_playback {
+            self.pro.playback = None;
         }
         if let Some(path) = open {
             match recorder::load(&path) {
@@ -264,5 +187,168 @@ impl App {
         if let Some(path) = reveal {
             let _ = kit::reveal(&path);
         }
+    }
+
+    /// The graph card of the flight ring (or of an opened recording). True when "Close playback"
+    /// was clicked.
+    fn flight_graph(&self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) -> bool {
+        let pal = fd.pal;
+        let st = theme::status(&pal);
+        let p = ui.painter().clone();
+        let playing = self.pro.playback.is_some();
+        let records: Vec<&Record> = match &self.pro.playback {
+            Some((_, recs)) => recs.iter().collect(),
+            None => self.recorder.ring.iter().collect(),
+        };
+        let n = records.len();
+        // Span of the samples and the time between two of them.
+        let span_secs = match (records.first(), records.last()) {
+            (Some(a), Some(b)) if n > 1 => stamp_secs(&b.time).zip(stamp_secs(&a.time)).map(|(b, a)| (b - a).max(0) as u64),
+            _ => None,
+        };
+        let interval = if playing {
+            span_secs.filter(|_| n > 1).map(|s| fmt_interval(Duration::from_secs_f32(s as f32 / (n - 1) as f32)))
+        } else {
+            self.settings.update_speed().interval().map(fmt_interval)
+        };
+        let title = match (&self.pro.playback, span_secs) {
+            (Some((path, _)), _) => format!("Playback {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
+            (None, Some(s)) => format!("Flight recorder \u{b7} last {}{}", fmt_span(s), interval.map(|i| format!(" \u{b7} 1 sample / {i}")).unwrap_or_default()),
+            (None, None) => "Flight recorder".to_string(),
+        };
+        let content = section_card(&p, rect, &pal, &title, "");
+        let mut legend: Vec<(&str, Swatch)> = vec![("CPU", Swatch::Line(fd.metric("cpu"))), ("Memory", Swatch::Line(fd.metric("memory"))), ("Disk", Swatch::Line(fd.metric("disk"))), ("GPU", Swatch::Line(fd.metric("gpu")))];
+        if !playing {
+            legend.push(("Process event", Swatch::Tick(st.warn)));
+        }
+        let lw = swatch_legend_width(&p, &legend);
+        swatch_legend(&p, &pal, pos2(rect.right() - 22.0 - lw, rect.top() + 25.0), &legend);
+
+        let foot_h = 16.0 + 8.0 + 28.0;
+        let graph = Rect::from_min_max(pos2(content.left() + LABEL_W, content.top() + 2.0), pos2(content.right(), (content.bottom() - foot_h).max(content.top() + 60.0)));
+        let mut close = false;
+        // Readout row under the time labels.
+        let readout_y = graph.bottom() + 16.0 + 8.0 + 14.0;
+        if n < 2 {
+            p.rect_stroke(graph, 0.0, Stroke::new(1.0_f32, pal.grid));
+            empty_state(&p, graph, &pal, "Collecting samples\u{2026}");
+        } else {
+            let px = (graph.width() / (n - 1) as f32).clamp(0.25, 16.0);
+            let x_of = |idx: usize| graph.right() - (n - 1 - idx) as f32 * px;
+            // Time labels (six, evenly spaced) with a faint vertical line each.
+            for k in 0..6 {
+                let x = graph.left() + graph.width() * k as f32 / 5.0;
+                let idx = (n - 1).saturating_sub(((graph.right() - x) / px).round() as usize);
+                if x_of(idx) - x > px + 0.5 {
+                    continue; // left of the oldest sample
+                }
+                p.vline(x, graph.y_range(), Stroke::new(1.0_f32, with_alpha(pal.text, 0.05)));
+                let anchor = match k {
+                    0 => Align2::LEFT_CENTER,
+                    5 => Align2::RIGHT_CENTER,
+                    _ => Align2::CENTER_CENTER,
+                };
+                p.text(pos2(x, graph.bottom() + 12.0), anchor, hm_of(&records[idx].time), theme::mono(10.0), pal.text_faint);
+            }
+            for (k, label) in ["100%", "75", "50", "25", "0"].iter().enumerate() {
+                let y = graph.top() + graph.height() * k as f32 / 4.0;
+                match k {
+                    0 | 4 => {}
+                    _ => {
+                        p.hline(graph.x_range(), y, Stroke::new(1.0_f32, pal.grid));
+                    }
+                }
+                p.text(pos2(graph.left() - 8.0, y), Align2::RIGHT_CENTER, label, theme::mono(10.0), pal.text_faint);
+            }
+            p.hline(graph.x_range(), graph.bottom(), Stroke::new(1.0_f32, with_alpha(pal.text, 0.14)));
+            let series = |f: &dyn Fn(&Record) -> f32| {
+                let mut s = Series::new(n.max(2));
+                for r in &records {
+                    s.push(f(r));
+                }
+                s
+            };
+            let (cpu, mem, disk, gpu) = (series(&|r| r.cpu), series(&|r| r.mem_pct), series(&|r| r.disk_pct), series(&|r| r.gpu));
+            let smooth = self.settings.graphs.smooth_curves;
+            let trace = |s: &Series, color: Color32, width: f32, fill: f32| {
+                let mut g = Graph::new(vec![GraphLine { series: s, color, range: (0.0, 100.0) }]);
+                g.regions = 1;
+                g.px_per_update = px;
+                g.bloom = 0.0;
+                g.markers = false;
+                g.smooth = smooth;
+                g.line_width = width;
+                g.fill = fill;
+                draw_graph(&p, graph, &g);
+            };
+            trace(&mem, fd.metric("memory"), 1.6, 0.0);
+            trace(&disk, fd.metric("disk"), 1.4, 0.0);
+            trace(&gpu, fd.metric("gpu"), 1.4, 0.0);
+            trace(&cpu, fd.metric("cpu"), 1.8, 0.10);
+            // Process starts and exits of the flight ring, at the sample of their second.
+            if !playing && !self.recorder.events.is_empty() {
+                let mut first: HashMap<&str, usize> = HashMap::new();
+                for (i, r) in records.iter().enumerate() {
+                    first.entry(r.time.as_str()).or_insert(i);
+                }
+                let mut xs: Vec<f32> = self.recorder.events.iter().filter_map(|e| first.get(e.time.as_str())).map(|i| x_of(*i)).collect();
+                xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+                for x in xs {
+                    p.extend(egui::Shape::dashed_line(&[pos2(x, graph.top()), pos2(x, graph.bottom())], Stroke::new(1.0_f32, with_alpha(st.warn, 0.7)), 3.0, 3.0));
+                }
+            }
+            // Hover: a line over the graph, its sample in the readout below.
+            let hovered = ui.ctx().pointer_hover_pos().filter(|h| graph.contains(*h)).and_then(|hp| {
+                let age = ((graph.right() - hp.x) / px).round() as usize;
+                (age < n).then_some((hp.x, n - 1 - age))
+            });
+            if let Some((x, _)) = hovered {
+                p.vline(x, graph.y_range(), Stroke::new(1.0_f32, with_alpha(pal.text, 0.5)));
+            }
+            let r = records[hovered.map(|h| h.1).unwrap_or(n - 1)];
+            let top = r.top.split('|').next().unwrap_or("");
+            let mut text = format!("{} \u{b7} CPU {:.0}% \u{b7} RAM {:.0}% \u{b7} Disk {:.0}% \u{b7} GPU {:.0}%", clock_of(&r.time), r.cpu, r.mem_pct, r.disk_pct, r.gpu);
+            if !top.is_empty() {
+                text.push_str(&format!(" \u{b7} {top}"));
+            }
+            let w = widgets::text_width(&p, &text, theme::mono(12.0)).min(content.width() - 20.0);
+            let chip = Rect::from_min_size(pos2(content.left(), readout_y - 13.0), vec2(w + 16.0, 26.0));
+            p.rect_filled(chip, 4.0, pal.raise(0.06));
+            p.rect_stroke(chip, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)));
+            widgets::text_fit(&p, chip.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, &text, theme::mono(12.0), pal.text, w);
+            let hint_x = chip.right() + 14.0;
+            if content.right() - hint_x > 300.0 {
+                p.text(pos2(hint_x, readout_y), Align2::LEFT_CENTER, "Hover for details \u{b7} click a recording to play it back", theme::ui(12.0), pal.text_faint);
+            }
+        }
+        if playing {
+            let r = p.text(pos2(content.right() - 18.0, readout_y), Align2::RIGHT_CENTER, "Close playback", theme::ui(12.0), pal.accent);
+            widgets::draw_icon(&p, Rect::from_center_size(pos2(content.right() - 7.0, readout_y), vec2(11.0, 11.0)), Icon::Close, pal.accent);
+            close = ui.interact(Rect::from_min_max(r.min, pos2(content.right(), r.max.y)).expand(4.0), ui.id().with("close-playback"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+        }
+        close
+    }
+}
+
+/// "250 ms" or "1 s": the time between two samples.
+fn fmt_interval(d: Duration) -> String {
+    if d.as_millis() < 1000 {
+        format!("{} ms", d.as_millis())
+    } else if d.subsec_millis() == 0 {
+        format!("{} s", d.as_secs())
+    } else {
+        format!("{:.1} s", d.as_secs_f32())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_interval_text() {
+        assert_eq!(fmt_interval(Duration::from_millis(250)), "250 ms");
+        assert_eq!(fmt_interval(Duration::from_secs(1)), "1 s");
+        assert_eq!(fmt_interval(Duration::from_millis(1500)), "1.5 s");
     }
 }

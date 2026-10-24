@@ -2,10 +2,12 @@
 //! categories and their measuring live in [`crate::pro::cleanup`]; deletion goes through the same
 //! classifier, worker, log and skipped list as the manual delete in [`super::disk_delete`].
 
-use super::disk_delete::{apply_report, danger_button, JobOut};
+use super::disk_delete::{apply_report, verdict_lists, JobOut};
 use super::diskspace_page::{disk_list, disk_row};
-use super::theme::{self, with_alpha, Palette};
-use super::widgets::{self, card, draw_icon, Icon};
+use super::kit::{self, section_card, stat_grid, StatTile};
+use super::pro_pages::{confirm_row, list_row, RowLook};
+use super::theme::{self, Palette};
+use super::widgets::{self, tracked_text, Button, ButtonKind, ButtonSize, Icon};
 use super::{App, FrameData};
 use crate::pro::cleanup::{self, Category, Measured};
 use crate::pro::diskdelete::{self, Assessed, Mode, Report, SystemPaths, Target, Verdict};
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-const ROW_H: f32 = 58.0;
+const ROW_H: f32 = 56.0;
 const LIST_ROW_H: f32 = 22.0;
 const RULES_MAX_AGE: Duration = Duration::from_secs(120);
 
@@ -218,34 +220,6 @@ pub fn footer_totals(ms: &[(&Measured, bool)], elevated: bool) -> (u64, usize) {
     (total, n)
 }
 
-/// Two-option control that draws itself in one rectangle (layout direction does not matter).
-/// Returns the index clicked.
-pub fn segmented(ui: &mut egui::Ui, labels: &[&str], selected: usize, pal: &Palette) -> Option<usize> {
-    let font = theme::ui(13.0);
-    let widths: Vec<f32> = labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), font.clone(), pal.text).size().x + 24.0).collect();
-    let (rect, _) = ui.allocate_exact_size(vec2(widths.iter().sum(), 30.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, 4.0, pal.control);
-    let mut x = rect.left();
-    let mut clicked = None;
-    for (i, (l, w)) in labels.iter().zip(&widths).enumerate() {
-        let r = Rect::from_min_size(pos2(x, rect.top()), vec2(*w, rect.height()));
-        let resp = ui.interact(r, ui.id().with(("segment", i)), Sense::click());
-        let on = i == selected;
-        if on {
-            p.rect_filled(r.shrink(2.0), 3.0, pal.selection);
-        } else if resp.hovered() {
-            p.rect_filled(r.shrink(2.0), 3.0, with_alpha(pal.text, 0.06));
-        }
-        p.text(r.center(), Align2::CENTER_CENTER, l, font.clone(), if on { pal.text } else { pal.text_dim });
-        if resp.clicked() && !on {
-            clicked = Some(i);
-        }
-        x += w;
-    }
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke));
-    clicked
-}
 
 fn to_target(i: &cleanup::CleanItem) -> Target {
     Target { path: i.path.clone(), size: i.size, is_dir: i.is_dir, node: i.node, file: i.file }
@@ -258,7 +232,6 @@ impl App {
     pub fn cleanup_page(&mut self, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, tree: Option<&Arc<Tree>>, scanning: bool, elevated: bool) -> bool {
         let pal = fd.pal;
         let p = ui.painter().clone();
-        card(&p, rect, &pal);
         let epoch = self.pro.disk_epoch();
         {
             let c = &mut self.pro.clean;
@@ -307,18 +280,17 @@ impl App {
             }
         }
 
-        let inner = rect.shrink(14.0);
-        let head = Rect::from_min_size(inner.min, vec2(inner.width(), 30.0));
-        let foot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 40.0), inner.max);
-        let list = Rect::from_min_max(pos2(inner.left(), head.bottom() + 8.0), pos2(inner.right(), foot.top() - 8.0));
-        p.text(head.left_center(), Align2::LEFT_CENTER, "Clean up", theme::semibold(15.0), pal.text);
-        let mut refresh = false;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(head).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-            refresh = widgets::button(ui, "Refresh", &pal, None).clicked();
-        });
+        let st = theme::status(&pal);
         let busy = self.pro.clean.fixed.is_loading() || self.pro.clean.tree_m.is_loading() || self.pro.clean.vols.is_loading();
-        let hint = if busy { "Measuring\u{2026}" } else { "Everything is checked against the same safety rules as manual deletes" };
-        widgets::text_fit(&p, pos2(head.left() + 80.0, head.center().y + 1.0), Align2::LEFT_CENTER, hint, theme::ui(12.5), pal.text_dim, (head.width() - 180.0).max(40.0));
+        let content = section_card(&p, rect, &pal, "Clean up", "");
+        // Refresh at the right end of the heading row; while measuring, a note beside the title.
+        let mut refresh = false;
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(rect.right() - 22.0 - 120.0, rect.top() + 10.0), vec2(120.0, 28.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+            refresh = Button::new("Refresh").size(ButtonSize::Compact).show(ui, &pal).clicked();
+        });
+        if busy {
+            p.text(pos2(rect.left() + 22.0 + 90.0, rect.top() + 24.0), Align2::LEFT_CENTER, "Measuring\u{2026}", theme::ui(12.0), pal.text_dim);
+        }
 
         let mut toggles: Vec<(Category, bool)> = Vec::new();
         let mut expands: Vec<Category> = Vec::new();
@@ -327,6 +299,32 @@ impl App {
         let c = &self.pro.clean;
         let visible = c.visible(elevated);
         let vol_rows = c.vol_list(elevated);
+
+        // What is selected and what there is in total.
+        let ms: Vec<(&Measured, bool)> = visible
+            .iter()
+            .filter(|cat| !(cat.needs_admin() && !elevated))
+            .filter_map(|&cat| c.measured(cat, epoch).map(|m| (m, c.is_checked(cat))))
+            .collect();
+        let (mut total, mut n) = footer_totals(&ms, elevated);
+        let sel_vols = c.selected_vols(elevated);
+        total += sel_vols.iter().map(|h| h.size).sum::<u64>();
+        n += sel_vols.len();
+        let everything: Vec<(&Measured, bool)> = ms.iter().map(|(m, _)| (*m, true)).collect();
+        let (mut found, mut found_n) = footer_totals(&everything, elevated);
+        for h in vol_rows.iter().filter(|h| h.size > 0 && (elevated || !h.needs_admin)) {
+            found += h.size;
+            found_n += 1;
+        }
+        let plural = |n: usize| if n == 1 { "category" } else { "categories" };
+        let mut selected = StatTile::new("Selected", format_bytes(total as f64), if n == 0 { "Nothing selected".to_string() } else { format!("{n} {}", plural(n)) });
+        if found > 0 {
+            selected = selected.bar((total as f32 / found as f32).min(1.0), pal.accent);
+        }
+        let tiles = [selected, StatTile::new("Found in total", format_bytes(found as f64), format!("across {found_n} {}", plural(found_n)))];
+        let tiles_h = stat_grid(&p, content, &pal, &tiles, 190.0);
+        let foot = Rect::from_min_max(pos2(content.left(), content.bottom() - 40.0), content.max);
+        let list = Rect::from_min_max(pos2(content.left(), content.top() + tiles_h + 14.0), pos2(content.right(), foot.top() - 10.0));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
@@ -335,11 +333,11 @@ impl App {
                 {
                     let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
                     let p = ui.painter();
-                    p.text(pos2(hr.left() + 4.0, hr.center().y), Align2::LEFT_CENTER, "Windows Disk Cleanup", theme::semibold(13.5), pal.text);
+                    tracked_text(p, pos2(hr.left() + 2.0, hr.center().y), Align2::LEFT_CENTER, "WINDOWS DISK CLEANUP", theme::semibold(11.0), pal.text_faint, 0.14);
                     let (msg, col) = if c.vols.is_loading() {
                         ("Measuring\u{2026}".to_string(), pal.text_dim)
                     } else if let Some(e) = c.vols.error() {
-                        (format!("Not available: {e}"), pal.warn)
+                        (format!("Not available: {e}"), st.warn)
                     } else if vol_rows.is_empty() {
                         ("Nothing to clean".to_string(), pal.text_dim)
                     } else {
@@ -354,7 +352,7 @@ impl App {
                     let locked = h.needs_admin && !elevated;
                     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
                     let resp = if h.description.is_empty() { resp } else { resp.on_hover_text(h.description.as_str()) };
-                    ui.painter().rect_filled(r, 6.0, with_alpha(pal.text, if resp.hovered() { 0.07 } else { 0.04 }));
+                    list_row(ui.painter(), r, &pal, RowLook::Plain, resp.hovered());
                     let mut v = c.is_vol_checked(&h.id) && !locked;
                     let cb = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
                     if ui.add_enabled_ui(!locked, |ui| ui.put(cb, egui::Checkbox::without_text(&mut v)).changed()).inner {
@@ -365,15 +363,15 @@ impl App {
                     let left = r.left() + 46.0;
                     let right_w = 190.0;
                     let text_w = (r.width() - 46.0 - right_w - 34.0).max(60.0);
-                    widgets::text_fit(p, pos2(left, r.top() + 18.0), Align2::LEFT_CENTER, &h.name, theme::semibold(13.5), dim, text_w);
+                    widgets::text_fit(p, pos2(left, r.top() + 18.0), Align2::LEFT_CENTER, &h.name, theme::semibold(13.0), dim, text_w);
                     let detail = h.description.split_whitespace().collect::<Vec<_>>().join(" ");
-                    widgets::text_fit(p, pos2(left, r.top() + 39.0), Align2::LEFT_CENTER, &detail, theme::ui(12.0), pal.text_dim, text_w);
+                    widgets::text_fit(p, pos2(left, r.top() + 38.0), Align2::LEFT_CENTER, &detail, theme::ui(12.0), pal.text_dim, text_w);
                     let rx = r.right() - 34.0;
                     if locked {
-                        widgets::text_fit(p, pos2(rx, r.top() + 18.0), Align2::RIGHT_CENTER, "\u{2014}", theme::semibold(13.5), dim, right_w);
-                        widgets::text_fit(p, pos2(rx, r.top() + 39.0), Align2::RIGHT_CENTER, "needs administrator", theme::ui(12.0), pal.warn, right_w);
+                        widgets::text_fit(p, pos2(rx, r.top() + 18.0), Align2::RIGHT_CENTER, "\u{2014}", theme::mono_medium(13.0), dim, right_w);
+                        widgets::text_fit(p, pos2(rx, r.top() + 38.0), Align2::RIGHT_CENTER, "needs administrator", theme::ui(12.0), st.warn, right_w);
                     } else {
-                        widgets::text_fit(p, pos2(rx, r.top() + 29.0), Align2::RIGHT_CENTER, &format_bytes(h.size as f64), theme::semibold(13.5), dim, right_w);
+                        widgets::text_fit(p, pos2(rx, r.top() + 28.0), Align2::RIGHT_CENTER, &format_bytes(h.size as f64), theme::mono_medium(13.0), dim, right_w);
                     }
                 }
                 if !vol_rows.is_empty() || c.vols.is_loading() || c.vols.error().is_some() {
@@ -387,8 +385,7 @@ impl App {
                     if resp.clicked() && can_expand {
                         expands.push(cat);
                     }
-                    let p = ui.painter();
-                    p.rect_filled(r, 6.0, with_alpha(pal.text, if resp.hovered() { 0.07 } else { 0.04 }));
+                    list_row(ui.painter(), r, &pal, RowLook::Plain, resp.hovered());
                     let mut v = c.is_checked(cat) && !locked;
                     let cb = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
                     if ui.add_enabled_ui(!locked, |ui| ui.put(cb, egui::Checkbox::without_text(&mut v)).changed()).inner {
@@ -399,8 +396,8 @@ impl App {
                     let left = r.left() + 46.0;
                     let right_w = 190.0;
                     let text_w = (r.width() - 46.0 - right_w - 34.0).max(60.0);
-                    widgets::text_fit(p, pos2(left, r.top() + 18.0), Align2::LEFT_CENTER, cat.title(), theme::semibold(13.5), dim, text_w);
-                    widgets::text_fit(p, pos2(left, r.top() + 39.0), Align2::LEFT_CENTER, cat.detail(), theme::ui(12.0), pal.text_dim, text_w);
+                    widgets::text_fit(p, pos2(left, r.top() + 18.0), Align2::LEFT_CENTER, cat.title(), theme::semibold(13.0), dim, text_w);
+                    widgets::text_fit(p, pos2(left, r.top() + 38.0), Align2::LEFT_CENTER, cat.detail(), theme::ui(12.0), pal.text_dim, text_w);
                     // Right block: size and item count, or why there is none.
                     let rx = r.right() - 34.0;
                     let no_scan = cat.needs_scan() && tree.is_none();
@@ -414,9 +411,9 @@ impl App {
                         } else {
                             let admin_items = m.items.iter().filter(|i| i.needs_admin).count();
                             let (sub, col) = if locked {
-                                ("needs administrator".to_string(), pal.warn)
+                                ("needs administrator".to_string(), st.warn)
                             } else if admin_items > 0 && !elevated {
-                                (format!("{} items \u{2022} {admin_items} need administrator", m.count), pal.warn)
+                                (format!("{} items \u{2022} {admin_items} need administrator", m.count), st.warn)
                             } else if cat == Category::RecycleBin {
                                 (format!("{} items", m.count), pal.text_dim)
                             } else {
@@ -425,29 +422,29 @@ impl App {
                             (format_bytes(m.bytes as f64), sub, col)
                         }
                     } else if locked {
-                        ("\u{2014}".to_string(), "needs administrator".to_string(), pal.warn)
+                        ("\u{2014}".to_string(), "needs administrator".to_string(), st.warn)
                     } else {
                         ("Measuring\u{2026}".to_string(), String::new(), pal.text_dim)
                     };
                     if no_scan && !scanning {
-                        let br = Rect::from_min_size(pos2(rx - 92.0, r.center().y - 15.0), vec2(92.0, 30.0));
-                        widgets::text_fit(p, pos2(br.left() - 10.0, r.center().y), Align2::RIGHT_CENTER, &top, theme::ui(12.5), pal.text_dim, 140.0);
+                        let br = Rect::from_min_size(pos2(rx - 92.0, r.center().y - 14.0), vec2(92.0, 28.0));
+                        widgets::text_fit(p, pos2(br.left() - 10.0, r.center().y), Align2::RIGHT_CENTER, &top, theme::ui(12.0), pal.text_dim, 140.0);
                         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(br), |ui| {
-                            if widgets::button(ui, "Scan", &pal, Some(Icon::Play)).clicked() {
+                            if Button::new("Scan").icon(Icon::Play).size(ButtonSize::Compact).show(ui, &pal).clicked() {
                                 want_scan = true;
                             }
                         });
                     } else {
                         let p = ui.painter();
-                        let font = if sub.is_empty() { theme::ui(12.5) } else { theme::semibold(13.5) };
-                        widgets::text_fit(p, pos2(rx, r.top() + if sub.is_empty() { 29.0 } else { 18.0 }), Align2::RIGHT_CENTER, &top, font, dim, right_w);
+                        let font = if sub.is_empty() { theme::ui(12.0) } else { theme::mono_medium(13.0) };
+                        widgets::text_fit(p, pos2(rx, r.top() + if sub.is_empty() { 28.0 } else { 18.0 }), Align2::RIGHT_CENTER, &top, font, dim, right_w);
                         if !sub.is_empty() {
-                            widgets::text_fit(p, pos2(rx, r.top() + 39.0), Align2::RIGHT_CENTER, &sub, theme::ui(12.0), sub_col, right_w);
+                            widgets::text_fit(p, pos2(rx, r.top() + 38.0), Align2::RIGHT_CENTER, &sub, theme::ui(12.0), sub_col, right_w);
                         }
                     }
                     if can_expand {
                         let open = c.expanded.contains(&cat);
-                        ui.painter().text(pos2(r.right() - 16.0, r.center().y), Align2::CENTER_CENTER, if open { "\u{25be}" } else { "\u{25b8}" }, theme::ui(14.0), pal.text_dim);
+                        widgets::draw_icon(ui.painter(), Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(12.0, 12.0)), if open { Icon::ChevronDown } else { Icon::ChevronRight }, pal.text_faint);
                     }
                     if let (Some(m), true) = (m, c.expanded.contains(&cat)) {
                         let n = m.items.len();
@@ -458,31 +455,21 @@ impl App {
                         disk_list(ui, lr, ("clean-list", cat), &pal, LIST_ROW_H, n, |ui, i, r, _| {
                             let it = &m.items[i];
                             let dim = it.needs_admin && !elevated;
-                            disk_row(ui.painter(), r, &pal, &it.path.display().to_string(), dim, it.size, it.size as f32 / biggest, theme::BLUE, false, None, None);
+                            disk_row(ui.painter(), r, &pal, &it.path.display().to_string(), dim, it.size, it.size as f32 / biggest, st.info, false, None, None);
                         });
                     }
                 }
             });
         });
 
-        // Footer.
-        let ms: Vec<(&Measured, bool)> = visible
-            .iter()
-            .filter(|cat| !(cat.needs_admin() && !elevated))
-            .filter_map(|&cat| c.measured(cat, epoch).map(|m| (m, c.is_checked(cat))))
-            .collect();
-        let (mut total, mut n) = footer_totals(&ms, elevated);
-        let sel_vols = c.selected_vols(elevated);
-        total += sel_vols.iter().map(|h| h.size).sum::<u64>();
-        n += sel_vols.len();
-        let text = if n == 0 { "Nothing selected".to_string() } else { format!("{} in {n} categor{} selected", format_bytes(total as f64), if n == 1 { "y" } else { "ies" }) };
-        p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0_f32, pal.panel_stroke));
-        p.text(pos2(foot.left() + 4.0, foot.center().y + 1.0), Align2::LEFT_CENTER, text, theme::semibold(13.0), pal.text);
+        // Footer: how the safety rules apply, and the action.
+        p.hline(foot.x_range(), foot.top(), Stroke::new(1.0_f32, pal.row_rule()));
+        widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, "Everything is checked against the same safety rules as manual deletes", theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
         let can_go = n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
         let mut want_clean = false;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(foot.shrink2(vec2(0.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left(), foot.top() + 6.0), foot.max)).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(can_go, |ui| {
-                want_clean = widgets::button(ui, "Clean up selected\u{2026}", &pal, None).clicked();
+                want_clean = Button::primary("Clean up selected\u{2026}").show(ui, &pal).clicked();
             });
         });
 
@@ -597,6 +584,7 @@ impl App {
 
     fn clean_confirm_window(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(p) = self.pro.clean.pending.as_mut() else { return };
+        let st = theme::status(pal);
         let a = p.assessed.as_ref();
         let bin_ok = a.map(|a| a.bin_ok).unwrap_or(true);
         let capped = a.map(|a| a.bin_capped).unwrap_or(false);
@@ -626,27 +614,26 @@ impl App {
         let mut ack = p.ack;
         let ok_to_go = a.is_some() && deletable && (warns.is_empty() || ack);
         let mut answer = None;
-        egui::Window::new("Clean up").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).frame(egui::Frame::window(&ctx.style()).fill(pal.panel)).show(ctx, |ui| {
-            ui.set_width(560.0);
-            ui.label(RichText::new(format!("{} \u{2022} {count} categor{}", format_bytes(total as f64), if count == 1 { "y" } else { "ies" })).font(theme::semibold(14.0)).color(pal.text));
-            ui.add_space(6.0);
+        let title = format!("Clean up **{}** in {count} categor{}?", format_bytes(total as f64), if count == 1 { "y" } else { "ies" });
+        kit::dialog(ctx, "disk-cleanup", |ui| {
+            kit::dialog_header(ui, pal, Some((Icon::Disk, st.warn)), &title, "These locations are checked against the same safety rules as manual deletes.");
+            ui.add_space(10.0);
+            // One line per category: what it is, how much, and where the items go.
+            let line = |ui: &mut egui::Ui, name: &str, amount: String, dest: &str, permanent: bool| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).font(theme::semibold(13.0)).color(pal.text));
+                    ui.label(RichText::new(amount).font(theme::mono(12.0)).color(pal.text_faint));
+                });
+                ui.label(RichText::new(dest).font(theme::ui(12.0)).color(if permanent { st.danger_text } else { pal.text_dim }));
+                ui.add_space(4.0);
+            };
             for (cat, n, bytes) in &lines {
                 let (dest, permanent) = dest_text(*cat, bin_ok, capped);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(cat.title()).font(theme::semibold(12.5)).color(pal.text));
-                    let count = if *cat == Category::RecycleBin { String::new() } else { format!("{n} item{} \u{2022} ", if *n == 1 { "" } else { "s" }) };
-                    ui.label(RichText::new(format!("{count}{}", format_bytes(*bytes as f64))).font(theme::ui(12.0)).color(pal.text_dim));
-                });
-                ui.label(RichText::new(dest).font(theme::ui(11.5)).color(if permanent { theme::RED } else { pal.text_dim }));
-                ui.add_space(3.0);
+                let count = if *cat == Category::RecycleBin { String::new() } else { format!("{n} item{} \u{2022} ", if *n == 1 { "" } else { "s" }) };
+                line(ui, cat.title(), format!("{count}{}", format_bytes(*bytes as f64)), dest, permanent);
             }
             for h in &vols {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(h.name.as_str()).font(theme::semibold(12.5)).color(pal.text));
-                    ui.label(RichText::new(format_bytes(h.size as f64)).font(theme::ui(12.0)).color(pal.text_dim));
-                });
-                ui.label(RichText::new(VOL_DEST).font(theme::ui(11.5)).color(theme::RED));
-                ui.add_space(3.0);
+                line(ui, h.name.as_str(), format_bytes(h.size as f64), VOL_DEST, true);
             }
             if a.is_none() {
                 ui.horizontal(|ui| {
@@ -655,57 +642,15 @@ impl App {
                 });
             }
             if skipped_in_use > 0 {
-                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(theme::YELLOW));
+                ui.label(RichText::new(format!("In-use check skipped for {skipped_in_use} files (more than {} selected)", diskdelete::IN_USE_CAP)).font(theme::ui(12.0)).color(st.yellow));
                 ui.add_space(4.0);
             }
-            if !warns.is_empty() || !blocked.is_empty() {
-                egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
-                    for x in warns.iter().take(40) {
-                        let Verdict::Warn(reasons) = &x.verdict else { continue };
-                        ui.horizontal_top(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                            draw_icon(ui.painter(), r, Icon::Warning, theme::YELLOW);
-                            ui.vertical(|ui| {
-                                ui.add(egui::Label::new(RichText::new(x.target.path.display().to_string()).font(theme::ui(12.0)).color(pal.text)).truncate());
-                                ui.add(egui::Label::new(RichText::new(reasons.join(" \u{2022} ")).font(theme::ui(11.5)).color(pal.text_dim)).wrap());
-                            });
-                        });
-                    }
-                    if warns.len() > 40 {
-                        ui.label(RichText::new(format!("+{} more with warnings", warns.len() - 40)).font(theme::ui(12.0)).color(pal.text_faint));
-                    }
-                    if !blocked.is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Will be skipped").font(theme::semibold(12.5)).color(pal.text));
-                        for x in blocked.iter().take(40) {
-                            let Verdict::Blocked(why) = &x.verdict else { continue };
-                            ui.horizontal_top(|ui| {
-                                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                                draw_icon(ui.painter(), r, Icon::Shield, pal.text_faint);
-                                ui.vertical(|ui| {
-                                    ui.add(egui::Label::new(RichText::new(x.target.path.display().to_string()).font(theme::ui(12.0)).color(pal.text_dim)).truncate());
-                                    ui.label(RichText::new(why).font(theme::ui(11.5)).color(pal.text_faint));
-                                });
-                            });
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-            }
+            verdict_lists(ui, pal, &warns, &blocked);
             if !warns.is_empty() {
                 ui.checkbox(&mut ack, "I know what I'm doing");
                 ui.add_space(4.0);
             }
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(ok_to_go, |ui| {
-                    if danger_button(ui, "Clean up", pal).clicked() {
-                        answer = Some(true);
-                    }
-                });
-                if widgets::button(ui, "Cancel", pal, None).clicked() {
-                    answer = Some(false);
-                }
-            });
+            answer = confirm_row(ui, pal, "Cancel", "Clean up", ButtonKind::DangerFill, ok_to_go);
         });
         p.ack = ack;
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

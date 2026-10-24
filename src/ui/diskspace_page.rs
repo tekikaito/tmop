@@ -1,30 +1,39 @@
 //! Disk Space page: scan, folder map and listings.
 
-use super::kit::{self, empty_state, header_toolbar, hsplit, titled_card, vsplit, GAP, MARGIN};
+use super::hardware::{self, Hardware};
+use super::kit::{self, empty_state, hsplit, section_card};
+use super::pro_pages::{confirm_row, mono_input, page_layout, toolbar, FileCol, SubKey};
 use super::table::cmp_str;
-use super::theme::{self, mix, with_alpha, Palette};
-use super::widgets::{self, card, Icon};
+use super::theme::{self, with_alpha, Palette};
+use super::widgets::{self, tracked_text, Button, ButtonKind, Icon};
 use super::{App, FrameData};
 use crate::pro::diskdelete::{self, Target};
-use crate::pro::diskspace::{self, Tree, Volume};
+use crate::pro::diskspace::{self, ScanProgress, Tree, Volume};
 use crate::process::format_bytes;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-use super::pro_pages::{FileCol, SubKey};
 
-const DISK_ROW_H: f32 = 24.0;
+const DISK_ROW_H: f32 = 32.0;
 const DISK_BIG_ROW_H: f32 = 40.0;
-const DISK_DATE_W: f32 = 78.0;
+/// Widths of the right-hand columns of a list row: date, percentage, size.
+const DISK_DATE_W: f32 = 96.0;
+const DISK_PCT_W: f32 = 52.0;
+const DISK_SIZE_W: f32 = 74.0;
 /// Share of the Name+Folder width given to the name when the Folder column shows.
 const FOLDER_SPLIT: f32 = 0.55;
 const DISK_NARROW_W: f32 = 330.0;
 const DISK_TINY_W: f32 = 240.0;
+/// Width the toolbar needs: path field, Scan and the Analyze / Clean up switch.
+const TOOLBAR_W: f32 = 600.0;
+const VOLUME_H: f32 = 76.0;
+const VOLUME_MIN_W: f32 = 250.0;
+const BANNER_H: f32 = 44.0;
 
 impl App {
     pub fn diskspace_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        let body = self.page_header(ui, &pal, "Disk Space", Icon::Disk);
+        let st = theme::status(&pal);
         self.pro.volumes.poll();
         if self.pro.volumes.stale(Duration::from_secs(30)) {
             self.pro.volumes.start(|| Ok(diskspace::volumes()));
@@ -47,20 +56,23 @@ impl App {
         if self.pro.disk_root.is_empty() {
             self.pro.disk_root = std::env::var("SystemDrive").map(|d| format!("{d}\\")).unwrap_or_else(|_| "C:\\".into());
         }
+        let tree = self.pro.disk_tree.as_ref().map(|(t, _)| t.clone());
+        let body = self.page_title(ui, &pal, "Disk Space", &scan_subtitle(&progress, tree.as_deref()));
+        let (tools, area) = page_layout(body, TOOLBAR_W);
         let mut start_scan: Option<String> = None;
         let mut stop = false;
         let mut mode_click = None;
-        header_toolbar(ui, body, 760.0, |ui| {
+        toolbar(ui, tools, |ui| {
+            mode_click = widgets::segmented(ui, &["Analyze", "Clean up"], self.pro.disk_mode as usize, &pal, false);
             if progress.running {
-                stop = widgets::button(ui, "Stop scan", &pal, Some(Icon::Stop)).clicked();
-            } else if widgets::button(ui, "Scan", &pal, Some(Icon::Play)).clicked() {
+                stop = Button::danger("Stop scan").icon(Icon::Stop).show(ui, &pal).clicked();
+            } else if Button::primary("Scan").icon(Icon::Play).show(ui, &pal).clicked() {
                 start_scan = Some(self.pro.disk_root.clone());
             }
-            let r = widgets::search_box(ui, &mut self.pro.disk_root, "Folder or drive to scan", 300.0, &pal);
+            let r = mono_input(ui, &mut self.pro.disk_root, "Folder or drive to scan", 260.0, &pal);
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 start_scan = Some(self.pro.disk_root.clone());
             }
-            mode_click = super::disk_cleanup::segmented(ui, &["Analyze", "Clean up"], self.pro.disk_mode as usize, &pal);
         });
         match mode_click {
             Some(1) => {
@@ -70,98 +82,65 @@ impl App {
             Some(_) => self.pro.disk_mode = super::disk_cleanup::DiskMode::Analyze,
             None => {}
         }
-        let area = body.shrink(MARGIN);
         let elevated = *self.pro.del.elevated.get_or_insert_with(crate::pro::diskdelete::is_elevated);
-        let rows = if elevated {
-            vsplit(area, &[112.0, 30.0, -1.0], GAP)
-        } else {
-            let r = vsplit(area, &[36.0, 112.0, 30.0, -1.0], GAP);
-            self.disk_admin_panel(ui, r[0], &pal);
-            r[1..].to_vec()
-        };
         let p = ui.painter().clone();
-        // Volume cards.
+        let mut y = area.top();
+        if !elevated {
+            let banner = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), BANNER_H));
+            self.disk_admin_panel(ui, banner, &pal);
+            y = banner.bottom() + 14.0;
+        }
+        // Volume cards: as many columns as fit, at most two rows.
         let vols: Vec<Volume> = self.pro.volumes.ok().cloned().unwrap_or_default();
         if !vols.is_empty() {
-            let shown = vols.len().min(5);
-            let strip = Rect::from_min_size(rows[0].min, vec2(rows[0].width().min(shown as f32 * 440.0), rows[0].height()));
-            let rects = hsplit(strip, &vec![1.0; shown], GAP);
-            for (r, v) in rects.iter().zip(vols.iter()) {
-                let frac = v.used_fraction();
-                let c = if frac > 0.9 { theme::RED } else if frac > 0.75 { theme::ORANGE } else { theme::GREEN };
-                let title = format!("{} {}", v.root.trim_end_matches('\\'), if v.label.is_empty() { v.kind } else { v.label.as_str() });
-                kit::stat_card(&p, *r, &pal, fd.bloom, &title, &format!("{} free", format_bytes(v.free as f64)), &format!("{} of {} used \u{2022} {}", format_bytes(v.used() as f64), format_bytes(v.total as f64), v.fs), c, Some(frac));
-                let resp = ui.interact(*r, ui.id().with(("vol", &v.root)), Sense::click());
+            let cols = (((area.width() + 12.0) / (VOLUME_MIN_W + 12.0)).floor() as usize).clamp(1, vols.len());
+            let shown = vols.len().min(cols * 2);
+            let w = (area.width() - 12.0 * (cols - 1) as f32) / cols as f32;
+            let scanned = self.pro.disk_tree.as_ref().map(|(t, _)| t.root.display().to_string()).unwrap_or_else(|| self.pro.disk_root.trim().to_string()).to_lowercase();
+            for (i, v) in vols.iter().take(shown).enumerate() {
+                let r = Rect::from_min_size(pos2(area.left() + (i % cols) as f32 * (w + 12.0), y + (i / cols) as f32 * (VOLUME_H + 12.0)), vec2(w, VOLUME_H));
+                let resp = ui.interact(r, ui.id().with(("vol", &v.root)), Sense::click());
+                volume_card(&p, r, &pal, v, scanned.starts_with(&v.root.to_lowercase()), resp.hovered());
                 if resp.clicked() && !progress.running {
                     self.pro.disk_root = v.root.clone();
                     start_scan = Some(v.root.clone());
                 }
-                resp.on_hover_text(format!("Scan {}", v.root));
+                resp.on_hover_text(format!("Scan {}", v.root)).on_hover_cursor(egui::CursorIcon::PointingHand);
             }
+            let rows = shown.div_ceil(cols);
+            y += rows as f32 * VOLUME_H + (rows - 1) as f32 * 12.0 + 14.0;
         }
-        // Progress / breadcrumb line.
-        let line = rows[1];
-        let tree = self.pro.disk_tree.as_ref().map(|(t, _)| t.clone());
-        if progress.running {
-            let txt = format!("Scanning\u{2026} {} files, {} folders, {} \u{2022} {:.0} s \u{2022} {}", progress.files, progress.dirs, format_bytes(progress.bytes as f64), progress.elapsed.as_secs_f32(), progress.current);
-            let clip = p.with_clip_rect(line);
-            clip.text(pos2(line.left() + 2.0, line.center().y), Align2::LEFT_CENTER, &txt, theme::ui(12.5), pal.text_dim);
-            let bar = Rect::from_min_max(pos2(line.left(), line.bottom() - 3.0), pos2(line.right(), line.bottom()));
-            let t = (fd.time as f32 * 0.6).fract();
-            p.rect_filled(bar, 1.0, pal.grid);
-            p.rect_filled(Rect::from_min_max(pos2(bar.left() + bar.width() * t * 0.8, bar.top()), pos2(bar.left() + bar.width() * (t * 0.8 + 0.2), bar.bottom())), 1.0, theme::BLUE);
-        } else if let Some(t) = &tree {
-            let mut x = line.left() + 2.0;
-            let mut go = None;
-            for (k, idx) in t.ancestry(self.pro.disk_cursor).into_iter().enumerate() {
-                if k > 0 {
-                    let r = p.text(pos2(x, line.center().y), Align2::LEFT_CENTER, "\u{203a}", theme::ui(14.0), pal.text_faint);
-                    x = r.right() + 6.0;
-                }
-                let name = &t.nodes[idx as usize].name;
-                let r = p.text(pos2(x, line.center().y), Align2::LEFT_CENTER, name, theme::semibold(13.0), if idx == self.pro.disk_cursor { pal.text } else { pal.accent });
-                if ui.interact(r, ui.id().with(("crumb", idx)), Sense::click()).clicked() {
-                    go = Some(idx);
-                }
-                x = r.right() + 6.0;
-            }
-            let n = &t.nodes[self.pro.disk_cursor as usize];
-            let mut summary = format!("{} in {} files", format_bytes(n.size as f64), n.files);
-            if self.pro.del.freed > 0 {
-                summary.push_str(&format!(" \u{2022} {} freed", format_bytes(self.pro.del.freed as f64)));
-            }
-            if progress.cancelled {
-                summary.push_str(" \u{2022} partial (scan stopped)");
-            } else if progress.finished {
-                summary.push_str(&format!(" \u{2022} scanned in {:.1} s ({}), {} folders unreadable", progress.elapsed.as_secs_f32(), progress.method.label(), progress.denied));
-                if let Some(why) = &progress.fell_back {
-                    summary.push_str(&format!(" \u{2022} MFT unavailable: {why}, used parallel walker"));
-                }
-            }
-            p.text(pos2(line.right(), line.center().y), Align2::RIGHT_CENTER, &summary, theme::ui(12.5), pal.text_dim);
-            if let Some(g) = go {
-                self.pro.disk_cursor = g;
-            }
-        }
-        // Treemap + side list.
-        let main = hsplit(rows[2], &[3.0, 2.0], GAP);
+        // Folder map and details, or the Clean up view.
+        let main = Rect::from_min_max(pos2(area.left(), y), area.max);
         if self.pro.disk_mode == super::disk_cleanup::DiskMode::Cleanup {
-            if self.cleanup_page(ui, rows[2], fd, tree.as_ref(), progress.running, elevated) && !progress.running {
+            if self.cleanup_page(ui, main, fd, tree.as_ref(), progress.running, elevated) && !progress.running {
                 self.pro.disk_mode = super::disk_cleanup::DiskMode::Analyze;
                 start_scan = Some(self.pro.disk_root.clone());
             }
         } else {
             match &tree {
                 None => {
-                    card(&p, rows[2], &pal);
-                    empty_state(&p, rows[2], &pal, if progress.running { "Building the folder map\u{2026}" } else { "Pick a drive above or enter a folder, then Scan" });
+                    let content = section_card(&p, main, &pal, "Folder map", "");
+                    if progress.running {
+                        let c = content.center();
+                        p.text(c - vec2(0.0, 22.0), Align2::CENTER_CENTER, "Building the folder map\u{2026}", theme::ui(13.0), pal.text_faint);
+                        widgets::text_fit(&p, c + vec2(0.0, 24.0), Align2::CENTER_CENTER, &progress.current, theme::mono(11.0), pal.text_faint, content.width() * 0.8);
+                        let track = Rect::from_center_size(c, vec2((content.width() * 0.5).min(360.0), 4.0));
+                        p.rect_filled(track, 2.0, pal.raise(0.08));
+                        let t = (fd.time as f32 * 0.6).fract();
+                        let seg = Rect::from_min_max(pos2(track.left() + track.width() * t * 0.8, track.top()), pos2(track.left() + track.width() * (t * 0.8 + 0.2), track.bottom()));
+                        p.rect_filled(seg, 2.0, st.info);
+                    } else {
+                        empty_state(&p, content, &pal, "Pick a drive above or enter a folder, then Scan");
+                    }
                 }
                 Some(t) => {
+                    let split = hsplit(main, &[3.0, 2.0], 14.0);
                     let cursor = self.pro.disk_cursor;
-                    if let Some(next) = self.treemap(ui, main[0], t, cursor, fd) {
+                    if let Some(next) = self.treemap(ui, split[0], t, cursor, &progress, fd) {
                         self.pro.disk_cursor = next;
                     }
-                    self.disk_side(ui, main[1], t, fd);
+                    self.disk_side(ui, split[1], t, fd);
                 }
             }
         }
@@ -175,17 +154,12 @@ impl App {
         if self.pro.disk_confirm_stop {
             let mut answer = None;
             let mut dont_ask = false;
-            egui::Window::new("Stop scan").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
-                ui.label("Stop the Disk Space scan? The results so far are kept.");
+            kit::dialog(ui.ctx(), "stop-scan", |ui| {
+                kit::dialog_header(ui, &pal, Some((Icon::Stop, st.danger)), "Stop the **Disk Space scan**?", "The results found so far are kept.");
+                ui.add_space(8.0);
                 ui.checkbox(&mut dont_ask, "Don't ask again");
-                ui.horizontal(|ui| {
-                    if widgets::button(ui, "Stop", &pal, None).clicked() {
-                        answer = Some(true);
-                    }
-                    if widgets::button(ui, "Keep scanning", &pal, None).clicked() {
-                        answer = Some(false);
-                    }
-                });
+                ui.add_space(8.0);
+                answer = confirm_row(ui, &pal, "Keep scanning", "Stop scan", ButtonKind::DangerFill, true);
             });
             if dont_ask {
                 self.settings.general.disk_space_suppress_stop_confirm = true;
@@ -214,11 +188,35 @@ impl App {
         }
     }
 
-    fn treemap(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tree, cursor: u32, fd: &FrameData<'_>) -> Option<u32> {
+    fn treemap(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tree, cursor: u32, progress: &ScanProgress, fd: &FrameData<'_>) -> Option<u32> {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let node = &t.nodes[cursor as usize];
-        let content = titled_card(&p, rect, &pal, fd.bloom, &format!("Folder map {}", node.name), &format_bytes(node.size as f64));
+        let title = format!("Folder map \u{b7} {}", node.name);
+        let content = section_card(&p, rect, &pal, &title, "");
+        let mut go = breadcrumb(ui, rect, &pal, t, cursor, 22.0 + title.chars().count() as f32 * 9.2);
+        // Hint (and how the scan went) under the map.
+        let hint_y = content.bottom() - 6.0;
+        let map = Rect::from_min_max(content.min, pos2(content.right(), content.bottom() - 24.0));
+        let hint = p.text(pos2(content.left(), hint_y), Align2::LEFT_CENTER, "Click a folder to zoom in \u{b7} right-click for the folder menu", theme::ui(11.0), pal.text_faint);
+        let mut notes: Vec<String> = Vec::new();
+        if progress.cancelled {
+            notes.push("partial (scan stopped)".into());
+        } else if progress.finished {
+            notes.push(format!("{} \u{b7} {:.1} s", progress.method.label(), progress.elapsed.as_secs_f32()));
+            if progress.denied > 0 {
+                notes.push(format!("{} folders unreadable", progress.denied));
+            }
+        }
+        if self.pro.del.freed > 0 {
+            notes.push(format!("{} freed", format_bytes(self.pro.del.freed as f64)));
+        }
+        if !notes.is_empty() {
+            let r = widgets::text_fit(&p, pos2(content.right(), hint_y), Align2::RIGHT_CENTER, &notes.join(" \u{b7} "), theme::mono(11.0), pal.text_faint, (content.width() - hint.width() - 20.0).max(40.0));
+            if let Some(why) = &progress.fell_back {
+                ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(format!("MFT unavailable: {why}, used the parallel walker"));
+            }
+        }
         let kids: Vec<u32> = node.children.iter().copied().filter(|c| t.nodes[*c as usize].size > 0).take(60).collect();
         let mut sizes: Vec<f64> = kids.iter().map(|c| t.nodes[*c as usize].size as f64).collect();
         let shown: u64 = sizes.iter().sum::<f64>() as u64;
@@ -231,39 +229,43 @@ impl App {
             sizes.push(rest as f64);
         }
         if sizes.is_empty() {
-            empty_state(&p, content, &pal, "This folder is empty");
-            return None;
+            empty_state(&p, map, &pal, "This folder is empty");
+            return go;
         }
-        let rects = diskspace::squarify(&sizes, content.left(), content.top(), content.width(), content.height());
-        let mut go = None;
+        let total = node.size.max(1) as f64;
+        let rects = diskspace::squarify(&sizes, map.left(), map.top(), map.width(), map.height());
         let hover = ui.ctx().pointer_hover_pos();
         // Registered first so the tiles sit on top; right-click on empty map goes up one level.
-        let bg = ui.interact(content, ui.id().with("tm-bg"), Sense::click());
+        let bg = ui.interact(map, ui.id().with("tm-bg"), Sense::click());
         let mut tiles: Vec<Rect> = Vec::new();
         let rules = self.pro.del.rules.ok().cloned();
         let mut menu = super::disk_delete::MenuOut::default();
         for (i, (x, y, w, h)) in rects.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(*x, *y), vec2(*w, *h)).shrink(1.0);
+            let r = Rect::from_min_size(pos2(*x, *y), vec2(*w, *h)).shrink(1.5);
             if r.width() < 1.0 || r.height() < 1.0 {
                 continue;
             }
             tiles.push(r);
             let is_rest = i >= kids.len();
-            let c = if is_rest { pal.text_faint } else { kit::category_color(i) };
             let hovered = hover.map(|h| r.contains(h)).unwrap_or(false);
-            let fill = mix(pal.card, c, if hovered { 0.42 } else { 0.24 });
-            p.rect_filled(r, 3.0, fill);
-            if fd.bloom > 0.0 && hovered {
-                p.rect_stroke(r.expand(1.5), 4.0, Stroke::new(3.0_f32, with_alpha(c, 0.25 * fd.bloom)));
-            }
-            p.rect_stroke(r, 3.0, Stroke::new(1.0_f32, with_alpha(c, 0.85)));
+            let (fill, stroke) = if is_rest {
+                (pal.raise(if hovered { 0.10 } else { 0.06 }), pal.raise(0.12))
+            } else {
+                let c = theme::darken_for(&pal, kit::category_color(i));
+                (with_alpha(c, if hovered { 0.30 } else { 0.20 }), with_alpha(c, 0.5))
+            };
+            p.rect_filled(r, 2.0, fill);
+            p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, stroke));
             let is_more = is_rest && more > 0 && i == kids.len();
             let (name, size) = if is_more { ("More folders".to_string(), more) } else if is_rest { ("Files here".to_string(), rest) } else { let n = &t.nodes[kids[i] as usize]; (n.name.clone(), n.size) };
             if r.width() > 46.0 && r.height() > 22.0 {
-                let clip = p.with_clip_rect(r.shrink(4.0));
-                clip.text(r.left_top() + vec2(6.0, 5.0), Align2::LEFT_TOP, &name, theme::semibold(12.5), pal.text);
-                if r.height() > 40.0 {
-                    clip.text(r.left_top() + vec2(6.0, 22.0), Align2::LEFT_TOP, format_bytes(size as f64), theme::ui(11.5), lighten_text(c));
+                let clip = p.with_clip_rect(r.shrink(2.0));
+                let sub = format!("{} \u{b7} {}", format_bytes(size as f64), pct_text(size as f64 / total));
+                widgets::text_fit(&clip, r.left_top() + vec2(10.0, 8.0), Align2::LEFT_TOP, &name, theme::semibold(13.0), pal.text, r.width() - 20.0);
+                if r.height() > 44.0 {
+                    widgets::text_fit(&clip, pos2(r.left() + 10.0, r.bottom() - 8.0), Align2::LEFT_BOTTOM, &sub, theme::mono(11.0), pal.text_dim, r.width() - 20.0);
+                } else if r.width() > 190.0 {
+                    clip.text(pos2(r.right() - 10.0, r.top() + 8.0), Align2::RIGHT_TOP, &sub, theme::mono(11.0), pal.text_dim);
                 }
             }
             if !is_rest {
@@ -298,30 +300,18 @@ impl App {
 
     fn disk_side(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tree, fd: &FrameData<'_>) {
         let pal = fd.pal;
+        let st = theme::status(&pal);
         let p = ui.painter().clone();
-        card(&p, rect, &pal);
-        let inner = rect.shrink(8.0);
-        // Tabs.
-        let tabs = ["Folders", "Files", "Largest files", "File types"];
-        let mut x = inner.left();
-        for (i, name) in tabs.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(x, inner.top()), vec2(widgets::text_width(&p, name, theme::ui(13.0)) + 24.0, 28.0));
-            let resp = ui.interact(r, ui.id().with(("disk-tab", i)), Sense::click());
-            let sel = self.pro.disk_tab == i;
-            if sel {
-                p.rect_filled(r, 4.0, pal.selection);
-            } else if resp.hovered() {
-                p.rect_filled(r, 4.0, pal.hover);
+        widgets::card(&p, rect, &pal);
+        // Tabs along the top, the list in the rest of the card.
+        let tabs = [("Folders", None), ("Files", None), ("Largest files", None), ("File types", None)];
+        if let Some(i) = widgets::tab_bar(ui, Rect::from_min_size(pos2(rect.left(), rect.top() + 8.0), vec2(rect.width(), 36.0)), &pal, &tabs, self.pro.disk_tab, None) {
+            if i == 1 && self.pro.disk_tab != 1 {
+                self.pro.disk_files_for = None; // re-list on entering the Files tab
             }
-            p.text(r.center(), Align2::CENTER_CENTER, *name, theme::ui(13.0), if sel { pal.on_selection() } else { pal.text });
-            if resp.clicked() {
-                if i == 1 && self.pro.disk_tab != 1 {
-                    self.pro.disk_files_for = None; // re-list on entering the Files tab
-                }
-                self.pro.disk_tab = i;
-            }
-            x = r.right() + 6.0;
+            self.pro.disk_tab = i;
         }
+        let inner = Rect::from_min_max(pos2(rect.left() + 10.0, rect.top() + 8.0 + 36.0 + 6.0), pos2(rect.right() - 10.0, rect.bottom() - 8.0));
         // Selection is per list: a different tab, sort, subfolder mode, folder or tree version clears it.
         let epoch = self.pro.disk_epoch();
         let view = {
@@ -333,7 +323,12 @@ impl App {
         self.pro.del.sel.reset(view, self.pro.disk_cursor);
         let bar_h = if self.pro.disk_tab < 3 && !self.pro.del.sel.rows.is_empty() { super::disk_delete::BAR_H } else { 0.0 };
         let bar = Rect::from_min_max(pos2(inner.left(), inner.bottom() - super::disk_delete::BAR_H), inner.max);
-        let list = Rect::from_min_max(pos2(inner.left(), inner.top() + 38.0), pos2(inner.right(), inner.bottom() - bar_h));
+        // The Largest files tab says how many files it lists; the line gives way to the selection bar.
+        let foot_h = if self.pro.disk_tab == 2 && bar_h == 0.0 { 24.0 } else { 0.0 };
+        let list = Rect::from_min_max(inner.min, pos2(inner.right(), inner.bottom() - bar_h - foot_h));
+        if foot_h > 0.0 {
+            p.text(pos2(inner.left() + 4.0, inner.bottom() - 10.0), Align2::LEFT_CENTER, "Up to the 100 largest files in this folder and below", theme::ui(11.0), pal.text_faint);
+        }
         let rules = self.pro.del.rules.ok().cloned();
         let rules = rules.as_deref();
         let del = &mut self.pro.del;
@@ -421,22 +416,23 @@ impl App {
                 // Include-subfolders switch, then the header strip with sortable columns.
                 let tgl = Rect::from_min_size(list.min, vec2(list.width(), 24.0));
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(tgl).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-                    ui.label(RichText::new("Include subfolders").font(theme::ui(12.5)).color(pal.text));
+                    ui.label(RichText::new("Include subfolders").font(theme::ui(12.0)).color(pal.text_dim));
                     ui.add_space(4.0);
                     widgets::toggle(ui, &mut self.pro.disk_files_sub, &pal);
                 });
-                let hdr = Rect::from_min_size(pos2(list.left(), tgl.bottom()), vec2(list.width(), 22.0));
+                let hdr = Rect::from_min_size(pos2(list.left(), tgl.bottom() + 2.0), vec2(list.width(), 28.0));
                 let body = Rect::from_min_max(pos2(list.left(), hdr.bottom()), list.max);
-                let date_w = if tiny { 0.0 } else { DISK_DATE_W };
-                let cols = [(FileCol::Name, "Name", Align2::LEFT_CENTER, hdr.left() + 4.0), (FileCol::Size, "Size", Align2::RIGHT_CENTER, hdr.right() - 4.0 - date_w), (FileCol::Modified, "Modified", Align2::RIGHT_CENTER, hdr.right() - 4.0)];
+                let (date_x, _, size_x, _) = row_cols(hdr, !narrow, !tiny);
+                let cols = [(FileCol::Name, "Name", Align2::LEFT_CENTER, hdr.left() + 8.0), (FileCol::Size, "Size", Align2::RIGHT_CENTER, size_x), (FileCol::Modified, "Modified", Align2::RIGHT_CENTER, date_x)];
                 for (k, (c, label, anchor, x)) in cols.iter().enumerate() {
                     if *c == FileCol::Modified && tiny {
                         continue;
                     }
                     let active = *c == self.pro.disk_files_sort;
-                    let arrow = if !active { "" } else if self.pro.disk_files_asc { "  \u{25b2}" } else { "  \u{25bc}" };
-                    let r = p.text(pos2(*x, hdr.center().y), *anchor, format!("{label}{arrow}"), theme::ui(12.0), if active { pal.text } else { pal.text_dim });
-                    if ui.interact(r.expand2(vec2(4.0, 3.0)), ui.id().with(("files-hdr", k)), Sense::click()).clicked() {
+                    let arrow = if !active { "" } else if self.pro.disk_files_asc { " \u{2191}" } else { " \u{2193}" };
+                    let (font, color) = if active { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
+                    let r = tracked_text(&p, pos2(*x, hdr.center().y), *anchor, &format!("{}{arrow}", label.to_uppercase()), font, color, 0.08);
+                    if ui.interact(r.expand2(vec2(4.0, 3.0)), ui.id().with(("files-hdr", k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         if active {
                             self.pro.disk_files_asc = !self.pro.disk_files_asc;
                         } else {
@@ -447,9 +443,9 @@ impl App {
                     }
                 }
                 if sub && !narrow {
-                    p.text(pos2(folder_x(hdr, true, !tiny), hdr.center().y), Align2::LEFT_CENTER, "Folder", theme::ui(12.0), pal.text_dim);
+                    tracked_text(&p, pos2(folder_x(hdr, true, !tiny), hdr.center().y), Align2::LEFT_CENTER, "FOLDER", theme::ui(11.0), pal.text_faint, 0.08);
                 }
-                p.line_segment([pos2(hdr.left(), hdr.bottom()), pos2(hdr.right(), hdr.bottom())], Stroke::new(1.0_f32, pal.panel_stroke));
+                p.hline(hdr.x_range(), hdr.bottom(), Stroke::new(1.0_f32, pal.row_rule()));
                 if sub {
                     if loading {
                         empty_state(&p, body, &pal, &format!("Sorting {} files\u{2026}", t.nodes[cur as usize].files));
@@ -466,7 +462,7 @@ impl App {
                             if del.sel.rows.contains(&i) {
                                 super::disk_delete::paint_selected(ui.painter(), r, &pal);
                             }
-                            disk_row(ui.painter(), r, &pal, t.file_name(f), f.hidden(), f.size, f.size as f32 / total, theme::BLUE, !narrow, date.as_deref(), (!narrow).then_some(folder));
+                            disk_row(ui.painter(), r, &pal, t.file_name(f), f.hidden(), f.size, f.size as f32 / total, st.info, !narrow, date.as_deref(), (!narrow).then_some(folder));
                             if resp.clicked() && del.on_click(ui, i) {
                                 reveal = Some(t.file_path(f));
                             }
@@ -512,7 +508,7 @@ impl App {
                                 if del.sel.rows.contains(&i) {
                                     super::disk_delete::paint_selected(ui.painter(), r, &pal);
                                 }
-                                disk_row(ui.painter(), r, &pal, &f.name, f.hidden, f.size, f.size as f32 / total, theme::BLUE, !narrow, date.as_deref(), None);
+                                disk_row(ui.painter(), r, &pal, &f.name, f.hidden, f.size, f.size as f32 / total, st.info, !narrow, date.as_deref(), None);
                                 let path = here.join(&f.name);
                                 if resp.clicked() && del.on_click(ui, i) {
                                     reveal = Some(path.clone());
@@ -541,13 +537,14 @@ impl App {
                     let f = &t.files[big[i]];
                     let folder = t.path_of(f.dir);
                     let name = t.file_name(f);
-                    let line1 = Rect::from_min_size(r.min, vec2(r.width(), 22.0));
+                    let line1 = Rect::from_min_size(r.min, vec2(r.width(), 26.0));
                     let date = date_of(f.modified());
                     if del.sel.rows.contains(&i) {
                         super::disk_delete::paint_selected(ui.painter(), r, &pal);
                     }
-                    disk_row(ui.painter(), line1, &pal, name, false, f.size, f.size as f32 / total, theme::ORANGE, !narrow, date.as_deref(), None);
-                    widgets::text_fit(ui.painter(), pos2(r.left() + 4.0, r.bottom() - 9.0), Align2::LEFT_CENTER, &folder.display().to_string(), theme::ui(11.0), pal.text_dim, r.width() - 8.0);
+                    row_bar(ui.painter(), r, f.size as f32 / total, st.warn);
+                    row_text(ui.painter(), line1, &pal, line1.center().y, name, false, f.size, f.size as f32 / total, !narrow, date.as_deref(), None);
+                    widgets::text_fit(ui.painter(), pos2(r.left() + 8.0, r.bottom() - 13.0), Align2::LEFT_CENTER, &folder.display().to_string(), theme::mono(11.0), pal.text_faint, r.width() - 16.0);
                     let path = folder.join(name);
                     if resp.clicked() && del.on_click(ui, i) {
                         reveal = Some(path.clone());
@@ -587,7 +584,7 @@ pub(super) fn disk_list(ui: &mut egui::Ui, rect: Rect, id: impl std::hash::Hash 
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
                 let resp = ui.interact(r, ui.id().with(("row", i)), Sense::click());
                 if resp.hovered() {
-                    ui.painter().rect_filled(r, 3.0, with_alpha(pal.text, 0.05));
+                    ui.painter().rect_filled(r, 4.0, pal.raise(0.04));
                 }
                 row(ui, i, r, resp);
             }
@@ -595,36 +592,173 @@ pub(super) fn disk_list(ui: &mut egui::Ui, rect: Rect, id: impl std::hash::Hash 
     });
 }
 
-/// One list row: name, thin % bar, size and optional date (right-aligned). `pct` prints the
+/// Right edges of the columns of a list row (or its header) `r`: date, percentage, size, and the
+/// right edge of the name / folder area.
+fn row_cols(r: Rect, pct: bool, date: bool) -> (f32, f32, f32, f32) {
+    let date_x = r.right() - 8.0;
+    let pct_x = date_x - if date { DISK_DATE_W } else { 0.0 };
+    let size_x = pct_x - if pct { DISK_PCT_W } else { 0.0 };
+    (date_x, pct_x, size_x, size_x - DISK_SIZE_W)
+}
+
+/// The 3 px share bar along the bottom of a list row, in the row's colour.
+fn row_bar(p: &egui::Painter, r: Rect, frac: f32, color: Color32) {
+    let w = (r.width() - 16.0) * frac.clamp(0.0, 1.0);
+    if w >= 1.0 {
+        p.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.bottom() - 5.0), vec2(w, 3.0)), 1.5, with_alpha(color, 0.75));
+    }
+}
+
+/// The texts of a list row centred on `y`: name (and folder), then date, percentage and size
+/// right-aligned in mono.
+#[allow(clippy::too_many_arguments)]
+fn row_text(p: &egui::Painter, r: Rect, pal: &Palette, y: f32, name: &str, dim: bool, size: u64, frac: f32, pct: bool, date: Option<&str>, folder: Option<&str>) {
+    let (date_x, pct_x, size_x, name_right) = row_cols(r, pct, date.is_some());
+    if let Some(d) = date {
+        p.text(pos2(date_x, y), Align2::RIGHT_CENTER, d, theme::mono(11.0), pal.text_faint);
+    }
+    if pct {
+        p.text(pos2(pct_x, y), Align2::RIGHT_CENTER, format!("{:.1}%", frac.clamp(0.0, 1.0) * 100.0), theme::mono(11.0), pal.text_faint);
+    }
+    p.text(pos2(size_x, y), Align2::RIGHT_CENTER, format_bytes(size as f64), theme::mono(12.0), pal.text_table());
+    let avail = name_right - r.left() - 16.0;
+    let name_w = if folder.is_some() { avail * FOLDER_SPLIT } else { avail };
+    widgets::text_fit(p, pos2(r.left() + 8.0, y), Align2::LEFT_CENTER, name, theme::ui(13.0), if dim { pal.text_faint } else { pal.text }, name_w);
+    if let Some(f) = folder {
+        widgets::text_fit(p, pos2(r.left() + 8.0 + name_w + 8.0, y), Align2::LEFT_CENTER, f, theme::mono(11.0), pal.text_faint, avail - name_w - 8.0);
+    }
+}
+
+/// One list row: name, size, share bar and optional date (right-aligned, mono). `pct` prints the
 /// percentage text (dropped on narrow panels); `date` is skipped when `None`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn disk_row(p: &egui::Painter, r: Rect, pal: &Palette, name: &str, dim: bool, size: u64, frac: f32, color: Color32, pct: bool, date: Option<&str>, folder: Option<&str>) {
-    let bar = Rect::from_min_max(pos2(r.left(), r.bottom() - 4.0), pos2(r.left() + r.width() * frac.clamp(0.0, 1.0), r.bottom() - 1.0));
-    p.rect_filled(bar, 1.0, with_alpha(color, 0.75));
-    let y = r.center().y - 2.0;
-    let mut x = r.right() - 4.0;
-    if let Some(d) = date {
-        p.text(pos2(x, y), Align2::RIGHT_CENTER, d, theme::ui(11.5), pal.text_dim);
-        x -= DISK_DATE_W;
-    }
-    if pct {
-        p.text(pos2(x, y), Align2::RIGHT_CENTER, format!("{:.1}%", frac.clamp(0.0, 1.0) * 100.0), theme::ui(12.0), pal.text_dim);
-        x -= 56.0;
-    }
-    p.text(pos2(x, y), Align2::RIGHT_CENTER, format_bytes(size as f64), theme::ui(12.0), pal.text);
-    x -= 70.0;
-    let avail = x - r.left() - 8.0;
-    let name_w = if folder.is_some() { avail * FOLDER_SPLIT } else { avail };
-    widgets::text_fit(p, pos2(r.left() + 4.0, y), Align2::LEFT_CENTER, name, theme::ui(12.5), if dim { pal.text_faint } else { pal.text }, name_w);
-    if let Some(f) = folder {
-        widgets::text_fit(p, pos2(r.left() + 4.0 + name_w + 8.0, y), Align2::LEFT_CENTER, f, theme::ui(11.5), pal.text_dim, avail - name_w - 8.0);
-    }
+    row_bar(p, r, frac, color);
+    row_text(p, r, pal, r.center().y - 2.0, name, dim, size, frac, pct, date, folder);
 }
 
 /// Left edge of the Folder column in a row or header `r`, mirroring [`disk_row`].
 fn folder_x(r: Rect, pct: bool, date: bool) -> f32 {
-    let x = r.right() - 4.0 - if date { DISK_DATE_W } else { 0.0 } - if pct { 56.0 } else { 0.0 } - 70.0;
-    r.left() + 4.0 + (x - r.left() - 8.0) * FOLDER_SPLIT + 8.0
+    let (_, _, _, name_right) = row_cols(r, pct, date);
+    r.left() + 8.0 + (name_right - r.left() - 16.0) * FOLDER_SPLIT + 8.0
+}
+
+/// The trail of folders from the scan root to `cursor` (mono 12, right-aligned in the heading of the
+/// folder map card `rect`, after a title `title_w` wide), followed by the size of the current
+/// folder. Earlier folders are clickable; leading ones are dropped for "\u{2026}" when the trail
+/// does not fit. Returns the folder clicked.
+fn breadcrumb(ui: &mut egui::Ui, rect: Rect, pal: &Palette, t: &Tree, cursor: u32, title_w: f32) -> Option<u32> {
+    let p = ui.painter().clone();
+    let font = theme::mono(12.0);
+    let width = |s: &str| widgets::text_width(&p, s, font.clone());
+    let (sep, ellipsis) = (" \u{203a} ", "\u{2026}");
+    let tail = format!(" \u{b7} {}", format_bytes(t.nodes[cursor as usize].size as f64));
+    let crumbs: Vec<(u32, &str)> = t.ancestry(cursor).into_iter().map(|i| (i, t.nodes[i as usize].name.as_str())).collect();
+    let total = |from: usize| crumbs[from..].iter().map(|c| width(c.1)).sum::<f32>() + width(sep) * (crumbs.len() - from - 1) as f32 + width(&tail) + if from > 0 { width(ellipsis) + width(sep) } else { 0.0 };
+    let avail = rect.width() - 44.0 - title_w;
+    let mut first = 0;
+    while first + 1 < crumbs.len() && total(first) > avail {
+        first += 1;
+    }
+    let y = rect.top() + 24.0;
+    let mut x = rect.right() - 22.0 - total(first);
+    let mut go = None;
+    let put = |x: &mut f32, s: &str, color: Color32| {
+        let r = p.text(pos2(*x, y), Align2::LEFT_CENTER, s, font.clone(), color);
+        *x = r.right();
+        r
+    };
+    if first > 0 {
+        put(&mut x, ellipsis, pal.text_faint);
+        put(&mut x, sep, pal.text_faint);
+    }
+    for (k, (idx, name)) in crumbs.iter().enumerate().skip(first) {
+        let last = k + 1 == crumbs.len();
+        let at = x;
+        let hit = Rect::from_min_size(pos2(at, y - 9.0), vec2(width(name), 18.0));
+        let hovered = !last && ui.rect_contains_pointer(hit);
+        let r = put(&mut x, name, if last { pal.text } else if hovered { pal.accent } else { pal.text_faint });
+        if !last {
+            if ui.interact(r.expand2(vec2(2.0, 4.0)), ui.id().with(("crumb", *idx)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                go = Some(*idx);
+            }
+            put(&mut x, sep, pal.text_faint);
+        }
+    }
+    put(&mut x, &tail, pal.text);
+    go
+}
+
+/// A volume card: drive icon, "C: label · size", used / total, a usage bar and the free space.
+/// The scanned volume is washed in the accent colour, a nearly full one is red.
+fn volume_card(p: &egui::Painter, r: Rect, pal: &Palette, v: &Volume, active: bool, hovered: bool) {
+    let st = theme::status(pal);
+    let frac = v.used_fraction();
+    let full = frac > 0.9;
+    p.rect_filled(r, 8.0, pal.card);
+    if hovered {
+        p.rect_filled(r, 8.0, pal.raise(0.03));
+    }
+    if active {
+        p.rect_filled(r, 8.0, with_alpha(pal.accent, 0.08));
+        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.4)));
+    } else {
+        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.card_stroke));
+    }
+    hardware::draw(p, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(60.0, 40.0)), if v.kind == "Fixed" { Hardware::Disk } else { Hardware::Hdd }, pal.text_rail());
+    let (x0, x1) = (r.left() + 88.0, r.right() - 16.0);
+    let clip = p.with_clip_rect(r);
+    // "C:" in Medium, then what it is and how big, with used / total at the right when there is room.
+    let used = format!("{} / {}", format_bytes(v.used() as f64), format_bytes(v.total as f64));
+    let root = clip.text(pos2(x0, r.top() + 22.0), Align2::LEFT_CENTER, v.root.trim_end_matches('\\'), theme::semibold(13.0), pal.text);
+    let desc = format!(" {} \u{b7} {}", if v.label.is_empty() { v.kind } else { v.label.as_str() }, format_bytes(v.total as f64));
+    let used_w = widgets::text_width(p, &used, theme::mono(11.0));
+    let room = x1 - root.right();
+    let show_used = room > widgets::text_width(p, &desc, theme::ui(13.0)).min(120.0) + used_w + 12.0;
+    widgets::text_fit(&clip, pos2(root.right(), r.top() + 22.0), Align2::LEFT_CENTER, &desc, theme::ui(13.0), pal.text_faint, if show_used { room - used_w - 12.0 } else { room });
+    if show_used {
+        clip.text(pos2(x1, r.top() + 22.0), Align2::RIGHT_CENTER, &used, theme::mono(11.0), pal.text_table());
+    }
+    let color = if full { st.danger } else if active { pal.accent } else { theme::darken_for(pal, theme::INDIGO) };
+    widgets::bar(&clip, Rect::from_min_size(pos2(x0, r.top() + 38.0), vec2(x1 - x0, 4.0)), frac, color);
+    let free = format_bytes(v.free as f64);
+    let (sub, sub_color) = if full {
+        (format!("\u{25a0} {free} free \u{b7} almost full"), st.danger_text)
+    } else if active {
+        (format!("{free} free"), pal.text_faint)
+    } else {
+        (format!("{free} free \u{b7} click to scan"), pal.text_faint)
+    };
+    widgets::text_fit(&clip, pos2(x0, r.top() + 56.0), Align2::LEFT_CENTER, &sub, theme::ui(12.0), sub_color, x1 - x0);
+}
+
+/// Page subtitle: what is being scanned, or what was scanned.
+fn scan_subtitle(progress: &ScanProgress, tree: Option<&Tree>) -> String {
+    let secs = progress.elapsed.as_secs_f32();
+    if progress.running {
+        format!("Scanning\u{2026} {} files \u{b7} {} folders \u{b7} {} \u{b7} {secs:.0} s", group_digits(progress.files), group_digits(progress.dirs), format_bytes(progress.bytes as f64))
+    } else if let Some(t) = tree {
+        let root = &t.nodes[0];
+        format!("Scanned {} \u{b7} {} files \u{b7} {} folders \u{b7} {} \u{b7} {secs:.0} s \u{b7} Ctrl+0", t.root.display(), group_digits(root.files), group_digits(progress.dirs), format_bytes(root.size as f64))
+    } else {
+        "Pick a drive above or enter a folder, then Scan".into()
+    }
+}
+
+/// 1204118 -> "1,204,118".
+fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    // Groups of three digits from the right.
+    s.as_bytes().rchunks(3).rev().map(|g| String::from_utf8_lossy(g).into_owned()).collect::<Vec<_>>().join(",")
+}
+
+/// A share as a percentage: "42%", "<1%" below one percent.
+fn pct_text(frac: f64) -> String {
+    if frac < 0.01 {
+        "<1%".into()
+    } else {
+        format!("{:.0}%", frac * 100.0)
+    }
 }
 
 /// Case-insensitive name order without allocating.
@@ -648,6 +782,69 @@ fn sorted_files(t: &Tree, base: u32, col: FileCol, asc: bool) -> (Vec<u32>, u64)
     (v, biggest)
 }
 
-fn lighten_text(c: Color32) -> Color32 {
-    theme::lighten(c, 0.35)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(add: impl Fn(&mut egui::Ui)) {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| add(ui));
+            });
+        }
+    }
+
+    /// Volume cards, list rows and the breadcrumb draw without panicking, narrow or wide.
+    #[test]
+    fn cards_rows_and_breadcrumb_draw() {
+        use crate::pro::diskspace::{Names, Node, ScanMethod, NO_PARENT};
+        let mk = |name: &str, parent: u32, children: Vec<u32>| Node { name: name.into(), parent, size: 2_000_000, children, ..Default::default() };
+        let tree = Tree { root: PathBuf::from("C:\\"), nodes: vec![mk("C:\\", NO_PARENT, vec![1]), mk("Users", 0, vec![2]), mk("a-very-long-user-folder-name", 1, vec![])], files: vec![], names: Names::default(), extensions: vec![], method: ScanMethod::Walker };
+        frame(|ui| {
+            let (p, pal) = (ui.painter().clone(), theme::DARK);
+            for (kind, active, free, w) in [("Fixed", true, 600, 430.0), ("Removable", false, 50, 250.0), ("Fixed", false, 0, 250.0)] {
+                let v = Volume { root: "C:\\".into(), label: "Windows".into(), fs: "NTFS".into(), kind, total: 1000, free };
+                volume_card(&p, Rect::from_min_size(pos2(10.0, 10.0), vec2(w, VOLUME_H)), &pal, &v, active, free == 600);
+            }
+            volume_card(&p, Rect::from_min_size(pos2(10.0, 100.0), vec2(300.0, VOLUME_H)), &pal, &Volume::default(), false, false);
+            let row = Rect::from_min_size(pos2(10.0, 200.0), vec2(400.0, DISK_ROW_H));
+            disk_row(&p, row, &pal, "notes.txt", true, 1024, 0.5, pal.accent, true, Some("3 weeks ago"), Some("Users\\alex"));
+            disk_row(&p, row.translate(vec2(0.0, 40.0)), &pal, "x", false, 0, 0.0, pal.accent, false, None, None);
+            for width in [600.0, 200.0] {
+                let card = Rect::from_min_size(pos2(10.0, 300.0), vec2(width, 200.0));
+                assert_eq!(breadcrumb(ui, card, &pal, &tree, 2, 100.0), None);
+            }
+        });
+    }
+
+    #[test]
+    fn digits_are_grouped() {
+        assert_eq!((group_digits(0), group_digits(999), group_digits(1000), group_digits(1_204_118)), ("0".into(), "999".into(), "1,000".into(), "1,204,118".into()));
+        assert_eq!((pct_text(0.004), pct_text(0.42)), ("<1%".into(), "42%".into()));
+    }
+
+    /// The header columns line up with the row columns: dates at the right edge, then the
+    /// percentage, then the size, and the folder column starts inside the name area.
+    #[test]
+    fn row_columns_mirror_the_header() {
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 32.0));
+        let (date, pct, size, name) = row_cols(r, true, true);
+        assert!(date > pct && pct > size && size > name);
+        let (date2, pct2, size2, _) = row_cols(r, true, false);
+        assert_eq!(pct2, date2, "without a date the percentage moves to the edge");
+        assert!(size2 > size);
+        let f = folder_x(r, true, true);
+        assert!(f > r.left() + 8.0 && f < name);
+    }
+
+    #[test]
+    fn subtitle_follows_the_scan_state() {
+        let idle = ScanProgress::default();
+        assert!(scan_subtitle(&idle, None).starts_with("Pick a drive"));
+        let running = ScanProgress { running: true, files: 1200, dirs: 30, ..Default::default() };
+        assert!(scan_subtitle(&running, None).starts_with("Scanning\u{2026} 1,200 files"));
+    }
 }
