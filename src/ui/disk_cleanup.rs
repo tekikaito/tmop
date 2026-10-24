@@ -91,19 +91,33 @@ pub struct CleanupUi {
     /// Set after a Clean up: measure again only the handlers it purged (the rest did not change); a full
     /// query takes seconds and keeps "Clean up selected" disabled meanwhile.
     pub vols_only: Option<Vec<String>>,
+    /// Handlers the running partial query measures again (see `poll_vols`).
+    vols_checking: Vec<String>,
     next_id: u64,
+}
+
+/// What a finished Clean up hands back to the page.
+#[derive(Clone)]
+pub struct CleanDone {
+    /// Handlers to query again: the purged ones plus the Recycle Bin (recycled items land there).
+    pub requery: Vec<String>,
+    /// The Recycle Bin read after the job (on the worker thread; it can be slow).
+    pub recycle_bin: Measured,
 }
 
 impl CleanupUi {
     /// After a Clean up: drop what it deleted from the fixed locations instead of measuring them all again
-    /// (seconds), read the Recycle Bin again, and query only the handlers it purged.
-    pub fn after_clean(&mut self, report: &Report, purged: Vec<String>) {
+    /// (seconds), take the Recycle Bin read by the job, and query only the handlers it changed.
+    pub fn after_clean(&mut self, report: &Report, done: CleanDone) {
         let gone: HashSet<&std::path::Path> = report.deleted.iter().map(|t| t.path.as_path()).collect();
+        let loading = self.fixed.is_loading();
         match self.fixed.ok_mut() {
+            // A measurement still running (Refresh during the job) may predate the deletes: measure again after it.
+            Some(_) if loading => self.started = false,
             Some(f) => {
                 for m in &mut f.measured {
                     if m.cat == Category::RecycleBin {
-                        *m = cleanup::measure_recycle_bin();
+                        *m = done.recycle_bin.clone();
                     } else {
                         m.forget(&gone);
                     }
@@ -111,8 +125,22 @@ impl CleanupUi {
             }
             None => self.started = false,
         }
-        self.vols_only = Some(purged);
+        self.vols_only = Some(done.requery);
         self.vols_dirty = true;
+    }
+
+    /// Polls the handler query. When a partial one leaves a handler that covers a category failed or missing,
+    /// that category shows again with sizes from before the purge, so the fixed locations are measured again.
+    pub fn poll_vols(&mut self) {
+        if !self.vols.poll() {
+            return;
+        }
+        let checked = std::mem::take(&mut self.vols_checking);
+        let all = self.vols.ok().map(Vec::as_slice).unwrap_or_default();
+        let failed = |id: &String| !volcache::covers(id).is_empty() && all.iter().find(|h| h.id.eq_ignore_ascii_case(id)).is_none_or(|h| h.error.is_some());
+        if checked.iter().any(failed) {
+            self.started = false;
+        }
     }
 
     pub fn is_checked(&self, c: Category) -> bool {
@@ -236,7 +264,7 @@ impl App {
             let c = &mut self.pro.clean;
             c.fixed.poll();
             c.tree_m.poll();
-            c.vols.poll();
+            c.poll_vols();
             if !c.started && !c.fixed.is_loading() {
                 c.started = true;
                 // Windows Disk Cleanup sizes (helper process), cached until the next Refresh or delete.
@@ -252,10 +280,13 @@ impl App {
                 c.vols_dirty = false;
                 match (c.vols_only.take(), c.vols.ok().cloned()) {
                     (Some(ids), _) if ids.is_empty() => {}
-                    (Some(ids), Some(prev)) => c.vols.start(move || {
+                    (Some(ids), Some(prev)) => c.vols.start({
+                        c.vols_checking = ids.clone();
+                        move || {
                         let drive = volcache::system_drive();
                         // Should the partial query fail, measure everything rather than keep stale sizes.
                         volcache::query_ids(&drive, &ids).map(|fresh| volcache::merge(prev, fresh)).or_else(|_| volcache::query(&drive))
+                        }
                     }),
                     _ => c.vols.start(|| volcache::query(&volcache::system_drive())),
                 }
@@ -518,7 +549,7 @@ impl App {
         let (c, d) = (&mut self.pro.clean, &mut self.pro.del);
         c.fixed.poll();
         c.tree_m.poll();
-        c.vols.poll();
+        c.poll_vols();
         if c.assess.poll() {
             if let (Some(out), Some(p)) = (c.assess.ok().cloned(), c.pending.as_mut()) {
                 if out.id == p.id {
@@ -707,7 +738,10 @@ impl App {
             .collect();
         let bin = p.bin_bytes;
         let (vols, drive) = (p.vols, p.drive);
-        let purged = Some(vols.iter().map(|v| v.id.clone()).collect());
+        let mut requery: Vec<String> = vols.iter().map(|v| v.id.clone()).collect();
+        if !requery.iter().any(|i| i.eq_ignore_ascii_case("Recycle Bin")) {
+            requery.push("Recycle Bin".into()); // recycled items land there; one handler is cheap to query
+        }
         let epoch = p.epoch;
         let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
@@ -729,7 +763,8 @@ impl App {
             }
             purge_vols(&vols, &drive, &mut report);
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
-            Ok(JobOut { report, tree, epoch, purged })
+            let clean = Some(CleanDone { requery, recycle_bin: cleanup::measure_recycle_bin() });
+            Ok(JobOut { report, tree, epoch, clean })
         });
     }
 }
@@ -859,21 +894,57 @@ mod tests {
         assert_eq!(CleanupUi::default().visible(true), Category::ALL.to_vec());
     }
 
-    #[test]
-    fn after_clean_forgets_deleted_items_and_requeries_only_purged_handlers() {
-        let mut c = with_vols(Ok(vec![handler("Temporary Files", 10, false)]));
-        let (a, b) = (CleanItem { path: PathBuf::from("a"), ..item(5, false) }, CleanItem { path: PathBuf::from("b"), ..item(7, false) });
-        c.fixed.start(move || Ok(Fixed { sys: Default::default(), measured: vec![measured(Category::BrowserCaches, vec![a, b])] }));
+    fn done(ids: &[&str], bin: u64) -> CleanDone {
+        CleanDone { requery: ids.iter().map(|s| s.to_string()).collect(), recycle_bin: Measured { bytes: bin, ..measured(Category::RecycleBin, vec![]) } }
+    }
+
+    fn with_fixed(c: &mut CleanupUi, measured: Vec<Measured>) {
+        c.fixed.start(move || Ok(Fixed { sys: Default::default(), measured }));
         while !c.fixed.poll() {
             std::thread::sleep(Duration::from_millis(1));
         }
         c.started = true;
+    }
+
+    #[test]
+    fn after_clean_forgets_deleted_items_and_requeries_only_changed_handlers() {
+        let mut c = with_vols(Ok(vec![handler("Temporary Files", 10, false)]));
+        let (a, b) = (CleanItem { path: PathBuf::from("a"), ..item(5, false) }, CleanItem { path: PathBuf::from("b"), ..item(7, false) });
+        with_fixed(&mut c, vec![measured(Category::BrowserCaches, vec![a, b]), measured(Category::RecycleBin, vec![])]);
         let gone = Target { path: PathBuf::from("a"), size: 5, is_dir: false, node: None, file: None };
-        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, vec!["Thumbnail Cache".into()]);
+        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, done(&["Thumbnail Cache", "Recycle Bin"], 42));
         let m = c.measured(Category::BrowserCaches, 0).unwrap();
         assert_eq!((m.bytes, m.count), (7, 1));
+        assert_eq!(c.measured(Category::RecycleBin, 0).unwrap().bytes, 42);
         assert!(c.started, "fixed locations are not measured again");
-        assert!(c.vols_dirty && c.vols_only == Some(vec!["Thumbnail Cache".to_string()]));
+        assert!(c.vols_dirty && c.vols_only == Some(vec!["Thumbnail Cache".to_string(), "Recycle Bin".to_string()]));
+    }
+
+    #[test]
+    fn after_clean_during_a_running_measurement_measures_again() {
+        let mut c = CleanupUi::default();
+        with_fixed(&mut c, vec![]);
+        c.fixed.start(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(Fixed { sys: Default::default(), measured: vec![] })
+        });
+        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0));
+        assert!(!c.started);
+    }
+
+    #[test]
+    fn failed_partial_requery_of_a_covering_handler_measures_again() {
+        for (answer, again) in [(handler("Temporary Files", 0, false), false), (Handler { error: Some("timed out".into()), ..handler("Temporary Files", 0, false) }, true)] {
+            let mut c = with_vols(Ok(vec![handler("Temporary Files", 10, false)]));
+            c.started = true;
+            c.vols_checking = vec!["Temporary Files".into()];
+            c.vols.start(move || Ok(vec![answer]));
+            while c.vols.is_loading() {
+                c.poll_vols();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(!c.started, again);
+        }
     }
 
     #[test]

@@ -102,8 +102,8 @@ pub struct JobOut {
     /// The scan tree with the deleted items removed (None when the scan changed meanwhile).
     pub tree: Option<Arc<Tree>>,
     pub epoch: u64,
-    /// Set for a Clean up: the Windows Disk Cleanup handlers it purged.
-    pub purged: Option<Vec<String>>,
+    /// Set for a Clean up.
+    pub clean: Option<super::disk_cleanup::CleanDone>,
 }
 
 #[derive(Default)]
@@ -407,8 +407,8 @@ impl App {
         let d = &mut self.pro.del;
         d.freed += rep.freed;
         d.sel.clear();
-        match out.purged {
-            Some(ids) => self.pro.clean.after_clean(&rep, ids),
+        match out.clean {
+            Some(done) => self.pro.clean.after_clean(&rep, done),
             None => self.pro.clean.started = false, // Cleanup measures again
         }
         self.status = format!("{} freed", format_bytes(rep.freed as f64));
@@ -535,7 +535,7 @@ impl App {
         self.pro.del.job.start(move || {
             let report = diskdelete::run(targets, mode, rules.as_deref());
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
-            Ok(JobOut { report, tree, epoch, purged: None })
+            Ok(JobOut { report, tree, epoch, clean: None })
         });
     }
 

@@ -1295,7 +1295,7 @@ pub(super) fn disk_row(p: &egui::Painter, r: Rect, pal: &Palette, name: &str, di
         x -= DISK_DATE_W;
     }
     if pct {
-        p.text(pos2(x, y), Align2::RIGHT_CENTER, format!("{:.1}%", frac * 100.0), theme::ui(12.0), pal.text_dim);
+        p.text(pos2(x, y), Align2::RIGHT_CENTER, format!("{:.1}%", frac.clamp(0.0, 1.0) * 100.0), theme::ui(12.0), pal.text_dim);
         x -= 56.0;
     }
     p.text(pos2(x, y), Align2::RIGHT_CENTER, format_bytes(size as f64), theme::ui(12.0), pal.text);
