@@ -5,9 +5,11 @@
 use super::{engine_wizard, wizards, Snap};
 use crate::docker::backend::{Command, ContainerAction, NoticeKind, PruneKind, Task};
 use crate::docker::stack::{stack_action, StackAction};
-use crate::ui::theme::Palette;
-use crate::ui::{widgets, App, FrameData};
-use eframe::egui::{self, Align2, Id, Key, RichText};
+use crate::ui::kit;
+use crate::ui::theme::{self, Palette};
+use crate::ui::widgets::{ButtonKind, Icon};
+use crate::ui::{App, FrameData};
+use eframe::egui::{self, Key, RichText};
 use std::time::Duration;
 
 /// An action on a Docker object, run from a toolbar, a menu or a confirmation.
@@ -246,42 +248,39 @@ fn confirm_window(app: &mut App, ctx: &egui::Context, pal: &Palette) {
     let verb = verb(&c.action);
     let danger = c.danger;
     let mut answer: Option<bool> = None;
-    egui::Window::new(title)
-        .id(Id::new("docker-confirm"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(egui::Frame::window(&ctx.style()).fill(pal.panel))
-        .show(ctx, |ui| {
-            ui.set_max_width(420.0);
-            for line in &c.lines {
-                ui.label(line.as_str());
-            }
-            if !c.options.is_empty() {
-                ui.add_space(6.0);
-                for (label, value) in c.options.iter_mut() {
-                    ui.checkbox(value, label.as_str());
-                }
-            }
-            if c.require.is_some() {
-                ui.add_space(6.0);
-                ui.add(egui::TextEdit::singleline(&mut c.typed).hint_text("Type the volume name to confirm").desired_width(f32::INFINITY));
-            }
+    let (question, context) = c.lines.split_first().map(|(q, rest)| (q.clone(), rest.to_vec())).unwrap_or_default();
+    kit::dialog(ctx, "docker-confirm", |ui| {
+        let tone = if danger { theme::status(pal).danger } else { pal.accent };
+        kit::dialog_header(ui, pal, Some((if danger { Icon::Octagon } else { Icon::Alert }, tone)), &title, &question);
+        for line in &context {
+            ui.add_space(4.0);
+            ui.label(RichText::new(line.as_str()).font(theme::ui(13.0)).color(pal.text_dim));
+        }
+        if !c.options.is_empty() {
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if widgets::button(ui, "Cancel", pal, None).clicked() || escape {
-                    answer = Some(false);
-                }
-                let go = if danger {
-                    ui.add_enabled(ready, egui::Button::new(RichText::new(verb).color(pal.warn))).clicked()
-                } else {
-                    ui.add_enabled_ui(ready, |ui| widgets::button(ui, verb, pal, None)).inner.clicked()
-                };
-                if go || (enter && ready) {
-                    answer = Some(true);
-                }
-            });
-        });
+            for (label, value) in c.options.iter_mut() {
+                ui.checkbox(value, label.as_str());
+            }
+        }
+        if c.require.is_some() {
+            ui.add_space(10.0);
+            ui.add(egui::TextEdit::singleline(&mut c.typed).hint_text("Type the volume name to confirm").desired_width(f32::INFINITY));
+        }
+        ui.add_space(12.0);
+        // The verb stays disabled until the volume name is typed.
+        let go = if danger { ButtonKind::DangerFill } else { ButtonKind::Primary };
+        match wizards::footer(ui, pal, &[(ButtonKind::Ghost, "Cancel", true), (go, verb, ready)]) {
+            Some(0) => answer = Some(false),
+            Some(_) => answer = Some(true),
+            None => {}
+        }
+        if escape {
+            answer = Some(false);
+        }
+        if enter && ready {
+            answer = Some(true);
+        }
+    });
     match answer {
         Some(true) => {
             if let Some(c) = app.docker.ui.dialogs.confirm.take() {

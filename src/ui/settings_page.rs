@@ -1,22 +1,28 @@
-//! Settings page: two columns of sections of settings.
+//! Settings page: a section list at the left and one column of section cards, each a stack of
+//! rows (label at the left, control at the right) separated by hairlines.
 
 use super::kit::{file_dialog, FileDialog};
 use super::theme::{self, MetricColors, Palette, Role, CORE_ROLES, METRICS, MIN_CONTRAST, ROLES};
-use super::widgets::{self, draw_icon, Icon};
+use super::widgets::{self, Button, ButtonSize, Icon};
 use super::{App, FrameData, Page};
 use crate::fonts;
 use crate::palette::{self, PaletteCatalog, PaletteFile, SYSTEM};
 use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
-use eframe::egui::{self, pos2, vec2, Align2, RichText, Stroke};
+use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-const LABEL_W: f32 = 150.0;
-
 /// Palette edits are written to disk this long after the last change.
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
+
+/// Width of the section list, and the sections it lists (in page order).
+const NAV_W: f32 = 180.0;
+const SECTIONS: [&str; 8] = ["Appearance", "Graphs", "General", "Window management", "Other options", "Task Manager", "Skins and files", "About"];
+
+/// The accent swatches after "Palette default": (name, `appearance.accent`).
+const ACCENTS: [(&str, &str); 4] = [("Teal", "#5EEAD4"), ("Indigo", "#8B9CFF"), ("Pink", "#FFB4C8"), ("Amber", "#F5B86B")];
 
 /// Palette controls and editor state (Settings → Appearance).
 #[derive(Default)]
@@ -127,7 +133,8 @@ impl FontList {
 /// Returns whether settings changed.
 fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, families: Option<&[String]>, missing: bool) -> bool {
     let mut changed = false;
-    row(ui, pal, "Display font", |ui| {
+    let hint = "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Inter.";
+    row_hint(ui, pal, "Display font", hint, |ui| {
         egui::ComboBox::from_id_salt("display-font").width(200.0).selected_text(fonts::picker_label(&a.display_font, missing)).show_ui(ui, |ui| {
             let built_in = fonts::is_built_in(&a.display_font);
             if ui.selectable_label(built_in, fonts::BUILT_IN_LABEL).clicked() && !built_in {
@@ -157,7 +164,6 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
             }
         });
     });
-    hint(ui, pal, "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Inter.");
     changed
 }
 
@@ -167,12 +173,12 @@ fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool
     let mut changed = false;
     row(ui, pal, r.label, |ui| {
         let c = p.role_mut(r.key).expect("palette role");
-        changed = egui::color_picker::color_edit_button_srgba(ui, c, egui::color_picker::Alpha::Opaque).changed();
-        ui.label(RichText::new(theme::to_skin(*c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
         if let Some(w) = warning {
             ui.label(RichText::new(format!("\u{26a0} {w:.1}:1")).font(theme::ui(12.0)).color(pal.warn))
                 .on_hover_text(format!("Text contrast is below {MIN_CONTRAST}:1 (WCAG AA). The palette is still saved."));
         }
+        ui.label(RichText::new(theme::to_skin(*c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
+        changed = egui::color_picker::color_edit_button_srgba(ui, c, egui::color_picker::Alpha::Opaque).changed();
     });
     changed
 }
@@ -190,14 +196,14 @@ fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs)
         for (key, label) in METRICS {
             let mut c = custom.get(key);
             row(ui, pal, label, |ui| {
-                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
-                    g.metric_colors.insert(key.into(), theme::to_skin(c).to_string());
+                let reset = ui.add_enabled_ui(g.metric_colors.contains_key(key), |ui| Button::new("Reset").size(ButtonSize::Small).icon(Icon::Refresh).show(ui, pal).on_hover_text("Back to the built-in colour").clicked()).inner;
+                if reset {
+                    g.metric_colors.remove(key);
                     changed = true;
                 }
                 ui.label(RichText::new(theme::to_skin(c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
-                let reset = ui.add_enabled_ui(g.metric_colors.contains_key(key), |ui| widgets::button(ui, "Reset", pal, Some(Icon::Refresh)).on_hover_text("Back to the built-in colour").clicked()).inner;
-                if reset {
-                    g.metric_colors.remove(key);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    g.metric_colors.insert(key.into(), theme::to_skin(c).to_string());
                     changed = true;
                 }
             });
@@ -212,22 +218,23 @@ fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs)
     changed
 }
 
-/// Theme combo, the palette buttons next to it and the palette editor. `current` is the id of
+/// A small outline button of the palette row.
+fn small_button(ui: &mut egui::Ui, pal: &Palette, label: &str) -> egui::Response {
+    Button::new(label).size(ButtonSize::Small).show(ui, pal)
+}
+
+/// Theme, palette and the buttons next to it, and the palette editor. `current` is the id of
 /// the palette in use. Returns whether settings changed.
 fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &mut PaletteCatalog, pui: &mut PaletteUi, current: &str) -> bool {
     let mut changed = false;
+    // System / Dark / Light are the three theme ids; a palette picked below shows none of them.
+    let theme_ids = [SYSTEM, "dark", "light"];
+    let active = theme_ids.iter().position(|id| *id == s.appearance.theme).unwrap_or(usize::MAX);
     row(ui, pal, "Theme", |ui| {
-        let selected = match pals.get(&s.appearance.theme) {
-            _ if s.appearance.theme == SYSTEM => "System".to_string(),
-            Some(p) => p.name.clone(),
-            None => format!("{} (not installed)", s.appearance.theme),
-        };
-        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(selected).show_ui(ui, |ui| {
-            changed |= ui.selectable_value(&mut s.appearance.theme, SYSTEM.to_string(), "System").changed();
-            for p in &pals.palettes {
-                changed |= ui.selectable_value(&mut s.appearance.theme, p.id.clone(), &p.name).changed();
-            }
-        });
+        if let Some(i) = widgets::segmented(ui, &["System", "Dark", "Light"], active, pal, false) {
+            s.appearance.theme = theme_ids[i].into();
+            changed = true;
+        }
     });
     if changed {
         pui.note_theme_change(pals);
@@ -235,98 +242,119 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
     let Some(cur) = pals.get(current).cloned() else { return changed };
     let custom = !cur.is_built_in();
     let editing = pui.editing.as_ref().is_some_and(|(id, _)| id == current);
-    ui.horizontal(|ui| {
-        ui.add_space(LABEL_W);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            if widgets::button(ui, "Duplicate", pal, None).on_hover_text(format!("Make an editable copy of {}", cur.name)).clicked() {
-                pui.message = pui.close_editor(pals);
-                match pals.duplicate(current) {
-                    Ok(id) => {
-                        s.appearance.theme = id.clone();
-                        changed = true;
-                        if let Some(p) = pals.get(&id) {
-                            pui.open_editor(p);
-                        }
-                    }
-                    Err(e) => pui.message = Some(format!("Duplicate failed: {e}")),
-                }
+    let mut picked = false;
+    row(ui, pal, "Palette", |ui| {
+        // Added right to left: Export is the rightmost, the picker the leftmost.
+        ui.add_enabled_ui(pui.dialog.is_none(), |ui| {
+            if small_button(ui, pal, "Export").on_hover_text(format!("Save {} as a .{} file", cur.name, palette::EXTENSION)).clicked() {
+                let file_name = format!("{}.{}", cur.id, palette::EXTENSION);
+                let d = FileDialog { save: true, title: "Export palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name, owner: pui.owner };
+                pui.dialog = Some((Some(cur.id.clone()), file_dialog(d)));
             }
-            ui.add_enabled_ui(custom, |ui| {
-                if widgets::button(ui, if editing { "Done" } else { "Edit" }, pal, None).clicked() {
-                    if editing {
-                        pui.message = pui.close_editor(pals);
-                    } else {
-                        pui.open_editor(&cur);
-                    }
-                }
-                if widgets::button(ui, "Rename", pal, None).clicked() {
-                    pui.rename = Some(cur.name.clone());
-                    pui.confirm_delete = false;
-                }
-                if widgets::button(ui, "Delete", pal, None).clicked() {
-                    pui.confirm_delete = true;
-                    pui.rename = None;
-                }
-            })
-            .response
-            .on_disabled_hover_text("Built-in palettes are read-only; duplicate one to edit it.");
-            ui.add_enabled_ui(pui.dialog.is_none(), |ui| {
-                if widgets::button(ui, "Import", pal, None).clicked() {
-                    let d = FileDialog { save: false, title: "Import palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name: String::new(), owner: pui.owner };
-                    pui.dialog = Some((None, file_dialog(d)));
-                }
-                if widgets::button(ui, "Export", pal, None).on_hover_text(format!("Save {} as a .{} file", cur.name, palette::EXTENSION)).clicked() {
-                    let file_name = format!("{}.{}", cur.id, palette::EXTENSION);
-                    let d = FileDialog { save: true, title: "Export palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name, owner: pui.owner };
-                    pui.dialog = Some((Some(cur.id.clone()), file_dialog(d)));
-                }
-            });
-        });
-    });
-    let mut rename_done = None;
-    if let Some(name) = &mut pui.rename {
-        row(ui, pal, "New name", |ui| {
-            let resp = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if widgets::button(ui, "Rename", pal, None).clicked() || enter {
-                rename_done = Some(true);
-            }
-            if widgets::button(ui, "Cancel", pal, None).clicked() {
-                rename_done = Some(false);
+            if small_button(ui, pal, "Import").clicked() {
+                let d = FileDialog { save: false, title: "Import palette".into(), filter: ("TMOP palette".into(), palette::EXTENSION.into()), file_name: String::new(), owner: pui.owner };
+                pui.dialog = Some((None, file_dialog(d)));
             }
         });
-    }
-    if let Some(ok) = rename_done {
-        let name = pui.rename.take().unwrap_or_default();
-        if ok && !name.trim().is_empty() {
-            if let Err(e) = pals.rename(current, &name) {
-                pui.message = Some(format!("Rename failed: {e}"));
+        ui.add_enabled_ui(custom, |ui| {
+            if small_button(ui, pal, if editing { "Done" } else { "Edit" }).clicked() {
+                if editing {
+                    pui.message = pui.close_editor(pals);
+                } else {
+                    pui.open_editor(&cur);
+                }
+            }
+        })
+        .response
+        .on_disabled_hover_text("Built-in palettes are read-only; duplicate one to edit it.");
+        if small_button(ui, pal, "Duplicate").on_hover_text(format!("Make an editable copy of {}", cur.name)).clicked() {
+            pui.message = pui.close_editor(pals);
+            match pals.duplicate(current) {
+                Ok(id) => {
+                    s.appearance.theme = id.clone();
+                    changed = true;
+                    if let Some(p) = pals.get(&id) {
+                        pui.open_editor(p);
+                    }
+                }
+                Err(e) => pui.message = Some(format!("Duplicate failed: {e}")),
             }
         }
-    }
-    if pui.confirm_delete {
-        let mut answer = None;
-        row(ui, pal, &format!("Delete {}?", cur.name), |ui| {
-            if widgets::button(ui, "Delete", pal, None).clicked() {
-                answer = Some(true);
+        let selected = if s.appearance.theme == SYSTEM {
+            format!("{} (system)", cur.name)
+        } else {
+            match pals.get(&s.appearance.theme) {
+                Some(p) => p.name.clone(),
+                None => format!("{} (not installed)", s.appearance.theme),
             }
-            if widgets::button(ui, "Cancel", pal, None).clicked() {
-                answer = Some(false);
+        };
+        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(selected).show_ui(ui, |ui| {
+            for p in &pals.palettes {
+                picked |= ui.selectable_value(&mut s.appearance.theme, p.id.clone(), &p.name).changed();
             }
         });
-        if let Some(yes) = answer {
-            pui.confirm_delete = false;
-            if yes {
-                // Save pending edits first: if the delete fails, the palette stays and keeps them.
-                pui.message = pui.flush(pals, true);
-                match pals.delete(current) {
-                    Ok(()) => {
-                        pui.editing = None;
-                        s.appearance.theme = SYSTEM.into();
-                        changed = true;
+    });
+    if picked {
+        changed = true;
+        pui.note_theme_change(pals);
+    }
+    if custom && pals.get(current).is_some() {
+        let mut rename_done = None;
+        row(ui, pal, "This palette", |ui| {
+            if small_button(ui, pal, "Delete").clicked() {
+                pui.confirm_delete = true;
+                pui.rename = None;
+            }
+            if small_button(ui, pal, "Rename").clicked() {
+                pui.rename = Some(cur.name.clone());
+                pui.confirm_delete = false;
+            }
+        });
+        if let Some(name) = &mut pui.rename {
+            row(ui, pal, "New name", |ui| {
+                if small_button(ui, pal, "Cancel").clicked() {
+                    rename_done = Some(false);
+                }
+                if small_button(ui, pal, "Rename").clicked() {
+                    rename_done = Some(true);
+                }
+                let resp = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    rename_done = Some(true);
+                }
+            });
+        }
+        if let Some(ok) = rename_done {
+            let name = pui.rename.take().unwrap_or_default();
+            if ok && !name.trim().is_empty() {
+                if let Err(e) = pals.rename(current, &name) {
+                    pui.message = Some(format!("Rename failed: {e}"));
+                }
+            }
+        }
+        if pui.confirm_delete {
+            let mut answer = None;
+            row(ui, pal, &format!("Delete {}?", cur.name), |ui| {
+                if small_button(ui, pal, "Cancel").clicked() {
+                    answer = Some(false);
+                }
+                if Button::danger("Delete").size(ButtonSize::Small).show(ui, pal).clicked() {
+                    answer = Some(true);
+                }
+            });
+            if let Some(yes) = answer {
+                pui.confirm_delete = false;
+                if yes {
+                    // Save pending edits first: if the delete fails, the palette stays and keeps them.
+                    pui.message = pui.flush(pals, true);
+                    match pals.delete(current) {
+                        Ok(()) => {
+                            pui.editing = None;
+                            s.appearance.theme = SYSTEM.into();
+                            changed = true;
+                        }
+                        Err(e) => pui.message = Some(format!("Delete failed: {e}")),
                     }
-                    Err(e) => pui.message = Some(format!("Delete failed: {e}")),
                 }
             }
         }
@@ -344,7 +372,7 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
 fn palette_editor(ui: &mut egui::Ui, pal: &Palette, pals: &mut PaletteCatalog, pui: &mut PaletteUi, id: &str) {
     let Some(p) = pals.get_mut(id) else { return };
     let mut edited = false;
-    ui.separator();
+    ui.add_space(6.0);
     ui.label(RichText::new(format!("Editing {}", p.name)).font(theme::bold(13.0)).color(pal.text));
     edited |= toggle_row(ui, pal, &mut p.palette.dark, "Dark palette");
     for r in CORE_ROLES {
@@ -374,9 +402,8 @@ fn palette_editor(ui: &mut egui::Ui, pal: &Palette, pals: &mut PaletteCatalog, p
         }
     }
     let mut revert = false;
-    ui.horizontal(|ui| {
-        ui.add_space(LABEL_W);
-        revert = widgets::button(ui, "Revert to file on disk", pal, Some(Icon::Refresh)).on_hover_text("Undo every change made since the editor was opened").clicked();
+    row(ui, pal, "", |ui| {
+        revert = Button::new("Revert to file on disk").size(ButtonSize::Small).icon(Icon::Refresh).show(ui, pal).on_hover_text("Undo every change made since the editor was opened").clicked();
     });
     if revert {
         if let Some((_, original)) = pui.editing {
@@ -389,226 +416,350 @@ fn palette_editor(ui: &mut egui::Ui, pal: &Palette, pals: &mut PaletteCatalog, p
     }
 }
 
-/// A settings section: icon + bold heading, then a card with rows.
-fn section(ui: &mut egui::Ui, pal: &Palette, icon: Icon, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
-        draw_icon(ui.painter(), r.shrink(1.0), icon, pal.text_dim);
-        ui.label(RichText::new(title).font(theme::bold(13.0)).color(pal.text));
-    });
-    ui.add_space(2.0);
-    egui::Frame::none().fill(pal.panel).stroke(Stroke::new(1.0_f32, pal.panel_stroke)).rounding(6.0).inner_margin(egui::Margin::symmetric(14.0, 12.0)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing = vec2(8.0, 10.0);
-        add(ui);
-    });
-    ui.add_space(14.0);
-}
-
-fn row(ui: &mut egui::Ui, pal: &Palette, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(LABEL_W, 22.0), egui::Sense::hover());
-        ui.painter().text(pos2(r.left(), r.center().y), Align2::LEFT_CENTER, label, theme::ui(13.0), pal.text);
-        add(ui);
-    });
-}
-
-fn toggle_row(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, label: &str) -> bool {
+/// The accent swatches: "Palette default" (drawn with `base`, the palette's own accent) and four
+/// fixed colours. Returns whether `appearance.accent` changed.
+fn accent_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, base: Color32) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        changed = widgets::toggle(ui, on, pal).changed();
-        ui.add_space(4.0);
-        ui.label(RichText::new(label).font(theme::ui(13.0)).color(pal.text));
+    row(ui, pal, "Accent colour", |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        // Right to left: the last swatch first.
+        let swatches = std::iter::once(("Palette default", "", base)).chain(ACCENTS.iter().map(|(n, hex)| (*n, *hex, skin::Color::parse(hex).map(theme::from_skin).unwrap_or(base))));
+        for (name, hex, color) in swatches.collect::<Vec<_>>().into_iter().rev() {
+            let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+            ui.painter().rect_filled(r, 6.0, color);
+            let on = a.accent.trim().eq_ignore_ascii_case(hex);
+            if on {
+                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.text));
+            } else if resp.hovered() {
+                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.raise(0.4)));
+            }
+            if resp.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on {
+                a.accent = hex.into();
+                changed = true;
+            }
+        }
     });
     changed
 }
 
-fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(RichText::new(text).font(theme::ui(11.5)).color(pal.text_faint));
+// ---------------------------------------------------------------------------
+// Rows and section cards
+// ---------------------------------------------------------------------------
+
+/// Where the section list and the cards meet: the card tops of this frame and a pending jump.
+#[derive(Default)]
+struct Sections {
+    tops: Vec<f32>,
+    /// Section to scroll to (set by a click in the list).
+    target: Option<usize>,
+}
+
+/// A section card: its heading (11 px, uppercase, tracked, faint; none when `title` is empty)
+/// and rows. Records its top for the section list and scrolls to itself when asked to.
+fn section(ui: &mut egui::Ui, pal: &Palette, sections: &mut Sections, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let index = sections.tops.len();
+    let frame = egui::Frame::none().fill(pal.card).stroke(Stroke::new(1.0_f32, pal.card_stroke)).rounding(10.0).inner_margin(egui::Margin { left: 22.0, right: 22.0, top: 18.0, bottom: 8.0 });
+    let out = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        if !title.is_empty() {
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+            widgets::tracked_text(ui.painter(), r.left_top(), Align2::LEFT_TOP, &title.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.16);
+            ui.add_space(8.0);
+        }
+        add(ui);
+    });
+    sections.tops.push(out.response.rect.top());
+    if sections.target == Some(index) {
+        sections.target = None;
+        ui.scroll_to_rect(out.response.rect, Some(Align::TOP));
+    }
+    ui.add_space(14.0);
+}
+
+/// A row without a hint line.
+fn row(ui: &mut egui::Ui, pal: &Palette, label: &str, controls: impl FnOnce(&mut egui::Ui)) {
+    row_hint(ui, pal, label, "", controls);
+}
+
+/// A settings row: a hairline, the label (and a faint hint line under it) at the left and the
+/// controls at the right. Controls are added right to left: the first one added is the rightmost.
+fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls: impl FnOnce(&mut egui::Ui)) {
+    let w = ui.available_width();
+    let text_w = if hint.is_empty() { w } else { (w * 0.62).clamp(160.0, 560.0) };
+    let label_g = ui.painter().layout(label.to_string(), theme::ui(13.0), pal.text, text_w);
+    let hint_g = (!hint.is_empty()).then(|| ui.painter().layout(hint.to_string(), theme::ui(12.0), pal.text_faint, text_w));
+    let text_h = label_g.size().y + hint_g.as_ref().map(|g| 3.0 + g.size().y).unwrap_or(0.0);
+    let content_h = text_h.max(32.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, content_h + 20.0), Sense::hover());
+    let p = ui.painter().clone();
+    p.line_segment([rect.left_top() + vec2(0.0, 0.5), rect.right_top() + vec2(0.0, 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
+    let y = rect.top() + 10.0 + (content_h - text_h) / 2.0;
+    let label_h = label_g.size().y;
+    p.galley(pos2(rect.left(), y), label_g, pal.text);
+    if let Some(g) = hint_g {
+        p.galley(pos2(rect.left(), y + label_h + 3.0), g, pal.text_faint);
+    }
+    let area = Rect::from_min_max(pos2(rect.left(), rect.top() + 10.0), pos2(rect.right(), rect.bottom() - 10.0));
+    // A child of its own: the row has been allocated above, the controls must not allocate it again.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)));
+    child.spacing_mut().item_spacing.x = 8.0;
+    controls(&mut child);
+}
+
+/// A row with an on/off switch at the right.
+pub(super) fn toggle_row(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, label: &str) -> bool {
+    toggle_row_hint(ui, pal, on, label, "")
+}
+
+/// [`toggle_row`] with a hint line under the label.
+pub(super) fn toggle_row_hint(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, label: &str, hint: &str) -> bool {
+    let mut changed = false;
+    row_hint(ui, pal, label, hint, |ui| changed = widgets::toggle(ui, on, pal).changed());
+    changed
+}
+
+/// A faint explanation under a group of rows.
+pub(super) fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).font(theme::ui(12.0)).color(pal.text_faint));
+    ui.add_space(6.0);
+}
+
+/// A mono hint line (paths, counts).
+pub(super) fn note(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+    ui.label(RichText::new(text).font(theme::mono(12.0)).color(pal.text_faint));
+}
+
+/// Index of the section whose card is at the top of the viewport (`top`); at the end of the
+/// scroll the one last clicked, if it is still further down, else the last.
+fn active_section(tops: &[f32], top: f32, at_end: bool, picked: Option<usize>) -> usize {
+    let by_scroll = tops.iter().rposition(|t| *t <= top + 24.0).unwrap_or(0);
+    if at_end && !tops.is_empty() {
+        picked.filter(|p| *p >= by_scroll && *p < tops.len()).unwrap_or(tops.len() - 1)
+    } else {
+        by_scroll
+    }
 }
 
 impl App {
     pub fn settings_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        let body = self.page_header(ui, &pal, "Settings", Icon::Gear);
-        let inner = body.shrink2(vec2(18.0, 10.0));
+        let subtitle = format!("saved automatically \u{b7} {} \u{b7} {}", settings::default_path().display(), Page::Settings.shortcut());
+        let body = self.page_title(ui, &pal, "Settings", &subtitle);
+        let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right() - 16.0, body.bottom()));
+        let nav = Rect::from_min_size(area.min, vec2(NAV_W, area.height()));
+        let column = Rect::from_min_max(pos2(nav.right() + 20.0, area.top()), area.max);
         let mut changed = false;
-        let gap = 20.0;
-        // Leave room for the scroll bar so the right column isn't covered by it.
-        let col_w = ((inner.width() - gap - 14.0) / 2.0).floor();
         let catalog_names: Vec<(String, String)> = self.catalog.skins.iter().map(|k| (k.id.clone(), k.name.clone())).collect();
         let mut reload_skins = false;
         let mut import = false;
+        let mut open_folder = false;
         let mut popout_change: Option<&'static str> = None;
         let current_palette = self.palette_id();
+        let base_accent = self.palettes.get(&current_palette).map(|p| p.palette.accent).unwrap_or(pal.accent);
         let font_missing = self.display_font.1;
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
-        // The columns are laid out inside the scroll area (not at fixed screen rects), so the area
+        let nav_id = egui::Id::new("settings-nav");
+        let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))), ..Default::default() };
+        // The cards are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
-        egui::ScrollArea::vertical().id_salt("settings-scroll").auto_shrink([false, false]).show(ui, |ui| {
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(col_w);
-                let s = &mut self.settings;
-                let (pals, pui) = (&mut self.palettes, &mut self.palette_ui);
-                section(ui, &pal, Icon::Apps, "Appearance", |ui| {
-                    changed |= palette_controls(ui, &pal, s, pals, pui, &current_palette);
-                    changed |= display_font_row(ui, &pal, &mut s.appearance, font_families.as_deref(), font_missing);
-                    row(ui, &pal, "Temperature", |ui| {
-                        egui::ComboBox::from_id_salt("temp").width(200.0).selected_text(if s.fahrenheit() { "Fahrenheit (\u{b0}F)" } else { "Celsius (\u{b0}C)" }).show_ui(ui, |ui| {
-                            changed |= ui.selectable_value(&mut s.general.temperature_unit, "celsius".into(), "Celsius (\u{b0}C)").changed();
-                            changed |= ui.selectable_value(&mut s.general.temperature_unit, "fahrenheit".into(), "Fahrenheit (\u{b0}F)").changed();
-                        });
-                    });
-                    let mut mode = s.popout.mode.clone();
-                    row(ui, &pal, "Popout", |ui| {
-                        egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(title_case(&mode)).show_ui(ui, |ui| {
-                            for m in ["off", "desktop", "normal", "topMost"] {
-                                if ui.selectable_value(&mut mode, m.to_string(), title_case(m)).changed() {
-                                    popout_change = Some(m);
-                                }
-                            }
-                        });
-                    });
-                    row(ui, &pal, "Popout skin", |ui| {
-                        let current = catalog_names.iter().find(|(id, _)| *id == s.popout.skin).map(|(_, n)| n.clone()).unwrap_or_else(|| s.popout.skin.clone());
-                        egui::ComboBox::from_id_salt("skin").width(200.0).selected_text(current).show_ui(ui, |ui| {
-                            for (id, name) in &catalog_names {
-                                changed |= ui.selectable_value(&mut s.popout.skin, id.clone(), name).changed();
-                            }
-                        });
-                    });
-                    row(ui, &pal, "Opacity", |ui| {
-                        let mut pct = (s.popout.opacity * 100.0).round();
-                        if ui.add(egui::Slider::new(&mut pct, 20.0..=100.0).show_value(false)).changed() {
-                            s.popout.opacity = pct / 100.0;
-                            changed = true;
-                        }
-                        ui.label(RichText::new(format!("{pct:.0}%")).font(theme::ui(12.5)).color(pal.text_dim));
-                    });
-                    changed |= toggle_row(ui, &pal, &mut s.popout.opaque_on_hover, "Full Strength on Mouse Over");
-                    hint(ui, &pal, "A faded popout stays out of the way of the desktop behind it, and comes back to full strength while the pointer is over it.");
-                    row(ui, &pal, "High Frequency Visuals", |ui| {
-                        let label = if s.appearance.high_frequency_visuals { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
-                        egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(label).show_ui(ui, |ui| {
-                            if ui.selectable_label(!s.appearance.high_frequency_visuals, "Off").clicked() {
-                                s.appearance.high_frequency_visuals = false;
-                                changed = true;
-                            }
-                            for fps in [30u32, 60, 120] {
-                                if ui.selectable_label(s.appearance.high_frequency_visuals && s.appearance.frame_rate == fps, format!("{fps} fps")).clicked() {
-                                    s.appearance.high_frequency_visuals = true;
-                                    s.appearance.frame_rate = fps;
+        let scroll = ui
+            .allocate_new_ui(egui::UiBuilder::new().max_rect(column), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Leave room for the scroll bar so the cards aren't covered by it.
+                        ui.set_max_width(ui.available_width() - 14.0);
+                        let s = &mut self.settings;
+                        let (pals, pui) = (&mut self.palettes, &mut self.palette_ui);
+                        section(ui, &pal, &mut sections, SECTIONS[0], |ui| {
+                            changed |= palette_controls(ui, &pal, s, pals, pui, &current_palette);
+                            changed |= accent_row(ui, &pal, &mut s.appearance, base_accent);
+                            changed |= display_font_row(ui, &pal, &mut s.appearance, font_families.as_deref(), font_missing);
+                            row(ui, &pal, "Temperature", |ui| {
+                                if let Some(i) = widgets::segmented(ui, &["\u{b0}C", "\u{b0}F"], s.fahrenheit() as usize, &pal, false) {
+                                    s.general.temperature_unit = if i == 0 { "celsius" } else { "fahrenheit" }.into();
                                     changed = true;
                                 }
-                            }
-                        });
-                    });
-                    hint(ui, &pal, "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use.");
-                    changed |= toggle_row(ui, &pal, &mut s.appearance.bloom, "Visual bloom");
-                    row(ui, &pal, "Bloom level", |ui| {
-                        changed |= ui.add(egui::Slider::new(&mut s.appearance.bloom_level, 1..=10).show_value(false)).changed();
-                        ui.label(RichText::new(format!("{}", s.appearance.bloom_level)).font(theme::ui(12.5)).color(pal.text_dim));
-                    });
-                });
-                section(ui, &pal, Icon::Chart, "Graphs", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.graphs.color_keyed, "Color Keyed Graphs");
-                    changed |= metric_color_rows(ui, &pal, &mut s.graphs);
-                    changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graph");
-                    changed |= toggle_row(ui, &pal, &mut s.graphs.smooth_curves, "Smooth Graph Curves");
-                    changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress Older History");
-                    row(ui, &pal, "History multiplier", |ui| {
-                        egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graphs.history_multiplier)).show_ui(ui, |ui| {
-                            for m in [1u32, 3, 7, 15] {
-                                changed |= ui.selectable_value(&mut s.graphs.history_multiplier, m, format!("{m}\u{d7} history")).changed();
-                            }
-                        });
-                    });
-                    hint(ui, &pal, "Older time is compressed smoothly. At 15\u{d7}, the live quarter on the right tracks the grid 1:1 and older time is compressed progressively, so the whole graph holds 15\u{d7} history.");
-                    row(ui, &pal, "Pixels per update", |ui| {
-                        egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graphs.pixels_per_update.to_string()).show_ui(ui, |ui| {
-                            for px in [4u32, 8, 12, 16, 24, 32] {
-                                changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, px.to_string()).changed();
-                            }
-                        });
-                    });
-                    hint(ui, &pal, "Each data update advances the graph by this many pixels; traces glide smoothly between updates.");
-                });
-            });
-            ui.add_space(gap);
-            ui.vertical(|ui| {
-                ui.set_width(col_w);
-                let s = &mut self.settings;
-                section(ui, &pal, Icon::List, "General", |ui| {
-                    row(ui, &pal, "Real-time update speed", |ui| {
-                        let cur = s.update_speed();
-                        egui::ComboBox::from_id_salt("speed").width(200.0).selected_text(cur.label()).show_ui(ui, |ui| {
-                            for sp in UpdateSpeed::ALL {
-                                if ui.selectable_label(cur == sp, sp.label()).clicked() {
-                                    s.general.update_speed = sp.token().into();
+                            });
+                            let mut mode = s.popout.mode.clone();
+                            row(ui, &pal, "Popout", |ui| {
+                                egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(title_case(&mode)).show_ui(ui, |ui| {
+                                    for m in ["off", "desktop", "normal", "topMost"] {
+                                        if ui.selectable_value(&mut mode, m.to_string(), title_case(m)).changed() {
+                                            popout_change = Some(m);
+                                        }
+                                    }
+                                });
+                            });
+                            row(ui, &pal, "Popout skin", |ui| {
+                                let current = catalog_names.iter().find(|(id, _)| *id == s.popout.skin).map(|(_, n)| n.clone()).unwrap_or_else(|| s.popout.skin.clone());
+                                egui::ComboBox::from_id_salt("skin").width(200.0).selected_text(current).show_ui(ui, |ui| {
+                                    for (id, name) in &catalog_names {
+                                        changed |= ui.selectable_value(&mut s.popout.skin, id.clone(), name).changed();
+                                    }
+                                });
+                            });
+                            row(ui, &pal, "Popout opacity", |ui| {
+                                let mut pct = (s.popout.opacity * 100.0).round();
+                                ui.add_sized([40.0, 20.0], egui::Label::new(RichText::new(format!("{pct:.0}%")).font(theme::mono(12.0)).color(pal.text_faint)));
+                                ui.spacing_mut().slider_width = 180.0;
+                                if ui.add(egui::Slider::new(&mut pct, 20.0..=100.0).show_value(false)).changed() {
+                                    s.popout.opacity = pct / 100.0;
                                     changed = true;
                                 }
-                            }
+                            });
+                            let hover_hint = "A faded popout stays out of the way of the desktop behind it, and comes back to full strength while the pointer is over it.";
+                            changed |= toggle_row_hint(ui, &pal, &mut s.popout.opaque_on_hover, "Full strength on mouse over", hover_hint);
+                            let hf_hint = "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use.";
+                            row_hint(ui, &pal, "High frequency visuals", hf_hint, |ui| {
+                                let label = if s.appearance.high_frequency_visuals { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
+                                egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(label).show_ui(ui, |ui| {
+                                    if ui.selectable_label(!s.appearance.high_frequency_visuals, "Off").clicked() {
+                                        s.appearance.high_frequency_visuals = false;
+                                        changed = true;
+                                    }
+                                    for fps in [30u32, 60, 120] {
+                                        if ui.selectable_label(s.appearance.high_frequency_visuals && s.appearance.frame_rate == fps, format!("{fps} fps")).clicked() {
+                                            s.appearance.high_frequency_visuals = true;
+                                            s.appearance.frame_rate = fps;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            });
+                            changed |= toggle_row(ui, &pal, &mut s.appearance.bloom, "Visual bloom");
+                            row(ui, &pal, "Bloom level", |ui| {
+                                ui.add_sized([40.0, 20.0], egui::Label::new(RichText::new(format!("{}", s.appearance.bloom_level)).font(theme::mono(12.0)).color(pal.text_faint)));
+                                ui.spacing_mut().slider_width = 180.0;
+                                changed |= ui.add(egui::Slider::new(&mut s.appearance.bloom_level, 1..=10).show_value(false)).changed();
+                            });
                         });
-                    });
-                    row(ui, &pal, "Default start page", |ui| {
-                        let cur = Page::from_id(&s.general.default_page).title();
-                        egui::ComboBox::from_id_salt("page").width(200.0).selected_text(cur).show_ui(ui, |ui| {
-                            for p in Page::NAV.iter().chain([Page::Settings].iter()) {
-                                changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), p.title()).changed();
-                            }
+                        let s = &mut self.settings;
+                        section(ui, &pal, &mut sections, SECTIONS[1], |ui| {
+                            changed |= toggle_row(ui, &pal, &mut s.graphs.color_keyed, "Color keyed graphs");
+                            changed |= metric_color_rows(ui, &pal, &mut s.graphs);
+                            changed |= toggle_row(ui, &pal, &mut s.graphs.dashed_summary, "Use dashed lines on summary graph");
+                            changed |= toggle_row(ui, &pal, &mut s.graphs.smooth_curves, "Smooth graph curves");
+                            changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress older history");
+                            let history_hint = "Older time is compressed smoothly. At 15\u{d7}, the live quarter on the right tracks the grid 1:1 and older time is compressed progressively, so the whole graph holds 15\u{d7} history.";
+                            row_hint(ui, &pal, "History multiplier", history_hint, |ui| {
+                                egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graphs.history_multiplier)).show_ui(ui, |ui| {
+                                    for m in [1u32, 3, 7, 15] {
+                                        changed |= ui.selectable_value(&mut s.graphs.history_multiplier, m, format!("{m}\u{d7} history")).changed();
+                                    }
+                                });
+                            });
+                            row_hint(ui, &pal, "Pixels per update", "Each data update advances the graph by this many pixels; traces glide smoothly between updates.", |ui| {
+                                egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graphs.pixels_per_update.to_string()).show_ui(ui, |ui| {
+                                    for px in [4u32, 8, 12, 16, 24, 32] {
+                                        changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, px.to_string()).changed();
+                                    }
+                                });
+                            });
                         });
-                    });
-                    changed |= toggle_row(ui, &pal, &mut s.general.show_self_in_reports, "Show TMOP in Reports");
-                    changed |= toggle_row(ui, &pal, &mut s.general.per_core_cpu_statistics, "Per Core CPU Statistics");
-                    let mut never = false;
-                    toggle_row(ui, &pal, &mut never, "Check for Updates on App Start");
-                    hint(ui, &pal, "Disabled: TMOP never contacts the network.");
+                        section(ui, &pal, &mut sections, SECTIONS[2], |ui| {
+                            row(ui, &pal, "Real-time update speed", |ui| {
+                                let cur = s.update_speed();
+                                egui::ComboBox::from_id_salt("speed").width(200.0).selected_text(cur.label()).show_ui(ui, |ui| {
+                                    for sp in UpdateSpeed::ALL {
+                                        if ui.selectable_label(cur == sp, sp.label()).clicked() {
+                                            s.general.update_speed = sp.token().into();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            });
+                            row(ui, &pal, "Default start page", |ui| {
+                                let cur = Page::from_id(&s.general.default_page).title();
+                                egui::ComboBox::from_id_salt("page").width(200.0).selected_text(cur).show_ui(ui, |ui| {
+                                    for p in Page::NAV.iter().chain([Page::Settings].iter()) {
+                                        changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), p.title()).changed();
+                                    }
+                                });
+                            });
+                            changed |= toggle_row(ui, &pal, &mut s.general.show_self_in_reports, "Show TMOP in reports");
+                            changed |= toggle_row(ui, &pal, &mut s.general.per_core_cpu_statistics, "Per core CPU statistics");
+                            let mut never = false;
+                            ui.add_enabled_ui(false, |ui| toggle_row_hint(ui, &pal, &mut never, "Check for updates on app start", "Disabled: TMOP never contacts the network."));
+                        });
+                        section(ui, &pal, &mut sections, SECTIONS[3], |ui| {
+                            changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
+                            changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
+                        });
+                        section(ui, &pal, &mut sections, SECTIONS[4], |ui| {
+                            changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
+                            changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
+                            changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
+                            changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
+                        });
+                        section(ui, &pal, &mut sections, SECTIONS[5], |ui| self.replace_section(ui, &pal));
+                        section(ui, &pal, &mut sections, SECTIONS[6], |ui| {
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                                reload_skins |= Button::new("Reload skins and palettes").size(ButtonSize::Medium).icon(Icon::Refresh).show(ui, &pal).clicked();
+                                import |= Button::new("Import TMOG settings").size(ButtonSize::Medium).show(ui, &pal).clicked();
+                                open_folder |= Button::new("Open settings folder").size(ButtonSize::Medium).show(ui, &pal).clicked();
+                            });
+                            ui.add_space(10.0);
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            note(ui, &pal, &format!("{} skins \u{b7} {} palettes", self.catalog.skins.len(), self.palettes.palettes.len()));
+                            note(ui, &pal, &format!("Settings file: {}", settings::default_path().display()));
+                            note(ui, &pal, &format!("Skin folders: {}", skin::default_skin_dirs().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")));
+                            note(ui, &pal, &format!("Palettes: {}", self.palettes.dir.display()));
+                            note(ui, &pal, &format!("Recordings: {}", crate::pro::recorder::default_dir().display()));
+                            for (p, e) in &self.catalog.errors {
+                                note(ui, &pal, &format!("Skin error: {}: {e}", p.display()));
+                            }
+                            for (p, e) in &self.palettes.errors {
+                                note(ui, &pal, &format!("Palette error: {}: {e}", p.display()));
+                            }
+                            ui.add_space(8.0);
+                        });
+                        section(ui, &pal, &mut sections, "", |ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+                            let p = ui.painter();
+                            widgets::logo(p, pos2(r.left() + 20.0, r.center().y), 40.0, pal.accent);
+                            let title = p.text(pos2(r.left() + 56.0, r.center().y - 17.0), Align2::LEFT_CENTER, format!("{} \u{2014} {}", crate::APP_NAME, crate::APP_LONG_NAME), theme::semibold(16.0), pal.text);
+                            p.text(pos2(title.right() + 10.0, title.center().y), Align2::LEFT_CENTER, format!("{} \u{b7} {}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH), theme::mono(12.0), pal.text_faint);
+                            let text = "Free and open source \u{b7} GPL-3.0 \u{b7} sends no data \u{b7} fonts: Inter, JetBrains Mono, Michroma (SIL OFL)";
+                            widgets::text_fit(p, pos2(r.left() + 56.0, r.center().y + 10.0), Align2::LEFT_CENTER, text, theme::ui(12.0), pal.text_faint, r.width() - 56.0);
+                        });
+                    })
+            })
+            .inner;
+
+        // The section list: the active entry follows the scroll position.
+        let at_end = scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 1.0;
+        let picked: Option<usize> = ui.data_mut(|d| d.get_temp(nav_id.with("picked")));
+        let active = active_section(&sections.tops, scroll.inner_rect.top(), at_end, picked);
+        if !at_end && picked.is_some() {
+            ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("picked")));
+        }
+        ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("target")));
+        for (i, name) in SECTIONS.iter().enumerate() {
+            let r = Rect::from_min_size(nav.min + vec2(0.0, i as f32 * 36.0), vec2(NAV_W, 34.0));
+            let resp = ui.interact(r, nav_id.with(i), Sense::click());
+            let on = i == active;
+            if on {
+                ui.painter().rect_filled(r, 6.0, pal.selection);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 6.0, pal.hover);
+            }
+            let (font, color) = if on { (theme::semibold(13.0), pal.accent) } else { (theme::ui(13.0), if resp.hovered() { pal.text } else { pal.text_dim }) };
+            ui.painter().text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, name, font, color);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                ui.data_mut(|d| {
+                    d.insert_temp(nav_id.with("target"), i);
+                    d.insert_temp(nav_id.with("picked"), i);
                 });
-                section(ui, &pal, Icon::Popout, "Window management", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
-                    changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
-                });
-                section(ui, &pal, Icon::Gear, "Other options", |ui| {
-                    changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
-                    changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
-                    changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
-                    changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
-                });
-                section(ui, &pal, Icon::Wrench, "Task Manager", |ui| {
-                    self.replace_section(ui, &pal, |ui, on| toggle_row(ui, &pal, on, "Open TMOP instead of Windows Task Manager"), |ui, t| hint(ui, &pal, t));
-                });
-                section(ui, &pal, Icon::Record, "Skins and files", |ui| {
-                    ui.horizontal(|ui| {
-                        if widgets::button(ui, "Reload skins and palettes", &pal, Some(Icon::Refresh)).clicked() {
-                            reload_skins = true;
-                        }
-                        if widgets::button(ui, "Import TMOG settings", &pal, None).clicked() {
-                            import = true;
-                        }
-                    });
-                    hint(ui, &pal, &format!("Settings file: {}", settings::default_path().display()));
-                    hint(ui, &pal, &format!("Skin folders: {}", skin::default_skin_dirs().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")));
-                    hint(ui, &pal, &format!("Palettes: {}", self.palettes.dir.display()));
-                    hint(ui, &pal, &format!("Recordings: {}", crate::pro::recorder::default_dir().display()));
-                    if !self.catalog.errors.is_empty() {
-                        for (p, e) in &self.catalog.errors {
-                            hint(ui, &pal, &format!("Skin error: {}: {e}", p.display()));
-                        }
-                    }
-                    for (p, e) in &self.palettes.errors {
-                        hint(ui, &pal, &format!("Palette error: {}: {e}", p.display()));
-                    }
-                });
-                section(ui, &pal, Icon::Home, "About", |ui| {
-                    ui.label(RichText::new(format!("{} \u{2014} {} 0.1  \u{2022}  Rust / egui  \u{2022}  no network, no licensing", crate::APP_NAME, crate::APP_LONG_NAME)).font(theme::ui(12.5)).color(pal.text));
-                    hint(ui, &pal, "Michroma font \u{a9} The Michroma Project Authors, SIL Open Font License 1.1 (assets/fonts/Michroma-OFL.txt).");
-                });
-            });
-        });
-        });
-        });
+                ui.ctx().request_repaint();
+            }
+        }
+
         if changed {
             self.settings_dirty = true;
         }
@@ -620,6 +771,13 @@ impl App {
                 self.set_popout(true);
             }
             None => {}
+        }
+        if open_folder {
+            if let Some(dir) = settings::default_path().parent() {
+                if let Err(e) = super::kit::reveal(dir) {
+                    self.status = format!("Could not open {}: {e}", dir.display());
+                }
+            }
         }
         if reload_skins {
             self.catalog = skin::scan(&skin::default_skin_dirs());
@@ -750,5 +908,53 @@ mod tests {
             assert!(!changed);
             assert_eq!(a, before);
         }
+    }
+
+    /// Section cards stack their rows, record where they start and take a hint line without
+    /// changing the value they show.
+    #[test]
+    fn sections_stack_rows() {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut sections = Sections::default();
+        let (mut on, mut changed) = (true, true);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                section(ui, &theme::DARK, &mut sections, "Appearance", |ui| {
+                    changed = toggle_row_hint(ui, &theme::DARK, &mut on, "Visual bloom", "A long hint that wraps onto a second line when the row is narrow enough to need it.");
+                    note(ui, &theme::DARK, "C:\\Users\\x\\settings.json");
+                });
+                section(ui, &theme::DARK, &mut sections, "", |ui| hint(ui, &theme::DARK, "About"));
+            });
+        });
+        assert!(!changed && on);
+        assert_eq!(sections.tops.len(), 2);
+        assert!(sections.tops[0] < sections.tops[1]);
+    }
+
+    /// The accent swatches lay out and change nothing until clicked; the active entry follows the
+    /// scroll position.
+    #[test]
+    fn accent_row_and_section_list() {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        for accent in ["", "#8B9CFF", "#123456"] {
+            let mut a = settings::Appearance { accent: accent.into(), ..Default::default() };
+            let before = a.clone();
+            let mut changed = true;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| changed = accent_row(ui, &theme::DARK, &mut a, theme::DARK.accent));
+            });
+            assert!(!changed);
+            assert_eq!(a, before);
+        }
+        let tops = [100.0, 400.0, 700.0, 900.0];
+        assert_eq!(active_section(&tops, 100.0, false, None), 0);
+        assert_eq!(active_section(&tops, 390.0, false, None), 1);
+        assert_eq!(active_section(&tops, 5000.0, false, None), 3);
+        assert_eq!(active_section(&tops, 500.0, true, None), 3, "the end of the scroll shows the last entry");
+        assert_eq!(active_section(&tops, 500.0, true, Some(2)), 2, "or the one that was clicked");
     }
 }
