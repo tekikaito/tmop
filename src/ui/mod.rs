@@ -1,17 +1,24 @@
 //! eframe/egui front end: window chrome (menu bar, sidebar, page header, status bar),
 //! the pages, and the skinnable popout window.
 
+pub mod apps_page;
 pub mod bench_page;
+pub mod connections_page;
 pub mod disk_cleanup;
 pub mod disk_delete;
+pub mod diskspace_page;
 pub mod docker;
+pub mod drivers_page;
 pub mod icons;
 pub mod inventory_pages;
 pub mod kit;
 pub mod performance;
 pub mod popout;
+pub mod power_page;
 pub mod pro_pages;
+pub mod process_actions;
 pub mod processes;
+pub mod recorder_page;
 pub mod replace;
 pub mod settings_page;
 pub mod summary;
@@ -24,9 +31,7 @@ use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::palette::{self, PaletteCatalog};
 use crate::pro::{bench::Bench, recorder::Recorder};
-#[cfg(windows)]
-use crate::process;
-use crate::process::{Action, Column, Priority, ProcessRow};
+use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
@@ -318,11 +323,6 @@ pub struct Launch {
     pub engine_test: Option<String>,
 }
 
-struct Pending {
-    action: Action,
-    row: ProcessRow,
-    question: String,
-}
 
 pub struct App {
     pub settings: Settings,
@@ -338,7 +338,7 @@ pub struct App {
     pub filter: String,
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
-    pending: Option<Pending>,
+    pending: Option<process_actions::Pending>,
     pub status: String,
     applied_top: Option<bool>,
     /// The palette last given to egui's style.
@@ -361,6 +361,9 @@ pub struct App {
     pub docker: docker::DockerState,
     /// Docker series for the Performance page, refreshed when the backend has new stats.
     pub perf_docker: performance::DockerPerfCache,
+    /// State of the Summary and Performance pages.
+    pub summary: summary::SummaryState,
+    pub perf: performance::PerfState,
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
@@ -397,6 +400,8 @@ impl App {
         let app = Self {
             docker,
             perf_docker: performance::DockerPerfCache::default(),
+            summary: summary::SummaryState::default(),
+            perf: performance::PerfState::default(),
             settings,
             settings_dirty: false,
             catalog,
@@ -822,71 +827,6 @@ impl App {
         draw_icon(p, Rect::from_center_size(pos2(header.left() + 36.0, header.center().y + 2.0), vec2(16.0, 16.0)), icon, pal.text_dim);
         p.text(pos2(header.left() + 60.0, header.center().y + 1.0), Align2::LEFT_CENTER, title, theme::display(26.0), pal.text);
         Rect::from_min_max(pos2(full.left(), header.bottom()), full.max)
-    }
-
-    // ------------------------------------------------------------------ process actions
-
-    pub fn request(&mut self, action: Action, row: ProcessRow) {
-        let question = match action {
-            Action::EndTask => Some(format!("Force quit {} ({})? Unsaved data will be lost.", row.name, row.pid)),
-            Action::EndTree => Some(format!("End the process tree of {} ({})? All descendant processes will also be asked to end.", row.name, row.pid)),
-            Action::Efficiency(true) if self.settings.general.confirm_efficiency_mode => {
-                Some(format!("Turn on efficiency mode for {}? It lowers its priority and may make it less responsive.", row.name))
-            }
-            Action::SetPriority(Priority::Realtime) => Some("Realtime priority can make the system unresponsive. Continue?".into()),
-            _ => None,
-        };
-        match question {
-            Some(q) => self.pending = Some(Pending { action, row, question: q }),
-            None => self.execute(action, &row),
-        }
-    }
-
-    fn execute(&mut self, action: Action, row: &ProcessRow) {
-        #[cfg(windows)]
-        {
-            let rows = self.snapshot().2;
-            self.status = match process::actions::run(action, row, &rows) {
-                Ok(m) => m,
-                Err(e) => format!("{}: {e}", row.name),
-            };
-            self.sampler.refresh();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = (action, row);
-            self.status = "Process actions are only implemented on Windows".into();
-        }
-    }
-
-    fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let Some(p) = &self.pending else { return };
-        let mut answer = None;
-        let question = p.question.clone();
-        egui::Window::new("Confirm")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(egui::Frame::window(&ctx.style()).fill(pal.panel))
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(question);
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if widgets::button(ui, "Yes", pal, None).clicked() {
-                        answer = Some(true);
-                    }
-                    if widgets::button(ui, "Cancel", pal, None).clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
-        if let Some(yes) = answer {
-            let p = self.pending.take().expect("pending");
-            if yes {
-                self.execute(p.action, &p.row);
-            }
-        }
     }
 
     // ------------------------------------------------------------------ popout viewport

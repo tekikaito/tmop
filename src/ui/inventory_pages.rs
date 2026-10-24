@@ -2,7 +2,7 @@
 //! Services.
 
 use super::kit::{empty_state, header_toolbar, hsplit, kv_list, stat_row, titled_card, vsplit, GAP, MARGIN};
-use super::pro_pages::driver_like_page;
+use super::drivers_page::driver_like_page;
 use super::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
 use super::theme;
 use super::widgets::{self, Icon};

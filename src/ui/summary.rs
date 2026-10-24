@@ -14,6 +14,10 @@ type MeterColumn<'a> = (&'a str, Color32, Option<f32>, String, LedStyle, Device)
 const M: f32 = 12.0;
 const GAP: f32 = 10.0;
 
+/// State of the Summary page (filled in by the page).
+#[derive(Default)]
+pub struct SummaryState {}
+
 impl App {
     pub fn summary_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;

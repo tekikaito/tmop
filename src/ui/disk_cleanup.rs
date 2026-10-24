@@ -3,7 +3,7 @@
 //! classifier, worker, log and skipped list as the manual delete in [`super::disk_delete`].
 
 use super::disk_delete::{apply_report, danger_button, JobOut};
-use super::pro_pages::{disk_list, disk_row};
+use super::diskspace_page::{disk_list, disk_row};
 use super::theme::{self, with_alpha, Palette};
 use super::widgets::{self, card, draw_icon, Icon};
 use super::{App, FrameData};

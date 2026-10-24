@@ -16,6 +16,10 @@ fn cell_bg(pal: &Palette) -> Color32 {
     mix(pal.graph_bg(), pal.body, 0.5)
 }
 
+/// State of the Performance page (filled in by the page).
+#[derive(Default)]
+pub struct PerfState {}
+
 /// Docker series copied from the backend for the Performance page.
 #[derive(Clone, Debug)]
 pub struct DockerPerfCache {
