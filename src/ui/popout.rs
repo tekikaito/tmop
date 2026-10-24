@@ -121,7 +121,7 @@ fn font(spec: Option<&FontSpec>, default_pt: f32, default_weight: FontWeight) ->
 /// (`appearance.displayFont`); other skins keep their own typography.
 fn title_font(skin: &Skin, spec: Option<&FontSpec>) -> FontId {
     let f = font(spec, 11.0, FontWeight::Bold);
-    if skin.source == SkinSource::BuiltIn && skin.id == "classic" {
+    if is_classic(skin) {
         theme::display(f.size)
     } else {
         f
@@ -241,6 +241,8 @@ struct Paint {
     title: Color32,
     primary: Color32,
     secondary: Color32,
+    /// Hints and labels (Classic: the palette's faint text, set as the skin's `grip` ink).
+    faint: Color32,
     control: Color32,
     badge: Color32,
     rule: Color32,
@@ -272,6 +274,7 @@ fn paint(skin: &Skin, op: f32) -> Paint {
         title: ic(ink.title, Color32::from_rgb(0xEB, 0xEB, 0xF0)),
         primary: ic(ink.primary, Color32::from_rgb(0xEB, 0xEB, 0xF0)),
         secondary: ic(ink.secondary, Color32::from_rgb(0xA0, 0xA0, 0xA8)),
+        faint: ic(ink.grip.or(ink.secondary), Color32::from_rgb(0xA0, 0xA0, 0xA8)),
         control: ic(ink.control, Color32::from_rgb(0xD0, 0xD0, 0xD6)),
         badge: ic(ink.badge, Color32::from_rgb(0x30, 0xE1, 0x67)),
         rule: ic(ink.rule, Color32::from_rgb(0x43, 0x43, 0x43)),
@@ -327,7 +330,39 @@ fn window_kind(skin: &Skin) -> (String, u32, f32) {
     (kind, sides, rot)
 }
 
+/// Classic, the built-in skin drawn in the application's own look (see [`draw_classic`]).
+fn is_classic(skin: &Skin) -> bool {
+    skin.source == SkinSource::BuiltIn && skin.id == "classic"
+}
+
+/// Classic's window: 340 px wide; the header, a grid of tiles, the per-core strip, the health
+/// line and the process list stack without gaps.
+const CLASSIC_W: f32 = 340.0;
+const CLASSIC_HEADER_H: f32 = 45.0;
+const CLASSIC_CORES_H: f32 = 21.0;
+const CLASSIC_HEALTH_H: f32 = 33.0;
+const CLASSIC_HEADING_H: f32 = 26.0;
+const CLASSIC_ROW_H: f32 = 22.0;
+
+fn classic_layout(skin: &Skin) -> Layout {
+    let n = skin.resolved_quadrants().len().max(1);
+    let columns = skin.meters.as_ref().and_then(|m| m.columns).map(|c| c as usize).unwrap_or(3).clamp(1, n);
+    let graph_h = skin.meters.as_ref().and_then(|m| m.graph.as_ref()).and_then(|g| g.height).unwrap_or(20.0);
+    let tile = vec2((CLASSIC_W - (columns - 1) as f32) / columns as f32, graph_h + 30.0);
+    let rows = n.div_ceil(columns);
+    // A hairline between the rows and one under the last.
+    let meters_h = rows as f32 * (tile.y + 1.0);
+    let cores_h = if skin.resolved_quadrants().contains(&Quadrant::Cpu) { CLASSIC_CORES_H } else { 0.0 };
+    let procs_rows = 9;
+    let h = (CLASSIC_HEADER_H + meters_h + cores_h + CLASSIC_HEALTH_H + CLASSIC_HEADING_H + procs_rows as f32 * CLASSIC_ROW_H + 8.0).round();
+    let size = vec2(CLASSIC_W, h);
+    Layout { columns, tile, header_h: CLASSIC_HEADER_H, header_gap: 0.0, pad: 0.0, gap: 0.0, meters_h, cores_h, procs_rows, row_h: CLASSIC_ROW_H, size, content: Rect::from_min_size(Pos2::ZERO, size) }
+}
+
 pub fn layout(skin: &Skin) -> Layout {
+    if is_classic(skin) {
+        return classic_layout(skin);
+    }
     let m = skin.metrics.clone().unwrap_or_default();
     let typo = skin.typography.clone().unwrap_or_default();
     let style = skin.meter_style();
@@ -402,6 +437,9 @@ pub struct PopoutEvents {
 #[allow(clippy::too_many_arguments)]
 pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool, tex: &mut Textures, icons: &mut IconCache) -> PopoutEvents {
     tex.ensure(ui.ctx(), skin);
+    if is_classic(skin) {
+        return draw_classic(ui, rect, skin, fd, opacity, fahrenheit);
+    }
     let mut ev = PopoutEvents::default();
     let painter = ui.painter_at(rect);
     let p = paint(skin, opacity);
@@ -644,6 +682,153 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     ev
 }
 
+/// Classic: header with the orbit mark, a grid of history tiles, the per-core strip, the health
+/// line and the busiest processes, all in the application's palette (see [`classic_skin`]).
+fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool) -> PopoutEvents {
+    let mut ev = PopoutEvents::default();
+    let painter = ui.painter_at(rect);
+    let p = paint(skin, opacity);
+    let typo = skin.typography.clone().unwrap_or_default();
+    let l = layout(skin);
+    let radius = skin.metrics.as_ref().and_then(|m| m.corner_radius).unwrap_or(10.0);
+    let pal = &fd.pal;
+    let st = theme::status(pal);
+    let fade = |c: Color32| with_alpha(c, opacity);
+    let accent_ui = fade(pal.accent);
+    let hair = p.header_rule.unwrap_or(p.rule);
+    let grid_line = p.tile_stroke.unwrap_or(hair);
+    let hline = |y: f32| painter.line_segment([pos2(rect.left() + 1.0, y), pos2(rect.right() - 1.0, y)], Stroke::new(1.0_f32, hair));
+    painter.rect_filled(rect, radius, p.window.0);
+
+    // Header: mark, title, opacity, chevron and close.
+    let header = Rect::from_min_size(rect.min, vec2(rect.width(), l.header_h - 1.0));
+    let hc = header.center().y;
+    widgets::logo(&painter, pos2(header.left() + 20.0, hc), 16.0, accent_ui);
+    let hide_title = skin.header.as_ref().and_then(|h| h.hide_title).unwrap_or(false);
+    let mut x = header.left() + 36.0;
+    if !hide_title {
+        let title = skin.header.as_ref().and_then(|h| h.title.clone()).unwrap_or_else(|| "TMOP".to_string());
+        let r = widgets::tracked_text(&painter, pos2(x, hc), Align2::LEFT_CENTER, &title, title_font(skin, typo.title.as_ref()), p.title, 0.14);
+        x = r.right() + 8.0;
+    }
+    painter.text(pos2(x, hc), Align2::LEFT_CENTER, format!("popout \u{b7} {:.0}%", opacity * 100.0), theme::mono(10.0), p.faint);
+    hline(header.bottom() + 0.5);
+    let close = Rect::from_center_size(pos2(header.right() - 22.0, hc), Vec2::splat(28.0));
+    let chev = Rect::from_center_size(close.center() - vec2(36.0, 0.0), Vec2::splat(28.0));
+    let close_resp = ui.interact(close, ui.id().with("popout-close"), Sense::click());
+    let chev_resp = ui.interact(chev, ui.id().with("popout-chevron"), Sense::click());
+    for (r, resp) in [(close, &close_resp), (chev, &chev_resp)] {
+        if resp.hovered() {
+            painter.rect_filled(r, 4.0, fade(pal.raise(0.08)));
+        }
+    }
+    let ctl = |hovered: bool| Stroke::new(1.8_f32, if hovered { p.title } else { p.faint });
+    let c = close.center();
+    painter.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], ctl(close_resp.hovered()));
+    painter.line_segment([c + vec2(4.0, -4.0), c + vec2(-4.0, 4.0)], ctl(close_resp.hovered()));
+    let c = chev.center();
+    painter.add(Shape::line(vec![c + vec2(-4.5, -2.5), c + vec2(0.0, 2.5), c + vec2(4.5, -2.5)], ctl(chev_resp.hovered())));
+    ev.close = close_resp.clicked();
+    ev.menu = chev_resp.clicked();
+    ev.chevron = Some(chev_resp);
+    let drag = ui.interact(Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom())), ui.id().with("popout-drag"), Sense::click_and_drag());
+    ev.drag = drag.drag_started();
+
+    // Tiles: label and value over a 20 px history, a hairline between them.
+    let mut y = header.bottom() + 1.0;
+    let cols = l.columns;
+    let grid = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), l.meters_h));
+    painter.rect_filled(grid, 0.0, grid_line);
+    let label_f = font(typo.label.as_ref(), 6.75, FontWeight::Regular);
+    let value_f = font(typo.value.as_ref(), 8.25, FontWeight::Regular);
+    let graph_h = l.tile.y - 30.0;
+    let mut scratch = Series::new(2);
+    for (i, q) in skin.resolved_quadrants().into_iter().enumerate() {
+        let (c, r) = (i % cols, i / cols);
+        let cell = Rect::from_min_size(pos2(rect.left() + c as f32 * (l.tile.x + 1.0), y + r as f32 * (l.tile.y + 1.0)), l.tile);
+        painter.rect_filled(cell, 0.0, p.tile.0);
+        let rd = reading(q, fd, fahrenheit);
+        let (acc, _, _) = accent(skin, q, opacity, &fd.metric_colors);
+        widgets::tracked_text(&painter, pos2(cell.left() + 10.0, cell.top() + 9.0), Align2::LEFT_TOP, q.label(), label_f.clone(), p.faint, 0.14);
+        painter.text(pos2(cell.right() - 10.0, cell.top() + 7.0), Align2::RIGHT_TOP, &rd.text, value_f.clone(), p.primary);
+        let (series, max) = series_for(fd, q, &mut scratch);
+        let fill = if matches!(q, Quadrant::Cpu | Quadrant::Memory) { 0.2 } else { 0.0 };
+        let graph = Rect::from_min_size(pos2(cell.left() + 10.0, cell.top() + 24.0), vec2(cell.width() - 20.0, graph_h));
+        widgets::sparkline(&painter, graph, &[(series, acc, (0.0, max))], fill, false);
+    }
+    y += l.meters_h;
+    hline(y - 0.5);
+
+    // Per-core strip.
+    if l.cores_h > 0.0 {
+        let strip = Rect::from_min_size(pos2(rect.left() + 1.0, y), vec2(rect.width() - 2.0, l.cores_h - 1.0));
+        painter.rect_filled(strip, 0.0, p.tile.0);
+        let cores = &fd.smooth.per_core;
+        let (acc, lit, unlit) = accent(skin, Quadrant::Cpu, opacity, &fd.metric_colors);
+        let (w, pitch) = (4.5, 6.0);
+        let x0 = strip.center().x - (cores.len() as f32 * pitch - (pitch - w)) / 2.0;
+        for (i, v) in cores.iter().enumerate() {
+            let r = Rect::from_min_size(pos2(x0 + i as f32 * pitch, strip.center().y - w / 2.0), vec2(w, w));
+            let t = (v / 100.0).clamp(0.0, 1.0);
+            let c = if t > 0.03 { mix(dim(lit, 0.45), lit, (t * 3.0).min(1.0)) } else { mix(unlit, Color32::BLACK, 0.5) };
+            painter.rect_filled(r, 0.5, c);
+            if t > 0.4 && fd.bloom > 0.0 {
+                painter.rect_filled(r.expand(1.5), 1.5, with_alpha(acc, 0.18 * fd.bloom));
+            }
+        }
+        y += l.cores_h;
+        hline(y - 0.5);
+    }
+
+    // Health line: a ring in the verdict's colour and the busiest app.
+    let verdict = super::health::health(fd.snap, fd.rows, None);
+    let (word, level_color) = match verdict.level {
+        super::health::Level::Good => ("good", st.ok),
+        super::health::Level::Elevated => ("elevated", st.warn),
+        super::health::Level::Critical => ("critical", st.danger),
+    };
+    let level_color = fade(level_color);
+    let cy = y + (CLASSIC_HEALTH_H - 1.0) / 2.0;
+    widgets::ring(&painter, pos2(rect.left() + 22.0, cy), 8.2, 2.2, 1.0, level_color, fade(pal.raise(0.10)));
+    let health_f = theme::ui(12.0);
+    let mut tx = rect.left() + 38.0;
+    for (text, color, f) in [("Health ", p.secondary, health_f.clone()), (word, level_color, theme::semibold(12.0))] {
+        tx = painter.text(pos2(tx, cy), Align2::LEFT_CENTER, text, f, color).right();
+    }
+    if let Some(busiest) = &verdict.busiest {
+        widgets::text_fit(&painter, pos2(tx, cy), Align2::LEFT_CENTER, &format!(" \u{b7} {busiest} busiest"), health_f, p.secondary, (rect.right() - 12.0 - tx).max(20.0));
+    }
+    y += CLASSIC_HEALTH_H;
+    hline(y - 0.5);
+
+    // Top processes by CPU.
+    let heading_f = font(typo.heading.as_ref(), 6.75, FontWeight::Regular);
+    let hy = y + 14.0;
+    widgets::tracked_text(&painter, pos2(rect.left() + 12.0, hy), Align2::LEFT_CENTER, &format!("TOP {} PROCESSES", l.procs_rows), heading_f.clone(), p.faint, 0.14);
+    let tri = pos2(rect.right() - 16.0, hy + 0.5);
+    painter.add(Shape::convex_polygon(vec![tri + vec2(-3.0, -2.0), tri + vec2(3.0, -2.0), tri + vec2(0.0, 2.5)], accent_ui, Stroke::NONE));
+    widgets::tracked_text(&painter, pos2(tri.x - 7.0, hy), Align2::RIGHT_CENTER, "CPU", heading_f, accent_ui, 0.1);
+    y += CLASSIC_HEADING_H;
+    let me = std::process::id();
+    let mut rows: Vec<&crate::process::ProcessRow> = fd.rows.iter().filter(|r| r.pid != 0 && (fd.show_self || r.pid != me)).collect();
+    rows.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+    let row_f = font(typo.row.as_ref(), 8.25, FontWeight::Regular);
+    let rowv_f = font(typo.row_value.as_ref(), 8.25, FontWeight::Regular);
+    for (i, r) in rows.iter().take(l.procs_rows).enumerate() {
+        let rr = Rect::from_min_size(pos2(rect.left() + 6.0, y + i as f32 * l.row_h), vec2(rect.width() - 12.0, l.row_h));
+        if i == 0 && r.cpu_pct > 0.0 {
+            painter.rect_filled(rr, 4.0, with_alpha(accent_ui, 0.1 * opacity));
+        }
+        let own = r.pid == me;
+        widgets::text_fit(&painter, pos2(rr.left() + 6.0, rr.center().y), Align2::LEFT_CENTER, &r.name, row_f.clone(), if own { p.faint } else { p.primary }, rr.width() - 70.0);
+        painter.text(pos2(rr.right() - 6.0, rr.center().y), Align2::RIGHT_CENTER, format!("{:.1}%", r.cpu_pct), rowv_f.clone(), if own { p.faint } else { p.primary });
+    }
+    if let Some(ws) = p.window_stroke {
+        painter.rect_stroke(rect, radius, Stroke::new(skin.metrics.as_ref().and_then(|m| m.border_width).unwrap_or(1.0), ws));
+    }
+    ev
+}
+
 /// Segmented LED bar with explicit unlit colour (skins give `unlit` directly), a soft
 /// glow under the lit run and a lighter top edge on lit segments.
 fn led_bar(painter: &egui::Painter, bar: Rect, n: usize, frac: f32, style: &LedStyle, unlit: Color32) {
@@ -769,25 +954,26 @@ fn skin_color(c: Color32) -> Color {
     Color::rgba(r, g, b, a)
 }
 
-/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal`
-/// (further, in steps, until it reads at 4.5:1 on the palette's surface).
+/// Meter accent for Classic: the app's metric colour, shifted for text contrast on `pal` (in
+/// steps, until it reads at 4.5:1 on the tiles).
 fn classic_accent(pal: &Palette, metrics: &MetricColors, q: Quadrant) -> Color32 {
     let c = metrics.get(q.key());
-    let shift = |t: f32| if pal.dark { lighten(c, 0.35 + t) } else { dim(c, 0.55 - t) };
-    (0..=6).map(|i| shift(i as f32 * 0.1)).find(|a| theme::contrast(*a, pal.card) >= theme::MIN_CONTRAST).unwrap_or_else(|| shift(0.6))
+    let shift = |t: f32| if pal.dark { lighten(c, t) } else { dim(theme::darken_for(pal, c), 1.0 - t) };
+    (0..=7).map(|i| shift(i as f32 * 0.1)).find(|a| theme::contrast(*a, pal.panel) >= theme::MIN_CONTRAST).unwrap_or_else(|| shift(0.7))
 }
 
 /// Classic drawn in the application's own colours (`pal`, `metrics`).
 pub fn classic_skin(pal: &Palette, metrics: &MetricColors) -> Skin {
     let mut skin = Skin::classic();
     let solid = |c: Color32| Some(Fill::Solid(skin_color(c)));
+    let window = mix(pal.body, pal.card, 0.3);
     skin.surfaces = Some(Surfaces {
-        window: solid(pal.body),
-        window_stroke: solid(pal.card_stroke),
-        header: solid(pal.chrome),
-        header_rule: solid(pal.panel_stroke),
-        tile: solid(pal.card),
-        tile_stroke: solid(pal.panel_stroke),
+        window: solid(window),
+        window_stroke: solid(pal.raise(0.10)),
+        header: solid(window),
+        header_rule: solid(pal.raise(0.08)),
+        tile: solid(pal.panel),
+        tile_stroke: solid(pal.raise(0.06)),
         badge_stroke: solid(pal.card_stroke),
         ..Default::default()
     });
@@ -796,6 +982,7 @@ pub fn classic_skin(pal: &Palette, metrics: &MetricColors) -> Skin {
         primary: Some(skin_color(pal.text)),
         secondary: Some(skin_color(pal.text_dim)),
         control: Some(skin_color(pal.text_dim)),
+        grip: Some(skin_color(pal.text_faint)),
         badge: Some(skin_color(if pal.dark { pal.ok } else { dim(pal.ok, 0.7) })),
         rule: Some(skin_color(pal.grid)),
         ..Default::default()
@@ -868,7 +1055,7 @@ mod tests {
         for pal in crate::palette::built_in().into_iter().map(|p| p.palette) {
             let s = classic_skin(&pal, &MetricColors::default());
             let tile = s.surfaces.as_ref().unwrap().tile.as_ref().unwrap().top().unwrap();
-            assert_eq!(tile, skin_color(pal.card));
+            assert_eq!(tile, skin_color(pal.panel));
             let ink = s.ink.as_ref().unwrap();
             for fg in [ink.primary, ink.secondary, ink.title] {
                 let r = contrast(fg.unwrap(), tile);
