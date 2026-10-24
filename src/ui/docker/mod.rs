@@ -396,8 +396,8 @@ impl App {
         let p = ui.painter().clone();
         widgets::draw_icon(&p, Rect::from_min_size(pos2(full.left() + 12.0, full.top() + 4.0), vec2(56.0, 56.0)), Icon::Container, pal.text_code());
         let title_area = Rect::from_min_max(pos2(full.left() + 72.0, full.top()), full.max);
-        // The two spaces leave room for the dot.
-        let body = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(title_area), |ui| self.page_title(ui, &pal, "Docker", &format!("  {subtitle}"))).inner;
+        // The three spaces leave room for the dot and its glow.
+        let body = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(title_area), |ui| self.page_title(ui, &pal, "Docker", &format!("   {subtitle}"))).inner;
         let dot_at = pos2(title_area.left() + 17.0, full.top() + 52.0);
         p.circle_filled(dot_at, 9.0, theme::with_alpha(dot, 0.10));
         p.circle_filled(dot_at, 6.5, theme::with_alpha(dot, 0.20));

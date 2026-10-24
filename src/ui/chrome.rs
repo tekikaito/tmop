@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 const READOUTS_MIN_W: f32 = 1100.0;
 const RAIL_ITEM: (f32, f32) = (60.0, 46.0);
 const RAIL_GAP: f32 = 2.0;
+const RAIL_MIN_STEP: f32 = 38.0;
 
 /// "HOST · user" from the environment (Windows: `COMPUTERNAME`, `USERNAME`; elsewhere
 /// `HOSTNAME`, `USER`); empty parts are skipped.
@@ -184,7 +185,9 @@ impl App {
         } else {
             pal.text_rail()
         };
-        draw_icon(p, Rect::from_center_size(pos2(rect.center().x, rect.top() + 4.5 + 11.0), vec2(22.0, 22.0)), icon, color);
+        // Squeezed entries (a short window) get a smaller icon so the label still fits below it.
+        let glyph = if rect.height() >= 44.0 { 22.0 } else { 20.0 };
+        draw_icon(p, Rect::from_center_size(pos2(rect.center().x, rect.top() + 3.5 + glyph / 2.0), vec2(glyph, glyph)), icon, color);
         let font = if active { theme::semibold(10.0) } else { theme::ui(10.0) };
         widgets::tracked_text(p, pos2(rect.center().x, rect.bottom() - 4.0), Align2::CENTER_BOTTOM, label, font, color, 0.04);
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -197,9 +200,12 @@ impl App {
             let p = ui.painter().clone();
             p.line_segment([pos2(full.right() - 0.5, full.top()), pos2(full.right() - 0.5, full.bottom())], Stroke::new(1.0_f32, pal.sidebar_rule));
             let x = full.left() + (RAIL_W - RAIL_ITEM.0) / 2.0 - 0.5;
-            let step = RAIL_ITEM.1 + RAIL_GAP;
             let pages = self.visible_pages();
-            // The page list gets the space above the bottom items; when it doesn't fit it scrolls.
+            // Every entry gets the same pitch: the full size when the window is tall enough, squeezed down to
+            // RAIL_MIN_STEP when it isn't; below that the page list scrolls.
+            let fit = (full.height() - 12.0 - 16.0 - 8.0) / (pages.len() + 2) as f32;
+            let step = fit.clamp(RAIL_MIN_STEP, RAIL_ITEM.1 + RAIL_GAP);
+            let item_h = step - RAIL_GAP;
             let bottom_top = full.bottom() - 16.0 - 2.0 * step + RAIL_GAP;
             let nav_rect = Rect::from_min_max(pos2(full.left(), full.top() + 12.0), pos2(full.right(), (bottom_top - 8.0).max(full.top() + 12.0)));
             let nav_h = pages.len() as f32 * step;
@@ -209,12 +215,21 @@ impl App {
             if max_scroll > 0.0 && ui.rect_contains_pointer(nav_rect) {
                 scroll -= ui.input(|i| i.smooth_scroll_delta.y);
             }
+            // A page picked elsewhere (shortcut, link) is scrolled into view.
+            let seen_id = ui.id().with("nav-seen");
+            if ui.data(|d| d.get_temp::<Page>(seen_id)) != Some(self.page) {
+                ui.data_mut(|d| d.insert_temp(seen_id, self.page));
+                if let Some(i) = pages.iter().position(|&q| q == self.page) {
+                    let (top, bottom) = (i as f32 * step, i as f32 * step + item_h);
+                    scroll = scroll.min(top).max(bottom - nav_rect.height());
+                }
+            }
             scroll = scroll.clamp(0.0, max_scroll);
             ui.data_mut(|d| d.insert_temp(scroll_id, scroll));
             let clip = p.with_clip_rect(nav_rect);
             let mut y = nav_rect.top() - scroll;
             for page in pages {
-                let rect = Rect::from_min_size(pos2(x, y), vec2(RAIL_ITEM.0, RAIL_ITEM.1));
+                let rect = Rect::from_min_size(pos2(x, y), vec2(RAIL_ITEM.0, item_h));
                 y += step;
                 let hit = rect.intersect(nav_rect);
                 if !hit.is_positive() {
@@ -226,12 +241,12 @@ impl App {
                     self.page = page;
                 }
             }
-            let settings = Rect::from_min_size(pos2(x, bottom_top), vec2(RAIL_ITEM.0, RAIL_ITEM.1));
+            let settings = Rect::from_min_size(pos2(x, bottom_top), vec2(RAIL_ITEM.0, item_h));
             let resp = Self::rail_item(ui, &p, settings, settings, "nav-settings", Icon::Gear, "Settings", self.page == Page::Settings, pal);
             if resp.on_hover_text(format!("Settings  {}", Page::Settings.shortcut())).clicked() {
                 self.page = Page::Settings;
             }
-            let popout = Rect::from_min_size(pos2(x, bottom_top + step), vec2(RAIL_ITEM.0, RAIL_ITEM.1));
+            let popout = Rect::from_min_size(pos2(x, bottom_top + step), vec2(RAIL_ITEM.0, item_h));
             let resp = Self::rail_item(ui, &p, popout, popout, "nav-popout", Icon::Popout, "Popout", self.popout_open, pal);
             if resp.on_hover_text(if self.popout_open { "Close the popout" } else { "Open the popout" }).clicked() {
                 let open = !self.popout_open;
