@@ -32,7 +32,7 @@ const PURGE_TIMEOUT: Duration = Duration::from_secs(60 * 60 + 60);
 pub struct Handler {
     /// Registry key name (stable, English); the id passed to `purge:`.
     pub id: String,
-    /// Localised display name from Windows.
+    /// English name for known handlers (`english`), else the localised one from Windows.
     pub name: String,
     pub description: String,
     pub size: u64,
@@ -45,6 +45,45 @@ pub struct Handler {
 
 pub fn is_excluded(id: &str) -> bool {
     EXCLUDED.iter().any(|e| e.eq_ignore_ascii_case(id))
+}
+
+/// English name and description for the handlers Windows ships. Windows reports them in the system language,
+/// which mixes German (etc.) into an otherwise English page; unknown third-party handlers keep their own text.
+pub fn english(id: &str) -> Option<(&'static str, &'static str)> {
+    const TABLE: &[(&str, &str, &str)] = &[
+        ("Active Setup Temp Folders", "Active Setup temporary files", "Files left behind by component setup that are no longer needed."),
+        ("BranchCache", "BranchCache", "Content cached by BranchCache from other computers on the network."),
+        ("Content Indexer Cleaner", "Old search index files", "Leftover files from previous search indexing."),
+        ("D3D Shader Cache", "DirectX Shader Cache", "Graphics shaders created by the system; they are rebuilt when needed."),
+        ("Delivery Optimization Files", "Delivery Optimization Files", "Update files shared with or downloaded from other PCs; no longer needed."),
+        ("Device Driver Packages", "Device driver packages", "Older versions of drivers that have since been updated."),
+        ("Diagnostic Data Viewer database files", "Diagnostic data viewer database", "Diagnostic data collected for the Diagnostic Data Viewer."),
+        ("Downloaded Program Files", "Downloaded Program Files", "ActiveX controls and Java applets downloaded by web pages."),
+        ("Feedback Hub Archive log files", "Feedback Hub archive logs", "Logs saved by the Feedback Hub for past feedback."),
+        ("Internet Cache Files", "Temporary Internet Files", "Cached web pages from Internet Explorer and apps that use it."),
+        ("Language Pack", "Language resource files", "Unused language resources and keyboard layouts."),
+        ("Offline Pages Files", "Offline webpages", "Web pages stored for offline reading."),
+        ("Old ChkDsk Files", "Old Check Disk files", "File fragments saved by Check Disk from damaged areas of the disk."),
+        ("Previous Installations", "Previous Windows installation(s)", "Files from an earlier Windows version; removing them prevents rolling back."),
+        ("Recycle Bin", "Recycle Bin", "Files you deleted earlier; emptying it removes them permanently."),
+        ("RetailDemo Offline Content", "Retail demo offline content", "Content for the store demo mode."),
+        ("Setup Log Files", "Setup log files", "Log files written by Windows setup."),
+        ("System error memory dump files", "System error memory dump files", "Full memory dump written when Windows crashed."),
+        ("System error minidump files", "System error minidump files", "Small memory dumps written when Windows crashed."),
+        ("Temporary Files", "Temporary files", "Files apps stored in temporary folders that are older than 7 days."),
+        ("Temporary Setup Files", "Temporary setup files", "Files left behind by app installers."),
+        ("Temporary Sync Files", "Temporary sync files", "Temporary files from file synchronisation."),
+        ("Thumbnail Cache", "Thumbnails", "Cached thumbnails of pictures, videos and documents; rebuilt when needed."),
+        ("Update Cleanup", "Windows Update Cleanup", "Old versions of updates that are no longer needed; removing them prevents uninstalling updates."),
+        ("Upgrade Discarded Files", "Discarded upgrade files", "Files from a Windows upgrade that were not migrated."),
+        ("User file versions", "User file versions", "File History versions of your files that are no longer needed."),
+        ("Windows Defender", "Microsoft Defender Antivirus", "Non-critical files used by Microsoft Defender Antivirus."),
+        ("Windows Error Reporting Files", "Windows error reports and feedback diagnostics", "Error reports and diagnostics collected by Windows."),
+        ("Windows ESD installation files", "Windows ESD installation files", "Files needed to reset Windows; removing them requires installation media to reset."),
+        ("Windows Reset Log Files", "Windows reset log files", "Log files from resetting Windows."),
+        ("Windows Upgrade Log Files", "Windows upgrade log files", "Log files from Windows upgrades."),
+    ];
+    TABLE.iter().find(|(k, _, _)| k.eq_ignore_ascii_case(id)).map(|&(_, n, d)| (n, d))
 }
 
 pub fn preselected(id: &str) -> bool {
@@ -300,7 +339,7 @@ fn helper_main(cmd: Cmd) -> i32 {
 
 #[cfg(windows)]
 mod com {
-    use super::{is_excluded, Handler};
+    use super::{english, is_excluded, Handler};
     use crate::pro::winutil::{Key, View};
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -350,12 +389,14 @@ mod com {
             .filter(|id| !is_excluded(id))
             .filter_map(|id| {
                 let k = root.subkey(&id)?;
-                Some(Reg {
-                    clsid: k.string("").unwrap_or_default(),
-                    name: k.string("Display").map(|s| resolve_indirect(&s)).unwrap_or_default(),
-                    description: k.string("Description").map(|s| resolve_indirect(&s)).unwrap_or_default(),
-                    id,
-                })
+                let (name, description) = match english(&id) {
+                    Some((n, d)) => (n.to_string(), d.to_string()),
+                    None => (
+                        k.string("Display").map(|s| resolve_indirect(&s)).unwrap_or_default(),
+                        k.string("Description").map(|s| resolve_indirect(&s)).unwrap_or_default(),
+                    ),
+                };
+                Some(Reg { clsid: k.string("").unwrap_or_default(), name, description, id })
             })
             .collect()
     }
@@ -622,6 +663,15 @@ mod tests {
         for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts] {
             assert!(!hidden.contains(&kept), "{kept:?}");
         }
+    }
+
+    #[test]
+    fn english_names_cover_preselected_handlers() {
+        for id in PRESELECTED {
+            assert!(english(id).is_some(), "{id}");
+        }
+        assert_eq!(english("thumbnail cache").map(|e| e.0), Some("Thumbnails"));
+        assert_eq!(english("Some Vendor Cache"), None);
     }
 
     #[test]
