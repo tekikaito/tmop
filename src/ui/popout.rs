@@ -1050,6 +1050,37 @@ mod tests {
         }
     }
 
+    /// Classic draws its header, tiles, health line and list inside the window size it asks for.
+    #[test]
+    fn classic_fits_its_window() {
+        let pal = theme::DARK;
+        let skin = classic_skin(&pal, &MetricColors::default());
+        let size = desired_size(&skin);
+        assert_eq!(size.x, CLASSIC_W);
+        assert!((400.0..460.0).contains(&size.y), "{size:?}");
+        let ctx = egui::Context::default();
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let (snap, mut hist, smooth) = (crate::metrics::Snapshot::default(), crate::metrics::History::new(60), crate::ui::Smooth::default());
+        for i in 0..30 {
+            hist.cpu.push(i as f32);
+            hist.memory.push(50.0);
+            hist.net_rx.push(10.0);
+            hist.net_tx.push(5.0);
+        }
+        let rows = vec![crate::process::ProcessRow { pid: 4, name: "chrome.exe".into(), cpu_pct: 18.4, ..Default::default() }];
+        let mut icons = IconCache::new(&ctx);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false };
+                    let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
+                    assert!(!ev.close && !ev.menu);
+                });
+            });
+        }
+    }
+
     #[test]
     fn classic_follows_the_app_palette_and_is_readable() {
         for pal in crate::palette::built_in().into_iter().map(|p| p.palette) {
