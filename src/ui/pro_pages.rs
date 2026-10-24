@@ -1143,7 +1143,6 @@ impl App {
                     } else if order.is_empty() {
                         empty_state(&p, body, &pal, "No files in this folder or below");
                     } else {
-                        let biggest = self.pro.disk_sub_order.ok().map(|o| o.1).unwrap_or(1).max(1) as f32;
                         let mk = |i: usize| if fresh { super::disk_delete::file_target(t, order[i] as usize) } else { None };
                         let size_of = |i: usize| t.files.get(order[i] as usize).map_or(0, |f| f.size);
                         disk_list(ui, body, ("disk-files-sub", cur), &pal, DISK_ROW_H, order.len(), |ui, i, r, resp| {
@@ -1154,7 +1153,7 @@ impl App {
                             if del.sel.rows.contains(&i) {
                                 super::disk_delete::paint_selected(ui.painter(), r, &pal);
                             }
-                            disk_row(ui.painter(), r, &pal, t.file_name(f), f.hidden(), f.size, f.size as f32 / biggest, theme::BLUE, !narrow, date.as_deref(), (!narrow).then_some(folder));
+                            disk_row(ui.painter(), r, &pal, t.file_name(f), f.hidden(), f.size, f.size as f32 / total, theme::BLUE, !narrow, date.as_deref(), (!narrow).then_some(folder));
                             if resp.clicked() && del.on_click(ui, i) {
                                 reveal = Some(t.file_path(f));
                             }
@@ -1191,7 +1190,6 @@ impl App {
                         if files.is_empty() {
                             empty_state(&p, body, &pal, "No files directly in this folder");
                         } else {
-                            let biggest = files.iter().map(|f| f.size).max().unwrap_or(1).max(1) as f32;
                             // Listed live: no file index; the tree update finds the record by name.
                             let mk = |i: usize| Some(Target { path: here.join(&files[order[i]].name), size: files[order[i]].size, is_dir: false, node: None, file: None });
                             let size_of = |i: usize| files[order[i]].size;
@@ -1201,7 +1199,7 @@ impl App {
                                 if del.sel.rows.contains(&i) {
                                     super::disk_delete::paint_selected(ui.painter(), r, &pal);
                                 }
-                                disk_row(ui.painter(), r, &pal, &f.name, f.hidden, f.size, f.size as f32 / biggest, theme::BLUE, !narrow, date.as_deref(), None);
+                                disk_row(ui.painter(), r, &pal, &f.name, f.hidden, f.size, f.size as f32 / total, theme::BLUE, !narrow, date.as_deref(), None);
                                 let path = here.join(&f.name);
                                 if resp.clicked() && del.on_click(ui, i) {
                                     reveal = Some(path.clone());
@@ -1224,7 +1222,6 @@ impl App {
                 if big.is_empty() {
                     empty_state(&p, list, &pal, "No files in this folder");
                 }
-                let top = big.first().map(|i| t.files[*i].size).unwrap_or(1).max(1) as f32;
                 let mk = |i: usize| super::disk_delete::file_target(t, big[i]);
                 let size_of = |i: usize| t.files[big[i]].size;
                 disk_list(ui, list, ("disk-largest", cursor), &pal, DISK_BIG_ROW_H, big.len(), |ui, i, r, resp| {
@@ -1236,7 +1233,7 @@ impl App {
                     if del.sel.rows.contains(&i) {
                         super::disk_delete::paint_selected(ui.painter(), r, &pal);
                     }
-                    disk_row(ui.painter(), line1, &pal, name, false, f.size, f.size as f32 / top, theme::ORANGE, !narrow, date.as_deref(), None);
+                    disk_row(ui.painter(), line1, &pal, name, false, f.size, f.size as f32 / total, theme::ORANGE, !narrow, date.as_deref(), None);
                     widgets::text_fit(ui.painter(), pos2(r.left() + 4.0, r.bottom() - 9.0), Align2::LEFT_CENTER, &folder.display().to_string(), theme::ui(11.0), pal.text_dim, r.width() - 8.0);
                     let path = folder.join(name);
                     if resp.clicked() && del.on_click(ui, i) {
