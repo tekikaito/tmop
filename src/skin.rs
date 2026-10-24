@@ -404,12 +404,23 @@ impl Skin {
             quadrants: Some(
                 ["cpu", "gpu", "disk", "network", "memory", "thermal"].iter().map(|s| s.to_string()).collect(),
             ),
-            metrics: None,
-            header: None,
+            metrics: Some(SkinMetrics { corner_radius: Some(10.0), tile_corner_radius: Some(0.0), ..Default::default() }),
+            header: Some(Header { title: Some("TMOP".into()), ..Default::default() }),
             surfaces: None,
-            typography: None,
+            // Sizes are points (1 pt = 4/3 px): 9 px labels, 11 px values and rows.
+            typography: Some(Typography {
+                title: Some(FontSpec { size: Some(8.25), weight: Some(FontWeight::Medium), design: None }),
+                heading: Some(FontSpec { size: Some(6.75), weight: Some(FontWeight::Regular), design: None }),
+                label: Some(FontSpec { size: Some(6.75), weight: Some(FontWeight::Regular), design: None }),
+                value: Some(FontSpec { size: Some(8.25), weight: Some(FontWeight::Regular), design: Some(FontDesign::Monospaced) }),
+                row: Some(FontSpec { size: Some(8.25), weight: Some(FontWeight::Regular), design: None }),
+                row_value: Some(FontSpec { size: Some(8.25), weight: Some(FontWeight::Regular), design: Some(FontDesign::Monospaced) }),
+                // 0.14 em of the 11 px title.
+                title_tracking: Some(1.16),
+                ..Default::default()
+            }),
             ink: None,
-            meters: Some(Meters { style: Some(MeterStyle::Rows), columns: Some(2), ..Default::default() }),
+            meters: Some(Meters { style: Some(MeterStyle::Graph), columns: Some(3), graph: Some(GraphSpec { shows_grid: Some(false), height: Some(20.0) }), ..Default::default() }),
             shape: None,
             extra: BTreeMap::new(),
             source: SkinSource::BuiltIn,

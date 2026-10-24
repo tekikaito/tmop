@@ -83,6 +83,8 @@ pub struct Appearance {
     /// a custom `.tmoptheme` id; see [`crate::palette`]).
     pub theme: String,
     pub display_font: String,
+    /// `#RRGGBB` accent colour that replaces the palette's own; empty keeps the palette's.
+    pub accent: String,
     pub bloom: bool,
     pub bloom_level: u32,
     pub high_frequency_visuals: bool,
@@ -223,6 +225,7 @@ impl Default for Appearance {
         Self {
             theme: "system".into(),
             display_font: "Michroma".into(),
+            accent: String::new(),
             bloom: true,
             bloom_level: 7,
             high_frequency_visuals: true,
@@ -648,6 +651,17 @@ mod tests {
         // A TMOG file with another schemaVersion is converted the same way, never reset.
         let s = parse(r#"{"schemaVersion":11,"theme":"dark"}"#).settings;
         assert_eq!(s.appearance.theme, "dark");
+    }
+
+    /// `appearance.accent` is new: files without it load with the palette's own accent, and a
+    /// colour round-trips.
+    #[test]
+    fn accent_is_optional() {
+        let load = parse(r#"{"version":1,"appearance":{"theme":"dark"}}"#);
+        assert_eq!((load.settings.appearance.theme.as_str(), load.settings.appearance.accent.as_str()), ("dark", ""));
+        let mut s = Settings::default();
+        s.appearance.accent = "#8B9CFF".into();
+        assert_eq!(parse(&s.to_json()).settings.appearance.accent, "#8B9CFF");
     }
 
     #[test]

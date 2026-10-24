@@ -7,7 +7,7 @@ use crate::docker::model::{format_bytes, EngineStatus};
 use crate::engine::config::Limits;
 use crate::engine::manager::{Phase, Status, WslCheck};
 use crate::engine::Overrides;
-use crate::ui::kit::{self, GAP};
+use crate::ui::kit;
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, text_fit};
 use crate::ui::{App, FrameData};
@@ -41,36 +41,38 @@ pub struct EngineTabState {
 /// Draws the engine tab in `rect`.
 pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
     let pal = fd.pal;
-    let bloom = fd.bloom;
     let snap = &app.docker.ui.snap;
     let p = ui.painter().clone();
-    let cols = kit::hsplit(rect, &[1.0, 1.0], GAP);
+    let cols = kit::hsplit(rect, &[1.0, 1.0], 14.0);
 
     // Engine facts, with the engine's warnings underneath.
-    let left = kit::titled_card(&p, cols[0], &pal, bloom, "Engine", "");
+    let left = kit::section_card(&p, cols[0], &pal, "Engine", "");
     match &snap.info {
         Some(info) => {
             let or_dash = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
+            // Versions, paths and counts read as code.
             let items = vec![
-                ("Name".to_string(), or_dash(&info.name)),
-                ("Server version".to_string(), or_dash(&info.server_version)),
-                ("API version".to_string(), or_dash(&info.api_version)),
-                ("OS".to_string(), or_dash(&info.os)),
-                ("Architecture".to_string(), or_dash(&info.arch)),
-                ("Kernel".to_string(), or_dash(&info.kernel)),
-                ("CPUs".to_string(), info.cpus.to_string()),
-                ("Memory".to_string(), format_bytes(info.mem_total)),
-                ("Storage driver".to_string(), or_dash(&info.driver)),
-                ("Docker root".to_string(), or_dash(&info.docker_root)),
-                ("Cgroup version".to_string(), or_dash(&info.cgroup_version)),
+                ("Name".to_string(), or_dash(&info.name), false, None),
+                ("Server version".to_string(), or_dash(&info.server_version), true, None),
+                ("API version".to_string(), or_dash(&info.api_version), true, None),
+                ("OS".to_string(), or_dash(&info.os), false, None),
+                ("Architecture".to_string(), or_dash(&info.arch), true, None),
+                ("Kernel".to_string(), or_dash(&info.kernel), true, None),
+                ("CPUs".to_string(), info.cpus.to_string(), true, None),
+                ("Memory".to_string(), format_bytes(info.mem_total), true, None),
+                ("Storage driver".to_string(), or_dash(&info.driver), true, None),
+                ("Docker root".to_string(), or_dash(&info.docker_root), true, None),
+                ("Cgroup version".to_string(), or_dash(&info.cgroup_version), true, None),
                 (
                     "Containers".to_string(),
                     format!("{} running, {} paused, {} stopped", info.containers_running, info.containers_paused, info.containers_stopped),
+                    true,
+                    None,
                 ),
-                ("Images".to_string(), info.images.to_string()),
-                ("Swarm".to_string(), or_dash(&info.swarm)),
+                ("Images".to_string(), info.images.to_string(), true, None),
+                ("Swarm".to_string(), or_dash(&info.swarm), false, None),
             ];
-            let bottom = kit::kv_list(&p, left, &pal, &items, 130.0, 20.0);
+            let bottom = kit::kv_grid(&p, left, &pal, &items, 130.0, 22.0);
             let mut y = bottom + 8.0;
             for w in &info.warnings {
                 if y + 16.0 > left.bottom() {
@@ -84,8 +86,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
     }
 
     // Recent events on top, the TMOP engine card below.
-    let right = kit::vsplit(cols[1], &[EVENTS_H, -1.0], GAP);
-    let events = kit::titled_card(&p, right[0], &pal, bloom, "Recent events", "");
+    let right = kit::vsplit(cols[1], &[EVENTS_H, -1.0], 14.0);
+    let events = kit::section_card(&p, right[0], &pal, "Recent events", "");
     if snap.events.is_empty() {
         kit::empty_state(&p, events, &pal, "No events yet");
     }
@@ -99,7 +101,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         }
         let mid = y + EVENT_ROW_H / 2.0;
         let mut x = events.left();
-        text_fit(&p, pos2(x, mid), Align2::LEFT_CENTER, &ago(e.at), theme::ui(12.0), pal.text_faint, time_w - 8.0);
+        text_fit(&p, pos2(x, mid), Align2::LEFT_CENTER, &ago(e.at), theme::mono(11.0), pal.text_faint, time_w - 8.0);
         x += time_w;
         text_fit(&p, pos2(x, mid), Align2::LEFT_CENTER, &e.kind, theme::ui(12.0), pal.text_dim, kind_w - 8.0);
         x += kind_w;
@@ -109,7 +111,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         y += EVENT_ROW_H;
     }
 
-    let tm = kit::titled_card(&p, right[1], &pal, bloom, "TMOP engine", "");
+    let tm = kit::section_card(&p, right[1], &pal, "TMOP engine", "");
     engine_card(app, ui, tm, &pal);
 }
 

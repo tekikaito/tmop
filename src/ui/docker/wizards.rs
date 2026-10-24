@@ -14,9 +14,10 @@ use crate::docker::run::{self, PullProgress, Restart, RunSpec, SearchHit};
 use crate::docker::stack::{self, ComposeRun};
 use crate::settings::{DockerHost, Settings};
 use crate::ui::theme::{self, Palette};
-use crate::ui::widgets;
+use crate::ui::kit;
+use crate::ui::widgets::{self, Button, ButtonKind, ButtonSize, Icon};
 use crate::ui::{App, FrameData};
-use eframe::egui::{self, Align2, RichText};
+use eframe::egui::{self, vec2, Align, Layout, RichText};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -139,36 +140,47 @@ pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
     let Some(open) = app.docker.ui.dialogs.wizards.open.clone() else { return };
     let pal = fd.pal;
     let busy = busy(&app.docker.ui.dialogs.wizards, &open);
-    let (title, width) = match &open {
-        Wizard::PullImage => ("Pull image", 640.0),
-        Wizard::RunImage { .. } => ("Run image", 620.0),
-        Wizard::AddHost => ("Add Docker host", 520.0),
-        Wizard::ComposeUp { .. } => ("Compose up", 620.0),
-        Wizard::ExportVolume { .. } => ("Export volume", 480.0),
-        Wizard::ImportVolume { .. } => ("Import volume", 480.0),
+    let (title, lead) = match &open {
+        Wizard::PullImage => ("Pull image", "Pull an image by name, or search the registry through the engine."),
+        Wizard::RunImage { .. } => ("Run image", "Create and start a container from an image."),
+        Wizard::AddHost => ("Add Docker host", "Connect to another Docker engine over SSH or TCP."),
+        Wizard::ComposeUp { .. } => ("Compose up", "Start the services of a compose file on the active host."),
+        Wizard::ExportVolume { .. } => ("Export volume", "Save the contents of a volume as a .tar archive."),
+        Wizard::ImportVolume { .. } => ("Import volume", "Unpack a .tar archive into a volume."),
     };
-    let mut is_open = true;
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut is_open)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(egui::Frame::window(&ctx.style()).fill(pal.panel))
-        .show(ctx, |ui| {
-            ui.set_width(width);
-            match &open {
-                Wizard::PullImage => pull_body(app, ui, &pal),
-                Wizard::RunImage { .. } => run_body(app, ui, &pal),
-                Wizard::AddHost => host_body(app, ui, &pal),
-                Wizard::ComposeUp { .. } => compose_body(app, ui, &pal),
-                Wizard::ExportVolume { .. } => export_body(app, ui, &pal),
-                Wizard::ImportVolume { .. } => import_body(app, ui, &pal),
-            }
-        });
+    kit::dialog(ctx, "docker-wizard", |ui| {
+        kit::dialog_header(ui, &pal, Some((Icon::Container, pal.accent)), title, lead);
+        ui.add_space(14.0);
+        match &open {
+            Wizard::PullImage => pull_body(app, ui, &pal),
+            Wizard::RunImage { .. } => run_body(app, ui, &pal),
+            Wizard::AddHost => host_body(app, ui, &pal),
+            Wizard::ComposeUp { .. } => compose_body(app, ui, &pal),
+            Wizard::ExportVolume { .. } => export_body(app, ui, &pal),
+            Wizard::ImportVolume { .. } => import_body(app, ui, &pal),
+        }
+    });
     let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    if (!is_open || escape) && !busy {
+    if escape && !busy {
         app.docker.ui.dialogs.wizards.open = None;
     }
+}
+
+/// Right-aligned 44 px footer buttons, `(kind, label, enabled)` in the order they read; the last is
+/// at the right edge. Like [`kit::dialog_buttons`], with a disabled state per button. Returns the
+/// index clicked.
+pub(super) fn footer(ui: &mut egui::Ui, pal: &Palette, buttons: &[(ButtonKind, &str, bool)]) -> Option<usize> {
+    let mut clicked = None;
+    ui.add_space(10.0);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), ButtonSize::Hero.height()), Layout::right_to_left(Align::Center), |ui| {
+        for (i, (kind, label, enabled)) in buttons.iter().enumerate().rev() {
+            let resp = ui.add_enabled_ui(*enabled, |ui| Button::new(label).kind(*kind).size(ButtonSize::Hero).show(ui, pal)).inner;
+            if *enabled && resp.clicked() {
+                clicked = Some(i);
+            }
+        }
+    });
+    clicked
 }
 
 /// Context names from the Docker CLI and TMOP hosts, with the CLI ones first. TMOP hosts
@@ -427,9 +439,9 @@ fn multi<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<
     egui::TextEdit::multiline(text).hint_text(hint).desired_width(width).desired_rows(2).font(theme::mono(12.0))
 }
 
-/// Button that is clicked only when `enabled`. Disabled buttons look the same as enabled ones.
+/// Small button that is clicked only when `enabled`.
 pub(super) fn enabled_button(ui: &mut egui::Ui, label: &str, pal: &Palette, enabled: bool) -> bool {
-    let clicked = ui.add_enabled_ui(enabled, |ui| widgets::button(ui, label, pal, None).clicked()).inner;
+    let clicked = ui.add_enabled_ui(enabled, |ui| Button::new(label).size(ButtonSize::Small).show(ui, pal).clicked()).inner;
     clicked && enabled
 }
 
@@ -526,6 +538,9 @@ fn pull_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         });
     }
 
+    if footer(ui, pal, &[(ButtonKind::Ghost, "Close", !pulling && !searching)]).is_some() {
+        app.docker.ui.dialogs.wizards.open = None;
+    }
     match action {
         Some(PullAction::Pull(image)) => start_pull(&mut app.docker.ui.dialogs.wizards.pull, engine.as_ref(), image),
         Some(PullAction::Search(term)) => start_search(&mut app.docker.ui.dialogs.wizards.pull, engine.as_ref(), term),
@@ -637,15 +652,12 @@ fn run_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     if running {
         progress_view(ui, &f.progress, pal);
     }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if enabled_button(ui, "Run", pal, check.is_none() && !running && connected && !read_only) {
-            start = true;
-        }
-        if !running && widgets::button(ui, "Close", pal, None).clicked() {
-            close = true;
-        }
-    });
+    let can_run = check.is_none() && !running && connected && !read_only;
+    match footer(ui, pal, &[(ButtonKind::Ghost, "Close", !running), (ButtonKind::Primary, "Run", can_run)]) {
+        Some(0) => close = true,
+        Some(_) => start = true,
+        None => {}
+    }
 
     if start {
         start_run(&mut app.docker.ui.dialogs.wizards.run, engine.as_ref());
@@ -757,17 +769,8 @@ fn host_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
             note(ui, e, pal);
         }
     }
-    ui.horizontal(|ui| {
-        if enabled_button(ui, "Add host", pal, check.is_ok()) {
-            save = true;
-        }
-        if widgets::button(ui, "Close", pal, None).clicked() {
-            close = true;
-        }
-    });
 
-    ui.add_space(8.0);
-    ui.separator();
+    ui.add_space(10.0);
     ui.label(RichText::new("TMOP hosts").font(theme::semibold(14.0)).color(pal.text));
     if existing.is_empty() {
         label(ui, "No hosts added yet. Hosts added here are kept in TMOP's settings, not in the Docker CLI configuration.", pal);
@@ -776,10 +779,15 @@ fn host_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         ui.horizontal(|ui| {
             text(ui, &h.name, pal);
             ui.label(RichText::new(&h.host).font(theme::mono(12.0)).color(pal.text_dim));
-            if widgets::button(ui, "Remove", pal, None).clicked() {
+            if Button::danger("Remove").size(ButtonSize::Compact).show(ui, pal).clicked() {
                 remove = Some(h.name.clone());
             }
         });
+    }
+    match footer(ui, pal, &[(ButtonKind::Ghost, "Close", true), (ButtonKind::Primary, "Add host", check.is_ok())]) {
+        Some(0) => close = true,
+        Some(_) => save = true,
+        None => {}
     }
 
     let host = check.ok();
@@ -878,22 +886,12 @@ fn compose_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     if read_only {
         note(ui, READ_ONLY, pal);
     }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if enabled_button(ui, "Open in editor", pal, file_ok) {
-            open_editor = true;
-        }
-        let can_up = available && file_ok && !running && connected && !read_only && !tmop_host;
-        if enabled_button(ui, "Up", pal, can_up) {
-            up = true;
-        }
-        if running {
+    if running {
+        ui.horizontal(|ui| {
             ui.spinner();
             label(ui, "Running...", pal);
-        } else if widgets::button(ui, "Close", pal, None).clicked() {
-            close = true;
-        }
-    });
+        });
+    }
     if running || !f.output.is_empty() {
         ui.add_space(6.0);
         egui::ScrollArea::vertical()
@@ -909,6 +907,13 @@ fn compose_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     match &f.result {
         Some(Ok(())) => text(ui, "Up finished.", pal),
         Some(Err(e)) => note(ui, e, pal),
+        None => {}
+    }
+    let can_up = available && file_ok && !running && connected && !read_only && !tmop_host;
+    match footer(ui, pal, &[(ButtonKind::Ghost, "Close", !running), (ButtonKind::Secondary, "Open in editor", file_ok), (ButtonKind::Primary, "Up", can_up)]) {
+        Some(0) => close = true,
+        Some(1) => open_editor = true,
+        Some(_) => up = true,
         None => {}
     }
 
@@ -959,6 +964,7 @@ fn export_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     let f = &mut app.docker.ui.dialogs.wizards.volume;
     let running = f.export.0.is_some();
     let mut dest: Option<PathBuf> = None;
+    let mut close = false;
 
     ui.horizontal(|ui| {
         label(ui, "Volume", pal);
@@ -968,26 +974,30 @@ fn export_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         RichText::new("The contents of the volume are saved to a .tar archive.").font(theme::ui(12.0)).color(pal.text_faint),
     );
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if enabled_button(ui, "Choose file and export...", pal, connected && !running) {
-            dest = rfd::FileDialog::new()
-                .set_file_name(format!("{}.tar", f.volume))
-                .add_filter("Tar archive", &["tar"])
-                .save_file();
-        }
-        if running {
+    if running {
+        ui.horizontal(|ui| {
             ui.spinner();
             label(ui, "Exporting...", pal);
-        }
-    });
+        });
+    }
     if !connected {
         note(ui, NOT_CONNECTED, pal);
     }
     if let Some(s) = &f.status {
         text(ui, s, pal);
     }
+    match footer(ui, pal, &[(ButtonKind::Ghost, "Close", !running), (ButtonKind::Primary, "Choose file and export...", connected && !running)]) {
+        Some(0) => close = true,
+        Some(_) => {
+            dest = rfd::FileDialog::new().set_file_name(format!("{}.tar", f.volume)).add_filter("Tar archive", &["tar"]).save_file();
+        }
+        None => {}
+    }
     if let Some(dest) = dest {
         spawn_export(f, engine.as_ref(), dest);
+    }
+    if close {
+        app.docker.ui.dialogs.wizards.open = None;
     }
 }
 
@@ -1011,6 +1021,7 @@ fn import_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     let running = f.import.0.is_some();
     let mut browse = false;
     let mut start = false;
+    let mut close = false;
 
     egui::Grid::new("import-form").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
         label(ui, "Archive", pal);
@@ -1035,18 +1046,20 @@ fn import_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         note(ui, NOT_CONNECTED, pal);
     }
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let can = connected && !read_only && !running && f.file.is_some() && !f.volume.trim().is_empty();
-        if enabled_button(ui, "Import", pal, can) {
-            start = true;
-        }
-        if running {
+    if running {
+        ui.horizontal(|ui| {
             ui.spinner();
             label(ui, "Importing...", pal);
-        }
-    });
+        });
+    }
     if let Some(s) = &f.status {
         text(ui, s, pal);
+    }
+    let can = connected && !read_only && !running && f.file.is_some() && !f.volume.trim().is_empty();
+    match footer(ui, pal, &[(ButtonKind::Ghost, "Close", !running), (ButtonKind::Primary, "Import", can)]) {
+        Some(0) => close = true,
+        Some(_) => start = true,
+        None => {}
     }
 
     if browse {
@@ -1056,6 +1069,9 @@ fn import_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     }
     if start {
         spawn_import(f, engine.as_ref());
+    }
+    if close {
+        app.docker.ui.dialogs.wizards.open = None;
     }
 }
 

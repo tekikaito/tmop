@@ -78,6 +78,8 @@ impl PaletteFile {
             return Err(PaletteError::Parse("palette id is empty".into()));
         }
         let mut palette = theme::DARK;
+        // The backdrop is not a file role: a palette file is flat `body`.
+        palette.backdrop = None;
         palette.dark = doc.dark;
         for key in doc.colors.keys() {
             if palette.role(key).is_none() {
@@ -129,7 +131,8 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// The built-in palettes: Dark, Light, High Contrast, Nord and Solarized Light.
+/// The built-in palettes: Dark, Light, High Contrast, Nord, Solarized Light, and the previous
+/// Dark and Light as Classic Dark and Classic Light.
 pub fn built_in() -> Vec<PaletteFile> {
     [
         ("dark", "Dark", theme::DARK),
@@ -137,6 +140,8 @@ pub fn built_in() -> Vec<PaletteFile> {
         ("high-contrast", "High Contrast", theme::HIGH_CONTRAST),
         ("nord", "Nord", theme::NORD),
         ("solarized-light", "Solarized Light", theme::SOLARIZED_LIGHT),
+        ("classic-dark", "Classic Dark", theme::CLASSIC_DARK),
+        ("classic-light", "Classic Light", theme::CLASSIC_LIGHT),
     ]
     .into_iter()
     .map(|(id, name, palette)| PaletteFile { id: id.into(), name: name.into(), palette, source: PaletteSource::BuiltIn })
@@ -199,6 +204,8 @@ impl PaletteCatalog {
     fn add(&mut self, mut p: PaletteFile, id: &str) -> Result<String, PaletteError> {
         use std::io::Write;
         p.id = self.unique_id(&slug(id));
+        // A file has no backdrop; keep the copy the same as what it reads back as.
+        p.palette.backdrop = None;
         let path = self.path_for(&p.id);
         std::fs::create_dir_all(&self.dir).map_err(|e| PaletteError::Io(format!("{}: {e}", self.dir.display())))?;
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| PaletteError::Io(format!("{}: {e}", path.display())))?;
@@ -319,7 +326,7 @@ mod tests {
     #[test]
     fn built_in_palettes_are_readable() {
         let all = built_in();
-        assert_eq!(all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["dark", "light", "high-contrast", "nord", "solarized-light"]);
+        assert_eq!(all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["dark", "light", "high-contrast", "nord", "solarized-light", "classic-dark", "classic-light"]);
         for p in &all {
             assert!(p.palette.contrast_warnings().is_empty(), "{}: {:?}", p.id, p.palette.contrast_warnings());
             // Hint text is not held to 4.5:1, but must stay legible.
@@ -339,14 +346,11 @@ mod tests {
             }
             assert_eq!(d.dark, p.palette.dark);
         }
-        // Dark's derived roles stay close to the hand-tuned ones.
-        let d = theme::DARK.derived();
-        let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| (*x as i32 - y as i32).abs() <= 16);
-        for (a, b) in [(d.chrome, theme::DARK.chrome), (d.card_stroke, theme::DARK.card_stroke), (d.text_dim, theme::DARK.text_dim), (d.control, theme::DARK.control)] {
-            assert!(close(a, b), "{a:?} vs {b:?}");
+        for pal in [theme::DARK, theme::LIGHT, theme::CLASSIC_DARK, theme::CLASSIC_LIGHT] {
+            let d = pal.derived();
+            assert!(d.contrast_warnings().is_empty(), "{:?}", d.contrast_warnings());
+            assert_eq!(d.backdrop, pal.backdrop);
         }
-        assert!(d.contrast_warnings().is_empty(), "{:?}", d.contrast_warnings());
-        assert!(theme::LIGHT.derived().contrast_warnings().is_empty());
     }
 
     #[test]
@@ -367,7 +371,7 @@ mod tests {
         let clash = PaletteFile { id: "nord".into(), name: "Not Nord".into(), palette: theme::DARK, source: PaletteSource::BuiltIn };
         std::fs::write(dir.join("clash.tmoptheme"), clash.to_json()).unwrap();
         let mut cat = scan(&dir);
-        assert_eq!(cat.palettes.len(), 5);
+        assert_eq!(cat.palettes.len(), 7);
         assert_eq!(cat.errors.len(), 2);
         assert_eq!(cat.get("nord").unwrap().name, "Nord", "built-ins can't be replaced");
 
@@ -415,7 +419,7 @@ mod tests {
         assert_eq!(cat.import(&src.join("odd.tmoptheme")).unwrap(), "my-theme-..-x");
         std::fs::write(src.join("bad.tmoptheme"), "{\"format\":1}").unwrap();
         assert!(matches!(cat.import(&src.join("bad.tmoptheme")), Err(PaletteError::Parse(_))));
-        assert_eq!(scan(&dir).palettes.len(), 8);
+        assert_eq!(scan(&dir).palettes.len(), 10);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&src);
     }
