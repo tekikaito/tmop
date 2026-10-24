@@ -10,18 +10,29 @@
 //! * [`connections`]  TCP/UDP endpoints with owning process
 //! * [`apps`]         installed applications (Uninstall registry keys)
 //! * [`drivers`]      kernel driver services and loaded kernel modules
-//! * [`diskspace`]    volume list and a cancelable folder-size scanner
+//! * [`cleanup`]      Disk Space cleanup categories and their measuring
+//! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
+//! * [`mft`]          NTFS Master File Table reader (fast scan method when elevated)
+//! * [`walker`]       parallel directory walker (scan method otherwise)
+//! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
 //! * [`inventory`]    system info, services, startup apps
 
 pub mod apps;
 pub mod bench;
+pub mod cleanup;
 pub mod connections;
+pub mod diskdelete;
 pub mod diskspace;
 pub mod drivers;
 pub mod icons;
 pub mod inventory;
+pub mod mft;
 pub mod power;
 pub mod recorder;
+#[cfg(windows)]
+pub(crate) mod restartmgr;
+pub mod volcache;
+pub mod walker;
 #[cfg(windows)]
 pub(crate) mod winutil;
 
@@ -88,6 +99,10 @@ impl<T: Send + 'static> Loader<T> {
 
     pub fn ok(&self) -> Option<&T> {
         self.value.as_ref().and_then(|r| r.as_ref().ok())
+    }
+
+    pub fn ok_mut(&mut self) -> Option<&mut T> {
+        self.value.as_mut().and_then(|r| r.as_mut().ok())
     }
 
     pub fn error(&self) -> Option<&str> {

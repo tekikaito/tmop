@@ -2,6 +2,8 @@
 //! the pages, and the skinnable popout window.
 
 pub mod bench_page;
+pub mod disk_cleanup;
+pub mod disk_delete;
 pub mod docker;
 pub mod icons;
 pub mod inventory_pages;
@@ -446,6 +448,7 @@ impl App {
             app.bench.start(tests, std::env::temp_dir());
         }
         if let Some(root) = launch.disk_scan {
+            let root = crate::pro::diskdelete::canonical_root(root);
             app.pro.disk_root = root.display().to_string();
             app.pro.scanner.start(root);
         }
@@ -1259,6 +1262,7 @@ impl App {
             });
             self.confirm_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
+            self.disk_delete_dialogs(ctx, &pal);
             self.draw_toasts(ctx);
             if self.popout_open {
                 self.popout_viewport(ctx, &fd);
