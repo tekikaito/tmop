@@ -157,20 +157,6 @@ pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool, capped: bool
     }
 }
 
-/// Why `path` cannot go to the bin, asked at most every few seconds while its menu is open.
-fn trash_why(ui: &egui::Ui, path: &std::path::Path) -> Option<String> {
-    let id = egui::Id::new(("trash-why", path));
-    let now = ui.input(|i| i.time);
-    if let Some((t, why)) = ui.ctx().data(|d| d.get_temp::<(f64, Option<String>)>(id)) {
-        if now - t < 5.0 {
-            return why;
-        }
-    }
-    let why = trash::unavailable(path);
-    ui.ctx().data_mut(|d| d.insert_temp(id, (now, why.clone())));
-    why
-}
-
 /// The delete button is enabled: something is deletable and warnings are acknowledged.
 pub fn can_confirm(assessed: &[Assessed], ack: bool) -> bool {
     let deletable = assessed.iter().any(|a| !matches!(a.verdict, Verdict::Blocked(_)));
@@ -227,12 +213,11 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_sa
             _ => None,
         })
     };
-    // No bin for this item: the Recycle entry is greyed with the reason (never a permanent delete).
-    let no_bin = if blocked.is_none() { trash_why(ui, &t.path).map(|why| format!("Can't go to the {}: {why}", trash_word())) } else { None };
+    // No file-system I/O here (the menu is drawn every frame): whether the item's volume has a
+    // bin is asked by the dialog's background check, which skips it with the reason.
     for (label, mode) in [(format!("Move to {}", trash_word()), Mode::Recycle), ("Delete permanently\u{2026}".to_string(), Mode::Permanent)] {
-        let why = if mode == Mode::Recycle { blocked.as_ref().or(no_bin.as_ref()) } else { blocked.as_ref() };
-        let r = ui.add_enabled(why.is_none(), egui::Button::new(label));
-        let r = match why {
+        let r = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
+        let r = match &blocked {
             Some(why) => r.on_disabled_hover_text(why),
             None => r,
         };
