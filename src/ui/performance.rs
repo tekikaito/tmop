@@ -3,7 +3,7 @@
 //! using the most.
 
 use super::health::{app_groups, AppGroup};
-use super::hardware;
+use super::hardware::{self, Exploded};
 use super::kit;
 use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
@@ -321,6 +321,7 @@ impl App {
         let p = ui.painter().clone();
         let slot = p.add(Shape::Noop);
         let (ix, iw) = (x + 24.0, w - 48.0);
+        let gw = if figure { iw - FIGURE_W } else { iw };
         let mut cy = y + 20.0;
         let iv = self.settings.update_speed().interval();
         let gs = &self.settings.graphs;
@@ -338,14 +339,11 @@ impl App {
                 };
                 let hd = Head { title: &name, sub, value: (format!("{:.0}", fd.smooth.cpu), "%".into()), side: format!("{:.0}% kernel", s.cpu.kernel_pct) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
-                let gw = if figure { iw - FIGURE_W } else { iw };
                 let accent = pal.accent;
                 let lines = [PlotLine::new(&fd.hist.cpu, accent, (0.0, 100.0)), PlotLine::new(&fd.hist.kernel, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.cpu, age), at(&fd.hist.kernel, age));
                 let (ph, hover) = plot(ui, &pc, "cpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
-                    let fx = ix + gw + 28.0;
-                    p.line_segment([pos2(fx - 14.0, cy), pos2(fx - 14.0, cy + 200.0)], Stroke::new(1.0_f32, pal.card_stroke));
                     let temp = s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string());
                     let ghz = s.cpu.current_mhz.map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
                     let l3 = if det.l3 > 0 { format!(" \u{b7} L3 {}", format_bytes(det.l3 as f64)) } else { String::new() };
@@ -353,8 +351,7 @@ impl App {
                     let ghz_of = |m: Option<u32>| m.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "\u{2014}".to_string());
                     let substrate = format!("base {} \u{b7} boost {}", ghz_of(s.cpu.base_mhz), ghz_of(s.cpu.boost_mhz));
                     let socket = format!("{} socket{}", det.sockets.max(1), if det.sockets.max(1) == 1 { "" } else { "s" });
-                    let labels = [("Heat spreader", temp.as_str()), ("Die", die.as_str()), ("Substrate", substrate.as_str()), ("Socket", socket.as_str())];
-                    hardware::cpu_exploded(&p, Rect::from_min_size(pos2(fx, cy + 10.0), vec2(150.0, 180.0)), pal.text_code(), pal.accent, &labels, &pal);
+                    figure_at(&p, &pal, Exploded::Cpu, ix + gw, cy, 200.0, &[("Heat spreader", temp), ("Die", die), ("Substrate", substrate), ("Socket", socket)]);
                 }
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Total", accent, false), ("Kernel time", pal.text_faint, true)], hover.as_deref(), ix + gw);
@@ -367,9 +364,15 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.memory, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {}", ago(iv, age), at(&fd.hist.memory, age), format_bytes(at(&fd.hist.memory_bytes, age) as f64));
-                let (ph, hover) = plot(ui, &pc, "memory", ix, cy, iw, 200.0, 36.0, &percent_labels(), &lines, &readout);
+                let (ph, hover) = plot(ui, &pc, "memory", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
+                if figure {
+                    let m = &s.memory;
+                    let pair = |a: u64, b: u64| format!("{} / {}", format_bytes(a as f64), format_bytes(b as f64));
+                    let labels = [("Heat spreader", pair(used, m.total)), ("DRAM chips", format!("{:.0}% in use", m.used_pct)), ("PCB", format!("{} cached", format_bytes(m.cached as f64))), ("Slot", format!("commit {}", pair(m.commit_used, m.commit_limit)))];
+                    figure_at(&p, &pal, Exploded::Memory, ix + gw, cy, 200.0, &labels);
+                }
                 cy += ph + 10.0;
-                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("In use", c, false)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("In use", c, false)], hover.as_deref(), ix + gw);
                 cy += 24.0;
                 // In use / cached / free.
                 let cached = s.memory.cached.min(s.memory.available);
@@ -403,9 +406,21 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.gpu, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.gpu, age));
-                let (ph, hover) = plot(ui, &pc, "gpu", ix, cy, iw, 200.0, 36.0, &percent_labels(), &lines, &readout);
+                let (ph, hover) = plot(ui, &pc, "gpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
+                if figure {
+                    let g = &s.gpu;
+                    let on = |v: String| dash_or(g.available.then_some(v));
+                    let top = g.engines.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, v)| format!("{e} \u{b7} {v:.0}%"));
+                    let labels = [
+                        ("Shroud", on(format!("{:.0}% busiest engine", g.utilization_pct))),
+                        ("Die", dash_or(top.filter(|_| g.available))),
+                        ("VRAM", on(format!("{} dedicated in use", format_bytes(g.dedicated_used as f64)))),
+                        ("PCB \u{b7} bus", on(format!("{} engines reported", g.engines.len()))),
+                    ];
+                    figure_at(&p, &pal, Exploded::Gpu, ix + gw, cy, 200.0, &labels);
+                }
                 cy += ph + 10.0;
-                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Utilization", c, false)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Utilization", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
                 if !s.gpu.available {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, "No GPU Engine performance counters were reported.", theme::ui(12.0), theme::status(&pal).warn);
@@ -431,9 +446,14 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.disk, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.disk, age));
-                let (ph, hover) = plot(ui, &pc, "disk", ix, cy, iw, 150.0, 36.0, &percent_labels(), &lines, &readout);
+                let (ph, hover) = plot(ui, &pc, "disk", ix, cy, gw, 150.0, 36.0, &percent_labels(), &lines, &readout);
+                if figure {
+                    let d = &s.disk;
+                    let labels = [("Casing", "all physical disks".to_string()), ("NAND", format!("read {}", format_rate(d.read_bps))), ("Controller", format!("write {}", format_rate(d.write_bps))), ("Interface", format!("{:.1}% active", d.active_pct))];
+                    figure_at(&p, &pal, Exploded::Disk, ix + gw, cy, 194.0, &labels);
+                }
                 cy += ph + 10.0;
-                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Active time", c, false)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Active time", c, false)], hover.as_deref(), ix + gw);
                 cy += 34.0;
                 let m = widgets::eased(ui.ctx(), "perf-disk-rate", fd.hist.disk_read.max().max(fd.hist.disk_write.max()).max(1024.0 * 1024.0));
                 let lines = [PlotLine::new(&fd.hist.disk_read, c, (0.0, m)), PlotLine::new(&fd.hist.disk_write, write, (0.0, m))];
@@ -453,9 +473,15 @@ impl App {
                 let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
                 let lines = [PlotLine::new(&fd.hist.net_rx, c, (0.0, m)), PlotLine::new(&fd.hist.net_tx, c, (0.0, m)).dashed(c)];
                 let readout = |age: usize| format!("{} \u{b7} \u{2193} {} \u{b7} \u{2191} {}", ago(iv, age), format_rate(at(&fd.hist.net_rx, age) as f64), format_rate(at(&fd.hist.net_tx, age) as f64));
-                let (ph, hover) = plot(ui, &pc, "network", ix, cy, iw, 200.0, 64.0, &rate_labels(m), &lines, &readout);
+                let (ph, hover) = plot(ui, &pc, "network", ix, cy, gw, 200.0, 64.0, &rate_labels(m), &lines, &readout);
+                if figure {
+                    let n = &s.network;
+                    let link = dash_or((n.link_bps > 0.0).then(|| format!("{:.1} Gb/s link", n.link_bps / 1e9)));
+                    let labels = [("Shield", format!("\u{2193} {}", format_rate(n.rx_bps))), ("Controller", format!("\u{2191} {}", format_rate(n.tx_bps))), ("PHY", format!("{:.2}% of link", n.utilization_pct)), ("Link", link)];
+                    figure_at(&p, &pal, Exploded::Network, ix + gw, cy, 200.0, &labels);
+                }
                 cy += ph + 10.0;
-                legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Receive", c, false), ("Send", c, true)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Receive", c, false), ("Send", c, true)], hover.as_deref(), ix + gw);
                 cy += 24.0;
                 let facts = vec![
                     ("Receive".to_string(), format_rate(s.network.rx_bps)),
@@ -477,9 +503,20 @@ impl App {
                 let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, 110.0))];
                 let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), self.temp(at(&fd.hist.thermal, age)));
                 let labels = ["110\u{b0}".to_string(), "82\u{b0}".to_string(), "55\u{b0}".to_string(), "27\u{b0}".to_string(), "0\u{b0}".to_string()];
-                let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, iw, 200.0, 36.0, &labels, &lines, &readout);
+                let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, gw, 200.0, 36.0, &labels, &lines, &readout);
+                if figure {
+                    let th = &s.thermal;
+                    let zones = th.zones.len();
+                    let labels = [
+                        ("Fins", dash_or(th.max_c().map(|t| format!("hottest {}", self.temp(t))))),
+                        ("Heat pipes", dash_or(th.zones.first().map(|(z, c)| format!("{z} {}", self.temp(*c))))),
+                        ("Sensor", dash_or(th.cpu.as_ref().map(|(l, c)| format!("{l} {}", self.temp(*c))))),
+                        ("Base", dash_or((zones > 0).then(|| format!("{zones} thermal zone{}", if zones == 1 { "" } else { "s" })))),
+                    ];
+                    figure_at(&p, &pal, Exploded::Thermal, ix + gw, cy, 200.0, &labels);
+                }
                 cy += ph + 10.0;
-                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Hottest sensor", c, false)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Hottest sensor", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
                 if s.thermal.max_c().is_none() {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, format!("No temperature source available. {}.", crate::metrics::HWINFO_HINT), theme::ui(12.0), theme::status(&pal).warn);
@@ -504,10 +541,20 @@ impl App {
                 let readout = |age: usize| format!("{} \u{b7} {:.1}% \u{b7} {}", ago(iv, age), at(&self.perf_docker.totals_cpu, age), format_bytes(at(&self.perf_docker.totals_mem, age) as f64));
                 // Docker stats arrive on their own clock, so the plot does not glide on the sampler's.
                 let still = PlotCtx { phase: 0.0, glide: false, ..pc };
-                let (ph, hover) = plot(ui, &still, "docker", ix, cy, iw, 160.0, 36.0, &percent_labels(), &lines, &readout);
+                let (ph, hover) = plot(ui, &still, "docker", ix, cy, gw, 160.0, 36.0, &percent_labels(), &lines, &readout);
+                if figure {
+                    let known = |v: &str| dash_or((v != "N/A").then(|| v.to_string()));
+                    let labels = [
+                        ("Containers", format!("{} / {} running", t.running, t.containers)),
+                        ("Engine", known(&engine)),
+                        ("Runtime", format!("{:.1}% CPU \u{b7} {}", t.cpu_pct, format_bytes(t.mem_used as f64))),
+                        ("Host", known(&host)),
+                    ];
+                    figure_at(&p, &pal, Exploded::Docker, ix + gw, cy, 194.0, &labels);
+                }
                 cy += ph + 10.0;
                 let scale = format!("Memory (scale {})", format_bytes(mem_max as f64));
-                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("CPU", c, false), (scale.as_str(), mem_c, false)], hover.as_deref(), ix + iw);
+                legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("CPU", c, false), (scale.as_str(), mem_c, false)], hover.as_deref(), ix + gw);
                 cy += 24.0;
                 let facts = vec![
                     ("Containers".to_string(), format!("{} / {}", t.running, t.containers)),
@@ -938,8 +985,16 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
 /// Legend of the plot's lines at the left and the hover readout at the right.
 #[allow(clippy::too_many_arguments)]
 fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str, Color32, bool)], readout: Option<&str>, right: f32) {
+    // The readout box, if any; legend items it would cover give way while it shows.
+    let boxed = readout.map(|t| {
+        let w = widgets::text_width(p, t, theme::mono(12.0)) + 16.0;
+        (t, Rect::from_min_size(pos2(right - w, cy - 12.0), vec2(w, 24.0)))
+    });
     let mut lx = x;
     for (label, color, dashed) in items {
+        if boxed.is_some_and(|(_, r)| lx + 22.0 + widgets::text_width(p, label, theme::ui(12.0)) > r.left() - 12.0) {
+            break;
+        }
         let a = pos2(lx, cy);
         let b = pos2(lx + 14.0, cy);
         if *dashed {
@@ -950,9 +1005,7 @@ fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str,
         let r = p.text(pos2(lx + 22.0, cy), Align2::LEFT_CENTER, label, theme::ui(12.0), pal.text_dim);
         lx = r.right() + 18.0;
     }
-    if let Some(t) = readout {
-        let w = widgets::text_width(p, t, theme::mono(12.0)) + 16.0;
-        let r = Rect::from_min_size(pos2(right - w, cy - 12.0), vec2(w, 24.0));
+    if let Some((t, r)) = boxed {
         p.rect_filled(r, 4.0, pal.raise(0.06));
         p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)));
         p.text(r.center(), Align2::CENTER_CENTER, t, theme::mono(12.0), pal.text);
@@ -1038,6 +1091,22 @@ fn split_unit(s: &str) -> (String, String) {
         Some((n, u)) => (n.to_string(), u.to_string()),
         None => (s.to_string(), String::new()),
     }
+}
+
+/// The exploded device right of a graph ending at `gx` (top `y`, `h` tall): a divider, the
+/// drawing fitted to `h - 20` and its layer labels, which keep their column whatever `h` is.
+#[allow(clippy::too_many_arguments)]
+fn figure_at(p: &egui::Painter, pal: &Palette, kind: Exploded, gx: f32, y: f32, h: f32, labels: &[(&str, String); 4]) {
+    let fx = gx + 28.0;
+    p.line_segment([pos2(fx - 14.0, y), pos2(fx - 14.0, y + h)], Stroke::new(1.0_f32, pal.card_stroke));
+    let fh = (h - 20.0).min(180.0);
+    let fw = fh * 5.0 / 6.0;
+    let labels = labels.each_ref().map(|(t, s)| (*t, s.as_str()));
+    hardware::exploded_view(p, Rect::from_min_size(pos2(fx + 150.0 - fw, y + (h - fh) / 2.0), vec2(fw, fh)), kind, pal.text_code(), pal.accent, &labels, FIGURE_W - 28.0 - 150.0 - 18.0 + 16.0, pal);
+}
+
+fn dash_or(s: Option<String>) -> String {
+    s.unwrap_or_else(|| "\u{2014}".to_string())
 }
 
 /// "19.0 / 31.1 GB": both in the unit of the total.

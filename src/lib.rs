@@ -3,6 +3,7 @@
 pub mod docker;
 pub mod engine;
 pub mod fonts;
+pub mod icon;
 pub mod metrics;
 pub mod palette;
 pub mod pro;

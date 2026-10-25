@@ -1274,7 +1274,8 @@ pub fn tab_bar(ui: &mut Ui, rect: Rect, pal: &Palette, tabs: &[(&str, Option<usi
     for (i, (label, count)) in tabs.iter().enumerate() {
         let on = i == selected;
         let font = if on { theme::semibold(13.0) } else { theme::ui(13.0) };
-        let lw = text_width(&p, label, font.clone());
+        // Sized for the Medium weight so selecting a tab never moves the ones after it.
+        let lw = text_width(&p, label, theme::semibold(13.0));
         let cw = count.map(|c| text_width(&p, &c.to_string(), theme::mono(11.0)) + 6.0).unwrap_or(0.0);
         let r = Rect::from_min_size(pos2(x, band.top()), vec2(lw + cw + 28.0, band.height()));
         let resp = ui.interact(r, ui.id().with(("tab", band.min.x as i32, band.min.y as i32, i)), Sense::click());
@@ -1335,24 +1336,77 @@ pub fn spark_glide() -> (f32, bool) {
     (f32::from_bits(SPARK_PHASE.load(std::sync::atomic::Ordering::Relaxed)), SPARK_GLIDE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it,
-/// round-capped.
+/// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it.
+/// The arc and its round ends are one mesh with one feathered edge, so the caps never show as
+/// separate dots. Arcs shorter than `width` also get thinner, shrinking as a pill to nothing.
 pub fn ring(p: &egui::Painter, center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, track: Color32) {
     p.circle_stroke(center, radius, Stroke::new(width, track));
-    let frac = frac.clamp(0.0, 1.0);
-    if frac <= 0.0 {
+    if !frac.is_finite() {
         return;
     }
-    let n = ((frac * 72.0).ceil() as usize).max(2);
-    let pts: Vec<Pos2> = (0..=n)
-        .map(|i| {
-            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * i as f32 / n as f32;
-            center + vec2(a.cos(), a.sin()) * radius
-        })
-        .collect();
-    p.add(Shape::line(pts.clone(), Stroke::new(width, color)));
-    p.circle_filled(pts[0], width / 2.0, color);
-    p.circle_filled(pts[n], width / 2.0, color);
+    let frac = frac.clamp(0.0, 1.0);
+    if frac >= 0.999 {
+        p.circle_stroke(center, radius, Stroke::new(width, color));
+        return;
+    }
+    let len = frac * std::f32::consts::TAU * radius;
+    let w = width * (len / width).min(1.0);
+    if len <= 0.0 || w < 0.3 {
+        return;
+    }
+    p.add(Shape::mesh(capped_arc(center, radius, w, frac, color, 1.0 / p.ctx().pixels_per_point())));
+}
+
+/// Mesh of an arc from 12 o'clock over `frac` of the circle, `width` thick with round ends:
+/// an opaque core and a `feather` wide fade to transparent along the whole outline.
+fn capped_arc(center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, feather: f32) -> Mesh {
+    let mut m = Mesh::default();
+    let (ri, ro) = ((width - feather).max(0.0) / 2.0, (width + feather) / 2.0);
+    let clear = Color32::TRANSPARENT;
+    let n = ((frac * 96.0).ceil() as u32).max(2);
+    let angle = |i: u32| -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * i as f32 / n as f32;
+    // Body: per step feather-out, core-out, core-in, feather-in.
+    for i in 0..=n {
+        let d = vec2(angle(i).cos(), angle(i).sin());
+        for (r, c) in [(radius + ro, clear), (radius + ri, color), (radius - ri, color), (radius - ro, clear)] {
+            m.colored_vertex(center + d * r, c);
+        }
+        if i > 0 {
+            let (a, b) = (4 * (i - 1), 4 * i);
+            for k in 0..3 {
+                m.add_triangle(a + k, a + k + 1, b + k);
+                m.add_triangle(a + k + 1, b + k + 1, b + k);
+            }
+        }
+    }
+    // Caps: half discs around each end, sharing the body's end vertices.
+    for (i, sign) in [(n, 1.0_f32), (0, -1.0)] {
+        let d = vec2(angle(i).cos(), angle(i).sin());
+        let t = vec2(-d.y, d.x) * sign;
+        let e = center + d * radius;
+        let base = 4 * i;
+        let hub = m.vertices.len() as u32;
+        m.colored_vertex(e, color);
+        let steps = 12;
+        let mut prev = (base + 1, base);
+        for k in 1..=steps {
+            let next = if k == steps {
+                (base + 2, base + 3)
+            } else {
+                let phi = std::f32::consts::PI * k as f32 / steps as f32;
+                let u = d * phi.cos() + t * phi.sin();
+                let idx = m.vertices.len() as u32;
+                m.colored_vertex(e + u * ri, color);
+                m.colored_vertex(e + u * ro, clear);
+                (idx, idx + 1)
+            };
+            m.add_triangle(hub, prev.0, next.0);
+            m.add_triangle(prev.0, prev.1, next.0);
+            m.add_triangle(prev.1, next.1, next.0);
+            prev = next;
+        }
+    }
+    m
 }
 
 /// Concentric rings (the Summary hero): ring `i` has radius `radii[i]` and shows `fracs[i]`.
@@ -1501,25 +1555,22 @@ pub fn baseline(p: &egui::Painter, rect: Rect, y_frac: f32, color: Color32) {
 // Chips, badges, text with tracking
 // ---------------------------------------------------------------------------
 
-/// Text laid out glyph by glyph with `em` of letter-spacing (in multiples of the font size;
-/// negative values are ignored, egui cannot tighten). Returns the rect used.
+/// Text with `em` of letter-spacing (in multiples of the font size; negative values are
+/// ignored, egui cannot tighten). Returns the rect used.
 pub fn tracked_text(p: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, font: FontId, color: Color32, em: f32) -> Rect {
     let space = em.max(0.0) * font.size;
     if space < 0.05 {
         return p.text(pos, anchor, text, font, color);
     }
-    let glyphs: Vec<(String, f32)> = text.chars().map(|c| (c.to_string(), text_width(p, &c.to_string(), font.clone()))).collect();
-    let total = glyphs.iter().map(|(_, w)| *w).sum::<f32>() + space * glyphs.len().saturating_sub(1) as f32;
-    let height = p.layout_no_wrap("Ag".into(), font.clone(), color).size().y;
-    let rect = anchor.anchor_size(pos, vec2(total, height));
-    let mut x = rect.left();
-    for (g, w) in glyphs {
-        if g != " " {
-            p.text(pos2(x, rect.top()), Align2::LEFT_TOP, g, font.clone(), color);
-        }
-        x += w + space;
-    }
-    rect
+    // One kerned galley at a pixel-snapped origin: glyphs painted one by one were each snapped on
+    // their own, so the gaps came out uneven and shifted with the fractional start (hover, weight).
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
+    job.wrap.max_width = f32::INFINITY;
+    let galley = p.layout_job(job);
+    let rect = anchor.anchor_size(pos, galley.size());
+    let min = p.round_pos_to_pixels(rect.min);
+    p.galley(min, galley, color);
+    Rect::from_min_size(min, rect.size())
 }
 
 /// Width of a [`chip`] with `text` (and an icon).
@@ -2125,6 +2176,8 @@ mod tests {
             baseline(p, r, 0.5, pal.text_faint);
             ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.7, pal.accent, pal.raise(0.08));
             ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.0, pal.accent, pal.raise(0.08));
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.001, pal.accent, pal.raise(0.08));
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 1.0, pal.accent, pal.raise(0.08));
             rings(p, pos2(200.0, 100.0), &[52.0, 44.0], 5.0, &[(0.5, pal.accent), (1.0, pal.ok)], pal.raise(0.08));
             bar(p, Rect::from_min_size(pos2(20.0, 150.0), vec2(100.0, 3.0)), 0.4, pal.accent);
             share_bar(p, Rect::from_min_size(pos2(20.0, 170.0), vec2(200.0, 12.0)), &[(1.0, pal.accent), (0.0, pal.ok), (2.0, pal.warn)], 3.0);

@@ -248,71 +248,321 @@ pub fn draw(p: &Painter, rect: Rect, kind: Hardware, color: Color32) {
                 g.circle(cx, cy, 1.2, 1.0, 0.0);
             }
         }
-        Hardware::CpuExploded => exploded(p, top_left, s, color, color),
+        Hardware::CpuExploded => exploded(p, top_left, s, Exploded::Cpu, color, color),
     }
 }
 
-/// The exploded CPU (200 x 240 view box) at `top_left`, `s` px per unit. `accent` tints the die.
-fn exploded(p: &Painter, top_left: Pos2, s: f32, color: Color32, accent: Color32) {
-    let at = |x: f32, y: f32| top_left + vec2(x, y) * s;
-    let stroke = |a: f32| Stroke::new(1.2_f32, with_alpha(color, a));
-    let line = |pts: &[(f32, f32)], a: f32| {
-        p.add(Shape::line(pts.iter().map(|&(x, y)| at(x, y)).collect(), stroke(a)));
-    };
-    let closed = |pts: &[(f32, f32)], a: f32| {
-        p.add(Shape::closed_line(pts.iter().map(|&(x, y)| at(x, y)).collect(), stroke(a)));
-    };
-    // Guides.
-    for (x1, y1, x2, y2) in [(40.0, 36.0, 40.0, 192.0), (160.0, 36.0, 160.0, 192.0), (100.0, 6.0, 100.0, 162.0), (100.0, 72.0, 100.0, 226.0)] {
-        p.extend(Shape::dashed_line(&[at(x1, y1), at(x2, y2)], stroke(0.35), 2.0, 3.0));
+/// A device taken apart into four stacked layers (200 x 240 view box, see [`exploded`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exploded {
+    /// Heat spreader, die, substrate, socket.
+    Cpu,
+    /// Heat spreader, DRAM chips, PCB, slot.
+    Memory,
+    /// Label, NAND, controller, M.2 interface.
+    Disk,
+    /// Shroud, die, VRAM, PCB and bus.
+    Gpu,
+    /// Shield, controller, PHY, link.
+    Network,
+    /// Fins, heat pipes, sensor plate, base.
+    Thermal,
+    /// Containers, engine, runtime, host.
+    Docker,
+}
+
+/// Top of each layer in the exploded view box; a layer's diamond is centred 30 units lower.
+const LAYERS: [f32; 4] = [0.0, 52.0, 104.0, 156.0];
+
+/// Drawing surface of the exploded view: view-box units at `tl`, `s` px per unit, 1.2 px strokes.
+struct Fig<'a> {
+    p: &'a Painter,
+    tl: Pos2,
+    s: f32,
+    color: Color32,
+    accent: Color32,
+}
+
+type Uv = (f32, f32, f32, f32);
+
+impl Fig<'_> {
+    fn at(&self, (x, y): (f32, f32)) -> Pos2 {
+        self.tl + vec2(x, y) * self.s
     }
-    // Heat spreader.
-    closed(&[(40.0, 36.0), (100.0, 6.0), (160.0, 36.0), (100.0, 66.0)], 1.0);
-    closed(&[(52.0, 36.0), (100.0, 12.0), (148.0, 36.0), (100.0, 60.0)], 0.6);
-    line(&[(40.0, 36.0), (40.0, 42.0), (100.0, 72.0), (160.0, 42.0), (160.0, 36.0)], 0.6);
-    line(&[(100.0, 66.0), (100.0, 72.0)], 0.6);
-    line(&[(92.0, 20.0), (108.0, 20.0)], 0.4);
-    // Die layer.
-    let y = 52.0;
-    closed(&[(64.0, 36.0 + y), (100.0, 18.0 + y), (136.0, 36.0 + y), (100.0, 54.0 + y)], 0.6);
-    let die: Vec<Pos2> = [(84.0, 36.0 + y), (100.0, 28.0 + y), (116.0, 36.0 + y), (100.0, 44.0 + y)].iter().map(|&(x, y)| at(x, y)).collect();
-    p.add(Shape::convex_polygon(die.clone(), with_alpha(accent, 0.35), Stroke::new(1.2_f32, accent)));
-    line(&[(84.0, 36.0 + y), (100.0, 44.0 + y), (116.0, 36.0 + y)], 0.5);
-    for (x, yy) in [(76.0, 36.0), (124.0, 36.0), (100.0, 22.0), (100.0, 50.0)] {
-        p.circle_filled(at(x, yy + y), 1.2 * s, color);
+    fn stroke(&self, a: f32) -> Stroke {
+        Stroke::new(1.2_f32, with_alpha(self.color, a))
     }
-    // Substrate with solder balls, socket with pins.
-    let grid: Vec<(f32, f32)> = (0..5).flat_map(|i| (0..5).map(move |j| (100.0 + 8.0 * (i as f32 - j as f32), 20.0 + 4.0 * (i + j) as f32))).collect();
-    let y = 104.0;
-    closed(&[(40.0, 36.0 + y), (100.0, 6.0 + y), (160.0, 36.0 + y), (100.0, 66.0 + y)], 1.0);
-    line(&[(40.0, 36.0 + y), (40.0, 40.0 + y), (100.0, 70.0 + y), (160.0, 40.0 + y), (160.0, 36.0 + y)], 0.6);
-    line(&[(100.0, 66.0 + y), (100.0, 70.0 + y)], 0.6);
-    for &(x, yy) in &grid {
-        p.circle_filled(at(x, yy + y), 1.6 * s, with_alpha(color, 0.7));
+    fn line(&self, pts: &[(f32, f32)], a: f32) {
+        self.p.add(Shape::line(pts.iter().map(|&q| self.at(q)).collect(), self.stroke(a)));
     }
-    let y = 156.0;
-    closed(&[(40.0, 36.0 + y), (100.0, 6.0 + y), (160.0, 36.0 + y), (100.0, 66.0 + y)], 1.0);
-    line(&[(40.0, 36.0 + y), (40.0, 44.0 + y), (100.0, 74.0 + y), (160.0, 44.0 + y), (160.0, 36.0 + y)], 0.6);
-    line(&[(100.0, 66.0 + y), (100.0, 74.0 + y)], 0.6);
-    for &(x, yy) in &grid {
-        line(&[(x, yy + y), (x, yy + y + 6.0)], 0.7);
+    fn closed(&self, pts: &[(f32, f32)], a: f32) {
+        self.p.add(Shape::closed_line(pts.iter().map(|&q| self.at(q)).collect(), self.stroke(a)));
+    }
+    fn dot(&self, q: (f32, f32), r: f32, a: f32) {
+        self.p.circle_filled(self.at(q), r * self.s, with_alpha(self.color, a));
+    }
+    fn guide(&self, x: f32, y0: f32, y1: f32) {
+        self.p.extend(Shape::dashed_line(&[self.at((x, y0)), self.at((x, y1))], self.stroke(0.35), 2.0, 3.0));
+    }
+    /// Guides dropping from the top layer to the bottom one through the (u, v) points.
+    fn guides(&self, uv: &[(f32, f32)]) {
+        for &(u, v) in uv {
+            let ((x, a), (_, b)) = (Self::q(LAYERS[0], u, v), Self::q(LAYERS[3], u, v));
+            self.guide(x, a, b);
+        }
+    }
+    /// Point on the plane of the layer at `y`: (0, 0) is the top corner of its 120 x 60 diamond,
+    /// `u` runs to the right corner, `v` to the left one.
+    fn q(y: f32, u: f32, v: f32) -> (f32, f32) {
+        (100.0 + 60.0 * (u - v), 6.0 + y + 30.0 * (u + v))
+    }
+    /// The (u0, v0)..(u1, v1) patch of layer `y`: top, right, bottom, left corner.
+    fn quad(y: f32, (u0, v0, u1, v1): Uv) -> [(f32, f32); 4] {
+        [Self::q(y, u0, v0), Self::q(y, u1, v0), Self::q(y, u1, v1), Self::q(y, u0, v1)]
+    }
+    fn patch(&self, y: f32, uv: Uv, a: f32) {
+        self.closed(&Self::quad(y, uv), a);
+    }
+    fn patch_fill(&self, y: f32, uv: Uv, a: f32, fill: f32) {
+        let pts: Vec<Pos2> = Self::quad(y, uv).iter().map(|&q| self.at(q)).collect();
+        self.p.add(Shape::convex_polygon(pts, with_alpha(self.color, fill), self.stroke(a)));
+    }
+    /// The highlighted part: filled and stroked in the accent colour.
+    fn accent(&self, y: f32, uv: Uv) {
+        let pts: Vec<Pos2> = Self::quad(y, uv).iter().map(|&q| self.at(q)).collect();
+        self.p.add(Shape::convex_polygon(pts, with_alpha(self.accent, 0.35), Stroke::new(1.2_f32, self.accent)));
+    }
+    /// A slab: the patch outlined at `a` with its two front faces `h` units deep.
+    fn block(&self, y: f32, uv: Uv, h: f32, a: f32) {
+        let [_, r, b, l] = Self::quad(y, uv);
+        self.closed(&Self::quad(y, uv), a);
+        self.line(&[l, (l.0, l.1 + h), (b.0, b.1 + h), (r.0, r.1 + h), r], 0.6);
+        self.line(&[b, (b.0, b.1 + h)], 0.6);
+    }
+    /// Circle of radius `r` (uv units) on layer `y`, an ellipse on screen.
+    fn ring(&self, y: f32, cu: f32, cv: f32, r: f32, a: f32) {
+        let pts: Vec<(f32, f32)> = (0..32).map(|i| {
+            let t = std::f32::consts::TAU * i as f32 / 32.0;
+            Self::q(y, cu + r * t.cos(), cv + r * t.sin())
+        }).collect();
+        self.closed(&pts, a);
     }
 }
 
-/// The exploded CPU in `rect` (aspect 5:6, e.g. 150 x 180) with the four layer labels to its
-/// right, top to bottom: heat spreader, die, substrate, socket. Each label is a title and a mono
-/// subline; the die is tinted with `accent`.
-pub fn cpu_exploded(p: &Painter, rect: Rect, color: Color32, accent: Color32, labels: &[(&str, &str); 4], pal: &Palette) {
+/// The exploded `kind` (200 x 240 view box) at `top_left`, `s` px per unit. `accent` tints the
+/// layer that does the work (the CPU die, the DRAM chips, the NAND, ...).
+fn exploded(p: &Painter, top_left: Pos2, s: f32, kind: Exploded, color: Color32, accent: Color32) {
+    let f = Fig { p, tl: top_left, s, color, accent };
+    let [y0, y1, y2, y3] = LAYERS;
+    let q = Fig::q;
+    match kind {
+        Exploded::Cpu => {
+            for (x, a, b) in [(40.0, 36.0, 192.0), (160.0, 36.0, 192.0), (100.0, 6.0, 162.0), (100.0, 72.0, 226.0)] {
+                f.guide(x, a, b);
+            }
+            // Heat spreader.
+            f.block(y0, (0.0, 0.0, 1.0, 1.0), 6.0, 1.0);
+            f.patch(y0, (0.1, 0.1, 0.9, 0.9), 0.6);
+            f.line(&[(92.0, 20.0), (108.0, 20.0)], 0.4);
+            // Die on its package.
+            f.patch(y1, (0.2, 0.2, 0.8, 0.8), 0.6);
+            let (d0, d1) = (11.0 / 30.0, 19.0 / 30.0);
+            f.accent(y1, (d0, d0, d1, d1));
+            f.line(&[q(y1, d0, d1), q(y1, d1, d1), q(y1, d1, d0)], 0.5);
+            for (u, v) in [(0.2, 0.5), (0.8, 0.5), (0.5, 0.2), (0.5, 0.8)] {
+                let (x, yy) = q(y1, u, v);
+                f.dot((x, yy), 1.2, 1.0);
+            }
+            // Substrate with solder balls, socket with pins.
+            let grid: Vec<(f32, f32)> = (0..5).flat_map(|i| (0..5).map(move |j| (100.0 + 8.0 * (i as f32 - j as f32), 20.0 + 4.0 * (i + j) as f32))).collect();
+            f.block(y2, (0.0, 0.0, 1.0, 1.0), 4.0, 1.0);
+            for &(x, yy) in &grid {
+                f.dot((x, yy + y2), 1.6, 0.7);
+            }
+            f.block(y3, (0.0, 0.0, 1.0, 1.0), 8.0, 1.0);
+            for &(x, yy) in &grid {
+                f.line(&[(x, yy + y3), (x, yy + y3 + 6.0)], 0.7);
+            }
+        }
+        Exploded::Memory => {
+            // A module runs corner to corner, as wide as the CPU's diamond.
+            let stick = (-0.5, 0.4, 1.5, 0.6);
+            f.guides(&[(-0.5, 0.6), (1.5, 0.4)]);
+            // Heat spreader with its groove.
+            f.block(y0, stick, 7.0, 1.0);
+            f.patch(y0, (-0.44, 0.46, 1.44, 0.54), 0.6);
+            // DRAM chips.
+            f.patch(y1, stick, 0.35);
+            for i in 0..8 {
+                let u = -0.44 + 0.24 * i as f32;
+                f.accent(y1, (u, 0.43, u + 0.17, 0.57));
+            }
+            // PCB with its contacts and key notch.
+            f.block(y2, (-0.5, 0.38, 1.5, 0.62), 3.0, 1.0);
+            for i in 0..40 {
+                let u = -0.46 + 0.05 * i as f32;
+                if (u - 0.4).abs() > 0.04 {
+                    f.line(&[q(y2, u, 0.57), q(y2, u, 0.62)], 0.7);
+                }
+            }
+            // Slot with latches.
+            f.block(y3, (-0.5, 0.34, 1.5, 0.66), 9.0, 1.0);
+            f.patch(y3, (-0.46, 0.47, 1.46, 0.53), 0.6);
+            f.patch(y3, (-0.62, 0.4, -0.54, 0.6), 0.7);
+            f.patch(y3, (1.54, 0.4, 1.62, 0.6), 0.7);
+        }
+        Exploded::Disk => {
+            let stick = (-0.5, 0.28, 1.5, 0.72);
+            f.guides(&[(-0.5, 0.72), (1.5, 0.28)]);
+            // Label.
+            f.block(y0, stick, 2.0, 1.0);
+            f.line(&[q(y0, -0.25, 0.4), q(y0, 0.6, 0.4)], 0.4);
+            f.line(&[q(y0, -0.25, 0.5), q(y0, 0.3, 0.5)], 0.4);
+            f.line(&[q(y0, -0.25, 0.6), q(y0, 0.1, 0.6)], 0.4);
+            // NAND packages.
+            f.patch(y1, stick, 0.35);
+            f.accent(y1, (-0.1, 0.34, 0.45, 0.66));
+            f.accent(y1, (0.55, 0.34, 1.1, 0.66));
+            // Board with controller, DRAM cache and the screw notch.
+            f.block(y2, stick, 3.0, 1.0);
+            f.patch_fill(y2, (-0.38, 0.36, -0.08, 0.64), 1.0, 0.12);
+            f.patch(y2, (0.02, 0.4, 0.2, 0.6), 0.6);
+            for v in [0.36, 0.44, 0.56, 0.64] {
+                f.line(&[q(y2, -0.08, v), q(y2, 0.3, v)], 0.3);
+            }
+            f.ring(y2, 1.5, 0.5, 0.07, 0.7);
+            // M.2 socket, keyed, with the stick's outline where it plugs in.
+            f.patch(y3, (-0.3, 0.28, 1.5, 0.72), 0.25);
+            f.block(y3, (-0.6, 0.22, -0.3, 0.78), 9.0, 1.0);
+            for k in 0..12 {
+                let v = 0.27 + 0.042 * k as f32;
+                if (v - 0.6).abs() > 0.02 {
+                    f.line(&[q(y3, -0.54, v), q(y3, -0.36, v)], 0.7);
+                }
+            }
+        }
+        Exploded::Gpu => {
+            let card = (-0.1, 0.08, 1.1, 0.92);
+            f.guides(&[(-0.1, 0.92), (1.1, 0.08)]);
+            // Shroud with two fans.
+            f.block(y0, card, 7.0, 1.0);
+            for cu in [0.24, 0.76] {
+                f.ring(y0, cu, 0.5, 0.26, 1.0);
+                f.ring(y0, cu, 0.5, 0.07, 0.7);
+                for k in 0..6 {
+                    let t = std::f32::consts::TAU * k as f32 / 6.0;
+                    f.line(&[q(y0, cu + 0.07 * t.cos(), 0.5 + 0.07 * t.sin()), q(y0, cu + 0.24 * (t + 0.5).cos(), 0.5 + 0.24 * (t + 0.5).sin())], 0.45);
+                }
+            }
+            // Die on its package.
+            f.patch(y1, card, 0.35);
+            f.patch(y1, (0.28, 0.28, 0.72, 0.72), 0.6);
+            f.accent(y1, (0.38, 0.38, 0.62, 0.62));
+            // VRAM around the die.
+            f.patch(y2, card, 0.35);
+            for (cu, cv) in [(0.1, 0.3), (0.1, 0.7), (0.5, 0.17), (0.5, 0.83), (0.9, 0.3), (0.9, 0.7)] {
+                f.patch_fill(y2, (cu - 0.08, cv - 0.07, cu + 0.08, cv + 0.07), 1.0, 0.12);
+            }
+            // PCB with the PCIe fingers and the bracket.
+            f.block(y3, card, 3.0, 1.0);
+            for i in 0..20 {
+                let u = 0.1 + 0.03 * i as f32;
+                f.line(&[q(y3, u, 0.85), q(y3, u, 0.92)], 0.7);
+            }
+            f.patch(y3, (-0.18, 0.02, -0.12, 0.98), 0.7);
+        }
+        Exploded::Network => {
+            let board = (0.0, 0.05, 1.0, 0.95);
+            f.guides(&[(0.0, 0.95), (1.0, 0.05)]);
+            // Shield can with vents.
+            f.block(y0, (0.15, 0.15, 0.85, 0.85), 5.0, 1.0);
+            for i in 0..4 {
+                for j in 0..4 {
+                    f.dot(q(y0, 0.29 + 0.14 * i as f32, 0.29 + 0.14 * j as f32), 1.1, 0.5);
+                }
+            }
+            // Controller.
+            f.patch(y1, board, 0.35);
+            f.accent(y1, (0.36, 0.36, 0.64, 0.64));
+            for (a, b) in [((0.08, 0.5), (0.36, 0.5)), ((0.64, 0.5), (0.92, 0.5)), ((0.5, 0.12), (0.5, 0.36)), ((0.5, 0.64), (0.5, 0.88))] {
+                f.line(&[q(y1, a.0, a.1), q(y1, b.0, b.1)], 0.5);
+            }
+            // PHY and magnetics on the board.
+            f.block(y2, board, 3.0, 1.0);
+            f.patch_fill(y2, (0.12, 0.18, 0.38, 0.44), 1.0, 0.12);
+            f.patch(y2, (0.55, 0.6, 0.72, 0.82), 0.7);
+            f.patch(y2, (0.76, 0.6, 0.93, 0.82), 0.7);
+            f.line(&[q(y2, 0.38, 0.31), q(y2, 0.64, 0.31), q(y2, 0.64, 0.6)], 0.4);
+            // RJ45 jack with its contacts.
+            f.block(y3, (0.22, 0.15, 0.78, 0.85), 12.0, 1.0);
+            f.patch(y3, (0.3, 0.26, 0.7, 0.74), 0.6);
+            for k in 0..8 {
+                let v = 0.32 + 0.05 * k as f32;
+                f.line(&[q(y3, 0.36, v), q(y3, 0.5, v)], 0.7);
+            }
+        }
+        Exploded::Thermal => {
+            f.guides(&[(0.0, 1.0), (1.0, 0.0)]);
+            // Fins.
+            for i in 0..8 {
+                let u = 0.06 + 0.125 * i as f32;
+                let (a, b) = (q(y0, u, 0.0), q(y0, u, 1.0));
+                f.closed(&[a, b, (b.0, b.1 + 9.0), (a.0, a.1 + 9.0)], if i == 7 { 1.0 } else { 0.55 });
+            }
+            // Heat pipes.
+            for v in [0.3, 0.5, 0.7] {
+                f.line(&[q(y1, 0.0, v - 0.025), q(y1, 1.0, v - 0.025)], 1.0);
+                f.line(&[q(y1, 0.0, v + 0.025), q(y1, 1.0, v + 0.025)], 1.0);
+                f.ring(y1, 1.0, v, 0.025, 0.7);
+            }
+            // Cold plate with the sensor.
+            f.block(y2, (0.2, 0.2, 0.8, 0.8), 5.0, 1.0);
+            f.accent(y2, (0.38, 0.38, 0.62, 0.62));
+            // Base with mounting holes.
+            f.block(y3, (0.0, 0.0, 1.0, 1.0), 3.0, 1.0);
+            f.patch(y3, (0.25, 0.25, 0.75, 0.75), 0.5);
+            for (cu, cv) in [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)] {
+                f.ring(y3, cu, cv, 0.04, 0.8);
+            }
+        }
+        Exploded::Docker => {
+            f.guides(&[(0.0, 1.0), (1.0, 0.0)]);
+            // Containers.
+            for u in [0.0, 0.35, 0.7] {
+                f.block(y0, (u, 0.25, u + 0.3, 0.75), 9.0, 1.0);
+                f.line(&[q(y0, u + 0.05, 0.5), q(y0, u + 0.25, 0.5)], 0.4);
+            }
+            // Engine.
+            f.patch(y1, (0.05, 0.1, 0.95, 0.9), 0.35);
+            f.accent(y1, (0.34, 0.34, 0.66, 0.66));
+            // Runtime.
+            f.block(y2, (0.05, 0.1, 0.95, 0.9), 3.0, 1.0);
+            for v in [0.3, 0.5, 0.7] {
+                f.line(&[q(y2, 0.15, v), q(y2, 0.85, v)], 0.4);
+            }
+            // Host.
+            f.block(y3, (0.0, 0.0, 1.0, 1.0), 4.0, 1.0);
+            for i in 0..5 {
+                f.dot(q(y3, 0.1 + 0.2 * i as f32, 0.5), 1.4, 0.7);
+            }
+        }
+    }
+}
+
+/// The exploded `kind` in `rect` (aspect 5:6, e.g. 150 x 180) with its four layer labels to the
+/// right, top to bottom, each a title and a mono subline clipped to `label_w`.
+#[allow(clippy::too_many_arguments)]
+pub fn exploded_view(p: &Painter, rect: Rect, kind: Exploded, color: Color32, accent: Color32, labels: &[(&str, &str); 4], label_w: f32, pal: &Palette) {
     let (vw, vh) = Hardware::CpuExploded.view_box();
     let s = (rect.width() / vw).min(rect.height() / vh);
     let top_left = rect.center() - vec2(vw, vh) * s / 2.0;
-    exploded(p, top_left, s, color, accent);
-    // Labels sit at the layers' heights: spreader 36, die 88, substrate 140, socket 192 (view units).
+    exploded(p, top_left, s, kind, color, accent);
+    // Labels sit at the layers' centres: 36, 88, 140, 192 (view units).
     let x = rect.right() + 18.0;
-    for (i, (title, sub)) in labels.iter().enumerate() {
-        let y = top_left.y + (36.0 + 52.0 * i as f32) * s;
-        let r = widgets::text(p, pos2(x, y - 2.0), Align2::LEFT_BOTTOM, title, super::theme::semibold(12.0), pal.text);
-        widgets::text(p, pos2(x, r.bottom() + 1.0), Align2::LEFT_TOP, sub, super::theme::mono(11.0), pal.text_faint);
+    for ((title, sub), ly) in labels.iter().zip(LAYERS) {
+        let y = top_left.y + (36.0 + ly) * s;
+        let r = widgets::text_fit(p, pos2(x, y - 2.0), Align2::LEFT_BOTTOM, title, super::theme::semibold(12.0), pal.text, label_w);
+        widgets::text_fit(p, pos2(x, r.bottom() + 1.0), Align2::LEFT_TOP, sub, super::theme::mono(11.0), pal.text_faint, label_w);
     }
 }
 
@@ -338,7 +588,9 @@ mod tests {
                         let rect = Rect::from_min_size(pos2(40.0, 40.0), vec2(vw, vh));
                         draw(&p, rect, kind, theme::DARK.text);
                     }
-                    cpu_exploded(&p, Rect::from_min_size(pos2(40.0, 40.0), vec2(150.0, 180.0)), theme::DARK.text, theme::DARK.accent, &[("a", "b"), ("c", "d"), ("e", "f"), ("g", "h")], &theme::DARK);
+                    for kind in [Exploded::Cpu, Exploded::Memory, Exploded::Disk, Exploded::Gpu, Exploded::Network, Exploded::Thermal, Exploded::Docker] {
+                        exploded_view(&p, Rect::from_min_size(pos2(40.0, 40.0), vec2(150.0, 180.0)), kind, theme::DARK.text, theme::DARK.accent, &[("a", "b"), ("c", "d"), ("e", "f"), ("g", "h")], 200.0, &theme::DARK);
+                    }
                 });
             });
         }
