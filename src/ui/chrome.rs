@@ -13,11 +13,11 @@ const RAIL_ITEM: (f32, f32) = (60.0, 46.0);
 const RAIL_GAP: f32 = 2.0;
 const RAIL_MIN_STEP: f32 = 38.0;
 
-/// "HOST · user" from the environment (Windows: `COMPUTERNAME`, `USERNAME`; elsewhere
-/// `HOSTNAME`, `USER`); empty parts are skipped.
+/// "HOST · user": [`crate::platform::hostname`] and the user from the environment (Windows:
+/// `USERNAME`; elsewhere `USER`); empty parts are skipped.
 pub(super) fn machine_line() -> String {
-    let var = |names: &[&str]| names.iter().find_map(|n| std::env::var(n).ok().filter(|v| !v.trim().is_empty()));
-    join_machine(var(&["COMPUTERNAME", "HOSTNAME"]), var(&["USERNAME", "USER"]))
+    let user = ["USERNAME", "USER"].iter().find_map(|n| std::env::var(n).ok().filter(|v| !v.trim().is_empty()));
+    join_machine(crate::platform::hostname(), user)
 }
 
 fn join_machine(host: Option<String>, user: Option<String>) -> String {

@@ -82,7 +82,7 @@ impl App {
             Some(_) => self.pro.disk_mode = super::disk_cleanup::DiskMode::Analyze,
             None => {}
         }
-        let elevated = *self.pro.del.elevated.get_or_insert_with(crate::pro::diskdelete::is_elevated);
+        let elevated = *self.pro.del.elevated.get_or_insert_with(crate::platform::is_elevated);
         let p = ui.painter().clone();
         let mut y = area.top();
         if !elevated {

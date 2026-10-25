@@ -255,6 +255,7 @@ fn main() -> eframe::Result<()> {
     }
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title(format!("{} \u{2013} {}", tmop::APP_NAME, tmop::APP_LONG_NAME))
+        .with_app_id(tmop::APP_ID)
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
         .with_maximized(args.iter().any(|a| a == "--maximized"));

@@ -664,6 +664,7 @@ impl App {
         };
         let mut builder = ViewportBuilder::default()
             .with_title(format!("TMOP \u{2014} {}", skin.name))
+            .with_app_id(crate::APP_ID)
             .with_inner_size(popout::desired_size(&skin))
             .with_resizable(false)
             .with_decorations(false)

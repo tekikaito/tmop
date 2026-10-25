@@ -80,12 +80,7 @@ fn connect_ssh(host: &str, user: Option<&str>, port: Option<u16>) -> Result<Conn
     let args = ssh_args(host, user, port, local_port);
     let mut command = Command::new(ssh_program());
     command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    crate::platform::hide_console(&mut command);
     let child = command.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
     // Owning the tunnel now means a failed wait below still kills the process.
     let mut tunnel = SshTunnel { child, local_port };

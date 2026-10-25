@@ -2,7 +2,8 @@
 //!
 //! The flight recorder always keeps the most recent samples (and process start/exit
 //! events) in memory, so the moments before a problem can be saved after the fact.
-//! Recording writes every sample to a CSV file in `%LOCALAPPDATA%\TMOP\recordings`
+//! Recording writes every sample to a CSV file in `recordings` under
+//! [`crate::platform::data_dir`]
 //! (or a folder the user picks) until stopped or until an optional time limit.
 
 use crate::docker::model::Totals;
@@ -176,9 +177,9 @@ impl Default for Recorder {
     }
 }
 
-/// `%LOCALAPPDATA%\TMOP\recordings`
+/// `recordings` in [`crate::platform::data_dir`] (Windows: `%LOCALAPPDATA%\TMOP\recordings`)
 pub fn default_dir() -> PathBuf {
-    super::data_dir().join("recordings")
+    crate::platform::data_dir().join("recordings")
 }
 
 impl Recorder {

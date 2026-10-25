@@ -106,16 +106,8 @@ pub fn kv_list(p: &egui::Painter, rect: Rect, pal: &Palette, items: &[(String, S
     y
 }
 
-/// Opens a folder (or selects a file) in Explorer.
-pub fn reveal(path: &std::path::Path) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("explorer.exe");
-    if path.is_file() {
-        cmd.arg(format!("/select,{}", path.display()));
-    } else {
-        cmd.arg(path);
-    }
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
-}
+/// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
+pub use crate::platform::reveal;
 
 /// What a [`file_dialog`] asks for.
 #[derive(Clone, Debug)]

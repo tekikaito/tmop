@@ -548,22 +548,9 @@ impl SkinCatalog {
     }
 }
 
-/// Default directories searched for skins, highest priority first.
+/// Default directories searched for skins, highest priority first (see [`crate::platform::skin_dirs`]).
 pub fn default_skin_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        dirs.push(local.join(crate::APP_DIR).join("Skins"));
-        dirs.push(local.join("TMOG").join("Skins"));
-    }
-    for base in ["ProgramW6432", "ProgramFiles"] {
-        if let Some(pf) = std::env::var_os(base).map(PathBuf::from) {
-            let d = pf.join("Task Manager TMOG").join("Skins");
-            if !dirs.contains(&d) {
-                dirs.push(d);
-            }
-        }
-    }
-    dirs
+    crate::platform::skin_dirs()
 }
 
 fn is_skin_entry(path: &Path) -> bool {
