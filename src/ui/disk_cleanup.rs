@@ -233,6 +233,8 @@ impl App {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let epoch = self.pro.disk_epoch();
+        // Off Windows: no Windows Disk Cleanup handlers, and measuring only until deletes are safe.
+        let (volcache_on, delete_safe) = (self.caps.volcache, self.pro.del.delete_safe);
         {
             let c = &mut self.pro.clean;
             c.fixed.poll();
@@ -241,7 +243,7 @@ impl App {
             if !c.started && !c.fixed.is_loading() {
                 c.started = true;
                 // Windows Disk Cleanup sizes (helper process), cached until the next Refresh or delete.
-                c.vols_dirty = true;
+                c.vols_dirty = volcache_on;
                 c.fixed.start(|| {
                     let sys = diskdelete::system_paths();
                     let mut measured = cleanup::measure_fixed(&sys, SystemTime::now());
@@ -249,7 +251,7 @@ impl App {
                     Ok(Fixed { sys, measured })
                 });
             }
-            if c.vols_dirty && !c.vols.is_loading() {
+            if c.vols_dirty && !c.vols.is_loading() && volcache_on {
                 c.vols_dirty = false;
                 match (c.vols_only.take(), c.vols.ok().cloned()) {
                     (Some(ids), _) if ids.is_empty() => {}
@@ -330,7 +332,7 @@ impl App {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 // Windows Disk Cleanup: the handlers Windows' own Disk Cleanup offers. They replace TMOP's
                 // temp, thumbnail, Delivery Optimization, Recycle Bin and error report categories.
-                {
+                if volcache_on {
                     let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
                     let p = ui.painter();
                     tracked_text(p, pos2(hr.left() + 2.0, hr.center().y), Align2::LEFT_CENTER, "WINDOWS DISK CLEANUP", theme::semibold(11.0), pal.text_faint, 0.14);
@@ -464,8 +466,9 @@ impl App {
 
         // Footer: how the safety rules apply, and the action.
         p.hline(foot.x_range(), foot.top(), Stroke::new(1.0_f32, pal.row_rule()));
-        widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, "Everything is checked against the same safety rules as manual deletes", theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
-        let can_go = n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
+        let foot_text = if delete_safe { "Everything is checked against the same safety rules as manual deletes".to_string() } else { super::disk_delete::delete_off_reason() };
+        widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, &foot_text, theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
+        let can_go = delete_safe && n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
         let mut want_clean = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left(), foot.top() + 6.0), foot.max)).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(can_go, |ui| {
@@ -499,7 +502,7 @@ impl App {
     /// Opens the confirm dialog for the checked categories.
     fn clean_request(&mut self, rows: &[ProcessRow], elevated: bool, epoch: u64) {
         let c = &self.pro.clean;
-        if c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.vols_dirty || c.vols.is_loading() || c.fixed.is_loading() {
+        if !self.pro.del.delete_safe || c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.vols_dirty || c.vols.is_loading() || c.fixed.is_loading() {
             return;
         }
         let mut cats = Vec::new();
@@ -665,6 +668,10 @@ impl App {
 
     /// Hands the deletable items of every category to the worker thread (the manual-delete job slot).
     fn clean_start_job(&mut self) {
+        if !self.pro.del.delete_safe {
+            self.pro.clean.pending = None;
+            return;
+        }
         if self.pro.del.job.is_loading() {
             self.status = "A delete is already running; try again when it has finished".into();
             return;

@@ -109,6 +109,9 @@ pub struct JobOut {
 
 #[derive(Default)]
 pub struct DiskDeleteUi {
+    /// Deleting is offered (`Caps::delete_safe`, set by `App::new`). Off, Disk Space only
+    /// analyzes and every delete entry says why ([`delete_off_reason`]).
+    pub delete_safe: bool,
     pub elevated: Option<bool>,
     pub relaunch: Loader<()>,
     pub rules: Loader<Arc<Rules>>,
@@ -133,6 +136,11 @@ pub struct MenuOut {
 }
 
 // ---------------------------------------------------------------- pure helpers
+
+/// Why Disk Space deletes and Clean up are unavailable while `Caps::delete_safe` is off.
+pub fn delete_off_reason() -> String {
+    format!("Deleting is not available on {} yet: the safety checks that protect system and personal folders are still being built.", crate::platform::os_name())
+}
 
 /// (first line, destination line, permanent) of the confirm dialog.
 pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool, capped: bool) -> (String, String, bool) {
@@ -179,10 +187,11 @@ pub fn file_target(t: &Tree, idx: usize) -> Option<Target> {
     Some(Target { path: t.file_path(f), size: f.size, is_dir: false, node: None, file: Some(idx) })
 }
 
-/// Context menu of one item. Delete entries are greyed with the reason when the rules are
-/// loaded and block the item; otherwise the dialog does the full check.
-pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, out: &mut MenuOut) {
-    out.want_rules = true;
+/// Context menu of one item. Delete entries are greyed with the reason when deleting is off
+/// (`delete_safe` false) or the rules are loaded and block the item; otherwise the dialog does
+/// the full check.
+pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_safe: bool, out: &mut MenuOut) {
+    out.want_rules = delete_safe;
     if ui.button("Show in Explorer").clicked() {
         let _ = kit::reveal(&t.path);
         ui.close_menu();
@@ -192,10 +201,14 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, out: &mut
         ui.close_menu();
     }
     ui.separator();
-    let blocked = rules.and_then(|r| match diskdelete::classify(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
-        Verdict::Blocked(why) => Some(why),
-        _ => None,
-    });
+    let blocked = if !delete_safe {
+        Some(delete_off_reason())
+    } else {
+        rules.and_then(|r| match diskdelete::classify(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
+            Verdict::Blocked(why) => Some(why),
+            _ => None,
+        })
+    };
     for (label, mode) in [("Move to Recycle Bin", Mode::Recycle), ("Delete permanently\u{2026}", Mode::Permanent)] {
         let r = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
         let r = match &blocked {
@@ -285,7 +298,7 @@ impl DiskDeleteUi {
 
     /// Opens the confirm dialog for `targets`.
     pub fn request(&mut self, targets: Vec<Target>, mode: Mode, epoch: u64, rows: &[ProcessRow]) {
-        if targets.is_empty() || self.pending.is_some() || self.job.is_loading() {
+        if !self.delete_safe || targets.is_empty() || self.pending.is_some() || self.job.is_loading() {
             return;
         }
         self.next_id += 1;
@@ -306,7 +319,7 @@ impl DiskDeleteUi {
         }
         resp.context_menu(|ui| {
             if let Some(t) = mk(i) {
-                item_menu(ui, &t, rules, out);
+                item_menu(ui, &t, rules, self.delete_safe, out);
             }
         });
     }
@@ -325,6 +338,10 @@ impl DiskDeleteUi {
                 kit::floating_bar(ui, bar.translate(vec2(0.0, 12.0)), "disk-selection", |ui| {
                     ui.label(RichText::new(format!("{} selected \u{2022} {}", picked.len(), format_bytes(total as f64))).font(theme::semibold(13.0)).color(pal.text));
                     ui.add_space(8.0);
+                    if !self.delete_safe {
+                        ui.add(egui::Label::new(RichText::new(format!("Deleting is not available on {} yet", crate::platform::os_name())).font(theme::ui(12.0)).color(pal.text_faint))).on_hover_text(delete_off_reason());
+                        return;
+                    }
                     if Button::new("Move to Recycle Bin").size(ButtonSize::Medium).show(ui, pal).clicked() {
                         mode = Some(Mode::Recycle);
                     }
@@ -333,7 +350,7 @@ impl DiskDeleteUi {
                     }
                 });
             }
-            if mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
+            if self.delete_safe && mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
                 let (del, shift) = ui.input(|i| (i.key_pressed(egui::Key::Delete), i.modifiers.shift));
                 if del {
                     mode = Some(if shift { Mode::Permanent } else { Mode::Recycle });
@@ -349,7 +366,8 @@ impl DiskDeleteUi {
 // ---------------------------------------------------------------- App glue
 
 impl App {
-    /// Amber banner at the top of Disk Space while TMOP is not elevated.
+    /// Amber banner at the top of Disk Space while TMOP is not elevated (Windows: the relaunch
+    /// needs `Caps::elevate_relaunch`).
     pub fn disk_admin_panel(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
         let st = theme::status(pal);
         let p = ui.painter().clone();
@@ -523,6 +541,10 @@ impl App {
 
     /// Hands the deletable targets to the worker thread.
     fn disk_start_job(&mut self) {
+        if !self.pro.del.delete_safe {
+            self.pro.del.pending = None;
+            return;
+        }
         if self.pro.del.job.is_loading() {
             self.status = "A delete is already running; try again when it has finished".into();
             return;

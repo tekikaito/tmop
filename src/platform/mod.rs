@@ -18,7 +18,10 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+pub mod caps;
 pub mod xdg;
+
+pub use caps::Caps;
 
 #[cfg(unix)]
 mod unix;

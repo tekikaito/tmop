@@ -301,5 +301,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
     }
     confirm_window(app, ctx, &fd.pal);
     wizards::show(app, ctx, fd);
-    engine_wizard::show(app, ctx, fd);
+    if app.caps.engine {
+        engine_wizard::show(app, ctx, fd);
+    }
 }

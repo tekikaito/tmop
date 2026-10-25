@@ -85,7 +85,7 @@ impl App {
         let elevated = *self.pro.del.elevated.get_or_insert_with(crate::platform::is_elevated);
         let p = ui.painter().clone();
         let mut y = area.top();
-        if !elevated {
+        if !elevated && self.caps.elevate_relaunch {
             let banner = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), BANNER_H));
             self.disk_admin_panel(ui, banner, &pal);
             y = banner.bottom() + 14.0;
@@ -213,7 +213,7 @@ impl App {
         }
         if !notes.is_empty() {
             let r = widgets::text_fit(&p, pos2(content.right(), hint_y), Align2::RIGHT_CENTER, &notes.join(" \u{b7} "), theme::mono(11.0), pal.text_faint, (content.width() - hint.width() - 20.0).max(40.0));
-            if let Some(why) = &progress.fell_back {
+            if let Some(why) = progress.fell_back.as_ref().filter(|_| self.caps.mft) {
                 ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(format!("MFT unavailable: {why}, used the parallel walker"));
             }
         }
@@ -273,7 +273,7 @@ impl App {
                 if resp.clicked() && !t.nodes[kids[i] as usize].children.is_empty() {
                     go = Some(kids[i]);
                 }
-                resp.context_menu(|ui| super::disk_delete::item_menu(ui, &diskdelete::folder_target(t, kids[i]), rules.as_deref(), &mut menu));
+                resp.context_menu(|ui| super::disk_delete::item_menu(ui, &diskdelete::folder_target(t, kids[i]), rules.as_deref(), self.pro.del.delete_safe, &mut menu));
                 resp.on_hover_text(format!("{}\n{}  \u{2022}  {} files", t.path_of(kids[i]).display(), format_bytes(size as f64), t.nodes[kids[i] as usize].files));
             } else if is_more {
                 ui.interact(r, ui.id().with("tm-more"), Sense::hover()).on_hover_text(format!("{} in smaller folders not drawn here\nSee the Folders tab", format_bytes(more as f64)));
