@@ -28,6 +28,7 @@ pub mod summary;
 pub mod table;
 pub mod terminal;
 pub mod theme;
+pub mod titlebar;
 pub mod widgets;
 
 use crate::docker::model::EngineStatus;
@@ -411,6 +412,11 @@ pub struct App {
     focus_search: bool,
     pub status: String,
     applied_top: Option<bool>,
+    /// The OS light/dark theme egui reports (winit), read every frame.
+    system_theme: Option<egui::Theme>,
+    /// TMOP draws the title bar, window buttons and resize edges (see
+    /// [`crate::platform::desktop::own_title_bar`]).
+    pub own_title_bar: bool,
     /// The palette last given to egui's style.
     applied_pal: Option<Palette>,
     /// The `appearance.displayFont` last installed, and whether it fell back to Michroma.
@@ -500,6 +506,8 @@ impl App {
             focus_search: false,
             status,
             applied_top: None,
+            system_theme: cc.egui_ctx.system_theme(),
+            own_title_bar: !popout_only && crate::platform::desktop::own_title_bar(),
             applied_pal: None,
             display_font,
             font_list: settings_page::FontList::default(),
@@ -566,14 +574,14 @@ impl App {
         app
     }
 
-    /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following
-    /// Windows) for `system` and for an id that isn't installed.
+    /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following the
+    /// system) for `system` and for an id that isn't installed.
     pub fn palette_id(&self) -> String {
         let id = &self.settings.appearance.theme;
         if id != palette::SYSTEM && self.palettes.get(id).is_some() {
             return id.clone();
         }
-        if matches!(dark_light_system(), Some(false)) { "light" } else { "dark" }.into()
+        if matches!(dark_light_system(self.system_theme), Some(false)) { "light" } else { "dark" }.into()
     }
 
     /// The palette in use, with `appearance.accent` applied.
@@ -702,6 +710,7 @@ impl App {
     fn popout_viewport(&mut self, ctx: &egui::Context, fd: &FrameData<'_>) {
         let skin = self.current_skin();
         let level = match self.popout_mode().as_str() {
+            _ if !self.caps.window_levels => egui::WindowLevel::Normal,
             "desktop" => egui::WindowLevel::AlwaysOnBottom,
             "normal" => egui::WindowLevel::Normal,
             _ => egui::WindowLevel::AlwaysOnTop,
@@ -835,12 +844,15 @@ pub fn fmt_hms(d: Duration) -> String {
     }
 }
 
-/// `Some(true)` when Windows apps use dark mode, `None` when unknown.
-fn dark_light_system() -> Option<bool> {
+/// `Some(true)` when the system uses dark mode, `None` when unknown. Windows: the apps' setting
+/// in the registry. Elsewhere egui's system theme (`reported`, from winit), else the desktop's
+/// setting where one is read ([`crate::platform::desktop::desktop_dark`]).
+fn dark_light_system(reported: Option<egui::Theme>) -> Option<bool> {
     #[cfg(windows)]
     {
         use windows::core::w;
         use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+        let _ = reported;
         let mut v: u32 = 0;
         let mut size = std::mem::size_of::<u32>() as u32;
         let st = unsafe {
@@ -861,7 +873,10 @@ fn dark_light_system() -> Option<bool> {
     }
     #[cfg(not(windows))]
     {
-        None
+        match reported {
+            Some(theme) => Some(theme == egui::Theme::Dark),
+            None => crate::platform::desktop::desktop_dark(),
+        }
     }
 }
 
@@ -928,6 +943,7 @@ impl Default for Profile {
 
 impl App {
     fn update_inner(&mut self, ctx: &egui::Context) {
+        self.system_theme = ctx.system_theme();
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
         widgets::set_ink(&pal);
@@ -980,7 +996,7 @@ impl App {
         };
         self.smooth.step(&snap, dt, hf);
         widgets::set_spark_glide(phase, hf && interval.is_some());
-        if self.applied_top != Some(self.settings.window.always_on_top) {
+        if self.caps.window_levels && self.applied_top != Some(self.settings.window.always_on_top) {
             let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
             self.applied_top = Some(self.settings.window.always_on_top);
@@ -1002,6 +1018,9 @@ impl App {
             self.replace_banner(ctx, &pal);
             self.status_bar(ctx, &pal, &snap);
             self.rail(ctx, &pal);
+            if self.own_title_bar {
+                titlebar::frame(ctx, &pal);
+            }
             let frame = egui::Frame::none().inner_margin(egui::Margin { left: 8.0, right: 32.0, top: 12.0, bottom: 36.0 });
             egui::CentralPanel::default().frame(frame).show(ctx, |ui| match self.page {
                 Page::Summary => self.summary_page(ui, &fd),

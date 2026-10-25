@@ -46,6 +46,9 @@ impl App {
         let frame = egui::Frame::none();
         egui::TopBottomPanel::top("header").exact_height(TOP_BAR_H).frame(frame).show_separator_line(false).show(ctx, |ui| {
             let full = ui.max_rect();
+            if self.own_title_bar {
+                super::titlebar::drag_area(ui, full);
+            }
             let p = ui.painter().clone();
             let cy = full.top() + 16.0 + 20.0;
             // Left: mark, wordmark, machine.
@@ -56,11 +59,15 @@ impl App {
             let machine_w = if self.machine.is_empty() { 0.0 } else { widgets::text_width(&p, &self.machine, theme::ui(12.0)) };
             // Right: buttons, then the readouts.
             let mut right = full.right() - 28.0;
+            if self.own_title_bar {
+                right = super::titlebar::window_buttons(ui, full.right() - 12.0, cy, pal) - 10.0;
+            }
             let button = |x: f32| Rect::from_min_size(pos2(x, cy - 20.0), vec2(40.0, 40.0));
             let dots_rect = button(right - 40.0);
             let theme_rect = button(right - 84.0);
-            let pin_rect = button(right - 128.0);
-            right -= 128.0 + 14.0;
+            // No pin where the window manager ignores window levels (Wayland).
+            let pin_rect = self.caps.window_levels.then(|| button(right - 128.0));
+            right -= if pin_rect.is_some() { 128.0 } else { 84.0 } + 14.0;
             let mut readouts: Vec<(&str, String)> = vec![("CPU", format!("{:.0}%", self.smooth.cpu)), ("RAM", format!("{:.0}%", self.smooth.memory))];
             if snap.disk_known() {
                 readouts.push(("DISK", format!("{:.0}%", self.smooth.disk)));
@@ -120,9 +127,11 @@ impl App {
             }
             // Pin: always on top.
             let on_top = self.settings.window.always_on_top;
-            if icon_button(ui, pin_rect, "hdr-pin", Icon::Pin, pal, on_top, if on_top { "Always on top: on" } else { "Always on top" }).clicked() {
-                self.settings.window.always_on_top = !on_top;
-                self.settings_dirty = true;
+            if let Some(pin_rect) = pin_rect {
+                if icon_button(ui, pin_rect, "hdr-pin", Icon::Pin, pal, on_top, if on_top { "Always on top: on" } else { "Always on top" }).clicked() {
+                    self.settings.window.always_on_top = !on_top;
+                    self.settings_dirty = true;
+                }
             }
             // Theme: the other polarity.
             let (icon, polarity) = if pal.dark { (Icon::Moon, "light") } else { (Icon::Sun, "dark") };
@@ -162,7 +171,7 @@ impl App {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     let line = |ui: &mut egui::Ui, text: egui::RichText| ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
                     line(ui, egui::RichText::new(format!("{} ({})", crate::APP_NAME, crate::APP_LONG_NAME)).font(theme::semibold(13.0)).color(pal.text));
-                    line(ui, egui::RichText::new("A skinnable system monitor for Windows.").font(theme::ui(12.0)).color(pal.text_dim));
+                    line(ui, egui::RichText::new(format!("A skinnable system monitor for {}.", crate::platform::os_name())).font(theme::ui(12.0)).color(pal.text_dim));
                     line(ui, egui::RichText::new("No network access, no licensing, no telemetry.").font(theme::ui(12.0)).color(pal.text_dim));
                 });
                 ui.separator();

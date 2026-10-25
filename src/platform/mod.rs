@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub mod caps;
+pub mod desktop;
 pub mod xdg;
 
 pub use caps::Caps;

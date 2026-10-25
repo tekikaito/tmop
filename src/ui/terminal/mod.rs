@@ -241,57 +241,15 @@ impl TerminalView {
                 let bracketed = emu.bracketed_paste();
                 let events = ui.input(|i| i.events.clone());
                 let mods = ui.input(|i| i.modifiers);
-                let mut alt_key_sent = false;
+                let mut router = KeyRouter::new(KeyPolicy::NATIVE, modes, bracketed);
                 for event in &events {
-                    match event {
-                        Event::Paste(text) => out.extend(encode_paste(text, bracketed)),
-                        Event::Copy => interrupt_or_copy(ui, &mut emu, mods.shift, &mut out),
-                        Event::Cut => {
-                            // Shift+Delete arrives as a cut on Windows; without Ctrl it is a forward delete.
-                            if !mods.ctrl {
-                                out.extend(encode_key(Key::Delete, Modifiers::NONE, modes).unwrap_or_default());
-                            } else if !mods.shift {
-                                out.push(CAN);
-                            }
+                    match router.route(event, mods, altgr_char) {
+                        Input::Send(bytes) => out.extend(bytes),
+                        Input::Copy => {
+                            copy_selection(ui, &mut emu);
                         }
-                        Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
-                            let ctrl = modifiers.ctrl || modifiers.command;
-                            // Windows reports AltGr as Ctrl+Alt, and egui-winit sends no text for it.
-                            // The character comes from the layout; other keys still go through encode_key,
-                            // and letters without an AltGr character are dropped so they never become ESC+Ctrl+letter.
-                            if ctrl && modifiers.alt {
-                                if let Some(c) = altgr_char(physical_key.unwrap_or(*key)) {
-                                    out.extend(encode_text(&c.to_string(), Modifiers::NONE));
-                                    continue;
-                                }
-                                if is_letter(*key) {
-                                    continue;
-                                }
-                            }
-                            match key {
-                                Key::C if ctrl => interrupt_or_copy(ui, &mut emu, modifiers.shift, &mut out),
-                                Key::Insert if ctrl => {
-                                    copy_selection(ui, &mut emu);
-                                }
-                                Key::V if ctrl => {}
-                                _ => {
-                                    if let Some(bytes) = encode_key(*key, *modifiers, modes) {
-                                        out.extend(bytes);
-                                        alt_key_sent |= modifiers.alt && !ctrl && is_letter(*key);
-                                    }
-                                }
-                            }
-                        }
-                        Event::Text(text) => {
-                            // Alt+letter is already sent as a key; skip the duplicate text.
-                            let alt_only = mods.alt && !mods.ctrl;
-                            if alt_only && alt_key_sent && is_ascii_letter(text) {
-                                alt_key_sent = false;
-                                continue;
-                            }
-                            out.extend(encode_text(text, Modifiers { alt: alt_only, ..Modifiers::NONE }));
-                        }
-                        _ => {}
+                        Input::InterruptOrCopy { shift } => interrupt_or_copy(ui, &mut emu, shift, &mut out),
+                        Input::Nothing => {}
                     }
                 }
             }
@@ -487,6 +445,144 @@ fn cell_index(row: usize, col: usize, cols: usize, len: usize) -> Option<usize> 
     }
     let index = row.checked_mul(cols)?.checked_add(col)?;
     (index < len).then_some(index)
+}
+
+/// How modifier keys reach the terminal.
+///
+/// * `Pc` (Windows, Linux): Ctrl+C copies a selection or interrupts, Ctrl+Insert copies, Alt+key
+///   is Meta (ESC prefix), and Windows' AltGr (Ctrl+Alt) types the layout's character.
+/// * `Mac`: Cmd belongs to the app (Cmd+C copies, Cmd+V pastes, other Cmd shortcuts are not
+///   typed), Ctrl+key sends control codes (Ctrl+C always interrupts), and Option types the
+///   layout's characters (`@`, `{`, `|` on many layouts) instead of acting as Meta; Option still
+///   modifies arrows, Backspace and the other named keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyPolicy {
+    Pc,
+    Mac,
+}
+
+impl KeyPolicy {
+    /// The policy of this build's OS.
+    pub const NATIVE: KeyPolicy = if cfg!(target_os = "macos") { KeyPolicy::Mac } else { KeyPolicy::Pc };
+}
+
+/// What one input event asks of the terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Input {
+    Send(Vec<u8>),
+    /// Copy the selection, if any.
+    Copy,
+    /// Copy the selection, else interrupt (unless Shift is held).
+    InterruptOrCopy { shift: bool },
+    Nothing,
+}
+
+/// Turns one frame's input events into [`Input`]s under a [`KeyPolicy`].
+struct KeyRouter {
+    policy: KeyPolicy,
+    modes: KeyModes,
+    bracketed: bool,
+    /// An Alt+letter went out as a key (ESC+letter); its text event is a duplicate.
+    alt_key_sent: bool,
+}
+
+impl KeyRouter {
+    fn new(policy: KeyPolicy, modes: KeyModes, bracketed: bool) -> Self {
+        Self { policy, modes, bracketed, alt_key_sent: false }
+    }
+
+    /// `event` under the frame's modifiers `mods`; `altgr` gives the layout's AltGr character
+    /// of a physical key (Windows).
+    fn route(&mut self, event: &Event, mods: Modifiers, altgr: impl Fn(Key) -> Option<char>) -> Input {
+        if let Event::Paste(text) = event {
+            return Input::Send(encode_paste(text, self.bracketed));
+        }
+        match self.policy {
+            KeyPolicy::Pc => self.route_pc(event, mods, altgr),
+            KeyPolicy::Mac => self.route_mac(event),
+        }
+    }
+
+    fn route_pc(&mut self, event: &Event, mods: Modifiers, altgr: impl Fn(Key) -> Option<char>) -> Input {
+        match event {
+            Event::Copy => Input::InterruptOrCopy { shift: mods.shift },
+            Event::Cut => {
+                // Shift+Delete arrives as a cut on Windows; without Ctrl it is a forward delete.
+                if !mods.ctrl {
+                    Input::Send(encode_key(Key::Delete, Modifiers::NONE, self.modes).unwrap_or_default())
+                } else if !mods.shift {
+                    Input::Send(vec![CAN])
+                } else {
+                    Input::Nothing
+                }
+            }
+            Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
+                let ctrl = modifiers.ctrl || modifiers.command;
+                // Windows reports AltGr as Ctrl+Alt, and egui-winit sends no text for it.
+                // The character comes from the layout; other keys still go through encode_key,
+                // and letters without an AltGr character are dropped so they never become ESC+Ctrl+letter.
+                if ctrl && modifiers.alt {
+                    if let Some(c) = altgr(physical_key.unwrap_or(*key)) {
+                        return Input::Send(encode_text(&c.to_string(), Modifiers::NONE));
+                    }
+                    if is_letter(*key) {
+                        return Input::Nothing;
+                    }
+                }
+                match key {
+                    Key::C if ctrl => Input::InterruptOrCopy { shift: modifiers.shift },
+                    Key::Insert if ctrl => Input::Copy,
+                    Key::V if ctrl => Input::Nothing,
+                    _ => match encode_key(*key, *modifiers, self.modes) {
+                        Some(bytes) => {
+                            self.alt_key_sent |= modifiers.alt && !ctrl && is_letter(*key);
+                            Input::Send(bytes)
+                        }
+                        None => Input::Nothing,
+                    },
+                }
+            }
+            Event::Text(text) => {
+                // Alt+letter is already sent as a key; skip the duplicate text.
+                let alt_only = mods.alt && !mods.ctrl;
+                if alt_only && self.alt_key_sent && is_ascii_letter(text) {
+                    self.alt_key_sent = false;
+                    return Input::Nothing;
+                }
+                Input::Send(encode_text(text, Modifiers { alt: alt_only, ..Modifiers::NONE }))
+            }
+            _ => Input::Nothing,
+        }
+    }
+
+    fn route_mac(&mut self, event: &Event) -> Input {
+        match event {
+            // Cmd+C and Cmd+X: a terminal cannot cut, both copy.
+            Event::Copy | Event::Cut => Input::Copy,
+            Event::Key { key, pressed: true, modifiers, .. } => {
+                if modifiers.mac_cmd || modifiers.command {
+                    return Input::Nothing;
+                }
+                // Option composes a character, which arrives as text.
+                if modifiers.alt && !modifiers.ctrl && types_text(*key) {
+                    return Input::Nothing;
+                }
+                encode_key(*key, *modifiers, self.modes).map_or(Input::Nothing, Input::Send)
+            }
+            Event::Text(text) => Input::Send(encode_text(text, Modifiers::NONE)),
+            _ => Input::Nothing,
+        }
+    }
+}
+
+/// Keys that type a character (letters, digits, punctuation, space), as opposed to named keys.
+fn types_text(key: Key) -> bool {
+    use Key::*;
+    is_letter(key)
+        || matches!(
+            key,
+            Num0 | Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9 | Space | Colon | Comma | Minus | Period | Plus | Equals | Semicolon | Backslash | Slash | Pipe | Questionmark | OpenBracket | CloseBracket | Backtick | Quote
+        )
 }
 
 fn is_letter(key: Key) -> bool {
@@ -789,5 +885,70 @@ mod tests {
         let app = KeyModes { app_cursor: true, app_keypad: false };
         assert_eq!(wheel_arrows(1, app), b"\x1bOA\x1bOA\x1bOA".to_vec());
         assert!(wheel_arrows(0, normal).is_empty());
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }
+    }
+
+    fn text(t: &str) -> Event {
+        Event::Text(t.into())
+    }
+
+    /// Routes `events` (each with the frame's modifiers) through one router.
+    fn route(policy: KeyPolicy, events: &[(Event, Modifiers)], altgr: impl Fn(Key) -> Option<char> + Copy) -> Vec<Input> {
+        let mut router = KeyRouter::new(policy, KeyModes::default(), false);
+        events.iter().map(|(e, m)| router.route(e, *m, altgr)).collect()
+    }
+
+    const NO_ALTGR: fn(Key) -> Option<char> = |_| None;
+    const CTRL: Modifiers = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
+    const ALT: Modifiers = Modifiers { alt: true, ..Modifiers::NONE };
+    const CMD: Modifiers = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
+    const MAC_CTRL: Modifiers = Modifiers { ctrl: true, ..Modifiers::NONE };
+    const OPTION: Modifiers = Modifiers { alt: true, ..Modifiers::NONE };
+
+    /// Windows and Linux: Ctrl+C copies or interrupts, Alt is Meta with no duplicate text, AltGr
+    /// types the layout's character, Ctrl+V leaves the paste to the paste event.
+    #[test]
+    fn pc_keys() {
+        let p = KeyPolicy::Pc;
+        assert_eq!(route(p, &[(Event::Copy, Modifiers::NONE), (key(Key::C, CTRL), CTRL)], NO_ALTGR), [Input::InterruptOrCopy { shift: false }, Input::InterruptOrCopy { shift: false }]);
+        let shift_ctrl = Modifiers { shift: true, ..CTRL };
+        assert_eq!(route(p, &[(key(Key::C, shift_ctrl), shift_ctrl)], NO_ALTGR), [Input::InterruptOrCopy { shift: true }]);
+        assert_eq!(route(p, &[(key(Key::Insert, CTRL), CTRL), (key(Key::V, CTRL), CTRL)], NO_ALTGR), [Input::Copy, Input::Nothing]);
+        assert_eq!(route(p, &[(key(Key::A, CTRL), CTRL)], NO_ALTGR), [Input::Send(vec![0x01])]);
+        assert_eq!(route(p, &[(key(Key::X, ALT), ALT), (text("x"), ALT), (text("y"), ALT)], NO_ALTGR), [Input::Send(b"\x1bx".to_vec()), Input::Nothing, Input::Send(b"\x1by".to_vec())]);
+        let altgr = Modifiers { alt: true, ..CTRL };
+        assert_eq!(route(p, &[(key(Key::Q, altgr), altgr)], |k| (k == Key::Q).then_some('@')), [Input::Send(b"@".to_vec())]);
+        assert_eq!(route(p, &[(key(Key::Q, altgr), altgr)], NO_ALTGR), [Input::Nothing], "never ESC+Ctrl+letter");
+        assert_eq!(route(p, &[(Event::Cut, Modifiers { shift: true, ..Modifiers::NONE }), (Event::Cut, CTRL)], NO_ALTGR), [Input::Send(b"\x1b[3~".to_vec()), Input::Send(vec![CAN])]);
+        assert_eq!(route(p, &[(text("\u{e9}"), Modifiers::NONE), (Event::Paste("a\nb".into()), Modifiers::NONE)], NO_ALTGR), [Input::Send("\u{e9}".as_bytes().to_vec()), Input::Send(b"a\rb".to_vec())]);
+    }
+
+    /// macOS: Cmd is the app's, Ctrl sends control codes, Option types characters.
+    #[test]
+    fn mac_keys() {
+        let p = KeyPolicy::Mac;
+        // Cmd+C / Cmd+X arrive as copy and cut events and only copy; Ctrl+C always interrupts.
+        assert_eq!(route(p, &[(Event::Copy, CMD), (Event::Cut, CMD), (key(Key::C, MAC_CTRL), MAC_CTRL)], NO_ALTGR), [Input::Copy, Input::Copy, Input::Send(vec![ETX])]);
+        // Other Cmd shortcuts type nothing.
+        assert_eq!(route(p, &[(key(Key::K, CMD), CMD), (key(Key::ArrowLeft, CMD), CMD)], NO_ALTGR), [Input::Nothing, Input::Nothing]);
+        // Option+L types the layout's "@" (German), with no ESC prefix; Option+Left is still Alt+Left.
+        let got = route(p, &[(key(Key::L, OPTION), OPTION), (text("@"), OPTION), (key(Key::Num7, OPTION), OPTION), (text("|"), OPTION), (key(Key::ArrowLeft, OPTION), OPTION)], NO_ALTGR);
+        assert_eq!(got, [Input::Nothing, Input::Send(b"@".to_vec()), Input::Nothing, Input::Send(b"|".to_vec()), Input::Send(b"\x1b[1;3D".to_vec())]);
+        assert_eq!(route(p, &[(key(Key::Backspace, OPTION), OPTION), (key(Key::Enter, Modifiers::NONE), Modifiers::NONE)], NO_ALTGR), [Input::Send(vec![0x1b, 0x7f]), Input::Send(b"\r".to_vec())]);
+        // Ctrl+Option+letter is still a control code with Meta.
+        let ctrl_opt = Modifiers { alt: true, ..MAC_CTRL };
+        assert_eq!(route(p, &[(key(Key::A, ctrl_opt), ctrl_opt)], NO_ALTGR), [Input::Send(vec![0x1b, 0x01])]);
+        assert_eq!(route(p, &[(Event::Paste("p".into()), CMD)], NO_ALTGR), [Input::Send(b"p".to_vec())]);
+    }
+
+    #[test]
+    fn native_policy_matches_the_target() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(KeyPolicy::NATIVE, KeyPolicy::Mac);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(KeyPolicy::NATIVE, KeyPolicy::Pc);
     }
 }

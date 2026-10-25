@@ -595,8 +595,8 @@ impl App {
                             });
                             let mut mode = s.popout.mode.clone();
                             row(ui, &pal, "Popout", |ui| {
-                                egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(title_case(&mode)).show_ui(ui, |ui| {
-                                    for m in ["off", "desktop", "normal", "topMost"] {
+                                egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(popout_mode_label(&mode, &caps)).show_ui(ui, |ui| {
+                                    for &m in popout_modes(&caps) {
                                         if ui.selectable_value(&mut mode, m.to_string(), title_case(m)).changed() {
                                             popout_change = Some(m);
                                         }
@@ -695,7 +695,9 @@ impl App {
                             ui.add_enabled_ui(false, |ui| toggle_row_hint(ui, &pal, &mut never, "Check for updates on app start", "Disabled: TMOP never contacts the network."));
                         });
                         section(ui, &pal, &mut sections, SECTIONS[3], |ui| {
-                            changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
+                            if caps.window_levels {
+                                changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
+                            }
                             changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
                         });
                         section(ui, &pal, &mut sections, SECTIONS[4], |ui| {
@@ -867,6 +869,25 @@ impl App {
     }
 }
 
+/// The popout modes offered: `desktop` and `topMost` are window levels, which Wayland ignores.
+fn popout_modes(caps: &Caps) -> &'static [&'static str] {
+    if caps.window_levels {
+        &["off", "desktop", "normal", "topMost"]
+    } else {
+        &["off", "normal"]
+    }
+}
+
+/// The popout combo's text for the saved `mode`. A window level this session cannot apply shows
+/// as Normal (the popout opens as a normal window); the saved value is kept.
+fn popout_mode_label(mode: &str, caps: &Caps) -> String {
+    if caps.window_levels || popout_modes(caps).contains(&mode) {
+        title_case(mode)
+    } else {
+        title_case("normal")
+    }
+}
+
 fn title_case(s: &str) -> String {
     match s {
         "topMost" => "TopMost".into(),
@@ -891,6 +912,19 @@ mod tests {
         let linux = shown_sections(&Caps::LINUX);
         assert_eq!(linux.len(), SECTIONS.len() - 1);
         assert!(!linux.contains(&TASK_MANAGER) && linux.last() == Some(&"About"));
+    }
+
+    /// Without window levels (Wayland) the popout offers no desktop or topmost mode, and a saved
+    /// one reads as Normal.
+    #[test]
+    fn popout_modes_follow_window_levels() {
+        let wayland = Caps { window_levels: false, ..Caps::LINUX };
+        assert_eq!(popout_modes(&Caps::WINDOWS), ["off", "desktop", "normal", "topMost"]);
+        assert_eq!(popout_modes(&wayland), ["off", "normal"]);
+        assert_eq!(popout_mode_label("topMost", &Caps::WINDOWS), "TopMost");
+        assert_eq!(popout_mode_label("topMost", &wayland), "Normal");
+        assert_eq!(popout_mode_label("desktop", &wayland), "Normal");
+        assert_eq!(popout_mode_label("off", &wayland), "Off");
     }
 
     /// The metric rows lay out with colour keying on and off and leave the settings alone

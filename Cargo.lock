@@ -2528,6 +2528,7 @@ dependencies = [
  "sha2",
  "tar",
  "tokio",
+ "wayland-client",
  "windows",
  "x11rb",
 ]
