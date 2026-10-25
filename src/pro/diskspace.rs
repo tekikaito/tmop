@@ -47,7 +47,28 @@ pub fn free_space(path: &Path) -> Option<u64> {
     Some(free)
 }
 
-#[cfg(not(windows))]
+/// `statvfs` on Linux (`f_bavail * f_frsize`); `statfs` on macOS, whose `statvfs` has 32-bit
+/// block counts.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // the field widths differ per target
+pub fn free_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: an all-zero statfs is valid; statfs only writes it for a NUL-terminated path.
+        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+        (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_bsize as u64)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: an all-zero statvfs is valid; statvfs only writes it for a NUL-terminated path.
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn free_space(_path: &Path) -> Option<u64> {
     None
 }
@@ -933,5 +954,11 @@ mod tests {
         let v = volumes();
         assert!(v.iter().any(|v| v.total > 0 && v.kind == "Fixed"));
         assert!(free_space(Path::new("C:\\")).is_some());
+    }
+
+    #[test]
+    fn free_space_of_temp_dir() {
+        assert!(free_space(&std::env::temp_dir()).is_some_and(|f| f > 0));
+        assert_eq!(free_space(Path::new("/tmop/no/such/dir/at/all")), None);
     }
 }
