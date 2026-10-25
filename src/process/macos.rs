@@ -425,20 +425,27 @@ pub(super) mod sys {
         }
     }
 
-    /// A real process id: 0 and negative values would address process groups.
+    /// A real process id: 0 and negative values would address process groups, and pid 1 is
+    /// launchd, whose death takes the whole system down.
     fn target(pid: u32) -> Result<i32, String> {
-        i32::try_from(pid).ok().filter(|p| *p > 0).ok_or_else(|| format!("invalid process id {pid}"))
+        let p = i32::try_from(pid).ok().filter(|p| *p > 0).ok_or_else(|| format!("invalid process id {pid}"))?;
+        if p == 1 {
+            return Err("refusing to signal launchd".into());
+        }
+        Ok(p)
     }
 
     /// `pid` as a real process id that still names the process started at `start` (the row's
-    /// create_time; 0 when unknown, which skips the check).
+    /// create_time). A row without a start time (0) cannot be checked against PID reuse, so it is
+    /// refused rather than signalled blind.
     fn same(pid: u32, start: i64) -> Result<i32, String> {
         let p = target(pid)?;
-        if start != 0 {
-            let k = kinfo(p).ok_or("the process has exited")?;
-            if filetime(k.start.0, k.start.1) != start {
-                return Err("the process has exited (its PID now belongs to another process)".into());
-            }
+        if start == 0 {
+            return Err("the process start time is unknown, so a reused PID cannot be ruled out".into());
+        }
+        let k = kinfo(p).ok_or("the process has exited")?;
+        if filetime(k.start.0, k.start.1) != start {
+            return Err("the process has exited (its PID now belongs to another process)".into());
         }
         Ok(p)
     }
@@ -623,8 +630,9 @@ mod tests {
     fn a_stopped_child_still_ends() {
         let mut child = Command::new("sleep").arg("30").stdin(Stdio::null()).spawn().expect("spawn sleep");
         let pid = child.id();
-        sys::suspend(pid, 0).unwrap();
         let mut e = Enumerator::new();
+        let start = wait_for(&mut e, pid, |_| true).create_time;
+        sys::suspend(pid, start).unwrap();
         let r = wait_for(&mut e, pid, |r| r.status == Status::Suspended);
         sys::terminate(pid, r.create_time).unwrap();
         use std::os::unix::process::ExitStatusExt;
@@ -637,6 +645,20 @@ mod tests {
             assert!(sys::terminate(pid, 0).unwrap_err().starts_with("invalid process id"));
             assert!(sys::suspend(pid, 0).is_err() && sys::set_priority(pid, 0, Priority::Idle).is_err());
         }
+        // launchd is never signalled, whatever the caller's rights.
+        let start = kinfo(1).map_or(1, |k| filetime(k.start.0, k.start.1));
+        assert!(sys::terminate(1, start).unwrap_err().contains("launchd"));
+        assert!(sys::suspend(1, start).unwrap_err().contains("launchd"));
+    }
+
+    #[test]
+    fn refuses_an_unknown_start() {
+        let mut child = Command::new("sleep").arg("30").stdin(Stdio::null()).spawn().expect("spawn sleep");
+        let pid = child.id();
+        assert!(sys::terminate(pid, 0).unwrap_err().contains("start time is unknown"));
+        assert!(sys::set_priority(pid, 0, Priority::BelowNormal).is_err());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
