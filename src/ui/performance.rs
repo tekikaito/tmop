@@ -320,7 +320,7 @@ impl App {
         let mut cy = y + 20.0;
         let iv = self.settings.update_speed().interval();
         let gs = &self.settings.graphs;
-        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv };
+        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv, phase: fd.phase, glide: fd.glide };
         let s = fd.snap;
         match self.device {
             Device::Cpu => {
@@ -843,6 +843,9 @@ struct PlotCtx<'a> {
     px_per_update: f32,
     /// The update interval, for the time labels.
     interval: Option<Duration>,
+    /// The newest sample scrolls in over the update interval (`FrameData::phase`, `glide`).
+    phase: f32,
+    glide: bool,
 }
 
 /// A history graph with y labels, time labels and a readout on hover. `gutter` is the width
@@ -875,6 +878,8 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
         g.line_width = l.width;
         g.fill = l.fill;
         g.dashed = l.dashed;
+        g.phase = cx.phase;
+        g.glide = cx.glide;
         draw_graph(&p, gr, &g);
     }
     // Time labels from the history length and the update interval.
@@ -970,6 +975,7 @@ fn spark_fixed(p: &egui::Painter, rect: Rect, s: &Series, color: Color32, range:
     g.smooth = smooth;
     g.line_width = 1.4;
     g.fill = fill;
+    (g.phase, g.glide) = widgets::spark_glide();
     draw_graph(p, rect, &g);
 }
 
@@ -1077,7 +1083,7 @@ mod tests {
             let p = ui.painter().clone();
             let head = Head { title: "Intel(R) Core(TM) Ultra 9 285K Processor", sub: "8 cores".into(), value: ("23".into(), "%".into()), side: "8% kernel".into() };
             assert_eq!(super::head(&p, &pal, 20.0, 20.0, 600.0, &head), 48.0);
-            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)) };
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false };
             let lines = [PlotLine::new(&a, pal.accent, (0.0, 100.0)), PlotLine::new(&b, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
             let (h, text) = plot(ui, &cx, "t", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| ago(cx.interval, age));
             assert_eq!(h, 220.0);
@@ -1095,7 +1101,7 @@ mod tests {
         let pal = theme::LIGHT;
         let empty = Series::new(4);
         frames(|ui| {
-            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None };
+            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None, phase: 0.0, glide: false };
             let lines = [PlotLine::new(&empty, pal.accent, (0.0, 100.0))];
             let (_, text) = plot(ui, &cx, "empty", 20.0, 20.0, 300.0, 100.0, 36.0, &percent_labels(), &lines, &|_| String::new());
             assert!(text.is_none());

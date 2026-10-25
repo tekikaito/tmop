@@ -188,6 +188,7 @@ impl App {
             g.smooth = smooth;
             g.line_width = width;
             g.fill = fill;
+            (g.phase, g.glide) = (fd.phase, fd.glide);
             draw_graph(&p, graph, &g);
         };
         if base > 0.0 {
