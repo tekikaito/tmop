@@ -103,7 +103,7 @@ impl Caps {
         commit_mem: true,
         proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
         trash: true,
-        delete_safe: false,
+        delete_safe: true,
         window_levels: true,
     };
 
@@ -122,7 +122,7 @@ impl Caps {
         commit_mem: false,
         proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
         trash: true,
-        delete_safe: false,
+        delete_safe: true,
         window_levels: true,
     };
 
@@ -196,12 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn windows_only_features_and_the_delete_gate_are_off_elsewhere() {
+    fn windows_only_features_are_off_elsewhere_and_delete_needs_a_classifier() {
         for c in [Caps::LINUX, Caps::MACOS, Caps::OTHER] {
             assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver));
-            // Disk Space deletes stay off until the Unix classifier, Trash and categories land.
-            assert!(!c.delete_safe);
         }
+        // Disk Space deletes where the protected-paths classifier, the Trash and the clean up
+        // categories exist (Windows, Linux, macOS); never on a target without them.
+        assert_eq!([Caps::WINDOWS.delete_safe, Caps::LINUX.delete_safe, Caps::MACOS.delete_safe, Caps::OTHER.delete_safe], [true, true, true, false]);
         assert_eq!([Caps::LINUX.inventory, Caps::MACOS.inventory, Caps::OTHER.inventory], [true, true, false]);
         assert_eq!([Caps::LINUX.trash, Caps::MACOS.trash, Caps::OTHER.trash], [true, true, false]);
     }
@@ -231,7 +232,7 @@ mod tests {
     fn get_matches_this_target() {
         let c = Caps::get();
         assert_eq!(c.engine, cfg!(windows));
-        assert_eq!(c.delete_safe, cfg!(windows));
+        assert_eq!(c.delete_safe, cfg!(any(windows, target_os = "linux", target_os = "macos")));
         if cfg!(windows) {
             assert_eq!(c, Caps::WINDOWS);
         }

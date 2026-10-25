@@ -491,7 +491,8 @@ fn trailing_dot_or_space_names_are_detected() {
     }
 }
 
-#[cfg(not(windows))]
+// Targets without a classifier (neither Windows, Linux nor macOS) never delete.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[test]
 fn run_deletes_nothing_while_delete_is_off() {
     assert!(!crate::platform::Caps::get().delete_safe);
