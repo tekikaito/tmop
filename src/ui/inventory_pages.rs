@@ -578,7 +578,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.services.poll();
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
-        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, service_manager().into(),Page::Services.shortcut().into()]));
+        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {
             refresh = Button::new("Refresh").show(ui, &pal).clicked();
@@ -603,16 +603,6 @@ fn clip_name(name: &str) -> String {
         format!("{}\u{2026}", name.chars().take(21).collect::<String>())
     } else {
         name.to_string()
-    }
-}
-
-/// Who runs the services: the source named on the Services page.
-const fn service_manager() -> &'static str {
-    use crate::platform::{Os, OS};
-    match OS {
-        Os::Linux => "systemd",
-        Os::MacOs => "launchd",
-        _ => "Service Control Manager",
     }
 }
 

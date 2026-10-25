@@ -9,7 +9,8 @@ use super::table::{self, cmp_str, Cell, Col, TableState};
 use super::theme::{self};
 use super::widgets::{self, Button, ButtonSize};
 use super::{App, FrameData};
-use crate::pro::drivers::Service;
+use crate::platform::{Os, OS};
+use crate::pro::drivers::{self, Kind, Service};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, Sense};
 use std::path::{Path, PathBuf};
@@ -30,18 +31,19 @@ impl App {
     pub fn drivers_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
         self.pro.drivers.poll();
+        let source = drivers::source(Kind::Drivers);
         let subtitle = match self.pro.drivers.ok() {
-            Some(l) => format!("kernel drivers from the Service Control Manager \u{b7} {} entries", l.len()),
-            None => "kernel drivers from the Service Control Manager".to_string(),
+            Some(l) => format!("{source} \u{b7} {} entries", l.len()),
+            None => source.to_string(),
         };
-        let body = self.page_title(ui, &pal, "Drivers", &subtitle);
+        let body = self.page_title(ui, &pal, drivers::DRIVERS_TITLE, &subtitle);
         let mut refresh = false;
         header_toolbar(ui, body, 340.0, |ui| {
             refresh = Button::new("Refresh").show(ui, &pal).clicked();
             filter_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
         });
         if refresh || (self.pro.drivers.get().is_none() && !self.pro.drivers.is_loading()) {
-            self.pro.drivers.start(|| crate::pro::drivers::read(crate::pro::drivers::Kind::Drivers));
+            self.pro.drivers.start(|| drivers::read(Kind::Drivers));
         }
         let list: &[Service] = self.pro.drivers.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let mut info = InfoCache::default();
@@ -49,9 +51,64 @@ impl App {
     }
 }
 
-/// True for a company other than Microsoft.
-fn third_party(company: &str) -> bool {
-    !company.is_empty() && !company.contains("Microsoft")
+/// The stat tiles above the table. Windows counts start modes and svchost groups; Linux and
+/// macOS count references (modules, kexts) and failed jobs (services).
+fn tiles(pal: &theme::Palette, list: &[Service], drivers: bool) -> Vec<kit::StatTile> {
+    let st = theme::status(pal);
+    let count = |f: &dyn Fn(&Service) -> bool| list.iter().filter(|s| f(s)).count();
+    let running = count(&|s| s.running);
+    let auto = count(&|s| drivers::starts_at_boot(&s.start));
+    let disabled = count(&|s| drivers::is_disabled(&s.start));
+    let third = count(&|s| s.third_party);
+    let n = list.len().max(1) as f32;
+    let what = drivers::noun(if drivers { Kind::Drivers } else { Kind::Services });
+    let purple = theme::darken_for(pal, theme::PURPLE);
+    let indigo = theme::darken_for(pal, theme::INDIGO);
+    let mut running_tile = kit::StatTile::new(if drivers && OS != Os::Windows { "Loaded" } else { "Running" }, running.to_string(), format!("of {} {what}", list.len())).bar(running as f32 / n, st.ok);
+    if drivers {
+        running_tile = running_tile.icon(super::hardware::Hardware::Cpu);
+    }
+    let mut tiles = vec![running_tile];
+    match (OS, drivers) {
+        (Os::Windows, _) => {
+            tiles.push(kit::StatTile::new("Stopped", (list.len() - running).to_string(), format!("{disabled} disabled")).bar((list.len() - running) as f32 / n, st.warn));
+            tiles.push(kit::StatTile::new("Start at boot", auto.to_string(), "Boot, system or automatic").bar(auto as f32 / n, indigo));
+            if drivers {
+                tiles.push(kit::StatTile::new("Third party", third.to_string(), "Not signed by Microsoft (company name)").bar(third as f32 / n, purple));
+            } else {
+                let shared = count(&|s| s.kind == "Shared process" && s.running);
+                tiles.push(kit::StatTile::new("Shared hosts", shared.to_string(), "Running in svchost groups").bar(shared as f32 / n, purple));
+            }
+        }
+        (_, true) => {
+            let used = count(&|s| s.start == "In use");
+            let unused = list.len() - used;
+            tiles.push(kit::StatTile::new("In use", used.to_string(), "Referenced by the kernel or other modules").bar(used as f32 / n, indigo));
+            tiles.push(kit::StatTile::new("Unused", unused.to_string(), "Loaded, reference count zero").bar(unused as f32 / n, st.warn));
+            let why = if OS == Os::MacOs { "Bundle id outside com.apple" } else { "Out of tree or proprietary" };
+            tiles.push(kit::StatTile::new("Third party", third.to_string(), why).bar(third as f32 / n, purple));
+        }
+        (_, false) => {
+            tiles.push(kit::StatTile::new("Stopped", (list.len() - running).to_string(), format!("{disabled} disabled")).bar((list.len() - running) as f32 / n, st.warn));
+            let why = if OS == Os::MacOs { "Run at load or kept alive" } else { "Enabled units" };
+            tiles.push(kit::StatTile::new("Start at boot", auto.to_string(), why).bar(auto as f32 / n, indigo));
+            let failed = count(&|s| s.state == "Failed");
+            tiles.push(kit::StatTile::new("Failed", failed.to_string(), "Last run ended with an error").bar(failed as f32 / n, st.danger));
+        }
+    }
+    tiles
+}
+
+/// Column headings: what the columns hold differs per OS (start mode vs use, company vs author).
+fn headings(drivers: bool) -> [&'static str; 8] {
+    match (OS, drivers) {
+        (Os::Linux, true) => ["Name", "Description", "Status", "Use", "Type", "Author", "Version", "File"],
+        (Os::MacOs, true) => ["Bundle id", "Name", "Status", "Use", "Type", "Vendor", "Version", "Bundle"],
+        (Os::Linux, false) => ["Unit", "Description", "Status", "Start", "Type", "PID", "Program", ""],
+        (Os::MacOs, false) => ["Label", "Program", "Status", "Start", "Type", "PID", "Program path", ""],
+        (_, true) => ["Name", "Description", "Status", "Start", "Type", "Company", "Version", "Image path"],
+        (_, false) => ["Name", "Display name", "Status", "Start", "Type", "PID", "Image path", ""],
+    }
 }
 
 /// Shared body of the Drivers and Services pages: stat tiles, the table and, for drivers, the bar
@@ -72,31 +129,10 @@ pub fn driver_like_page(
     let pal = &fd.pal;
     let st = theme::status(pal);
     let p = ui.painter().clone();
-    let running = list.iter().filter(|s| s.running).count();
-    let auto = list.iter().filter(|s| matches!(s.start, "Boot" | "System" | "Automatic")).count();
-    let disabled = list.iter().filter(|s| s.start == "Disabled").count();
-    let n = list.len().max(1) as f32;
-    let what = if drivers { "drivers" } else { "services" };
-    let mut running_tile = kit::StatTile::new("Running", running.to_string(), format!("of {} {what}", list.len())).bar(running as f32 / n, st.ok);
-    if drivers {
-        running_tile = running_tile.icon(super::hardware::Hardware::Cpu);
-    }
-    let mut tiles = vec![
-        running_tile,
-        kit::StatTile::new("Stopped", (list.len() - running).to_string(), format!("{disabled} disabled")).bar((list.len() - running) as f32 / n, st.warn),
-        kit::StatTile::new("Start at boot", auto.to_string(), "Boot, system or automatic").bar(auto as f32 / n, theme::darken_for(pal, theme::INDIGO)),
-    ];
-    if drivers {
-        let third = list.iter().filter(|s| third_party(&s.company)).count();
-        tiles.push(kit::StatTile::new("Third party", third.to_string(), "Not signed by Microsoft (company name)").bar(third as f32 / n, theme::darken_for(pal, theme::PURPLE)));
-    } else {
-        let shared = list.iter().filter(|s| s.kind == "Shared process" && s.running).count();
-        tiles.push(kit::StatTile::new("Shared hosts", shared.to_string(), "Running in svchost groups").bar(shared as f32 / n, theme::darken_for(pal, theme::PURPLE)));
-    }
-    let tiles_h = kit::stat_grid(&p, area, pal, &tiles, 170.0);
+    let tiles_h = kit::stat_grid(&p, area, pal, &tiles(pal, list, drivers), 170.0);
     let rest = Rect::from_min_max(pos2(area.left(), area.top() + tiles_h + BLOCK_GAP), area.max);
     if list.is_empty() {
-        empty_state(&p, rest, pal, error.unwrap_or("Reading the Service Control Manager\u{2026}"));
+        empty_state(&p, rest, pal, error.unwrap_or(drivers::reading(if drivers { Kind::Drivers } else { Kind::Services })));
         return None;
     }
 
@@ -119,8 +155,8 @@ pub fn driver_like_page(
         0 => cmp_str(&a.name, &b.name),
         1 => cmp_str(&a.display, &b.display),
         2 => a.state.cmp(b.state),
-        3 => a.start.cmp(b.start),
-        4 => a.kind.cmp(b.kind),
+        3 => a.start.cmp(&b.start),
+        4 => a.kind.cmp(&b.kind),
         5 => {
             if drivers {
                 cmp_str(&a.company, &b.company)
@@ -131,10 +167,11 @@ pub fn driver_like_page(
         6 => a.version.cmp(&b.version),
         _ => cmp_str(&a.path, &b.path),
     });
+    let h = headings(drivers);
     let cols: Vec<Col> = if drivers {
-        vec![Col::text("Name", 170.0), Col::text("Description", 280.0), Col::text("Status", 100.0), Col::text("Start", 90.0), Col::text("Type", 100.0), Col::text("Company", 200.0), Col::text("Version", 150.0), Col::text("Image path", 320.0)]
+        vec![Col::text(h[0], 170.0), Col::text(h[1], 280.0), Col::text(h[2], 100.0), Col::text(h[3], 90.0), Col::text(h[4], 100.0), Col::text(h[5], 200.0), Col::text(h[6], 150.0), Col::text(h[7], 320.0)]
     } else {
-        vec![Col::text("Name", 190.0), Col::text("Display name", 330.0), Col::text("Status", 100.0), Col::text("Start", 100.0), Col::text("Type", 120.0), Col::num("PID", 70.0), Col::text("Image path", 360.0)]
+        vec![Col::text(h[0], 190.0), Col::text(h[1], 330.0), Col::text(h[2], 100.0), Col::text(h[3], 100.0), Col::text(h[4], 120.0), Col::num(h[5], 70.0), Col::text(h[6], 360.0)]
     };
     let purple = theme::darken_for(pal, theme::PURPLE);
     let cell = |i: usize, col: usize| -> Cell {
@@ -145,16 +182,17 @@ pub fn driver_like_page(
             2 => {
                 let c = match s.state {
                     "Paused" => st.yellow,
+                    "Failed" => st.danger,
                     _ if s.running => st.ok,
                     _ => pal.text_faint,
                 };
                 Cell::new(s.state).dot(c).color(c)
             }
-            3 => Cell::new(s.start).color(if s.start == "Disabled" { st.danger } else { pal.text_dim }),
-            4 => Cell::new(s.kind).dim(pal),
+            3 => Cell::new(&s.start).color(if drivers::is_disabled(&s.start) { st.danger } else { pal.text_dim }),
+            4 => Cell::new(&s.kind).dim(pal),
             5 => {
                 if drivers {
-                    Cell::new(&s.company).color(if third_party(&s.company) { purple } else { pal.text_dim })
+                    Cell::new(&s.company).color(if s.third_party { purple } else { pal.text_dim })
                 } else {
                     Cell::new(if s.pid != 0 { s.pid.to_string() } else { String::new() }).dim(pal)
                 }
@@ -185,7 +223,12 @@ fn driver_bar(ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette, driver: Optio
     let p = ui.painter().clone();
     widgets::card(&p, rect, pal);
     let Some(s) = driver else {
-        p.text(pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, "Select a driver to see its file.", theme::ui(13.0), pal.text_faint);
+        let one = match OS {
+            Os::Linux => "module",
+            Os::MacOs => "extension",
+            _ => "driver",
+        };
+        p.text(pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, format!("Select a {one} to see its file."), theme::ui(13.0), pal.text_faint);
         return;
     };
     let file = Path::new(&s.path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| s.name.clone());
@@ -196,7 +239,8 @@ fn driver_bar(ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette, driver: Optio
     if !s.version.is_empty() {
         facts.push(s.version.clone());
     }
-    facts.push(format!("{} start", s.start));
+    // Off Windows the column holds the use ("In use"), not a start mode.
+    facts.push(if OS == Os::Windows { format!("{} start", s.start) } else { s.start.clone() });
     let buttons_w = 330.0;
     let name = widgets::text_fit(&p, pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, &file, theme::mono_medium(13.0), pal.text, (rect.width() - buttons_w - 60.0).max(80.0) * 0.5);
     widgets::text_fit(&p, pos2(name.right() + 16.0, rect.center().y), Align2::LEFT_CENTER, &facts.join(" \u{b7} "), theme::ui(13.0), pal.text_dim, (rect.right() - buttons_w - name.right() - 32.0).max(40.0));
@@ -258,8 +302,10 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
     let details_h = details as f32 * 26.0 + if s.path.is_empty() { 0.0 } else { 56.0 };
     let para_top = head.bottom() + 12.0;
     let para_h = (actions.top() - 14.0 - details_h - para_top).max(0.0);
-    let text = facts.description.as_deref().unwrap_or("No description provided by the service.");
-    let color = if facts.description.is_some() { pal.text_table() } else { pal.text_faint };
+    // Off Windows the list itself carries what is known (unit file and documentation).
+    let described = facts.description.as_deref().or_else(|| Some(s.description.as_str()).filter(|d| !d.is_empty()));
+    let text = described.unwrap_or("No description provided by the service.");
+    let color = if described.is_some() { pal.text_table() } else { pal.text_faint };
     let line_h = 19.5;
     let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: theme::ui(13.0), color, line_height: Some(line_h), ..Default::default() });
     job.wrap = egui::text::TextWrapping { max_width: content.width(), max_rows: ((para_h / line_h).floor() as usize).max(1), break_anywhere: false, overflow_character: Some('\u{2026}') };
@@ -302,7 +348,7 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
         y += detail_row(&p, pal, pos2(x, y), w, "Resources", &res, true, None, 1);
     }
     if !facts.company.is_empty() {
-        let c = third_party(&facts.company).then(|| theme::darken_for(pal, theme::PURPLE));
+        let c = drivers::third_party_company(&facts.company).then(|| theme::darken_for(pal, theme::PURPLE));
         y += detail_row(&p, pal, pos2(x, y), w, "Company", &facts.company, false, c, 1);
     }
     if !s.path.is_empty() {
@@ -329,19 +375,20 @@ mod tests {
     use crate::metrics::{History, Snapshot};
     use crate::process::ProcessRow;
 
-    fn service(name: &str, state: &'static str, start: &'static str, kind: &'static str, pid: u32, company: &str) -> Service {
+    fn service(name: &str, state: &'static str, start: &str, kind: &str, pid: u32, company: &str) -> Service {
         Service {
             name: name.into(),
             display: format!("{name} display"),
             state,
             running: state == "Running",
-            start,
-            kind,
+            start: start.into(),
+            kind: kind.into(),
             pid,
             path: r"C:\Windows\System32\svchost.exe".into(),
             company: company.into(),
             version: "10.0.1".into(),
             description: "A driver".into(),
+            third_party: drivers::third_party_company(company),
         }
     }
 
@@ -376,8 +423,30 @@ mod tests {
         }
     }
 
+    /// The tiles count what the backend of this OS marks: Windows start modes and Microsoft
+    /// company names, Linux enabled units and failed ones, references of modules and kexts.
     #[test]
-    fn only_non_microsoft_companies_are_third_party() {
-        assert!(third_party("Vendor") && !third_party("Microsoft Corporation") && !third_party(""));
+    fn tiles_count_per_os() {
+        let pal = theme::DARK;
+        let values = |list: &[Service], drivers: bool| tiles(&pal, list, drivers).iter().map(|t| t.value.clone()).collect::<Vec<_>>();
+        let win = vec![
+            service("Dnscache", "Running", "Automatic", "Shared process", 2112, ""),
+            service("Spooler", "Paused", "Boot", "Own process", 900, "Vendor"),
+            service("BITS", "Stopped", "Disabled", "Shared process", 0, "Microsoft Corporation"),
+        ];
+        let unix = vec![
+            service("cron", "Running", "Enabled", "Simple", 207, ""),
+            service("broken", "Failed", "Masked", "One-shot", 0, ""),
+            Service { third_party: true, ..service("nvidia", "Running", "In use", "Proprietary", 0, "") },
+            service("snd", "Running", "Unused", "In tree", 0, ""),
+        ];
+        if OS == Os::Windows {
+            assert_eq!(values(&win, false), ["1", "2", "2", "1"]);
+            assert_eq!(values(&win, true), ["1", "2", "2", "1"]);
+        } else {
+            assert_eq!(values(&unix, false), ["3", "1", "1", "1"]);
+            assert_eq!(values(&unix, true), ["3", "1", "3", "1"]);
+        }
+        assert_eq!(headings(true).len(), 8);
     }
 }
