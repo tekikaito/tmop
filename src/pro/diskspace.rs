@@ -86,9 +86,52 @@ pub fn volumes() -> Vec<Volume> {
     out
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn volumes() -> Vec<Volume> {
+    super::mounts::volumes()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn volumes() -> Vec<Volume> {
     Vec::new()
+}
+
+/// Where a first scan starts: the system drive on Windows, the home folder elsewhere (scanning
+/// `/` as a normal user mostly finds unreadable folders), else `/`.
+pub fn default_root() -> PathBuf {
+    if cfg!(windows) {
+        return PathBuf::from(std::env::var("SystemDrive").map(|d| format!("{d}\\")).unwrap_or_else(|_| "C:\\".into()));
+    }
+    std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.is_dir()).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Path names compare as this OS's default file system does: case-insensitively on Windows
+/// (NTFS) and macOS (APFS is case-insensitive unless formatted otherwise), exactly on Linux.
+pub const CASE_SENSITIVE: bool = cfg!(target_os = "linux");
+
+fn same_name(a: &str, b: &str) -> bool {
+    a == b || (!CASE_SENSITIVE && a.to_lowercase() == b.to_lowercase())
+}
+
+/// Index of the volume holding `path`: the longest volume root that contains it (so `/home`
+/// wins over `/`), compared whole components at a time and with the OS's case rule.
+pub fn volume_index(path: &str, roots: &[&str]) -> Option<usize> {
+    let fold = |s: &str| if CASE_SENSITIVE { s.to_string() } else { s.to_lowercase() };
+    let path = fold(path);
+    roots.iter().enumerate().filter(|(_, r)| !r.is_empty() && Path::new(&path).starts_with(fold(r))).max_by_key(|(_, r)| r.len()).map(|(i, _)| i)
+}
+
+/// Bytes a file takes on disk: allocated blocks off Windows (sparse files count what they use,
+/// small files a whole block, like `du`), the file length on Windows.
+#[cfg(unix)]
+pub fn allocated(md: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    md.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+pub fn allocated(md: &std::fs::Metadata) -> u64 {
+    md.len()
 }
 
 /// A file directly in one folder (see [`list_files`]).
@@ -118,7 +161,7 @@ pub fn list_files(dir: &Path) -> Result<Vec<DirFile>, String> {
         let Ok(md) = entry.metadata() else { continue };
         let name = entry.file_name().to_string_lossy().to_string();
         let hidden = is_hidden(&md, &name);
-        out.push(DirFile { name, size: md.len(), modified: mtime(&md), hidden });
+        out.push(DirFile { name, size: allocated(&md), modified: mtime(&md), hidden });
     }
     Ok(out)
 }
@@ -135,7 +178,14 @@ pub(crate) fn is_hidden(md: &std::fs::Metadata, _name: &str) -> bool {
     md.file_attributes() & (FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0) != 0
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) fn is_hidden(md: &std::fs::Metadata, name: &str) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const UF_HIDDEN: u32 = 0x8000;
+    name.starts_with('.') || md.st_flags() & UF_HIDDEN != 0
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn is_hidden(_md: &std::fs::Metadata, name: &str) -> bool {
     name.starts_with('.')
 }
@@ -381,7 +431,7 @@ impl Tree {
         (0..self.files.len()).filter(|i| self.files[*i].dir == dir).collect()
     }
 
-    /// Path of `dir` relative to `base` ("" when equal), `\`-separated.
+    /// Path of `dir` relative to `base` ("" when equal), joined with the OS's separator.
     pub fn relative_dir(&self, base: u32, dir: u32) -> String {
         let mut parts = Vec::new();
         let mut i = dir;
@@ -390,18 +440,22 @@ impl Tree {
             i = self.nodes[i as usize].parent;
         }
         parts.reverse();
-        parts.join("\\")
+        parts.join(std::path::MAIN_SEPARATOR_STR)
     }
 
-    /// Indices into `files` of the `limit` biggest files in `root`'s subtree, biggest first.
-    /// Node index of the folder at `path` (case-insensitive), if it is inside the scan.
+    /// Node index of the folder at `path`, if it is inside the scan. Names compare by the OS's
+    /// rule ([`CASE_SENSITIVE`]); an exact match always wins, so siblings `A` and `a` (possible on
+    /// any of them) each find themselves.
     pub fn find_node(&self, path: &Path) -> Option<u32> {
-        let low = |p: &Path| -> Vec<String> { p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect() };
-        let (base, target) = (low(&self.root), low(path));
-        let rel = target.strip_prefix(base.as_slice())?;
+        let parts = |p: &Path| -> Vec<String> { p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect() };
+        let (base, target) = (parts(&self.root), parts(path));
+        if target.len() < base.len() || !base.iter().zip(&target).all(|(a, b)| same_name(a, b)) {
+            return None;
+        }
         let mut cur = 0u32;
-        for name in rel {
-            cur = *self.nodes[cur as usize].children.iter().find(|&&k| !self.nodes[k as usize].removed && self.nodes[k as usize].name.to_lowercase() == *name)?;
+        for name in &target[base.len()..] {
+            let kids = || self.nodes[cur as usize].children.iter().copied().filter(|&k| !self.nodes[k as usize].removed);
+            cur = kids().find(|&k| self.nodes[k as usize].name == *name).or_else(|| kids().find(|&k| same_name(&self.nodes[k as usize].name, name)))?;
         }
         Some(cur)
     }
@@ -486,6 +540,7 @@ impl Tree {
         }
     }
 
+    /// Indices into `files` of the `limit` biggest files in `root`'s subtree, biggest first.
     pub fn largest_under(&self, root: u32, limit: usize) -> Vec<usize> {
         let mut v = self.files_under(root);
         if v.len() > limit {
@@ -790,6 +845,7 @@ mod tests {
         // Windows paths are case-insensitive.
         #[cfg(windows)]
         assert_eq!(t.find_node(Path::new("x:\\r\\A\\b")), Some(2));
+        assert_eq!(t.find_node(&hand_root().join("A").join("b")).is_some(), !CASE_SENSITIVE);
         assert_eq!(t.remove(&[2], &[]), 1100);
         assert!(t.nodes[2].removed && t.nodes[2].parent == NO_PARENT);
         assert!(t.nodes[1].children.is_empty());
@@ -805,25 +861,80 @@ mod tests {
         assert_eq!(t.nodes[0].size, 0);
     }
 
+    /// Siblings that differ only in case (Linux, case-sensitive APFS, NTFS folders with
+    /// per-directory case sensitivity): each path finds its own folder; the case-insensitive
+    /// fallback applies only where the OS folds case.
+    #[test]
+    fn find_node_tells_case_siblings_apart() {
+        let mk = |name: &str, parent: u32, children: Vec<u32>| Node { name: name.into(), parent, children, ..Default::default() };
+        let nodes = vec![mk("r", NO_PARENT, vec![1, 2]), mk("A", 0, vec![]), mk("a", 0, vec![3]), mk("only", 2, vec![])];
+        let t = Tree { root: hand_root(), nodes, ..Default::default() };
+        assert_eq!(t.find_node(&hand_root().join("A")), Some(1));
+        assert_eq!(t.find_node(&hand_root().join("a")), Some(2));
+        assert_eq!(t.find_node(&hand_root().join("a").join("only")), Some(3));
+        assert_eq!(t.find_node(&hand_root().join("A").join("only")), None, "the exact sibling A wins, and it has no child");
+        assert_eq!(t.find_node(&hand_root().join("a").join("ONLY")), if CASE_SENSITIVE { None } else { Some(3) });
+        assert_eq!(t.find_node(&hand_root()), Some(0));
+        assert_eq!(t.find_node(&hand_root().join("missing")), None);
+        assert_eq!(t.find_node(hand_root().parent().unwrap()), None, "above the scan root");
+        let upper = PathBuf::from(hand_root().to_string_lossy().to_uppercase()).join("a");
+        assert_eq!(t.find_node(&upper), if CASE_SENSITIVE { None } else { Some(2) }, "the root compares by the same rule");
+    }
+
+    #[test]
+    fn volume_by_longest_prefix() {
+        if cfg!(windows) {
+            let roots = [r"C:\", r"D:\"];
+            assert_eq!(volume_index(r"d:\games\x", &roots), Some(1));
+            assert_eq!(volume_index(r"C:\", &roots), Some(0));
+            assert_eq!(volume_index(r"E:\", &roots), None);
+        } else {
+            let roots = ["/", "/home", "/home/alex/Media", "/mnt/nas"];
+            assert_eq!(volume_index("/home/alex/x", &roots), Some(1));
+            assert_eq!(volume_index("/home/alex/Media/film", &roots), Some(2));
+            assert_eq!(volume_index("/homework", &roots), Some(0), "whole components only");
+            assert_eq!(volume_index("/usr", &roots), Some(0));
+            assert_eq!(volume_index("/mnt/nas", &roots), Some(3));
+            assert_eq!(volume_index("/HOME/alex", &roots), if CASE_SENSITIVE { Some(0) } else { Some(1) });
+            assert_eq!(volume_index("relative", &roots), None);
+        }
+        assert_eq!(volume_index("x", &[]), None);
+    }
+
+    #[test]
+    fn default_root_is_a_folder() {
+        let r = default_root();
+        assert!(r.is_absolute(), "{}", r.display());
+        if !cfg!(windows) {
+            assert!(r.is_dir(), "{}", r.display());
+        }
+    }
+
     #[test]
     fn scans_a_folder_tree() {
         let dir = std::env::temp_dir().join(format!("tmop-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("a/b")).unwrap();
         std::fs::write(dir.join("a/b/big.bin"), vec![0u8; 1 << 20]).unwrap();
-        std::fs::write(dir.join("a/small.txt"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("a/small.txt"), vec![0u8; 5000]).unwrap();
         std::fs::write(dir.join("top.txt"), vec![0u8; 10]).unwrap();
         std::fs::write(dir.join("top.bin"), vec![0u8; (1 << 20) + 512]).unwrap();
         let tree = super::super::walker::scan_blocking(&dir);
         assert_eq!(tree.method, ScanMethod::Walker);
-        assert_eq!(tree.nodes[0].size, 2 * (1 << 20) + 622);
+        // Bytes on disk: the lengths on Windows, whole blocks elsewhere.
+        let on_disk = |p: &str| allocated(&std::fs::metadata(dir.join(p)).unwrap());
+        let (big, small, top_txt, top_bin) = (on_disk("a/b/big.bin"), on_disk("a/small.txt"), on_disk("top.txt"), on_disk("top.bin"));
+        if cfg!(windows) {
+            assert_eq!((big, small, top_txt, top_bin), (1 << 20, 5000, 10, (1 << 20) + 512));
+        }
+        assert_eq!(tree.nodes[0].size, big + small + top_txt + top_bin);
         assert_eq!(tree.nodes[0].files, 4);
         let a = tree.nodes[0].children[0];
         assert_eq!(tree.nodes[a as usize].name, "a");
-        assert_eq!(tree.nodes[a as usize].size, (1 << 20) + 100);
+        assert_eq!(tree.nodes[a as usize].size, big + small);
         assert_eq!(tree.path_of(a), dir.join("a"));
         let b = tree.nodes[a as usize].children[0];
-        assert_eq!(tree.relative_dir(0, b), r"a\b");
+        assert_eq!(tree.relative_dir(0, b), format!("a{}b", std::path::MAIN_SEPARATOR));
         assert_eq!(tree.relative_dir(a, a), "");
         assert_eq!(tree.files.len(), 4, "every file is recorded");
         let now = std::time::SystemTime::now();
@@ -890,8 +1001,12 @@ mod tests {
         let mut v = list_files(&dir).unwrap();
         v.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(v.len(), 2);
-        assert_eq!((v[0].name.as_str(), v[0].size), ("x.txt", 3));
-        assert_eq!((v[1].name.as_str(), v[1].size), ("y.bin", 10));
+        let on_disk = |p: &str| allocated(&std::fs::metadata(dir.join(p)).unwrap());
+        assert_eq!((v[0].name.as_str(), v[0].size), ("x.txt", on_disk("x.txt")));
+        assert_eq!((v[1].name.as_str(), v[1].size), ("y.bin", on_disk("y.bin")));
+        if cfg!(windows) {
+            assert_eq!((v[0].size, v[1].size), (3, 10));
+        }
         assert!(v.iter().all(|f| f.modified.is_some() && !f.hidden));
         let e = list_files(&dir.join("missing")).unwrap_err();
         assert!(e.contains("no longer exists"), "{e}");
