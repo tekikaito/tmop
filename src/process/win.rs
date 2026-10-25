@@ -17,7 +17,6 @@ use windows::Win32::System::Threading::{
 };
 
 pub(crate) const SYSTEM_PROCESS_INFORMATION_CLASS: u32 = 5;
-pub(crate) const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS: u32 = 8;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 const MAX_BUFFER: usize = 64 * 1024 * 1024; // safety limit
 
@@ -95,11 +94,6 @@ fn all_threads_suspended(buf: &[u8], first_thread: usize, n: usize) -> bool {
         }
     }
     true
-}
-
-/// Raw SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION array (processor group 0).
-pub fn query_processor_performance(size: usize) -> Result<Vec<u8>, String> {
-    query_system_information(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS, size)
 }
 
 /// x64 SYSTEM_PROCESS_INFORMATION (fixed part, 256 bytes).
@@ -265,6 +259,7 @@ impl Enumerator {
                 handles: spi.handle_count,
                 session_id: spi.session_id,
                 base_priority: spi.base_priority,
+                priority: None,
                 private_working_set: spi.working_set_private_size.max(0) as u64,
                 working_set: spi.working_set_size as u64,
                 commit: spi.pagefile_usage as u64,

@@ -8,7 +8,10 @@
 mod win;
 
 #[cfg(windows)]
-pub use win::{actions, query_processor_performance, Enumerator};
+pub use win::{actions, Enumerator};
+/// Moved to the metrics backend; kept here for old callers.
+#[cfg(windows)]
+pub use crate::metrics::query_processor_performance;
 
 use std::cmp::Ordering;
 
@@ -22,19 +25,24 @@ pub struct ProcessRow {
     pub threads: u32,
     pub handles: u32,
     pub session_id: u32,
+    /// NT base priority (Windows only; 0 elsewhere).
     pub base_priority: i32,
+    /// The priority class, from backends without NT base priorities (nice / Mach priorities).
+    /// None on Windows, where it is derived from `base_priority`.
+    pub priority: Option<Priority>,
     /// Private working set (bytes) - what Windows Task Manager shows as "Memory".
     pub private_working_set: u64,
     pub working_set: u64,
     /// Commit charge (private bytes).
     pub commit: u64,
     pub cpu_pct: f32,
-    /// Total CPU time in 100 ns units.
+    /// Total CPU time in 100 ns units (backends convert clock ticks or Mach time).
     pub cpu_time: u64,
     /// Read+write transfer rate (bytes/s); includes non-disk I/O.
     pub io_bps: f64,
     pub gpu_pct: f32,
-    /// Creation FILETIME (100 ns since 1601), used to detect PID reuse.
+    /// Opaque, monotonic creation stamp used to detect PID reuse (Windows: FILETIME, 100 ns
+    /// since 1601; other backends their own start-time unit).
     pub create_time: i64,
     /// Efficiency mode was turned on for this process by this app.
     pub efficiency: bool,
@@ -53,7 +61,8 @@ pub struct ProcessRow {
     pub description: Option<String>,
 }
 
-/// Status values: Running, Suspended, Not responding (Stopped/Exited are not shown).
+/// Status values: Running, Suspended, Not responding (Stopped/Exited are not shown; Unix
+/// backends report a zombie as Running and a stopped process as Suspended).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Status {
     #[default]

@@ -9,7 +9,7 @@ use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
 use super::{App, Device, FrameData};
 use crate::docker::model::{Container, EngineStatus};
-use crate::metrics::Series;
+use crate::metrics::{Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
 use std::collections::{HashMap, HashSet};
@@ -141,9 +141,24 @@ impl App {
         self.docker_visible() && self.docker.last_status == EngineStatus::Connected
     }
 
+    /// Whether `d` is in the device list and the strip: Docker per [`App::docker_listed`],
+    /// Thermals where this machine has a temperature source (or a hint for one).
+    fn device_listed(&self, d: Device) -> bool {
+        match d {
+            Device::Docker => self.docker_listed(),
+            Device::Thermal => self.caps.thermal,
+            _ => true,
+        }
+    }
+
     pub fn performance_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         // Still connecting is not a reason to leave the page; a disabled or unreachable engine is.
-        if self.device == Device::Docker && (!self.docker_visible() || self.docker.last_status == EngineStatus::Unreachable) {
+        let gone = match self.device {
+            Device::Docker => !self.docker_visible() || self.docker.last_status == EngineStatus::Unreachable,
+            Device::Thermal => !self.caps.thermal,
+            _ => false,
+        };
+        if gone {
             self.device = Device::Cpu;
         }
         if self.device == Device::Cpu {
@@ -237,7 +252,7 @@ impl App {
         let c = fd.metric(d.key());
         match d {
             Device::Cpu => {
-                let ghz = s.cpu.current_mhz.map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
+                let ghz = s.cpu.current_mhz.filter(|_| self.caps.clocks).map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
                 DevView { value: format!("{:.0}%{ghz}", s.cpu.total_pct), lines: vec![(&fd.hist.cpu, c, (0.0, 100.0))], dashed_second: false }
             }
             Device::Memory => DevView {
@@ -250,10 +265,11 @@ impl App {
                 lines: vec![(&fd.hist.gpu, c, (0.0, 100.0))],
                 dashed_second: false,
             },
-            Device::Disk => DevView { value: format!("{:.0}%", s.disk.active_pct), lines: vec![(&fd.hist.disk, c, (0.0, 100.0))], dashed_second: false },
+            Device::Disk => DevView { value: if s.disk_known() { format!("{:.0}%", s.disk.active_pct) } else { "\u{2014}".to_string() }, lines: vec![(&fd.hist.disk, c, (0.0, 100.0))], dashed_second: false },
             Device::Network => {
                 let peak = fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(1024.0);
-                DevView { value: rate_pair(s.network.rx_bps, s.network.tx_bps), lines: vec![(&fd.hist.net_rx, c, (0.0, peak)), (&fd.hist.net_tx, c, (0.0, peak))], dashed_second: true }
+                let value = if s.net_known() { rate_pair(s.network.rx_bps, s.network.tx_bps) } else { "\u{2014}".to_string() };
+                DevView { value, lines: vec![(&fd.hist.net_rx, c, (0.0, peak)), (&fd.hist.net_tx, c, (0.0, peak))], dashed_second: true }
             }
             Device::Thermal => DevView {
                 value: s.thermal.max_c().map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string()),
@@ -268,11 +284,10 @@ impl App {
     fn device_list(&self, ui: &mut egui::Ui, list: Rect, fd: &FrameData<'_>, act: &mut Option<Act>) {
         let pal = fd.pal;
         let p = ui.painter().clone();
-        let docker_listed = self.docker_listed();
         let top = ui.cursor().min;
         let mut y = top.y;
         for d in Device::ALL {
-            if d == Device::Docker && !docker_listed {
+            if !self.device_listed(d) {
                 continue;
             }
             let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), DEVICE_CARD_H));
@@ -345,7 +360,7 @@ impl App {
                 let (ph, hover) = plot(ui, &pc, "cpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let temp = s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string());
-                    let ghz = s.cpu.current_mhz.map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
+                    let ghz = s.cpu.current_mhz.filter(|_| self.caps.clocks).map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
                     let l3 = if det.l3 > 0 { format!(" \u{b7} L3 {}", format_bytes(det.l3 as f64)) } else { String::new() };
                     let die = format!("{}C / {}T{ghz}{l3}", det.cores, threads);
                     let ghz_of = |m: Option<u32>| m.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "\u{2014}".to_string());
@@ -368,7 +383,7 @@ impl App {
                 if figure {
                     let m = &s.memory;
                     let pair = |a: u64, b: u64| format!("{} / {}", format_bytes(a as f64), format_bytes(b as f64));
-                    let labels = [("Heat spreader", pair(used, m.total)), ("DRAM chips", format!("{:.0}% in use", m.used_pct)), ("PCB", format!("{} cached", format_bytes(m.cached as f64))), ("Slot", format!("commit {}", pair(m.commit_used, m.commit_limit)))];
+                    let labels = [("Heat spreader", pair(used, m.total)), ("DRAM chips", format!("{:.0}% in use", m.used_pct)), ("PCB", format!("{} cached", format_bytes(m.cached as f64))), ("Slot", dash_or(m.commit_used.zip(m.commit_limit).map(|(u, l)| format!("commit {}", pair(u, l)))))];
                     figure_at(&p, &pal, Exploded::Memory, ix + gw, cy, 200.0, &labels);
                 }
                 cy += ph + 10.0;
@@ -387,22 +402,24 @@ impl App {
                 let items: Vec<(&str, Color32)> = parts.iter().map(|(t, c)| (t.as_str(), *c)).collect();
                 widgets::legend(&p, pos2(ix, bar.bottom() + 16.0), &items, theme::ui(12.0));
                 cy = bar.bottom() + 34.0;
-                let mut facts = vec![
-                    ("In use".to_string(), format_bytes(used as f64)),
-                    ("Available".to_string(), format_bytes(s.memory.available as f64)),
-                    ("Committed".to_string(), format!("{} / {}", format_bytes(s.memory.commit_used as f64), format_bytes(s.memory.commit_limit as f64))),
-                    ("Cached".to_string(), format_bytes(s.memory.cached as f64)),
-                    ("Page file".to_string(), format_bytes(s.memory.commit_limit.saturating_sub(s.memory.total) as f64)),
-                ];
-                if let Some(swap) = s.memory.swap_used {
-                    facts.push(("Page file in use".to_string(), format_bytes(swap as f64)));
+                let mut facts = vec![("In use".to_string(), format_bytes(used as f64)), ("Available".to_string(), format_bytes(s.memory.available as f64))];
+                if let (Some(u), Some(l)) = (s.memory.commit_used, s.memory.commit_limit) {
+                    facts.push(("Committed".to_string(), format!("{} / {}", format_bytes(u as f64), format_bytes(l as f64))));
+                }
+                facts.push(("Cached".to_string(), format_bytes(s.memory.cached as f64)));
+                let swap = crate::platform::swap_word();
+                if let Some(total) = s.memory.swap_total {
+                    facts.push((swap.to_string(), format_bytes(total as f64)));
+                }
+                if let Some(used) = s.memory.swap_used {
+                    facts.push((format!("{swap} in use"), format_bytes(used as f64)));
                 }
                 cy += dl(&p, &pal, ix, cy, iw, &facts);
             }
             Device::Gpu => {
                 let c = fd.metric("gpu");
                 let value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
-                let hd = Head { title: "GPU", sub: "Busiest engine of the busiest adapter (PDH GPU Engine counters)".into(), value, side: String::new() };
+                let hd = Head { title: "GPU", sub: SOURCES.gpu.into(), value, side: String::new() };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.gpu, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.gpu, age));
@@ -423,7 +440,7 @@ impl App {
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Utilization", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
                 if !s.gpu.available {
-                    p.text(pos2(ix, cy), Align2::LEFT_TOP, "No GPU Engine performance counters were reported.", theme::ui(12.0), theme::status(&pal).warn);
+                    p.text(pos2(ix, cy), Align2::LEFT_TOP, SOURCES.no_gpu, theme::ui(12.0), theme::status(&pal).warn);
                     cy += 22.0;
                 }
                 for (e, v) in s.gpu.engines.iter().take(6) {
@@ -432,17 +449,17 @@ impl App {
                     p.text(pos2(ix + iw, cy + 8.0), Align2::RIGHT_CENTER, format!("{v:.0}%"), theme::mono(12.0), pal.text_table());
                     cy += 24.0;
                 }
-                let facts = vec![
-                    ("Utilization".to_string(), format!("{:.1}%", s.gpu.utilization_pct)),
-                    ("Dedicated memory in use".to_string(), format_bytes(s.gpu.dedicated_used as f64)),
-                    ("Engines reported".to_string(), s.gpu.engines.len().to_string()),
-                ];
+                let mut facts = vec![("Utilization".to_string(), format!("{:.1}%", s.gpu.utilization_pct)), ("Dedicated memory in use".to_string(), format_bytes(s.gpu.dedicated_used as f64))];
+                if self.caps.gpu_engines {
+                    facts.push(("Engines reported".to_string(), s.gpu.engines.len().to_string()));
+                }
                 cy += dl(&p, &pal, ix, cy + 4.0, iw, &facts) + 4.0;
             }
             Device::Disk => {
                 let c = fd.metric("disk");
                 let write = theme::status(&pal).warn;
-                let hd = Head { title: "Disk", sub: "Active time (all physical disks)".into(), value: (format!("{:.0}", fd.smooth.disk), "%".into()), side: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) };
+                let value = if s.disk_known() { (format!("{:.0}", fd.smooth.disk), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
+                let hd = Head { title: "Disk", sub: SOURCES.disk.into(), value, side: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.disk, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.disk, age));
@@ -467,8 +484,8 @@ impl App {
             }
             Device::Network => {
                 let c = fd.metric("network");
-                let (num, unit) = split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps));
-                let hd = Head { title: "Network", sub: "Throughput (GetIfTable2, all adapters)".into(), value: (num, unit), side: format!("{:.2}% of link", s.network.utilization_pct) };
+                let (num, unit) = if s.net_known() { split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps)) } else { ("\u{2014}".to_string(), String::new()) };
+                let hd = Head { title: "Network", sub: SOURCES.network.into(), value: (num, unit), side: format!("{:.2}% of link", s.network.utilization_pct) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
                 let lines = [PlotLine::new(&fd.hist.net_rx, c, (0.0, m)), PlotLine::new(&fd.hist.net_tx, c, (0.0, m)).dashed(c)];
@@ -493,7 +510,7 @@ impl App {
             }
             Device::Thermal => {
                 let c = fd.metric("thermal");
-                let src = if s.thermal.sources.is_empty() { "ACPI thermal zones (firmware sensors, not the CPU package)".to_string() } else { s.thermal.sources.clone() };
+                let src = if s.thermal.sources.is_empty() { SOURCES.thermal.to_string() } else { s.thermal.sources.clone() };
                 let value = match s.thermal.max_c() {
                     Some(t) => split_unit(&self.temp(t)),
                     None => ("\u{2014}".to_string(), String::new()),
@@ -519,7 +536,7 @@ impl App {
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Hottest sensor", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
                 if s.thermal.max_c().is_none() {
-                    p.text(pos2(ix, cy), Align2::LEFT_TOP, format!("No temperature source available. {}.", crate::metrics::HWINFO_HINT), theme::ui(12.0), theme::status(&pal).warn);
+                    p.text(pos2(ix, cy), Align2::LEFT_TOP, format!("No temperature source available. {}.", SOURCES.thermal_hint), theme::ui(12.0), theme::status(&pal).warn);
                     cy += 20.0;
                 } else {
                     let mut facts: Vec<(String, String)> = s.thermal.cpu.iter().map(|(l, c)| (l.clone(), self.temp(*c))).collect();
@@ -590,8 +607,7 @@ impl App {
     fn other_resources(&self, ui: &mut egui::Ui, fd: &FrameData<'_>, x: f32, y: f32, w: f32, act: &mut Option<Act>) -> f32 {
         let pal = fd.pal;
         let p = ui.painter().clone();
-        let docker_listed = self.docker_listed();
-        let others: Vec<Device> = Device::ALL.into_iter().filter(|d| *d != self.device && (*d != Device::Docker || docker_listed)).collect();
+        let others: Vec<Device> = Device::ALL.into_iter().filter(|d| *d != self.device && self.device_listed(*d)).collect();
         if others.is_empty() {
             return 0.0;
         }
@@ -631,14 +647,17 @@ impl App {
         let (lw, rw) = if wide { ((w - GAP) * 0.6, (w - GAP) * 0.4) } else { (w, w) };
 
         // Facts under the cores.
-        let facts = [
-            ("Speed".to_string(), s.cpu.current_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "N/A".into())),
-            ("Temp".to_string(), s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".into())),
-            ("Processes".to_string(), s.process_count.to_string()),
-            ("Threads".to_string(), s.thread_count.to_string()),
-            ("Handles".to_string(), s.handle_count.to_string()),
-            ("Up time".to_string(), super::fmt_hms(s.uptime)),
-        ];
+        let facts: Vec<(String, String)> = [
+            self.caps.clocks.then(|| ("Speed".to_string(), s.cpu.current_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "N/A".into()))),
+            self.caps.thermal.then(|| ("Temp".to_string(), s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".into()))),
+            Some(("Processes".to_string(), s.process_count.to_string())),
+            Some(("Threads".to_string(), s.thread_count.to_string())),
+            s.handle_count.map(|h| (SOURCES.handles.to_string(), h.to_string())),
+            Some(("Up time".to_string(), super::fmt_hms(s.uptime))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let c_w = lw - 44.0;
         let n = fd.hist.per_core.len();
         let show_cores = self.cpus_expanded() && n > 0;
@@ -783,10 +802,15 @@ impl App {
         let yes_no = |b: Option<bool>| b.map(|v| if v { "Yes" } else { "No" }.to_string()).unwrap_or_else(|| "Unknown".into());
         let plan = self.pro.power.ok().map(|i| i.scheme_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "\u{2014}".into());
         let ghz = |m: Option<u32>| m.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "N/A".into());
-        let items: Vec<(String, String, bool, Option<Color32>)> = [
+        let clocks = [
             ("Base speed", ghz(s.cpu.base_mhz)),
             ("Boost speed", ghz(s.cpu.boost_mhz)),
             ("Fastest core", s.cpu.per_core_mhz.iter().max().map(|m| format!("{:.2} GHz", *m as f32 / 1000.0)).unwrap_or_else(|| "N/A".into())),
+        ];
+        let items: Vec<(String, String, bool, Option<Color32>)> = clocks
+            .into_iter()
+            .filter(|_| self.caps.clocks)
+            .chain([
             ("Kernel time", format!("{:.1}%", s.cpu.kernel_pct)),
             ("Power plan", plan),
             ("Sockets", det.sockets.max(1).to_string()),
@@ -798,8 +822,7 @@ impl App {
             ("L2 cache", format_bytes(det.l2 as f64)),
             ("L3 cache", format_bytes(det.l3 as f64)),
             ("Fast Startup", yes_no(det.fast_startup)),
-        ]
-        .into_iter()
+        ])
         .map(|(k, v)| (k.to_string(), v, false, None))
         .collect();
         let cols = if w >= 900.0 { 3 } else if w >= 560.0 { 2 } else { 1 };
