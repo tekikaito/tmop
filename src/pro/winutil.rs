@@ -171,12 +171,6 @@ fn decode(ty: REG_VALUE_TYPE, data: Vec<u8>) -> Value {
     }
 }
 
-/// True when the process runs elevated (administrator token).
-pub fn is_elevated() -> bool {
-    // SAFETY: no arguments.
-    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
-}
-
 /// Path of a known folder (`FOLDERID_*`).
 pub fn known_folder(id: &windows::core::GUID) -> Option<std::path::PathBuf> {
     use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};

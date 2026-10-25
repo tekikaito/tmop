@@ -54,17 +54,12 @@ pub fn send(_title: &str, _body: &str) -> Result<(), String> {
 /// toasts still work without the registration, only the app name may be missing.
 #[cfg(windows)]
 fn register_app_id() {
-    use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let key = format!(r"HKCU\Software\Classes\AppUserModelId\{APP_ID}");
-    let _ = Command::new("reg")
-        .args(["add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", APP_ID, "/f"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
+    let mut cmd = Command::new("reg");
+    cmd.args(["add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", APP_ID, "/f"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::platform::hide_console(&mut cmd);
+    let _ = cmd.status();
 }
 
 #[cfg(windows)]

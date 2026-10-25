@@ -685,7 +685,7 @@ pub fn log_line(stamp: &str, mode: Mode, size: u64, result: &Result<(), String>,
 }
 
 pub fn default_log() -> PathBuf {
-    super::data_dir().join("deletions.log")
+    crate::platform::data_dir().join("deletions.log")
 }
 
 /// Runs on a worker thread. Callers should have removed Blocked targets; with `rules` every target
@@ -979,17 +979,6 @@ pub fn recycle_limit_known(_: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------- elevation
-
-pub fn is_elevated() -> bool {
-    #[cfg(windows)]
-    {
-        super::winutil::is_elevated()
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
 
 /// Command line for the elevated copy. Windows argv parsing reads `\"` as a literal quote, so a
 /// backslash run at the end of the quoted root (`C:\`) is doubled.

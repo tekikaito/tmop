@@ -236,14 +236,14 @@ impl App {
         let pal = fd.pal;
         let inv = &mut self.pro.inv;
         if inv.sysinfo.poll() && inv.sysinfo.ok().is_some() {
-            let (_, _, _, h, m, s) = crate::pro::local_time();
+            let (_, _, _, h, m, s) = crate::platform::local_time();
             inv.sysinfo_read_at = Some((h, m, s));
         }
         let sections = inv.sysinfo.ok().cloned();
         let get = |sec: &str, k: &str| -> String {
             sections.as_ref().and_then(|s| s.iter().find(|x| x.0 == sec)).and_then(|x| x.1.iter().find(|r| r.0 == k)).map(|r| r.1.clone()).unwrap_or_default()
         };
-        let computer = Some(get("Device", "Computer name")).filter(|c| !c.is_empty()).or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_default();
+        let computer = Some(get("Device", "Computer name")).filter(|c| !c.is_empty()).or_else(crate::platform::hostname).unwrap_or_default();
         let read = inv.sysinfo_read_at.map(|(h, m, s)| format!("read {h:02}:{m:02}:{s:02}")).unwrap_or_default();
         let body = self.page_title(ui, &pal, "System Info", &subtitle(&[computer.clone(), read, Page::SystemInfo.shortcut().into()]));
         let mut refresh = false;
@@ -275,7 +275,7 @@ impl App {
             StatTile::new("Windows", windows, format!("build {}", get("Operating system", "OS build"))),
             StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get("Processor and memory", "Processor") } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
             StatTile::new("Memory", format_bytes(s.memory.total as f64), if installed.is_empty() { String::new() } else { format!("{installed} installed") }).bar(fd.smooth.memory / 100.0, theme::darken_for(&pal, theme::INDIGO)),
-            StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::pro::local_time(), s.uptime))])),
+            StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::platform::local_time(), s.uptime))])),
         ];
 
         // Cards flow into as many columns as fit, each below the shortest so far.
@@ -406,7 +406,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.startup.poll();
         let count = self.pro.inv.startup.ok().map(|l| format!("{} entries", l.len())).unwrap_or_default();
-        let boot = format!("last boot {}", boot_label(crate::pro::local_time(), fd.snap.uptime));
+        let boot = format!("last boot {}", boot_label(crate::platform::local_time(), fd.snap.uptime));
         let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, Page::StartupApps.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {

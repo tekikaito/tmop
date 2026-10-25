@@ -224,7 +224,7 @@ pub fn apply(on: bool) -> Result<(), ApplyError> {
 /// Turns the replacement on (this exe) or off, elevating through the helper when needed.
 /// Blocks until the helper has finished; call it off the UI thread.
 pub fn set(on: bool) -> Result<(), String> {
-    if win::is_elevated() {
+    if crate::platform::is_elevated() {
         return apply(on).map_err(|e| describe_exit(code(Err(e))));
     }
     let arg = format!("{HELPER_ARG}{}", if on { "on" } else { "off" });
@@ -298,7 +298,7 @@ mod win {
     };
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows::Win32::System::Threading::{CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, WaitForSingleObject, DEBUG_ONLY_THIS_PROCESS, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
-    use windows::Win32::UI::Shell::{FOLDERID_Downloads, IsUserAnAdmin, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, SW_HIDE};
 
     pub fn read_value() -> Option<String> {
@@ -363,10 +363,6 @@ mod win {
         Ok(())
     }
 
-    pub fn is_elevated() -> bool {
-        // SAFETY: no arguments.
-        unsafe { IsUserAnAdmin().as_bool() }
-    }
 
     /// Starts this exe elevated with `args`. With `wait`, returns its exit code.
     pub fn run_elevated(args: &str, wait: bool) -> Result<i32, String> {
@@ -420,7 +416,7 @@ mod win {
     pub fn open_real() -> Result<(), String> {
         // Started without admin rights, Task Manager restarts itself elevated, and that restart
         // goes through the replacement again. So it is always started from an elevated copy.
-        if !is_elevated() {
+        if !crate::platform::is_elevated() {
             return run_elevated(super::OPEN_REAL_ARG, false).map(|_| ());
         }
         let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
@@ -526,9 +522,6 @@ mod win {
     }
     pub fn delete_value() -> Result<(), i32> {
         Ok(())
-    }
-    pub fn is_elevated() -> bool {
-        false
     }
     pub fn run_elevated(_: &str, _: bool) -> Result<i32, String> {
         Err("only available on Windows".into())

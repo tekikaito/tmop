@@ -33,7 +33,7 @@ pub struct VolumeInfo {
 pub fn eligible(root: &Path) -> Option<VolumeInfo> {
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
-    if !super::winutil::is_elevated() {
+    if !crate::platform::is_elevated() {
         return None;
     }
     let s = root.to_string_lossy();
@@ -862,7 +862,7 @@ mod tests {
     fn reads_system_volume_mft() {
         use super::super::diskspace::{ScanMethod, ScanShared};
         use std::sync::Mutex;
-        if !crate::pro::winutil::is_elevated() {
+        if !crate::platform::is_elevated() {
             eprintln!("skipped: not elevated");
             return;
         }

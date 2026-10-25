@@ -152,7 +152,7 @@ pub struct Bench {
 
 
 pub fn results_path() -> PathBuf {
-    super::data_dir().join("benchmarks.json")
+    crate::platform::data_dir().join("benchmarks.json")
 }
 
 impl Bench {

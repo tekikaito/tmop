@@ -2,7 +2,7 @@
 name = "tmop"
 version = "0.5.2"
 edition = "2021"
-description = "TMOP (Task Manager OverPowered): a skinnable Windows system monitor in Rust, compatible with TMOG skins and settings"
+description = "TMOP (Task Manager OverPowered): a skinnable system monitor for Windows, Linux and macOS in Rust, compatible with TMOG skins and settings"
 publish = false
 license = "GPL-3.0-only"
 repository = "https://github.com/tekikaito/tmop"
@@ -79,6 +79,16 @@ features = [
     "UI_Notifications",
     "Win32_UI_LegacyWindowsEnvironmentFeatures",
 ]
+
+# localtime_r, gethostname and geteuid for src/platform.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The x11 and wayland features of egui-winit (eframe's own x11/wayland features would add ~46 never-built
+# wgpu crates to Cargo.lock through weak `egui-wgpu?/...` features, cargo#10801). They make
+# `with_app_id` reach Wayland and X11 window types work; winit itself already has both backends.
+[target.'cfg(target_os = "linux")'.dependencies]
+egui-winit = { version = "0.29.1", default-features = false, features = ["x11", "wayland"] }
 
 [dev-dependencies]
 

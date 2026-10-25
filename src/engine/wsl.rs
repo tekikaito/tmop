@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::platform::CREATE_NO_WINDOW;
 /// Upper bound for `--import` and `--unregister`, which copy or delete a whole VHD.
 const LONG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Upper bound for quick status queries and `--terminate`.
