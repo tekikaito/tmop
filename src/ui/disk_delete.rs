@@ -533,8 +533,9 @@ impl App {
             }
             if no_bin {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Without a {} these items can only be deleted for good.", trash_word())).font(theme::ui(12.0)).color(pal.text_dim));
-                    go_permanent = Button::danger("Delete permanently instead\u{2026}").size(ButtonSize::Small).show(ui, pal).clicked();
+                    ui.label(RichText::new(format!("Items without a {} can only be deleted for good.", trash_word())).font(theme::ui(12.0)).color(pal.text_dim));
+                    // It turns the whole selection into a permanent delete (shown again to confirm).
+                    go_permanent = Button::danger("Delete all permanently instead\u{2026}").size(ButtonSize::Small).show(ui, pal).clicked();
                 });
                 ui.add_space(4.0);
             }
