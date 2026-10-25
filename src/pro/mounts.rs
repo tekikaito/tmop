@@ -159,6 +159,13 @@ pub struct MountTable {
     pub drives: Vec<(String, char)>,
 }
 
+/// The deepest of `points` that holds the absolute `path`, compared whole components at a time
+/// (`/home` holds `/home/me`, not `/homework`).
+pub fn mount_of<'a>(path: &str, points: &'a [String]) -> Option<&'a str> {
+    let p = std::path::Path::new(path);
+    points.iter().filter(|m| m.starts_with('/') && p.starts_with(m.as_str())).max_by_key(|m| m.len()).map(String::as_str)
+}
+
 /// The drive letter of a WSL `drvfs` mount (9p with a `C:\` source on WSL 2, `drvfs` on WSL 1).
 pub fn wsl_drive(m: &Mount) -> Option<char> {
     if !matches!(m.fs.as_str(), "9p" | "drvfs") {
@@ -380,6 +387,18 @@ garbage line
         assert_eq!(wsl_drive(&m("9p", "drivers")), None);
         assert_eq!(wsl_drive(&m("ext4", "C:\\")), None);
         assert_eq!(wsl_drive(&m("9p", "C:\\x")), None);
+    }
+
+    #[test]
+    fn mount_of_picks_the_deepest_whole_component_match() {
+        let t = table_linux(&parse_mountinfo(MOUNTINFO));
+        assert_eq!(mount_of("/home/alex/x", &t.points), Some("/home"));
+        assert_eq!(mount_of("/home", &t.points), Some("/home"));
+        assert_eq!(mount_of("/homework/x", &t.points), Some("/"));
+        assert_eq!(mount_of("/run/media/alex/My Stick/a b", &t.points), Some("/run/media/alex/My Stick"));
+        assert_eq!(mount_of("/srv/www/index.html", &t.points), Some("/srv/www"), "a bind mount is its own mount");
+        assert_eq!(mount_of("/x", &[]), None);
+        assert_eq!(mount_of("relative/x", &t.points), None);
     }
 
     #[test]

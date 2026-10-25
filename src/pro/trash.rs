@@ -110,16 +110,20 @@ pub fn unique_name(name: &[u8], n: u32) -> Vec<u8> {
 
 // ---------------------------------------------------------------- the per-volume check
 
-/// Asks [`unavailable`] and [`limit_known`] once per volume of a batch of items.
+/// Asks [`unavailable`] and [`limit_known`] once per volume of a batch of items: per drive on
+/// Windows, per mount (mount point and file system) on Linux and macOS.
 #[derive(Default)]
 pub struct Volumes {
     seen: Vec<(String, Option<String>, bool)>,
+    /// Mount points, read on the first check.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    points: Option<Vec<String>>,
 }
 
 impl Volumes {
     /// (why `path` cannot go to the bin, the bin keeps everything) for the volume of `path`.
     pub fn check(&mut self, path: &Path) -> (Option<String>, bool) {
-        let key = volume_key(path);
+        let key = self.key(path);
         if let Some((_, why, capped)) = self.seen.iter().find(|(k, ..)| *k == key) {
             return (why.clone(), *capped);
         }
@@ -127,9 +131,28 @@ impl Volumes {
         self.seen.push((key, why.clone(), capped));
         (why, capped)
     }
+
+    /// The mount `path` is on: the mount point holding its (resolved) parent and the file system
+    /// of the nearest existing item. A bind mount of a folder of the same file system is a
+    /// separate key: its Trash is decided from a different top folder.
+    fn key(&mut self, path: &Path) -> String {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let points = self.points.get_or_insert_with(|| super::mounts::table().points);
+            if let Some((a, m)) = path.ancestors().find_map(|a| std::fs::symlink_metadata(a).ok().map(|m| (a, m))) {
+                // The parent, resolved: the item itself may be a link to another mount.
+                let real = a.parent().filter(|p| !p.as_os_str().is_empty()).and_then(|p| std::fs::canonicalize(p).ok()).unwrap_or_else(|| a.to_path_buf());
+                let point = super::mounts::mount_of(&real.to_string_lossy(), points).unwrap_or("");
+                return format!("{point}\n{}", m.dev());
+            }
+        }
+        volume_key(path)
+    }
 }
 
-/// The drive (Windows) or the file system (`st_dev`) of `path`.
+/// The drive (Windows) or the file system (`st_dev`, other Unix targets) of `path`; its first
+/// component when nothing of it exists.
 fn volume_key(path: &Path) -> String {
     #[cfg(unix)]
     {
