@@ -629,7 +629,7 @@ impl App {
         let Some(p) = self.pro.clean.pending.as_mut() else { return };
         let st = theme::status(pal);
         let a = p.assessed.as_ref();
-        let capped = a.map(|a| a.bin_capped).unwrap_or(false);
+        let capped = a.map(|a| a.bin_capped).unwrap_or(!cfg!(windows)); // off Windows the Trash keeps everything
         let vols = p.vols.clone();
         let live = |v: &Verdict| !matches!(v, Verdict::Blocked(_));
         // (category, items, bytes) of what will actually be deleted.
@@ -744,27 +744,49 @@ impl App {
         let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
         self.pro.del.job.start(move || {
-            let mut report = Report { mode: Mode::Permanent, ..Default::default() };
-            for (mode, targets) in groups {
-                let r = diskdelete::run(targets, mode, rules.as_deref());
-                report.deleted.extend(r.deleted);
-                report.skipped.extend(r.skipped);
-                report.freed += r.freed;
-            }
-            if let Some(bytes) = bin {
-                let res = trash::empty();
-                log_entry(trash_word(), bytes, &res);
-                match res {
-                    Ok(()) => report.freed += bytes,
-                    Err(e) => report.skipped.push((Target { path: PathBuf::from(trash_word()), size: bytes, is_dir: false, node: None, file: None }, e)),
-                }
-            }
-            purge_vols(&vols, &drive, &mut report);
+            let report = clean_job(
+                groups,
+                bin,
+                |bytes| {
+                    let res = trash::empty();
+                    log_entry(trash_word(), bytes, &res);
+                    res
+                },
+                |targets, mode| diskdelete::run(targets, mode, rules.as_deref()),
+                |report| purge_vols(&vols, &drive, report),
+            );
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
             let clean = Some(CleanDone { requery, recycle_bin: cleanup::measure_recycle_bin() });
             Ok(JobOut { report, tree, epoch, clean })
         });
     }
+}
+
+/// The steps of a Clean up job. The bin is emptied (`empty`) and the Windows handlers purged
+/// (`purge`, which may include the Recycle Bin) before any category runs (`del`): emptying
+/// afterwards would destroy for good what the bin categories had just moved there.
+fn clean_job(
+    groups: Vec<(Mode, Vec<Target>)>,
+    bin: Option<u64>,
+    empty: impl FnOnce(u64) -> Result<(), String>,
+    mut del: impl FnMut(Vec<Target>, Mode) -> Report,
+    purge: impl FnOnce(&mut Report),
+) -> Report {
+    let mut report = Report { mode: Mode::Permanent, ..Default::default() };
+    if let Some(bytes) = bin {
+        match empty(bytes) {
+            Ok(()) => report.freed += bytes,
+            Err(e) => report.skipped.push((Target { path: PathBuf::from(trash_word()), size: bytes, is_dir: false, node: None, file: None }, e)),
+        }
+    }
+    purge(&mut report);
+    for (mode, targets) in groups {
+        let r = del(targets, mode);
+        report.deleted.extend(r.deleted);
+        report.skipped.extend(r.skipped);
+        report.freed += r.freed;
+    }
+    report
 }
 
 /// One `deletions.log` line for a purge by Windows (`label` is the Recycle Bin or `cleanmgr:<handler id>`).
@@ -823,6 +845,35 @@ mod tests {
 
     fn measured(cat: Category, items: Vec<CleanItem>) -> Measured {
         Measured { cat, bytes: items.iter().map(|i| i.size).sum(), count: items.len() as u64, items, error: None }
+    }
+
+    /// "Empty Trash" together with "Old Downloads" (moved to the Trash): the bin is emptied
+    /// first, so what the job itself moves there survives and can still be restored.
+    #[test]
+    fn emptying_the_bin_never_destroys_what_the_same_job_recycles() {
+        use std::cell::RefCell;
+        let bin: RefCell<Vec<PathBuf>> = RefCell::new(vec![PathBuf::from("/old/in-bin.txt")]);
+        let purged = RefCell::new(false);
+        let t = |p: &str| Target { path: PathBuf::from(p), size: 10, is_dir: false, node: None, file: None };
+        let groups = vec![(Mode::Recycle, vec![t("/home/me/Downloads/tax-2019.pdf")]), (Mode::Permanent, vec![t("/home/me/.cache/x")])];
+        let rep = clean_job(
+            groups,
+            Some(5),
+            |_| {
+                bin.borrow_mut().clear();
+                Ok(())
+            },
+            |targets, mode| {
+                assert!(*purged.borrow(), "the Windows handlers (Recycle Bin among them) run before the categories");
+                if mode == Mode::Recycle {
+                    bin.borrow_mut().extend(targets.iter().map(|t| t.path.clone()));
+                }
+                Report { freed: targets.iter().map(|t| t.size).sum(), deleted: targets, ..Default::default() }
+            },
+            |_| *purged.borrow_mut() = true,
+        );
+        assert_eq!(*bin.borrow(), [PathBuf::from("/home/me/Downloads/tax-2019.pdf")]);
+        assert_eq!((rep.freed, rep.deleted.len()), (25, 2));
     }
 
     #[test]
