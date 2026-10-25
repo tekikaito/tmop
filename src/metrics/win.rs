@@ -418,6 +418,8 @@ impl Collector {
     }
 
     fn network(&mut self, snap: &mut Snapshot) {
+        // Like the disk: Windows always shows the network readouts (0 B/s if GetIfTable2 fails).
+        snap.network.available = true;
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         if unsafe { GetIfTable2(&mut table) }.is_err() || table.is_null() {
             snap.errors.push("GetIfTable2 failed".into());
