@@ -321,10 +321,21 @@ mod io {
         if !std::path::Path::new("/run/systemd/system").is_dir() {
             return Err("This system does not run systemd. TMOP lists services through systemctl.".into());
         }
-        let show = parse_show(&run_capture("systemctl", &["show", "--type=service", "--all", "--no-pager", "-p", SHOW_PROPS], TIMEOUT)?);
-        let units = run_capture("systemctl", &["list-units", "--type=service", "--all", "--output=json", "--no-pager"], TIMEOUT)
-            .and_then(|j| parse_units_json(&j))
-            .unwrap_or_else(|_| units_from_show(&show));
+        let show_all = || run_capture("systemctl", &["show", "--type=service", "--all", "--no-pager", "-p", SHOW_PROPS], TIMEOUT).map(|t| parse_show(&t));
+        // `systemctl show` without unit names lists the units only on newer systemd (249, as on
+        // Ubuntu 22.04, prints the manager instead), so the loaded units are named explicitly.
+        let (units, show) = match run_capture("systemctl", &["list-units", "--type=service", "--all", "--output=json", "--no-pager"], TIMEOUT).and_then(|j| parse_units_json(&j)) {
+            Ok(units) if !units.is_empty() => {
+                let mut args = vec!["show", "--no-pager", "-p", SHOW_PROPS, "--"];
+                args.extend(units.iter().map(|u| u.unit.as_str()));
+                let show = run_capture("systemctl", &args, TIMEOUT).map(|t| parse_show(&t)).or_else(|_| show_all())?;
+                (units, show)
+            }
+            _ => {
+                let show = show_all()?;
+                (units_from_show(&show), show)
+            }
+        };
         let files = run_capture("systemctl", &["list-unit-files", "--type=service", "--output=json", "--no-pager"], TIMEOUT).and_then(|j| parse_unit_files_json(&j)).unwrap_or_default();
         Ok(build_services(&units, &files, &show))
     }
