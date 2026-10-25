@@ -1,9 +1,17 @@
 name: Release
 
 # Push a tag like v0.2.0 (matching `version` in Cargo.toml) to build and publish a release.
+# Run it by hand (workflow_dispatch) for a dry run: everything is built, packaged and checked
+# against the expected asset list and left as workflow artifacts, but no release is created.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Dry run: version used in the asset names (default: v + the Cargo.toml version)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -12,8 +20,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  meta:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check tag matches Cargo.toml version
+        id: tag
+        shell: pwsh
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          $tag = if ($env:TAG) { $env:TAG } else { "v$version" }
+          if ("v$version" -ne $tag) {
+            Write-Error "Tag $tag does not match Cargo.toml version $version"
+            exit 1
+          }
+          "tag=$tag" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
   build:
     name: Build ${{ matrix.name }}
+    needs: meta
     runs-on: windows-latest
     strategy:
       fail-fast: true
@@ -27,15 +58,6 @@ jobs:
             test: false
     steps:
       - uses: actions/checkout@v5
-
-      - name: Check tag matches Cargo.toml version
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            Write-Error "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
-            exit 1
-          }
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,7 +77,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $name = "TMOP-${{ github.ref_name }}-${{ matrix.name }}"
+          $name = "TMOP-${{ needs.meta.outputs.tag }}-${{ matrix.name }}"
           $dir = "dist\$name"
           New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\TMOP.exe" $dir
@@ -80,8 +102,120 @@ jobs:
             dist/*.exe.sha256
           if-no-files-found: error
 
+  # Built on 22.04 for a glibc 2.35 floor. The GUI stack loads X11, Wayland and GL with dlopen,
+  # so neither the build nor the AppImage needs -dev packages or bundled libraries.
+  linux:
+    name: Build ${{ matrix.name }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x64
+            arch: x64
+            os: ubuntu-22.04
+            test: true
+          - name: linux-arm64
+            arch: arm64
+            os: ubuntu-22.04-arm
+            test: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      # The docker_* suites need an engine and run in CI only.
+      - name: Test
+        if: matrix.test
+        run: cargo test --locked --lib --bins
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Package
+        run: packaging/linux/package.sh "${{ needs.meta.outputs.tag }}" ${{ matrix.arch }} target/release/TMOP dist
+
+      - name: Check the AppImage
+        run: |
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/dist/TMOP-linux-${{ matrix.arch }}.AppImage" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/tmop
+          grep -qx 'StartupWMClass=tmop' squashfs-root/tmop.desktop
+          test -f squashfs-root/usr/share/icons/hicolor/1024x1024/apps/tmop.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: Build macos-universal
+    needs: meta
+    runs-on: macos-14
+    env:
+      # All optional. Without them the app is signed ad hoc and not notarized.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+
+      - name: Test
+        run: cargo test --locked --target aarch64-apple-darwin --lib --bins
+
+      - name: Build
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12 != '' && env.MACOS_SIGN_IDENTITY != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Package
+        run: |
+          # A signing identity is only usable after the import above.
+          if [ -z "$MACOS_CERT_P12" ]; then unset MACOS_SIGN_IDENTITY; fi
+          packaging/macos/package.sh "${{ needs.meta.outputs.tag }}" \
+            target/aarch64-apple-darwin/release/TMOP target/x86_64-apple-darwin/release/TMOP dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*
+          if-no-files-found: error
+
   engine:
     name: Build engine ${{ matrix.arch }}
+    needs: meta
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
@@ -98,7 +232,7 @@ jobs:
         run: sh -n engine/rootfs/usr/local/bin/tmop-engine
 
       - name: Build rootfs
-        run: engine/build.sh ${{ github.ref_name }} ${{ matrix.arch }} dist
+        run: engine/build.sh ${{ needs.meta.outputs.tag }} ${{ matrix.arch }} dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,8 +241,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
-    needs: [build, engine]
+    name: ${{ github.event_name == 'push' && 'Publish GitHub release' || 'Check release assets (dry run)' }}
+    needs: [meta, build, linux, macos, engine]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -116,11 +250,44 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The app pins its engine download to its own version, and the download page and install
+      # scripts use the version-less names from releases/latest, so every file must be there.
+      - name: Check assets
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          ls -l dist
+          expected=()
+          for arch in x64 arm64; do
+            expected+=("TMOP-$TAG-windows-$arch.zip" "TMOP-windows-$arch.exe")
+            expected+=("TMOP-$TAG-linux-$arch.tar.gz" "TMOP-linux-$arch.tar.gz" "TMOP-linux-$arch")
+            expected+=("TMOP-$TAG-linux-$arch.AppImage" "TMOP-linux-$arch.AppImage")
+            expected+=("tmop-engine-$TAG-$arch.tar.gz")
+          done
+          expected+=("TMOP-$TAG-macos-universal.zip" "TMOP-macos-universal.zip")
+          expected+=("TMOP-$TAG-macos-universal.dmg" "TMOP-macos-universal.dmg")
+          status=0
+          for file in "${expected[@]}"; do
+            for f in "$file" "$file.sha256"; do
+              [ -f "dist/$f" ] || { echo "::error::missing release asset $f"; status=1; }
+            done
+            if [ -f "dist/$file" ] && [ -f "dist/$file.sha256" ]; then
+              # The Windows jobs write CRLF line ends.
+              (cd dist && tr -d '\r' < "$file.sha256" | sha256sum -c --quiet -) || { echo "::error::checksum mismatch for $file"; status=1; }
+            fi
+          done
+          count=$(find dist -maxdepth 1 -type f | wc -l)
+          if [ "$count" -ne $(( ${#expected[@]} * 2 )) ]; then
+            echo "::error::expected $(( ${#expected[@]} * 2 )) release assets, found $count"
+            status=1
+          fi
+          exit $status
+
       - name: Create release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -l dist
           gh release create "${{ github.ref_name }}" dist/* \
             --repo "${{ github.repository }}" \
             --title "TMOP ${{ github.ref_name }}" \
