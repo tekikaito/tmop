@@ -262,6 +262,11 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
     }
+    // A Wayland compositor without server-side decorations (GNOME): TMOP's header becomes the
+    // title bar instead of winit's bare fallback frame.
+    if !popout_only && tmop::platform::desktop::own_title_bar() {
+        viewport = viewport.with_decorations(false);
+    }
     if popout_only {
         let skins = tmop::skin::scan(&tmop::skin::default_skin_dirs());
         let skin = skins.get(&settings.popout.skin).cloned().unwrap_or_else(tmop::skin::Skin::classic);
