@@ -272,6 +272,9 @@ impl App {
             ("running", pal.accent)
         } else if queued {
             ("queued", pal.text_faint)
+        } else if latest.is_some_and(|l| l.buffered) {
+            // Direct I/O was refused: the value may include the OS cache (the details say so).
+            ("buffered", st.warn)
         } else if latest.is_some() {
             ("done", st.ok)
         } else {
@@ -327,7 +330,10 @@ impl App {
             widgets::draw_icon(&clip, Rect::from_center_size(pos2(tr.right() + 8.0, tr.center().y), vec2(9.0, 9.0)), Icon::Play, label_c);
         }
         let resp = match self.bench.best(t) {
-            Some(b) if !running => resp.on_hover_text(format!("Best {} {}", format_value(t, b), t.unit())),
+            Some(b) if !running => {
+                let note = if latest.is_some_and(|l| l.buffered) { format!("\nLatest: {}", crate::pro::bench::BUFFERED_NOTE) } else { String::new() };
+                resp.on_hover_text(format!("Best {} {}{note}", format_value(t, b), t.unit()))
+            }
             _ => resp,
         };
         if !running && resp.clicked() {

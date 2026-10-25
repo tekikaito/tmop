@@ -119,6 +119,8 @@ pub struct BenchResult {
     /// Local time the test finished (`YYYY-MM-DD HH:MM:SS`).
     pub when: String,
     pub detail: String,
+    /// A disk result measured through the OS page cache (direct I/O refused).
+    pub buffered: bool,
 }
 
 /// Live state of a run, shared with the UI.
@@ -262,6 +264,7 @@ fn run_all(tests: &[Test], disk_dir: &Path, shared: &Mutex<Shared>, cancel: &Ato
                 }
             });
         };
+        let mut buffered = false;
         let outcome: Result<(f64, String), String> = match t {
             Test::CpuSingle => Ok(cpu_test(1, t.budget(), cancel, &live)),
             Test::CpuMulti => {
@@ -281,18 +284,20 @@ fn run_all(tests: &[Test], disk_dir: &Path, shared: &Mutex<Shared>, cancel: &Ato
                     }
                 }
                 let f = disk_file.as_mut().expect("temp file");
-                match t {
+                let r = match t {
                     Test::DiskWrite => f.write_test(t.budget(), cancel, &live),
                     Test::DiskRead => f.read_test(t.budget(), cancel, &live),
                     _ => f.random_test(t.budget(), cancel, &live),
-                }
+                };
+                buffered = f.buffered;
+                r
             }
         };
         let cancelled = cancel.load(Ordering::Relaxed);
         match outcome {
             Ok((value, detail)) if !cancelled && value.is_finite() && value > 0.0 => {
                 if let Ok(mut g) = shared.lock() {
-                    g.results.push(BenchResult { test: *t, value, when: super::display_stamp(), detail });
+                    g.results.push(BenchResult { test: *t, value, when: super::display_stamp(), detail, buffered });
                 }
             }
             Ok(_) => {}
@@ -472,32 +477,111 @@ impl Drop for AlignedBuf {
 pub struct TempFile {
     pub path: PathBuf,
     written: u64,
+    /// The file system refused direct I/O: the tests ran through the OS page cache.
+    pub buffered: bool,
 }
 
-fn open_unbuffered(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
-    let mut o = std::fs::OpenOptions::new();
-    if write {
-        o.write(true).create(true).truncate(true);
-    } else {
-        o.read(true);
-    }
+/// Opens the test file bypassing the OS page cache where the file system allows it: no
+/// buffering plus write-through on Windows, `O_DIRECT` (+ `O_DSYNC` for writes) on Linux,
+/// `F_NOCACHE` (+ `O_DSYNC`) on macOS. The flag is false when the cache is not bypassed (some
+/// file systems refuse `O_DIRECT`); the file is then opened buffered.
+fn open_unbuffered(path: &Path, write: bool) -> std::io::Result<(std::fs::File, bool)> {
+    let options = || {
+        let mut o = std::fs::OpenOptions::new();
+        if write {
+            o.write(true).create(true).truncate(true);
+        } else {
+            o.read(true);
+        }
+        o
+    };
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
         const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
         const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+        let mut o = options();
         o.custom_flags(FILE_FLAG_NO_BUFFERING | if write { FILE_FLAG_WRITE_THROUGH } else { 0 });
         o.attributes(FILE_ATTRIBUTE_TEMPORARY);
+        o.open(path).map(|f| (f, true))
     }
-    o.open(path)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let open = |direct: bool| options().custom_flags(if write { libc::O_DSYNC } else { 0 } | if direct { libc::O_DIRECT } else { 0 }).open(path);
+        match open(true) {
+            Ok(f) => Ok((f, true)),
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => open(false).map(|f| (f, false)),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let f = options().custom_flags(if write { libc::O_DSYNC } else { 0 }).open(path)?;
+        // SAFETY: fcntl on a descriptor we own; F_NOCACHE takes an int argument.
+        let direct = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_NOCACHE, 1) } != -1;
+        Ok((f, direct))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        options().open(path).map(|f| (f, false))
+    }
+}
+
+/// Evicts a buffered test file's cached pages so reads reach the disk where they can (Linux;
+/// nothing to evict on tmpfs, whose pages are the file). Only used when the cache is not bypassed.
+fn drop_cache(f: &std::fs::File) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: advisory call on a descriptor we own; offset 0 and length 0 cover the whole file.
+        unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = f;
+}
+
+/// Ends the detail of a disk result measured through the OS page cache.
+pub const BUFFERED_NOTE: &str = "buffered: this file system refuses direct I/O, so the OS cache may inflate the result";
+
+/// True when the error is the file system refusing direct I/O on a file it let us open.
+#[cfg(unix)]
+fn refuses_direct(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EINVAL)
+}
+
+#[cfg(not(unix))]
+fn refuses_direct(_e: &std::io::Error) -> bool {
+    false
 }
 
 impl TempFile {
     pub fn create(dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join(format!("tmop-bench-{}-{}.tmp", std::process::id(), super::file_stamp()));
-        Ok(Self { path, written: 0 })
+        Ok(Self { path, written: 0, buffered: false })
+    }
+
+    /// Opens the file for reading the way the write test managed to write it.
+    fn open_read(&self) -> Result<std::fs::File, String> {
+        let f = if self.buffered { std::fs::File::open(&self.path) } else { open_unbuffered(&self.path, false).map(|(f, _)| f) };
+        let f = f.map_err(|e| e.to_string())?;
+        if self.buffered {
+            drop_cache(&f);
+        }
+        Ok(f)
+    }
+
+    /// `detail` plus the buffered note when the cache was not bypassed.
+    fn note(&self, detail: String) -> String {
+        if self.buffered {
+            format!("{detail}, {BUFFERED_NOTE}")
+        } else {
+            detail
+        }
     }
 
     fn write_test(&mut self, budget: Duration, cancel: &AtomicBool, live: &dyn Fn(f32, Option<f32>)) -> Result<(f64, String), String> {
@@ -508,7 +592,8 @@ impl TempFile {
         if cap < CHUNK as u64 * 4 {
             return Err("not enough free space for the disk test".into());
         }
-        let mut f = open_unbuffered(&self.path, true).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let (mut f, direct) = open_unbuffered(&self.path, true).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.buffered = !direct;
         let mut buf = AlignedBuf::new(CHUNK);
         let mut x = 0x9E37_79B9u64;
         for b in buf.as_mut().chunks_mut(8) {
@@ -521,7 +606,16 @@ impl TempFile {
         let mut window = (Instant::now(), 0u64);
         self.written = 0;
         while self.written < cap && start.elapsed() < budget && !cancel.load(Ordering::Relaxed) {
-            f.write_all(buf.as_mut()).map_err(|e| e.to_string())?;
+            match f.write_all(buf.as_mut()) {
+                Ok(()) => {}
+                // Opened with O_DIRECT but the file system refuses it on write: go buffered.
+                Err(e) if !self.buffered && self.written == 0 && refuses_direct(&e) => {
+                    self.buffered = true;
+                    f = std::fs::OpenOptions::new().write(true).truncate(true).open(&self.path).map_err(|e| e.to_string())?;
+                    continue;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
             self.written += CHUNK as u64;
             if window.0.elapsed() >= Duration::from_millis(100) {
                 let rate = (self.written - window.1) as f64 / window.0.elapsed().as_secs_f64() / 1e6;
@@ -532,7 +626,7 @@ impl TempFile {
         }
         f.sync_all().map_err(|e| e.to_string())?;
         let secs = start.elapsed().as_secs_f64();
-        Ok((self.written as f64 / secs / 1e6, format!("{} MiB in {secs:.1} s, {}", self.written >> 20, self.path.parent().map(|p| p.display().to_string()).unwrap_or_default())))
+        Ok((self.written as f64 / secs / 1e6, self.note(format!("{} MiB in {secs:.1} s, {}", self.written >> 20, self.path.parent().map(|p| p.display().to_string()).unwrap_or_default()))))
     }
 
     fn read_test(&mut self, budget: Duration, cancel: &AtomicBool, live: &dyn Fn(f32, Option<f32>)) -> Result<(f64, String), String> {
@@ -540,7 +634,7 @@ impl TempFile {
         if self.written == 0 {
             return Err("run the write test first".into());
         }
-        let mut f = open_unbuffered(&self.path, false).map_err(|e| e.to_string())?;
+        let mut f = self.open_read()?;
         let mut buf = AlignedBuf::new(CHUNK);
         let start = Instant::now();
         let mut read = 0u64;
@@ -550,6 +644,9 @@ impl TempFile {
             if n == 0 {
                 use std::io::Seek;
                 f.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+                if self.buffered {
+                    drop_cache(&f);
+                }
                 continue;
             }
             read += n as u64;
@@ -560,7 +657,7 @@ impl TempFile {
             }
         }
         let secs = start.elapsed().as_secs_f64();
-        Ok((read as f64 / secs / 1e6, format!("{} MiB in {secs:.1} s", read >> 20)))
+        Ok((read as f64 / secs / 1e6, self.note(format!("{} MiB in {secs:.1} s", read >> 20))))
     }
 
     fn random_test(&mut self, budget: Duration, cancel: &AtomicBool, live: &dyn Fn(f32, Option<f32>)) -> Result<(f64, String), String> {
@@ -568,7 +665,7 @@ impl TempFile {
         if self.written == 0 {
             return Err("run the write test first".into());
         }
-        let mut f = open_unbuffered(&self.path, false).map_err(|e| e.to_string())?;
+        let mut f = self.open_read()?;
         let mut buf = AlignedBuf::new(ALIGN);
         let blocks = self.written / ALIGN as u64;
         let mut x = 0xDEAD_BEEFu64;
@@ -590,7 +687,7 @@ impl TempFile {
         }
         let secs = start.elapsed().as_secs_f64();
         let iops = ops as f64 / secs;
-        Ok((iops, format!("{:.1} MB/s, {:.0} \u{b5}s average", iops * ALIGN as f64 / 1e6, 1e6 / iops.max(1e-9))))
+        Ok((iops, self.note(format!("{:.1} MB/s, {:.0} \u{b5}s average", iops * ALIGN as f64 / 1e6, 1e6 / iops.max(1e-9)))))
     }
 }
 
@@ -615,6 +712,7 @@ fn load_results(path: &Path) -> Vec<BenchResult> {
                 value: v.get("value")?.as_f64()?,
                 when: v.get("when").and_then(|w| w.as_str()).unwrap_or_default().to_string(),
                 detail: v.get("detail").and_then(|w| w.as_str()).unwrap_or_default().to_string(),
+                buffered: v.get("buffered").and_then(|b| b.as_bool()).unwrap_or(false),
             })
         })
         .collect()
@@ -626,7 +724,14 @@ fn save_results(path: &Path, results: &[BenchResult]) -> std::io::Result<()> {
     }
     let arr: Vec<serde_json::Value> = results
         .iter()
-        .map(|r| serde_json::json!({ "test": r.test.id(), "value": r.value, "when": r.when, "detail": r.detail }))
+        .map(|r| {
+            let mut v = serde_json::json!({ "test": r.test.id(), "value": r.value, "when": r.when, "detail": r.detail });
+            // Only written when set, so files stay as they were where the cache is always bypassed.
+            if r.buffered {
+                v["buffered"] = true.into();
+            }
+            v
+        })
         .collect();
     std::fs::write(path, serde_json::to_string_pretty(&serde_json::Value::Array(arr)).unwrap_or_default())
 }
@@ -657,7 +762,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(windows), ignore = "diskspace::free_space has no Unix backend yet, so the write test refuses to run")]
     fn disk_tests_are_bounded_and_clean_up() {
         let dir = std::env::temp_dir().join(format!("tmop-bench-test-{}", std::process::id()));
         let cancel = AtomicBool::new(false);
@@ -668,13 +772,22 @@ mod tests {
             let t = Instant::now();
             let w = f.write_test(Duration::from_millis(300), &cancel, &|_, _| {});
             assert!(t.elapsed() < Duration::from_secs(20));
-            let (mbps, _) = w.expect("write test");
+            let (mbps, detail) = w.expect("write test");
             assert!(mbps > 0.0);
             assert!(path.exists());
+            // Windows always bypasses the cache; elsewhere the result says when it could not.
+            assert!(!(cfg!(windows) && f.buffered));
+            assert_eq!(detail.ends_with(BUFFERED_NOTE), f.buffered, "{detail}");
             let (r, _) = f.read_test(Duration::from_millis(200), &cancel, &|_, _| {}).expect("read test");
             assert!(r > 0.0);
             let (iops, _) = f.random_test(Duration::from_millis(200), &cancel, &|_, _| {}).expect("random test");
             assert!(iops > 0.0);
+            // The buffered fallback reads the same file and labels its results.
+            f.buffered = true;
+            let (r, detail) = f.read_test(Duration::from_millis(100), &cancel, &|_, _| {}).expect("buffered read test");
+            assert!(r > 0.0 && detail.ends_with(BUFFERED_NOTE), "{detail}");
+            let (iops, detail) = f.random_test(Duration::from_millis(100), &cancel, &|_, _| {}).expect("buffered random test");
+            assert!(iops > 0.0 && detail.ends_with(BUFFERED_NOTE), "{detail}");
         }
         assert!(!path.exists(), "temp file must be deleted");
         let _ = std::fs::remove_dir_all(&dir);
@@ -698,9 +811,14 @@ mod tests {
     #[test]
     fn results_roundtrip() {
         let p = std::env::temp_dir().join(format!("tmop-bench-results-{}.json", std::process::id()));
-        let r = vec![BenchResult { test: Test::DiskRead, value: 123.5, when: "2026-01-01 00:00:00".into(), detail: "x".into() }];
+        let r = vec![
+            BenchResult { test: Test::DiskRead, value: 123.5, when: "2026-01-01 00:00:00".into(), detail: "x".into(), buffered: false },
+            BenchResult { test: Test::DiskWrite, value: 99.0, when: "2026-01-01 00:00:01".into(), detail: "y".into(), buffered: true },
+        ];
         save_results(&p, &r).unwrap();
         assert_eq!(load_results(&p), r);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text.matches("buffered").count(), 1, "only set flags are written: {text}");
         let _ = std::fs::remove_file(&p);
     }
 }
