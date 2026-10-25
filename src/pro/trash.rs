@@ -121,8 +121,13 @@ pub struct Volumes {
 }
 
 impl Volumes {
-    /// (why `path` cannot go to the bin, the bin keeps everything) for the volume of `path`.
+    /// (why `path` cannot go to the bin, the bin keeps everything) for the volume of `path`. An
+    /// item that no longer exists is no question of the volume (its siblings share the key): it
+    /// passes uncached, and moving it reports that it is gone.
     pub fn check(&mut self, path: &Path) -> (Option<String>, bool) {
+        if std::fs::symlink_metadata(path).is_err() {
+            return (None, true);
+        }
         let key = self.key(path);
         if let Some((_, why, capped)) = self.seen.iter().find(|(k, ..)| *k == key) {
             return (why.clone(), *capped);
@@ -770,12 +775,19 @@ mod mac {
     /// `NSFileManager trashItemAtURL:resultingItemURL:error:`, which records where the item came
     /// from, so the Finder's Put Back works.
     pub fn trash(path: &Path) -> Result<(), String> {
+        trash_to(path).map(|_| ())
+    }
+
+    /// [`trash`], also giving where the item went (when the system says).
+    pub fn trash_to(path: &Path) -> Result<Option<std::path::PathBuf>, String> {
         use objc2_foundation::{NSFileManager, NSString, NSURL};
         let md = std::fs::symlink_metadata(path).map_err(|e| crate::pro::diskdelete::short_error(&e))?;
         let s = path.to_str().ok_or("the name is not valid UTF-8")?;
         objc2::rc::autoreleasepool(|_| {
             let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(s), md.is_dir());
-            NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| e.localizedDescription().to_string())
+            let mut went = None;
+            NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, Some(&mut went)).map_err(|e| e.localizedDescription().to_string())?;
+            Ok(went.and_then(|u| u.to_file_path()))
         })
     }
 }
@@ -831,11 +843,17 @@ mod tests {
     #[test]
     fn volumes_are_asked_once() {
         let mut v = Volumes::default();
-        let here = std::env::temp_dir();
-        let a = v.check(&here.join("tmop-trash-a"));
-        let b = v.check(&here.join("tmop-trash-b"));
-        assert_eq!(a, b);
+        let here = std::env::temp_dir().join(format!("tmop-trash-vols-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        let (a, b) = (here.join("a"), here.join("b"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        // A sibling that is gone first: it is not asked about, and nothing is remembered for it.
+        assert_eq!(v.check(&here.join("gone")), (None, true));
+        assert!(v.seen.is_empty());
+        assert_eq!(v.check(&a), v.check(&b));
         assert_eq!(v.seen.len(), 1);
+        let _ = std::fs::remove_dir_all(&here);
     }
 
     #[test]
@@ -845,6 +863,28 @@ mod tests {
         if cfg!(not(windows)) {
             assert!(limit_known(Path::new("/x")), "the Trash has no size limit");
         }
+    }
+
+    /// NSFileManager moves a temp file into the user's Trash (Put Back recorded by the system):
+    /// it leaves its folder and turns up in a `.Trash` / `.Trashes` folder, then is removed there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_trashes_a_temp_file() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("tmop-mac-trash-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(mac::unavailable(&dir), None, "the temp folder is on a local, writable volume");
+        assert_eq!(unavailable(&dir.join("not-yet")), None, "decided by the volume, not the item");
+        let f = dir.join("tmop trash me.txt");
+        std::fs::write(&f, b"x").unwrap();
+        let went = mac::trash_to(&f).unwrap();
+        assert!(std::fs::symlink_metadata(&f).is_err(), "still in its folder");
+        let went = went.expect("the system says where the item went");
+        assert!(std::fs::symlink_metadata(&went).is_ok(), "{}", went.display());
+        assert!(went.ancestors().any(|a| a.file_name().is_some_and(|n| n == ".Trash" || n == ".Trashes")), "{}", went.display());
+        let _ = std::fs::remove_file(&went);
+        assert!(mac::trash(&f).is_err(), "a missing item is an error, nothing else is moved");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "linux")]

@@ -859,7 +859,9 @@ mod tests {
     #[test]
     fn bin_items_without_a_bin_are_skipped_not_deleted_permanently() {
         let mk = |p: &str| Assessed { target: Target { path: PathBuf::from(p), size: 1, is_dir: false, node: None, file: None }, verdict: Verdict::Allowed };
-        let mut items = vec![mk("x"), Assessed { verdict: Verdict::Blocked("protected".into()), ..mk("y") }];
+        // An item that exists (a missing one is not a question of its volume's bin).
+        let x = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let mut items = vec![mk(x), Assessed { verdict: Verdict::Blocked("protected".into()), ..mk("y") }];
         let mut vols = trash::Volumes::default();
         let (n, _) = diskdelete::block_untrashable(&mut items, &mut vols);
         // Whatever this host says about the bin of "x", a missing one blocks it with the reason.
