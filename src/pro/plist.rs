@@ -73,9 +73,20 @@ struct Binary<'a> {
     count: usize,
     top: usize,
     table: usize,
+    /// What is left to build: one per object visited plus the bytes of each string. Objects can
+    /// be shared, so a small file could otherwise expand exponentially (an array holding the same
+    /// array twice, 40 levels deep).
+    budget: std::cell::Cell<usize>,
 }
 
 impl<'a> Binary<'a> {
+    /// Takes `n` from the budget; false once it is spent.
+    fn spend(&self, n: usize) -> bool {
+        let left = self.budget.get();
+        self.budget.set(left.saturating_sub(n));
+        left >= n
+    }
+
     fn new(b: &'a [u8]) -> Option<Self> {
         if b.len() < 8 + 32 {
             return None;
@@ -84,7 +95,10 @@ impl<'a> Binary<'a> {
         let (off_size, ref_size) = (t[6] as usize, t[7] as usize);
         let (count, top, table) = (be(&t[8..16]) as usize, be(&t[16..24]) as usize, be(&t[24..32]) as usize);
         let ok = (1..=8).contains(&off_size) && (1..=8).contains(&ref_size) && top < count && count.checked_mul(off_size).and_then(|n| n.checked_add(table)).is_some_and(|end| end <= b.len() - 32);
-        ok.then_some(Self { b, off_size, ref_size, count, top, table })
+        // A plist without shared containers visits each reference once; strings shared by many
+        // dicts (CFBinaryPList writes each key once) produce at most a few times the file size.
+        let budget = std::cell::Cell::new(b.len().saturating_mul(64).saturating_add(1 << 16));
+        ok.then_some(Self { b, off_size, ref_size, count, top, table, budget })
     }
 
     fn offset(&self, i: usize) -> Option<usize> {
@@ -115,7 +129,7 @@ impl<'a> Binary<'a> {
 
     /// Object `i` (the top object when None).
     fn object(&self, i: Option<usize>, depth: usize) -> Option<Value> {
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || !self.spend(1) {
             return None;
         }
         let at = self.offset(i.unwrap_or(self.top))?;
@@ -142,10 +156,16 @@ impl<'a> Binary<'a> {
             0x4 => Value::Data,
             0x5 | 0x7 => {
                 let (n, start) = self.len(at, nib)?;
+                if !self.spend(n) {
+                    return None;
+                }
                 Value::Str(String::from_utf8_lossy(self.b.get(start..start.checked_add(n)?)?).into_owned())
             }
             0x6 => {
                 let (n, start) = self.len(at, nib)?;
+                if !self.spend(n.saturating_mul(2)) {
+                    return None;
+                }
                 let raw = self.b.get(start..start.checked_add(n.checked_mul(2)?)?)?;
                 Value::Str(String::from_utf16_lossy(&raw.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>()))
             }
@@ -484,5 +504,18 @@ mod tests {
         assert!(parse(&ok).is_some());
         assert_eq!(parse(&ok[..ok.len() - 3]), None);
         assert_eq!(parse(&bplist(&[vec![0xA1, 7], ascii("x")])), None);
+    }
+
+    #[test]
+    fn shared_objects_cannot_blow_up() {
+        // Object k is [k+1, k+1]: 2^40 visits as a tree, from a file of a few hundred bytes.
+        let mut objs: Vec<Vec<u8>> = (1..=40u8).map(|k| vec![0xA2, k, k]).collect();
+        objs.push(ascii("leaf"));
+        let started = std::time::Instant::now();
+        assert_eq!(parse(&bplist(&objs)), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // A little sharing (a key used by several dicts) is fine.
+        let shared = bplist(&[vec![0xA2, 1, 1], vec![0xD1, 2, 3], ascii("Label"), ascii("x")]);
+        assert_eq!(parse(&shared).and_then(|v| v.as_array().map(|a| a.len())), Some(2));
     }
 }
