@@ -574,7 +574,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.services.poll();
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
-        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, "Service Control Manager".into(), Page::Services.shortcut().into()]));
+        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {
             refresh = Button::new("Refresh").show(ui, &pal).clicked();

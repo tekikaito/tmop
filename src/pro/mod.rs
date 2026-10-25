@@ -9,7 +9,8 @@
 //! * [`power`]        power scheme, processor policy, battery
 //! * [`connections`]  TCP/UDP endpoints with owning process
 //! * [`apps`]         installed applications (Uninstall registry keys)
-//! * [`drivers`]      kernel driver services and loaded kernel modules
+//! * [`drivers`]      drivers and services (SCM; systemd and kernel modules; launchd and kexts)
+//! * [`plist`]        property-list reader (XML and binary) for the macOS backends
 //! * [`cleanup`]      Disk Space cleanup categories and their measuring
 //! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
 //! * [`mft`]          NTFS Master File Table reader (fast scan method when elevated)
@@ -27,6 +28,7 @@ pub mod drivers;
 pub mod icons;
 pub mod inventory;
 pub mod mft;
+pub mod plist;
 pub mod power;
 pub mod recorder;
 #[cfg(windows)]
