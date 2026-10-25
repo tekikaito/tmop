@@ -63,7 +63,10 @@ impl App {
         let mut stop = false;
         let mut mode_click = None;
         toolbar(ui, tools, |ui| {
-            mode_click = widgets::segmented(ui, &["Analyze", "Clean up"], self.pro.disk_mode as usize, &pal, false);
+            // Clean up lists Windows categories only; it stays hidden elsewhere until it has its own.
+            if self.pro.del.delete_safe || self.caps.volcache {
+                mode_click = widgets::segmented(ui, &["Analyze", "Clean up"], self.pro.disk_mode as usize, &pal, false);
+            }
             if progress.running {
                 stop = Button::danger("Stop scan").icon(Icon::Stop).show(ui, &pal).clicked();
             } else if Button::primary("Scan").icon(Icon::Play).show(ui, &pal).clicked() {

@@ -7,12 +7,10 @@ use std::process::Command;
 
 /// `~/Library/Application Support/TMOP`: settings, palettes, recordings, skins.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| h.is_absolute())
-        .map(|h| h.join("Library").join("Application Support"))
-        .unwrap_or_else(std::env::temp_dir)
-        .join(crate::APP_DIR)
+    match super::unix::home() {
+        Some(h) => h.join("Library").join("Application Support").join(crate::APP_DIR),
+        None => super::unix::private_temp(crate::APP_DIR),
+    }
 }
 
 /// Same as [`data_dir`]: macOS keeps preferences files next to app data.

@@ -689,9 +689,19 @@ pub fn default_log() -> PathBuf {
 }
 
 /// Runs on a worker thread. Callers should have removed Blocked targets; with `rules` every target
-/// is classified once more right before it is deleted and Blocked ones are skipped.
+/// is classified once more right before it is deleted and Blocked ones are skipped. Where
+/// [`Caps::delete_safe`](crate::platform::Caps) is off nothing is touched and every target is skipped.
 pub fn run(targets: Vec<Target>, mode: Mode, rules: Option<&Rules>) -> Report {
+    if !crate::platform::Caps::get().delete_safe {
+        return refuse_all(targets, mode);
+    }
     run_with_log(targets, mode, Some(&default_log()), rules)
+}
+
+/// Every target skipped, nothing deleted or logged: deleting is not offered on this OS yet.
+fn refuse_all(targets: Vec<Target>, mode: Mode) -> Report {
+    let why = format!("deleting is not available on {} yet", crate::platform::os_name());
+    Report { skipped: targets.into_iter().map(|t| (t, why.clone())).collect(), mode, ..Default::default() }
 }
 
 /// Why `path` must never be deleted whatever the rules say (pure, no I/O).
@@ -699,7 +709,7 @@ pub(crate) fn refuse_reason(path: &Path) -> Option<&'static str> {
     (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
 }
 
-pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
+fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
     let mut rep = Report { mode, ..Default::default() };
     let mut log_file = log.and_then(|p| {
         if let Some(d) = p.parent() {

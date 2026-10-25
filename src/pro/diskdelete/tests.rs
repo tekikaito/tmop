@@ -465,3 +465,16 @@ fn trailing_dot_or_space_names_are_detected() {
         assert!(!folds_to_sibling(Path::new(p)), "{p}");
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn run_deletes_nothing_while_delete_is_off() {
+    assert!(!crate::platform::Caps::get().delete_safe);
+    let f = std::env::temp_dir().join(format!("tmop-del-off-{}.txt", std::process::id()));
+    std::fs::write(&f, b"x").unwrap();
+    let rep = run(vec![target(&f, 1, false)], Mode::Permanent, None);
+    assert!(f.exists());
+    let _ = std::fs::remove_file(&f);
+    assert!(rep.deleted.is_empty());
+    assert_eq!(rep.skipped.len(), 1);
+}

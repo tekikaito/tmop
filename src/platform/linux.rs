@@ -7,18 +7,22 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The process environment, with `HOME` from the passwd entry when it is unset or relative.
 fn env(key: &str) -> Option<std::ffi::OsString> {
+    if key == "HOME" {
+        return super::unix::home().map(PathBuf::into_os_string);
+    }
     std::env::var_os(key)
 }
 
 /// `$XDG_DATA_HOME/tmop` (`~/.local/share/tmop`): recordings, benchmarks, skins, logs.
 pub fn data_dir() -> PathBuf {
-    xdg::data_dir(&env).unwrap_or_else(|| std::env::temp_dir().join(xdg::DIR))
+    xdg::data_dir(&env).unwrap_or_else(|| super::unix::private_temp(xdg::DIR))
 }
 
 /// `$XDG_CONFIG_HOME/tmop` (`~/.config/tmop`): settings and palettes.
 pub fn config_dir() -> PathBuf {
-    xdg::config_dir(&env).unwrap_or_else(|| std::env::temp_dir().join(xdg::DIR))
+    xdg::config_dir(&env).unwrap_or_else(|| super::unix::private_temp(xdg::DIR))
 }
 
 /// `<data>/skins`, then `tmop/skins` under each `$XDG_DATA_DIRS` entry.

@@ -138,7 +138,11 @@ pub fn run_capture(cmd: &str, args: &[&str], timeout: Duration) -> Result<String
                 return Err(format!("{cmd} timed out after {:.1} s", timeout.as_secs_f32()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return Err(format!("waiting for {cmd} failed: {e}")),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting for {cmd} failed: {e}"));
+            }
         }
     };
     let grace = Instant::now() + READER_GRACE;
