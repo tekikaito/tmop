@@ -78,7 +78,7 @@ impl App {
         let spark_w = (r.width() * 0.38).clamp(50.0, 110.0);
         widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 31.0), Align2::LEFT_TOP, &format_rate(net.rx_bps + net.tx_bps), theme::light(24.0), pal.text, r.width() - 40.0 - spark_w);
         widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 62.0), Align2::LEFT_TOP, &format!("\u{2193} {} \u{b7} \u{2191} {}", format_rate(net.rx_bps), format_rate(net.tx_bps)), theme::mono(11.0), pal.text_faint, r.width() - 32.0);
-        let mut trend = Series::new(fd.hist.net_rx.values.len().max(2));
+        let mut trend = Series::new(fd.hist.net_rx.capacity.max(2));
         for (rx, tx) in fd.hist.net_rx.values.iter().zip(&fd.hist.net_tx.values) {
             trend.push(rx + tx);
         }

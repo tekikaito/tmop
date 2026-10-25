@@ -274,7 +274,7 @@ pub fn show_with_menu(
                                     series.push(*v);
                                 }
                                 let hi = s.values.iter().cloned().fold(1.0_f32, f32::max);
-                                widgets::sparkline(&p.with_clip_rect(r), area, &[(&series, s.color, (0.0, hi))], if s.fill { 0.15 } else { 0.0 }, false);
+                                widgets::sparkline_static(&p.with_clip_rect(r), area, &[(&series, s.color, (0.0, hi))], if s.fill { 0.15 } else { 0.0 });
                                 return;
                             }
                             if let Some(d) = content.dot {

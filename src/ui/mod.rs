@@ -931,6 +931,7 @@ impl App {
             _ => 0.0,
         };
         self.smooth.step(&snap, dt, hf);
+        widgets::set_spark_glide(phase, hf && interval.is_some());
         if self.applied_top != Some(self.settings.window.always_on_top) {
             let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
