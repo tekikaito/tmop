@@ -15,6 +15,7 @@
 //! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
 //! * [`mft`]          NTFS Master File Table reader (fast scan method when elevated)
 //! * [`walker`]       parallel directory walker (scan method otherwise)
+//! * [`mounts`]       mounted file systems off Windows (mountinfo, getfsstat)
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
 //! * [`inventory`]    system info, services, startup apps
 //! * [`sysfmt`]       pure parsers for os-release, `.desktop` files and XML property lists
@@ -29,6 +30,7 @@ pub mod drivers;
 pub mod icons;
 pub mod inventory;
 pub mod mft;
+pub mod mounts;
 pub mod plist;
 pub mod power;
 pub mod recorder;

@@ -54,7 +54,7 @@ impl App {
             }
         }
         if self.pro.disk_root.is_empty() {
-            self.pro.disk_root = std::env::var("SystemDrive").map(|d| format!("{d}\\")).unwrap_or_else(|_| "C:\\".into());
+            self.pro.disk_root = diskspace::default_root().display().to_string();
         }
         let tree = self.pro.disk_tree.as_ref().map(|(t, _)| t.clone());
         let body = self.page_title(ui, &pal, "Disk Space", &scan_subtitle(&progress, tree.as_deref()));
@@ -99,11 +99,13 @@ impl App {
             let cols = (((area.width() + 12.0) / (VOLUME_MIN_W + 12.0)).floor() as usize).clamp(1, vols.len());
             let shown = vols.len().min(cols * 2);
             let w = (area.width() - 12.0 * (cols - 1) as f32) / cols as f32;
-            let scanned = self.pro.disk_tree.as_ref().map(|(t, _)| t.root.display().to_string()).unwrap_or_else(|| self.pro.disk_root.trim().to_string()).to_lowercase();
+            let scanned = self.pro.disk_tree.as_ref().map(|(t, _)| t.root.display().to_string()).unwrap_or_else(|| self.pro.disk_root.trim().to_string());
+            let roots: Vec<&str> = vols.iter().map(|v| v.root.as_str()).collect();
+            let active = diskspace::volume_index(&scanned, &roots);
             for (i, v) in vols.iter().take(shown).enumerate() {
                 let r = Rect::from_min_size(pos2(area.left() + (i % cols) as f32 * (w + 12.0), y + (i / cols) as f32 * (VOLUME_H + 12.0)), vec2(w, VOLUME_H));
                 let resp = ui.interact(r, ui.id().with(("vol", &v.root)), Sense::click());
-                volume_card(&p, r, &pal, v, scanned.starts_with(&v.root.to_lowercase()), resp.hovered());
+                volume_card(&p, r, &pal, v, active == Some(i), resp.hovered());
                 if resp.clicked() && !progress.running {
                     self.pro.disk_root = v.root.clone();
                     start_scan = Some(v.root.clone());
@@ -218,6 +220,8 @@ impl App {
             let r = widgets::text_fit(&p, pos2(content.right(), hint_y), Align2::RIGHT_CENTER, &notes.join(" \u{b7} "), theme::mono(11.0), pal.text_faint, (content.width() - hint.width() - 20.0).max(40.0));
             if let Some(why) = progress.fell_back.as_ref().filter(|_| self.caps.mft) {
                 ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(format!("MFT unavailable: {why}, used the parallel walker"));
+            } else if let Some(hint) = denied_hint().filter(|_| progress.finished && progress.denied > 0) {
+                ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(hint);
             }
         }
         let kids: Vec<u32> = node.children.iter().copied().filter(|c| t.nodes[*c as usize].size > 0).take(60).collect();
@@ -733,6 +737,15 @@ fn volume_card(p: &egui::Painter, r: Rect, pal: &Palette, v: &Volume, active: bo
         (format!("{free} free \u{b7} click to scan"), pal.text_faint)
     };
     widgets::text_fit(&clip, pos2(x0, r.top() + 56.0), Align2::LEFT_CENTER, &sub, theme::ui(12.0), sub_color, x1 - x0);
+}
+
+/// Why folders were unreadable and what helps, off Windows (where the admin banner says it).
+fn denied_hint() -> Option<&'static str> {
+    match crate::platform::OS {
+        crate::platform::Os::Windows => None,
+        crate::platform::Os::MacOs => Some("macOS protects some folders (Mail, Messages, Safari, Trash). Give TMOP Full Disk Access in System Settings \u{203a} Privacy & Security to include them."),
+        _ => Some("Folders of other users and of the system need root. Run TMOP as root (sudo) to include them."),
+    }
 }
 
 /// Page subtitle: what is being scanned, or what was scanned.
