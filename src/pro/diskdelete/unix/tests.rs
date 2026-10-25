@@ -44,6 +44,7 @@ fn rules(fl: Flavor) -> Rules {
         other_homes: vec![n("/srv/bob"), n("/data/carol")],
         temp: ["/tmp", "/var/tmp", "/private/tmp", "/var/folders/ab/xyz/T", "/private/var/folders/ab/xyz/T"].iter().map(|t| n(t)).collect(),
         protected_ids: vec![(1, 2)],
+        stores: vec![n("~/.data/Trash")],
     };
     Rules { sys: SystemPaths { known, unix, ..Default::default() }, inv: Inventory::default() }
 }
@@ -55,6 +56,7 @@ struct FakeFs {
     owners: HashMap<String, u32>,
     ids: HashMap<String, (u64, u64)>,
     dirs: Vec<String>,
+    homes: HashMap<u32, String>,
 }
 
 impl FakeFs {
@@ -104,6 +106,9 @@ impl UnixFs for FakeFs {
             }
         }
         Some(if out.is_empty() { "/".into() } else { out })
+    }
+    fn home_of(&self, uid: u32) -> Option<String> {
+        self.homes.get(&uid).cloned()
     }
 }
 
@@ -419,4 +424,114 @@ fn real_machine_blocks_the_basics() {
     // Deleting the folder removes the link, never /etc.
     assert!(crate::pro::diskdelete::delete_permanent(&base).is_ok());
     assert!(std::path::Path::new("/etc").is_dir() && !base.exists());
+}
+
+/// U1: TMOP as root, an LDAP account (in no passwd file) with its home outside the usual users
+/// folders: the owner's home comes from the user database and is blocked like any other home,
+/// and another user's file elsewhere is no longer silent.
+#[test]
+fn root_meets_directory_service_homes() {
+    for fl in FLAVORS {
+        let mut r = rules(fl);
+        r.sys.unix.uid = Some(0);
+        r.sys.unix.homes = vec![norm_unix(fl, "/root")];
+        let mut fs = FakeFs::default().owner("/u/alice", 1234).owner("/u/alice/.ssh", 1234).owner("/u/alice/.ssh/id_ed25519", 1234).owner("/tmp/t1/bob-file", 1235);
+        fs.homes.insert(1234, "/u/alice".into());
+        for (path, dir) in [("/u/alice", true), ("/u/alice/.ssh", true), ("/u/alice/.ssh/id_ed25519", false)] {
+            let v = verdict(fl, path, dir, &r, &fs);
+            assert!(matches!(&v, Verdict::Blocked(why) if why.contains("another user's home")), "{fl:?} {path}: {v:?}");
+        }
+        assert!(matches!(verdict(fl, "/tmp/t1/bob-file", false, &r, &fs), Verdict::Warn(w) if w.iter().any(|x| x.contains("another user"))));
+        // The user's own files stay deletable for the user.
+        r.sys.unix.uid = Some(1234);
+        r.sys.unix.homes = vec![norm_unix(fl, "/u/alice")];
+        assert_eq!(verdict(fl, "/u/alice/old.iso", false, &r, &fs.owner("/u/alice/old.iso", 1234)), Verdict::Allowed);
+    }
+}
+
+/// U2: the account's own home is trusted even when its owner looks different (NFS id mapping);
+/// a `$HOME` the user does not own is not.
+#[test]
+fn account_home_is_trusted_env_home_only_when_owned() {
+    assert_eq!(trusted_homes(&["/nfs/home/me".into()], Some(("/nfs/home/me".into(), false))), ["/nfs/home/me"]);
+    assert_eq!(trusted_homes(&[], Some(("/home".into(), false))), Vec::<String>::new());
+    assert_eq!(trusted_homes(&["/home/me".into()], Some(("/data/me".into(), true))), ["/data/me", "/home/me"]);
+    // With the account home known, its keys and itself are protected whoever the files seem to belong to.
+    let fl = Flavor::Linux;
+    let mut r = rules(fl);
+    r.sys.unix.homes = vec!["/nfs/home/me".into()];
+    let fs = FakeFs::default().owner("/nfs/home/me", 65534).owner("/nfs/home/me/.ssh", 65534).owner("/nfs/home/me/.ssh/id_ed25519", 65534);
+    for (path, dir) in [("/nfs/home/me", true), ("/nfs/home/me/.ssh", true), ("/nfs/home/me/.ssh/id_ed25519", false)] {
+        assert!(matches!(classify_fs(fl, path, meta(dir), &r, &fs), Verdict::Blocked(_)), "{path}");
+    }
+}
+
+/// U4: the user folders of every trusted home are protected, not only of the first.
+#[test]
+fn user_dirs_for_every_home() {
+    let read = |f: &str| (f == "/home/me/.config/user-dirs.dirs").then(|| "XDG_DOCUMENTS_DIR=\"$HOME/Dokumente\"\n".to_string());
+    let dirs = user_dirs_of(&["/data/me".into(), "/home/me".into()], None, read);
+    for p in ["/data/me/Documents", "/home/me/Documents", "/home/me/Dokumente", "/home/me/Desktop"] {
+        assert!(dirs.iter().any(|(d, _)| d == p), "{p}: {dirs:?}");
+    }
+}
+
+/// U3: the Windows profile's known folders and OneDrive, seen from WSL, get the native warnings.
+#[test]
+fn wsl_profile_known_folders_warn() {
+    let (known, onedrive) = wsl_profile_folders(r"c:\users\me", &["onedrive".into(), "onedrive - contoso".into(), "documents".into()]);
+    assert!(known.contains(&(r"c:\users\me\documents".into(), "Documents")));
+    assert_eq!(onedrive, [r"c:\users\me\onedrive", r"c:\users\me\onedrive - contoso"]);
+    for fl in FLAVORS {
+        let mut r = rules(fl);
+        r.sys.unix.wsl[0].sys.known = known.clone();
+        r.sys.unix.wsl[0].sys.onedrive = onedrive.clone();
+        let fs = FakeFs::default();
+        for (path, needle) in [("/mnt/c/Users/me/Documents", "Documents"), ("/mnt/c/Users/me/OneDrive", "OneDrive")] {
+            let v = verdict(fl, path, true, &r, &fs);
+            assert!(matches!(&v, Verdict::Warn(w) if w.iter().any(|x| x.contains(needle))), "{fl:?} {path}: {v:?}");
+        }
+    }
+}
+
+/// U5 (part): a system account's home (`bin:/usr/bin`) is not "another user's home": a link
+/// there is refused as the system folder it is.
+#[test]
+fn system_account_homes_are_system_folders() {
+    for fl in FLAVORS {
+        let mut r = rules(fl);
+        r.sys.unix.other_homes.push(norm_unix(fl, "/usr/bin"));
+        let fs = FakeFs::default().link(&p(fl, "~/venv/bin/python"), "/usr/bin/python3");
+        let v = verdict(fl, "~/venv/bin/python", false, &r, &fs);
+        assert!(matches!(&v, Verdict::Blocked(why) if why.contains("system folder") && !why.contains("another user")), "{fl:?} {v:?}");
+        // A real account under a temporary folder keeps its protection.
+        r.sys.unix.other_homes.push(norm_unix(fl, "/tmp/guest"));
+        assert!(matches!(verdict(fl, "/tmp/guest/x", false, &r, &fs), Verdict::Blocked(_)));
+    }
+}
+
+/// U6 and U7: data below hidden home folders and `~/Library` warns (caches and logs do not), sync
+/// roots warn, and the Trash where `$XDG_DATA_HOME` puts it is blocked like the default one.
+#[test]
+fn hidden_library_sync_and_moved_trash() {
+    let fs = FakeFs::default();
+    for fl in FLAVORS {
+        let r = rules(fl);
+        let warns = |path: &str, dir: bool, needle: &str| {
+            let v = verdict(fl, path, dir, &r, &fs);
+            assert!(matches!(&v, Verdict::Warn(w) if w.iter().any(|x| x.contains(needle))), "{fl:?} {path}: {v:?}");
+        };
+        warns("~/.bitcoin/wallets", true, "hidden folder");
+        warns("~/.ethereum/keystore/key", false, "hidden folder");
+        warns("~/Library/Safari/Bookmarks.plist", false, "Library");
+        warns("~/Library/Cookies/Cookies.binarycookies", false, "Library");
+        warns("~/Dropbox", true, "cloud-synced");
+        warns("~/Nextcloud/a.txt", false, "cloud-synced");
+        for path in ["~/.cache/pip/x", "~/Library/Caches/x", "~/Library/Logs/x.log", "~/Library/Developer/Xcode/DerivedData/App-abc"] {
+            assert_eq!(verdict(fl, path, true, &r, &fs), Verdict::Allowed, "{fl:?} {path}");
+        }
+        for (path, dir) in [("~/.data/Trash/info/a.trashinfo", false), ("~/.data/Trash/info", true), ("~/.data/Trash", true), ("~/.data", true)] {
+            assert!(matches!(verdict(fl, path, dir, &r, &fs), Verdict::Blocked(_)), "{fl:?} {path}");
+        }
+    }
 }

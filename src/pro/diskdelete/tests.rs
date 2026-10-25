@@ -339,6 +339,24 @@ fn run_rechecks_rules_before_deleting() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// S4: an item that was a file at scan time and is a folder now (or the other way round) is
+/// judged as it is now, and left alone: the old row would skip every folder rule.
+#[cfg(unix)]
+#[test]
+fn run_refuses_an_item_whose_type_changed_since_the_scan() {
+    let base = std::env::temp_dir().join(format!("tmop-del-kind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("stuff").join("inner")).unwrap();
+    std::fs::write(base.join("stuff").join("inner").join("x"), b"x").unwrap();
+    std::fs::write(base.join("file"), b"f").unwrap();
+    let rep = run_with_log(vec![target(&base.join("stuff"), 1, false), target(&base.join("file"), 1, true)], Mode::Permanent, None, None);
+    assert!(rep.deleted.is_empty(), "{:?}", rep.deleted);
+    assert_eq!(rep.skipped.len(), 2);
+    assert!(rep.skipped.iter().all(|(_, why)| why.contains("changed since the scan")), "{:?}", rep.skipped);
+    assert!(base.join("stuff").join("inner").join("x").exists() && base.join("file").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn classify_normalises_tricks() {
     let r = rules();

@@ -13,6 +13,8 @@ use super::diskspace::Tree;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod anchored;
 pub mod unix;
 
 pub use unix::UnixPaths;
@@ -786,21 +788,9 @@ fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Opt
     let stamp = super::display_stamp();
     let trasher = (mode == Mode::Recycle).then(super::trash::Trasher::new);
     for t in targets {
-        let blocked_now = rules.and_then(|r| match classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
-            Verdict::Blocked(why) => Some(why),
-            _ => None,
-        });
-        let result = if let Some(why) = refuse_reason(&t.path) {
-            Err(why.to_string())
-        } else if let Some(why) = blocked_now {
-            Err(format!("blocked ({why})"))
-        } else {
-            // A Recycle never falls back to a permanent delete: what cannot go to the bin stays.
-            match (&trasher, mode) {
-                (Some(r), Mode::Recycle) => r.trash(&t.path, t.size),
-                (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
-                (_, Mode::Permanent) => delete_permanent(&t.path),
-            }
+        let result = match refuse_reason(&t.path) {
+            Some(why) => Err(why.to_string()),
+            None => act(&t, mode, rules, trasher.as_ref()),
         };
         if let Some(f) = log_file.as_mut() {
             use std::io::Write;
@@ -815,6 +805,49 @@ fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Opt
         }
     }
     rep
+}
+
+/// Classifies `t` once more and deletes or recycles it. A Recycle never falls back to a permanent
+/// delete: what cannot go to the bin stays.
+#[cfg(not(unix))]
+fn act(t: &Target, mode: Mode, rules: Option<&Rules>, trasher: Option<&super::trash::Trasher>) -> Result<(), String> {
+    if let Some(r) = rules {
+        if let Verdict::Blocked(why) = classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
+            return Err(format!("blocked ({why})"));
+        }
+    }
+    match (trasher, mode) {
+        (Some(r), Mode::Recycle) => r.trash(&t.path, t.size),
+        (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
+        (_, Mode::Permanent) => delete_permanent(&t.path),
+    }
+}
+
+/// Off Windows the parent folder is resolved and opened first ([`anchored::Anchor`]); the item is
+/// then judged as given and as resolved, with its type as it is now, and deleted or moved
+/// relative to that open folder, so a link swapped into the path afterwards changes nothing.
+/// A Recycle never falls back to a permanent delete.
+#[cfg(unix)]
+fn act(t: &Target, mode: Mode, rules: Option<&Rules>, trasher: Option<&super::trash::Trasher>) -> Result<(), String> {
+    let a = anchored::Anchor::new(&t.path)?;
+    let is_dir = a.kind()? == Some(true);
+    if is_dir != t.is_dir {
+        return Err(format!("it is now a {} (changed since the scan); scan again", if is_dir { "folder" } else { "file or link" }));
+    }
+    if let Some(r) = rules {
+        let meta = ItemMeta { is_dir, size: t.size, is_reparse: false };
+        let real = a.path();
+        for p in std::iter::once(t.path.as_path()).chain((real != t.path).then_some(real.as_path())) {
+            if let Verdict::Blocked(why) = classify_resolved(p, meta, r) {
+                return Err(format!("blocked ({why})"));
+            }
+        }
+    }
+    match (trasher, mode) {
+        (Some(r), Mode::Recycle) => r.trash_anchored(&a),
+        (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
+        (_, Mode::Permanent) => anchored::remove(&a),
+    }
 }
 
 pub(crate) fn short_error(e: &std::io::Error) -> String {
@@ -850,8 +883,16 @@ pub fn folds_to_sibling(path: &Path) -> bool {
     path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().ends_with(['.', ' '])))
 }
 
+/// Permanent delete off Windows, through [`anchored`]: a link is removed itself, never its target;
+/// no link swapped into the path is followed and no mount point is entered.
+#[cfg(unix)]
+pub fn delete_permanent(path: &Path) -> Result<(), String> {
+    anchored::remove(&anchored::Anchor::new(path)?)
+}
+
 /// Permanent delete. A link (symlink or junction) is removed itself, never its target. Works on the
 /// verbatim form of `path` (see [`verbatim`]) on Windows.
+#[cfg(not(unix))]
 pub fn delete_permanent(path: &Path) -> Result<(), String> {
     // Win32 does not normalise verbatim paths (`..` would not resolve) and cannot make a relative path
     // verbatim (a trailing dot or space would still fold to a sibling).
@@ -878,14 +919,7 @@ pub fn delete_permanent(path: &Path) -> Result<(), String> {
     };
     #[cfg(not(windows))]
     let (link, dir) = (md.file_type().is_symlink(), md.is_dir());
-    // `remove_dir_all` does not follow links but does descend into mounted file systems.
-    #[cfg(unix)]
-    if dir && !link {
-        if let Some(m) = unix::other_device_below(path) {
-            return Err(format!("contains a mount point ({}); nothing was deleted", m.display()));
-        }
-    }
-    let r = if dir && link {
+    let r =if dir && link {
         std::fs::remove_dir(path)
     } else if dir {
         std::fs::remove_dir_all(path)

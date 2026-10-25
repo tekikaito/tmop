@@ -149,7 +149,9 @@ impl Volumes {
                 // The parent, resolved: the item itself may be a link to another mount.
                 let real = a.parent().filter(|p| !p.as_os_str().is_empty()).and_then(|p| std::fs::canonicalize(p).ok()).unwrap_or_else(|| a.to_path_buf());
                 let point = super::mounts::mount_of(&real.to_string_lossy(), points).unwrap_or("");
-                return format!("{point}\n{}", m.dev());
+                // The folder's device: on an overlay a file's st_dev names the layer it comes from.
+                let dev = std::fs::metadata(&real).map(|r| r.dev()).unwrap_or(m.dev());
+                return format!("{point}\n{dev}");
             }
         }
         volume_key(path)
@@ -273,17 +275,30 @@ impl Trasher {
 
     /// Moves `path` to the bin, or says why not; never deletes it otherwise.
     pub fn trash(&self, path: &Path, _size: u64) -> Result<(), String> {
+        self.trash_anchored(&super::diskdelete::anchored::Anchor::new(path)?)
+    }
+
+    /// [`Self::trash`] for an item whose parent folder is already open (see
+    /// [`super::diskdelete::anchored`]). Linux moves it relative to that folder; macOS hands the
+    /// resolved path to the system after checking it still names the same item.
+    pub fn trash_anchored(&self, a: &super::diskdelete::anchored::Anchor) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
-            fdo::trash_in(path, crate::platform::data_home().map(|d| d.join("Trash")).as_deref())
+            fdo::trash_anchored(a, crate::platform::data_home().map(|d| d.join("Trash")).as_deref())
         }
         #[cfg(target_os = "macos")]
         {
-            mac::trash(path)
+            use std::os::unix::fs::MetadataExt;
+            let path = a.path();
+            let now = std::fs::symlink_metadata(&path).ok().map(|m| (m.dev(), m.ino()));
+            if now.is_none() || now != a.id() {
+                return Err("the path changed while it was checked; nothing was moved".into());
+            }
+            mac::trash(&path)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = path;
+            let _ = a;
             Err(format!("there is no {} on this system", trash_word()))
         }
     }
@@ -472,13 +487,16 @@ fn absolute(path: &Path) -> Result<std::path::PathBuf, String> {
     Ok(parent.join(name))
 }
 
-/// The highest folder above `item` on the same file system (the volume's "top directory").
+/// The highest folder above `item` on the same file system and the same mount (the volume's
+/// "top directory"; a bind mount's own root, where the kernel tells mounts apart).
 #[cfg(target_os = "linux")]
 fn topdir(item: &Path, dev: u64) -> std::path::PathBuf {
+    use super::diskdelete::anchored::mount_id_of;
     use std::os::unix::fs::MetadataExt;
     let mut top = item.parent().unwrap_or(item).to_path_buf();
+    let mnt = mount_id_of(&top);
     while let Some(up) = top.parent() {
-        if std::fs::symlink_metadata(up).map(|m| m.dev()).ok() != Some(dev) {
+        if std::fs::symlink_metadata(up).map(|m| m.dev()).ok() != Some(dev) || (mnt.is_some() && mount_id_of(up) != mnt) {
             break;
         }
         top = up.to_path_buf();
@@ -497,7 +515,8 @@ fn writable(path: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 mod fdo {
-    use super::{absolute, topdir, trash_word, trashinfo, unique_name, INFO_EXT};
+    use super::{topdir, trash_word, trashinfo, unique_name, INFO_EXT};
+    use crate::pro::diskdelete::anchored::{mount_id_of, Anchor};
     use crate::pro::diskdelete::short_error;
     use std::ffi::{OsStr, OsString};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -555,14 +574,27 @@ mod fdo {
     /// only whether they could be. Never another file system: a rename cannot cross one, and
     /// copying is not done.
     pub fn locate(item: &Path, home: Option<&Path>, create: bool) -> Result<Loc, String> {
-        let dev = std::fs::symlink_metadata(item).map_err(|e| short_error(&e))?.dev();
+        let item_dev = std::fs::symlink_metadata(item).map_err(|e| short_error(&e))?.dev();
         let parent = item.parent().ok_or("the path has no parent")?;
-        if std::fs::symlink_metadata(parent).map(|m| m.dev()).ok() != Some(dev) {
+        // The folder holding the item says which file system it is on (on an overlay a file's
+        // st_dev names the layer it comes from).
+        let dev = std::fs::symlink_metadata(parent).map_err(|e| short_error(&e))?.dev();
+        // A mount point cannot be renamed: told by the mount id where the kernel says (bind mounts
+        // of the same file system included), else by the device.
+        let mnt = mount_id_of(parent);
+        let is_mount = match (mount_id_of(item), mnt) {
+            (Some(a), Some(b)) => a != b,
+            _ => item_dev != dev,
+        };
+        if is_mount {
             return Err(format!("it is a mount point, which cannot go to the {}", trash_word()));
         }
         if let Some(h) = home {
-            // The home Trash may not exist yet: its nearest existing folder decides.
-            if h.ancestors().find_map(|a| std::fs::metadata(a).ok()).map(|m| m.dev()) == Some(dev) {
+            // The home Trash may not exist yet: its nearest existing folder decides. Same file
+            // system and same mount, or the rename would fail.
+            let near = h.ancestors().find(|a| std::fs::metadata(a).is_ok()).and_then(|a| std::fs::canonicalize(a).ok());
+            let same_mount = mnt.is_none() || near.as_deref().and_then(mount_id_of) == mnt;
+            if near.as_deref().and_then(|a| std::fs::metadata(a).ok()).map(|m| m.dev()) == Some(dev) && same_mount {
                 if create {
                     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(h).map_err(|e| format!("could not create {}: {}", h.display(), short_error(&e)))?;
                     make_parts(h)?;
@@ -608,33 +640,67 @@ mod fdo {
         Err(format!("{} is read-only or not writable, so this volume has no {}", top.display(), trash_word()))
     }
 
-    /// `rename` that never replaces an existing `to` (`renameat2` with `RENAME_NOREPLACE`;
-    /// plain `rename` where the file system does not support the flag).
-    fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
-        let (a, b) = (c(from)?, c(to)?);
-        // SAFETY: two NUL-terminated paths relative to the working directory (both absolute).
-        let rc = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
+    fn cvt(rc: libc::c_long) -> std::io::Result<()> {
+        if rc < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Moves the anchored item to `to` without ever replacing an existing `to` (`renameat2` with
+    /// `RENAME_NOREPLACE`). Where the file system does not support the flag, a file or link is
+    /// hard-linked (which fails on an existing name) and then unlinked; a folder, or a file on a
+    /// file system without hard links, is renamed after checking the name is free (its record in
+    /// `info/` was created exclusively first, which reserves the name among Trash users).
+    fn rename_noreplace(a: &Anchor, to: &Path) -> std::io::Result<()> {
+        let b = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let (dir, name) = (a.dir_fd(), a.cname());
+        // SAFETY: a NUL-terminated name in an open folder and a NUL-terminated absolute path.
+        let rc = unsafe { libc::syscall(libc::SYS_renameat2, dir, name.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_NOREPLACE) };
         if rc == 0 {
             return Ok(());
         }
         let e = std::io::Error::last_os_error();
-        match e.raw_os_error() {
-            Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-                if std::fs::symlink_metadata(to).is_ok() {
-                    return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-                }
-                std::fs::rename(from, to)
-            }
-            _ => Err(e),
+        if !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS)) {
+            return Err(e);
         }
+        if a.kind().ok() != Some(Some(true)) {
+            // SAFETY: as above; flags 0: a link is linked itself, never followed.
+            match cvt(unsafe { libc::linkat(dir, name.as_ptr(), libc::AT_FDCWD, b.as_ptr(), 0) } as libc::c_long) {
+                Ok(()) => {
+                    // SAFETY: as above.
+                    return match cvt(unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } as libc::c_long) {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(to);
+                            Err(e)
+                        }
+                    };
+                }
+                Err(e) if !matches!(e.raw_os_error(), Some(libc::EPERM) | Some(libc::EOPNOTSUPP) | Some(libc::EMLINK)) => return Err(e),
+                Err(_) => {}
+            }
+        }
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        // SAFETY: as above.
+        cvt(unsafe { libc::renameat(dir, name.as_ptr(), libc::AT_FDCWD, b.as_ptr()) } as libc::c_long)
     }
 
-    /// Moves `path` into its Trash (see [`locate`]): writes `info/<name>.trashinfo` first (created
-    /// exclusively, so two moves never share a name), then renames the item to `files/<name>`.
-    /// When the rename fails the record is removed again and the item stays where it was.
+    /// Moves `path` into its Trash (see [`trash_anchored`]).
+    #[cfg(test)]
     pub fn trash_in(path: &Path, home: Option<&Path>) -> Result<(), String> {
-        let item = absolute(path)?;
+        trash_anchored(&Anchor::new(path)?, home)
+    }
+
+    /// Moves the anchored item into its Trash (see [`locate`]): writes `info/<name>.trashinfo`
+    /// first (created exclusively, so two moves never share a name), then renames the item,
+    /// relative to its open parent folder, to `files/<name>`. When the rename fails the record is
+    /// removed again and the item stays where it was.
+    pub fn trash_anchored(a: &Anchor, home: Option<&Path>) -> Result<(), String> {
+        let item = a.path();
         let loc = locate(&item, home, true)?;
         let real = std::fs::canonicalize(&loc.dir).unwrap_or_else(|_| loc.dir.clone());
         if real.starts_with(&item) || item.starts_with(&real) {
@@ -672,7 +738,7 @@ mod fdo {
                 return undo(format!("could not write to the {}: {}", trash_word(), short_error(&e)));
             }
             drop(file);
-            return match rename_noreplace(&item, &dest) {
+            return match rename_noreplace(a, &dest) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let _ = std::fs::remove_file(&info);
@@ -753,7 +819,9 @@ mod mac {
     /// take one. Everything else gets `.Trashes/$uid` from the system when needed.
     pub fn unavailable(path: &Path) -> Option<String> {
         use std::os::unix::ffi::OsStrExt;
-        let near = path.ancestors().find(|a| std::fs::symlink_metadata(a).is_ok())?;
+        // The folder holding the item decides (statfs follows links: a link on this volume to a
+        // network share is trashed here).
+        let near = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(path).ancestors().find(|a| std::fs::symlink_metadata(a).is_ok())?;
         let c = std::ffi::CString::new(near.as_os_str().as_bytes()).ok()?;
         // SAFETY: an all-zero statfs is valid; statfs reads the NUL-terminated path and fills `s`.
         let mut s: libc::statfs = unsafe { std::mem::zeroed() };
@@ -998,6 +1066,78 @@ mod tests {
             let _ = std::fs::remove_dir_all(&vol);
         }
         let _ = std::fs::remove_dir_all(&home_root);
+    }
+
+    /// `mount --bind from to`, where this process may (root, or `unshare -Urm`); false otherwise.
+    #[cfg(target_os = "linux")]
+    fn bind(from: &Path, to: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let (a, b) = (c(from), c(to));
+        // SAFETY: two NUL-terminated paths; no file system type or data for a bind mount.
+        unsafe { libc::mount(a.as_ptr(), b.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) == 0 }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unmount(p: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+    }
+
+    /// S1: a folder in the Trash holding a bind mount of the same file system (a file manager
+    /// moved it there with the mount inside): emptying the Trash never empties the mounted
+    /// folder. Needs mount rights (root or `unshare -Urm`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn emptying_never_enters_a_bind_mount_in_the_trash() {
+        let root = sandbox("empty-bind");
+        let (home, docs) = (root.join("Trash"), root.join("docs"));
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("precious.txt"), b"p").unwrap();
+        let proj = home.join("files").join("proj");
+        std::fs::create_dir_all(proj.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("info")).unwrap();
+        if !bind(&docs, &proj.join("data")) {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let e = fdo::empty_in(&home).unwrap_err();
+        assert!(e.contains("mount"), "{e}");
+        assert!(docs.join("precious.txt").exists(), "the mounted folder was emptied");
+        unmount(&proj.join("data"));
+        fdo::empty_in(&home).unwrap();
+        assert!(!proj.exists() && docs.join("precious.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// T3: an item inside a bind mount of a folder of the home Trash's file system cannot be
+    /// renamed into the home Trash (another mount): its Trash is decided at the mount, in advance.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bind_mount_is_not_the_home_trash_mount() {
+        let root = sandbox("bind-home");
+        let (home, src, dst) = (root.join("data").join("Trash"), root.join("src"), root.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        if !bind(&src, &dst) {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(dst.join("f"), b"f").unwrap();
+        match fdo::locate(&dst.join("f"), Some(&home), false) {
+            Ok(loc) => {
+                assert_ne!(loc.dir, home, "{loc:?}");
+                assert_eq!(loc.topdir.as_deref(), Some(dst.as_path()));
+            }
+            Err(why) => assert!(!why.is_empty()),
+        }
+        let moved = fdo::trash_in(&dst.join("f"), Some(&home));
+        assert!(moved.is_ok() || dst.join("f").exists(), "{moved:?}");
+        unmount(&dst);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Never another file system: a mount point is refused, and so is a home Trash on another device.

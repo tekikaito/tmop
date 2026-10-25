@@ -47,6 +47,9 @@ pub struct UnixPaths {
     pub temp: Vec<String>,
     /// (st_dev, st_ino) of folders protected themselves, to recognise them under another name.
     pub protected_ids: Vec<(u64, u64)>,
+    /// Trash folders wherever they are (the home Trash under `$XDG_DATA_HOME`): blocked with
+    /// everything below.
+    pub stores: Vec<String>,
 }
 
 /// A Windows drive mounted by WSL (`/mnt/c`).
@@ -195,6 +198,17 @@ const HOME_WARN: &[(&str, &str)] = &[
     ("Library/Application Support/Firefox", "browser profile (passwords, history)"),
 ];
 
+/// Inside the home folder: cloud-synced folders, a warning for themselves and everything below.
+const SYNC_ROOTS: &[(&str, &str)] = &[
+    ("Dropbox", "cloud-synced files: deleting removes them everywhere"),
+    ("Nextcloud", "cloud-synced files: deleting removes them everywhere"),
+    ("ownCloud", "cloud-synced files: deleting removes them everywhere"),
+    ("OneDrive", "cloud-synced files: deleting removes them everywhere"),
+    ("pCloudDrive", "cloud-synced files: deleting removes them everywhere"),
+    ("MEGA", "cloud-synced files: deleting removes them everywhere"),
+    ("Google Drive", "cloud-synced files: deleting removes them everywhere"),
+];
+
 /// The system tree `n` is in (`etc` for `/etc/x`), if any.
 fn system_tree(flavor: Flavor, n: &str) -> Option<String> {
     let first = *comps(n).first()?;
@@ -239,6 +253,14 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
     if c.iter().any(|x| STORES.iter().any(|s| k(flavor, s) == *x) || x.starts_with(&k(flavor, ".Trash-"))) {
         return blocked("Trash or file system metadata store");
     }
+    for s in u.stores.iter().filter(|s| s.starts_with('/') && *s != "/") {
+        if under(n, s) {
+            return blocked("Trash storage; empty the Trash instead");
+        }
+        if meta.is_dir && strictly_under(s, n) {
+            return blocked("contains your Trash");
+        }
+    }
     let mut warn: Vec<String> = Vec::new();
 
     // --- mounts: the point itself, and anything holding one (a recursive delete would cross into it)
@@ -268,7 +290,10 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
     if meta.is_dir && homes.iter().any(|h| strictly_under(h, n)) {
         return blocked("contains your home folder");
     }
-    let others = u.other_homes.iter().filter(|o| o.starts_with('/') && *o != "/" && !homes.iter().any(|h| under(h, o)));
+    // System accounts' homes (`/bin`, `/usr/sbin`, `/var/lib/x`) are judged as the system folders they are.
+    let temps: Vec<&String> = u.temp.iter().filter(|t| temp_ok(flavor, t)).collect();
+    let system_home = |o: &str| system_tree(flavor, o).is_some() && !temps.iter().any(|t| under(o, t)) && !USERS_ROOTS.iter().any(|r| strictly_under(o, &k(flavor, r)));
+    let others = u.other_homes.iter().filter(|o| o.starts_with('/') && *o != "/" && !homes.iter().any(|h| under(h, o)) && !system_home(o));
     for o in others {
         if under(n, o) {
             return blocked("another user's home folder");
@@ -285,7 +310,6 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
             return blocked(format!("contains your {label} folder"));
         }
     }
-    let temps: Vec<&String> = u.temp.iter().filter(|t| temp_ok(flavor, t)).collect();
     if temps.iter().any(|t| *t == n) {
         return blocked("temporary folder itself; delete its contents instead");
     }
@@ -297,8 +321,9 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
     if owner == Some(0) && u.uid != Some(0) {
         return blocked("owned by root");
     }
+    // Root may delete anything, but not without a word about whose it is.
     if let (Some(o), Some(me)) = (owner, u.uid) {
-        if o != me && o != 0 && me != 0 {
+        if o != me && o != 0 {
             warn.push("owned by another user".into());
         }
     }
@@ -318,14 +343,30 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
         if HOME_ESSENTIAL.iter().any(|e| k(flavor, e) == r) {
             return blocked("essential folder of your home folder");
         }
+        let before = warn.len();
         for (w, why) in HOME_WARN {
             if strictly_under(r, &k(flavor, w)) {
+                warn.push((*why).into());
+            }
+        }
+        for (w, why) in SYNC_ROOTS {
+            if under(r, &k(flavor, w)) {
                 warn.push((*why).into());
             }
         }
         let rc = comps(r);
         if rc.len() == 1 && rc[0].starts_with('.') {
             warn.push("hidden settings or data in your home folder".into());
+        }
+        // Below the hidden folders and `~/Library` live settings, keys and app data (wallets,
+        // bookmarks, cookies); only the caches and logs are throwaway.
+        let throwaway = [".cache", "Library/Caches", "Library/Logs", "Library/Developer/Xcode/DerivedData"].iter().any(|t| under(r, &k(flavor, t)));
+        if warn.len() == before && rc.len() >= 2 && !throwaway {
+            if rc[0].starts_with('.') {
+                warn.push("settings or data in a hidden folder of your home folder".into());
+            } else if rc[0] == k(flavor, "Library") {
+                warn.push("application data in your Library folder".into());
+            }
         }
     } else {
         // --- everywhere else
@@ -426,6 +467,9 @@ pub trait UnixFs {
     fn lstat(&self, path: &str) -> Option<FsInfo>;
     /// The path with every link resolved (`realpath`).
     fn canonical(&self, path: &str) -> Option<String>;
+    /// The home folder of account `uid` as the system's user database says (directory services
+    /// such as LDAP included, which `/etc/passwd` does not list).
+    fn home_of(&self, uid: u32) -> Option<String>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -470,9 +514,22 @@ pub fn classify_fs(flavor: Flavor, path: &str, meta: ItemMeta, rules: &Rules, fs
     if info.is_some_and(|i| u.protected_ids.contains(&i.id)) {
         return blocked("a protected folder under another name");
     }
+    let real = parent_resolved(path, fs);
+    // Another account's item in that account's home folder, wherever the home is (`/u/alice`
+    // from LDAP is in no passwd file and under no usual users folder).
+    if let Some(o) = owner.filter(|o| *o != 0 && Some(*o) != u.uid) {
+        let homes: Vec<String> = u.homes.iter().filter(|h| home_ok(flavor, h)).cloned().collect();
+        if let Some(h) = fs.home_of(o) {
+            let hs: Vec<String> = [Some(h.clone()), fs.canonical(&h)].into_iter().flatten().map(|x| norm_unix(flavor, &x)).filter(|x| x.starts_with('/') && x != "/" && !comps(x).contains(&"..") && !homes.iter().any(|m| under(m, x))).collect();
+            let seen = [Some(n.clone()), real.as_ref().map(|r| norm_unix(flavor, r))];
+            if hs.iter().any(|x| seen.iter().flatten().any(|s| under(s, x))) {
+                return blocked(format!("another user's home folder ({h})"));
+            }
+        }
+    }
     // (path, meta, owner, how it was reached, whether its warnings count)
     let mut views: Vec<(String, ItemMeta, Option<u32>, &str, bool)> = Vec::new();
-    if let Some(real) = parent_resolved(path, fs).filter(|r| norm_unix(flavor, r) != n) {
+    if let Some(real) = real.filter(|r| norm_unix(flavor, r) != n) {
         views.push((real, meta, owner, "resolves to", true));
     }
     if info.is_some_and(|i| i.is_link) {
@@ -522,6 +579,97 @@ impl UnixFs for RealFs {
     fn canonical(&self, path: &str) -> Option<String> {
         std::fs::canonicalize(path).ok().map(|p| p.to_string_lossy().into_owned())
     }
+    fn home_of(&self, uid: u32) -> Option<String> {
+        // One lookup per account and thread: a directory service may be slow to answer.
+        thread_local! {
+            static SEEN: std::cell::RefCell<std::collections::HashMap<u32, Option<String>>> = Default::default();
+        }
+        SEEN.with(|s| s.borrow_mut().entry(uid).or_insert_with(|| pw_home(uid)).clone())
+    }
+}
+
+/// `getpwuid_r(uid)`'s home folder (NSS: files, LDAP, SSSD... alike).
+#[cfg(unix)]
+pub fn pw_home(uid: u32) -> Option<String> {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        // SAFETY: all-zero passwd is valid; getpwuid_r writes into `pw` and `buf` (length passed) and sets `res`.
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut res: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr().cast(), buf.len(), &mut res) };
+        if rc == libc::ERANGE && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 4, 0);
+            continue;
+        }
+        if rc != 0 || res.is_null() || pw.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: pw_dir points into `buf`, NUL-terminated, valid while `buf` lives.
+        let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) }.to_string_lossy().into_owned();
+        return (!dir.is_empty()).then_some(dir);
+    }
+}
+
+/// Every account's (uid, home) the user database lists (`getpwent`; directory services that
+/// enumerate are included). Capped, a huge directory is not read to the end.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pw_all() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    // SAFETY: setpwent/getpwent/endpwent on this worker thread only; each entry is copied before the next call.
+    unsafe {
+        libc::setpwent();
+        while out.len() < 100_000 {
+            let p = libc::getpwent();
+            if p.is_null() {
+                break;
+            }
+            if !(*p).pw_dir.is_null() {
+                let dir = std::ffi::CStr::from_ptr((*p).pw_dir).to_string_lossy().into_owned();
+                out.push(((*p).pw_uid, dir));
+            }
+        }
+        libc::endpwent();
+    }
+    out
+}
+
+/// The home folders TMOP treats as the user's: the account's own (`account`, from the user
+/// database, which the user cannot change) as they are, even when the folder's owner looks
+/// different (NFS id mapping, shifted container ids); `$HOME` (`env`, with whether it is a folder
+/// this user owns) only when it is one, as the variable can say anything.
+pub fn trusted_homes(account: &[String], env: Option<(String, bool)>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for h in env.filter(|(_, owned)| *owned).map(|(h, _)| h).into_iter().chain(account.iter().cloned()) {
+        if !h.is_empty() && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// The user folders of every home folder: `user-dirs.dirs` (in `config`, or `<home>/.config`)
+/// and the default names. `read` reads a file.
+pub fn user_dirs_of(homes: &[String], config: Option<&str>, read: impl Fn(&str) -> Option<String>) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for h in homes {
+        let config = config.map(String::from).unwrap_or_else(|| join(h, ".config"));
+        let listed = read(&join(&config, "user-dirs.dirs")).map(|t| parse_user_dirs(&t, h)).unwrap_or_default();
+        for (label, p) in listed.into_iter().chain(DEFAULT_USER_DIRS.iter().map(|(label, name)| (*label, join(h, name)))) {
+            if !out.iter().any(|(k, _)| *k == p) {
+                out.push((p, label));
+            }
+        }
+    }
+    out
+}
+
+/// The known folders and OneDrive roots of a Windows profile seen through WSL (`profile` as
+/// `c:\users\me`, `entries` the lower-case names in it): the Windows rules warn about them.
+pub fn wsl_profile_folders(profile: &str, entries: &[String]) -> (Vec<(String, &'static str)>, Vec<String>) {
+    const KNOWN: &[(&str, &str)] = &[("documents", "Documents"), ("pictures", "Pictures"), ("desktop", "Desktop"), ("downloads", "Downloads"), ("music", "Music"), ("videos", "Videos"), ("saved games", "Saved Games")];
+    let known = KNOWN.iter().map(|(name, label)| (format!("{profile}\\{name}"), *label)).collect();
+    let onedrive = entries.iter().filter(|e| e.starts_with("onedrive")).map(|e| format!("{profile}\\{e}")).collect();
+    (known, onedrive)
 }
 
 // ---------------------------------------------------------------- reading this machine (pure parsers)
@@ -586,15 +734,20 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
     let canon = |p: &str| std::fs::canonicalize(p).ok().map(|c| c.to_string_lossy().into_owned());
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
-    let passwd = std::fs::read_to_string("/etc/passwd").map(|t| parse_passwd(&t)).unwrap_or_default();
-
-    // Home: $HOME (or the passwd entry), trusted only when it is a folder this user owns.
-    let mut raw_homes: Vec<String> = Vec::new();
-    for h in crate::platform::home().map(|h| h.to_string_lossy().into_owned()).into_iter().chain(passwd.iter().filter(|(u, _)| *u == uid).map(|(_, h)| h.clone())) {
-        if std::fs::metadata(&h).is_ok_and(|m| m.is_dir() && m.uid() == uid) && !raw_homes.contains(&h) {
-            raw_homes.push(h);
+    let mut passwd = std::fs::read_to_string("/etc/passwd").map(|t| parse_passwd(&t)).unwrap_or_default();
+    for e in pw_all() {
+        if !passwd.contains(&e) {
+            passwd.push(e);
         }
     }
+
+    // Home: the account's own (user database) as it is; $HOME only when it is a folder this user owns.
+    let account: Vec<String> = pw_home(uid).into_iter().chain(passwd.iter().filter(|(u, _)| *u == uid).map(|(_, h)| h.clone())).collect();
+    let env_home = crate::platform::home().map(|h| h.to_string_lossy().into_owned()).map(|h| {
+        let owned = std::fs::metadata(&h).is_ok_and(|m| m.is_dir() && m.uid() == uid);
+        (h, owned)
+    });
+    let raw_homes = trusted_homes(&account, env_home);
     let mut homes: Vec<String> = Vec::new();
     for h in &raw_homes {
         for v in [Some(n(h)), canon(h).map(|c| n(&c))].into_iter().flatten() {
@@ -612,14 +765,9 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
             known.push((p, label));
         }
     };
-    if let Some(h) = raw_homes.first() {
-        let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|c| c.starts_with('/')).unwrap_or_else(|| join(h, ".config"));
-        for (label, p) in std::fs::read_to_string(join(&config, "user-dirs.dirs")).map(|t| parse_user_dirs(&t, h)).unwrap_or_default() {
-            add_known(p, label);
-        }
-        for (label, name) in DEFAULT_USER_DIRS {
-            add_known(join(h, name), label);
-        }
+    let config = std::env::var("XDG_CONFIG_HOME").ok().filter(|c| c.starts_with('/'));
+    for (p, label) in user_dirs_of(&raw_homes, config.as_deref(), |f| std::fs::read_to_string(f).ok()) {
+        add_known(p, label);
     }
     let resolved: Vec<(String, &'static str)> = known.iter().filter_map(|(p, l)| canon(p).map(|c| (n(&c), *l))).collect();
     for (p, l) in resolved {
@@ -645,7 +793,12 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
             };
             if let Ok(rd) = std::fs::read_dir(Path::new(point).join("Users")) {
                 for e in rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
-                    sys.profiles.push(d(&format!("users\\{}", e.file_name().to_string_lossy().to_lowercase())));
+                    let profile = d(&format!("users\\{}", e.file_name().to_string_lossy().to_lowercase()));
+                    let entries: Vec<String> = std::fs::read_dir(e.path()).map(|rd| rd.flatten().map(|x| x.file_name().to_string_lossy().to_lowercase()).collect()).unwrap_or_default();
+                    let (known, onedrive) = wsl_profile_folders(&profile, &entries);
+                    sys.known.extend(known);
+                    sys.onedrive.extend(onedrive);
+                    sys.profiles.push(profile);
                 }
             }
             sys.appdata = sys.profiles.iter().map(|p| format!("{p}\\appdata")).collect();
@@ -702,7 +855,18 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
             }
         }
     }
-    let u = UnixPaths { homes, uid: Some(uid), mounts, binds, wsl, other_homes, temp, protected_ids: ids };
+    // The home Trash where `$XDG_DATA_HOME` puts it (the fixed `~/.local/share/Trash` is in HOME_TREES).
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut stores: Vec<String> = Vec::new();
+    #[cfg(target_os = "linux")]
+    if let Some(t) = crate::platform::data_home().map(|d| d.join("Trash").to_string_lossy().into_owned()) {
+        for v in [Some(n(&t)), canon(&t).map(|c| n(&c))].into_iter().flatten() {
+            if v != "/" && !stores.contains(&v) {
+                stores.push(v);
+            }
+        }
+    }
+    let u = UnixPaths { homes, uid: Some(uid), mounts, binds, wsl, other_homes, temp, protected_ids: ids, stores };
     (known, u)
 }
 
@@ -712,28 +876,6 @@ pub fn refresh_mounts(u: &mut UnixPaths) {
     let t = super::super::mounts::table();
     u.mounts = t.points.iter().map(|p| norm_unix(FLAVOR, p)).collect();
     u.binds = t.binds.iter().map(|(p, s)| (norm_unix(FLAVOR, p), norm_unix(FLAVOR, s))).collect();
-}
-
-/// The first folder below `dir` (links not followed) on another file system than `dir`: a
-/// recursive delete would empty that mount too.
-#[cfg(unix)]
-pub fn other_device_below(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let dev = std::fs::symlink_metadata(dir).ok()?.dev();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
-            if m.is_dir() {
-                if m.dev() != dev {
-                    return Some(e.path());
-                }
-                stack.push(e.path());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
