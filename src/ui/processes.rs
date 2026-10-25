@@ -1049,7 +1049,9 @@ impl App {
 
                 // Resources.
                 let res = Rect::from_min_size(main.min, vec2(main_w, res_h));
-                let n = self.proc.sel_cpu.as_ref().map(|s| s.values.len()).unwrap_or(0);
+                // What a column's sparkline (a quarter of the card's inner width) shows of the history.
+                let spark_w = (main_w - 44.0 - 3.0 * 20.0) / 4.0;
+                let n = self.proc.sel_cpu.as_ref().map(|s| widgets::spark_visible(spark_w, s.values.len(), s.capacity)).unwrap_or(0);
                 let inner = kit::section_card(&p, res, &pal, &format!("Resources \u{b7} last {}", samples_text(n.max(1), interval)), "");
                 let cols = kit::hsplit(inner, &[1.0; 4], 20.0);
                 let cpu_txt = format!("{:.1}", self.shown_cpu(r.cpu_pct, logical));

@@ -1429,39 +1429,49 @@ pub fn spark_color(i: usize, color: Color32) -> Color32 {
 /// Each line is `(series, colour, (low, high))`. With `dashed_second` the second series is dashed
 /// and unfilled (network down solid, up dashed).
 pub fn sparkline(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_second: bool) {
-    spark_lines(p, rect, lines, fill, true, |i| dashed_second && i == 1);
+    spark_lines(p, rect, lines, fill, true, true, |i| dashed_second && i == 1);
 }
 
 /// [`sparkline`] for a series that is not sampled live (e.g. past benchmark results): no glide.
 pub fn sparkline_static(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
-    spark_lines(p, rect, lines, fill, false, |_| false);
+    spark_lines(p, rect, lines, fill, false, false, |_| false);
 }
 
 /// [`sparkline`] with every line dashed and unfilled (`graphs.dashedSummary`).
 pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))]) {
-    spark_lines(p, rect, lines, 0.0, true, |_| true);
+    spark_lines(p, rect, lines, 0.0, true, true, |_| true);
 }
 
-/// Narrowest spacing of the samples of a live sparkline: a long history shows only its newest part.
+/// [`sparkline`] for live samples on a clock of their own (Docker stats): fixed scale, no glide.
+pub fn sparkline_unsynced(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
+    spark_lines(p, rect, lines, fill, true, false, |_| false);
+}
+
+/// Spacing of the samples of a live sparkline whose history would be packed denser than 1 px per
+/// sample: it shows only the newest part of the history.
 pub const SPARK_MIN_PX: f32 = 2.0;
+
+/// Px per sample of a live sparkline `width` px wide over a history of `n` samples.
+fn spark_px(width: f32, n: usize) -> f32 {
+    let px = width / (n.max(2) - 1) as f32;
+    if px < 1.0 { SPARK_MIN_PX } else { px }
+}
 
 /// How many of `len` samples (history `cap`) a live sparkline `width` px wide shows.
 pub fn spark_visible(width: f32, len: usize, cap: usize) -> usize {
-    let px = (width / (cap.max(len).max(2) - 1) as f32).max(SPARK_MIN_PX);
-    len.min((width / px).floor() as usize + 1)
+    len.min((width / spark_px(width, cap.max(len))).floor() as usize + 1)
 }
 
-fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, dashed_at: impl Fn(usize) -> bool) {
+fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, glide: bool, dashed_at: impl Fn(usize) -> bool) {
     if lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0) < 2 {
         return;
     }
-    // A live series keeps a fixed time scale (its full history, at least SPARK_MIN_PX per sample), so
-    // it grows in from the right instead of stretching (every point moving) while the history fills.
+    // A live series keeps a fixed time scale (its full history, see spark_px), so it grows in from
+    // the right instead of stretching (every point moving) while the history fills.
     let n = lines.iter().map(|(s, _, _)| if live { s.capacity.max(s.values.len()) } else { s.values.len() }).max().unwrap_or(2).max(2);
-    let px = rect.width() / (n - 1) as f32;
-    let px = if live { px.max(SPARK_MIN_PX) } else { px };
+    let px = if live { spark_px(rect.width(), n) } else { rect.width() / (n - 1) as f32 };
     let smooth = SPARK_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
-    let (phase, glide) = if live { spark_glide() } else { (0.0, false) };
+    let (phase, glide) = if glide { spark_glide() } else { (0.0, false) };
     for (i, (series, color, range)) in lines.iter().enumerate() {
         let dashed = dashed_at(i);
         let color = spark_color(i, *color);
@@ -2054,6 +2064,8 @@ mod tests {
         assert_eq!(spark_visible(200.0, 960, 960), 101);
         // A short history spans the whole width.
         assert_eq!(spark_visible(200.0, 60, 60), 60);
+        // Down to 1 px per sample the whole history fits (a 60 s trend in 84 px).
+        assert_eq!(spark_visible(84.0, 60, 60), 60);
     }
 
     fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {

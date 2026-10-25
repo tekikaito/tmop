@@ -293,7 +293,11 @@ impl App {
             widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, d.title(), theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
             widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + 19.0), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
             let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 34.0), vec2(r.width() - 24.0, 32.0));
-            widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            if d == Device::Docker {
+                widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
+            } else {
+                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            }
             if resp.clicked() {
                 *act = Some(Act::Device(d));
             }
@@ -498,7 +502,9 @@ impl App {
                 let mem_max = snap.info.as_ref().map(|i| i.mem_total as f32).filter(|m| *m > 0.0).unwrap_or(self.perf_docker.totals_mem.max()).max(1.0);
                 let lines = [PlotLine::new(&self.perf_docker.totals_cpu, c, (0.0, 100.0)), PlotLine::new(&self.perf_docker.totals_mem, mem_c, (0.0, mem_max))];
                 let readout = |age: usize| format!("{} \u{b7} {:.1}% \u{b7} {}", ago(iv, age), at(&self.perf_docker.totals_cpu, age), format_bytes(at(&self.perf_docker.totals_mem, age) as f64));
-                let (ph, hover) = plot(ui, &pc, "docker", ix, cy, iw, 160.0, 36.0, &percent_labels(), &lines, &readout);
+                // Docker stats arrive on their own clock, so the plot does not glide on the sampler's.
+                let still = PlotCtx { phase: 0.0, glide: false, ..pc };
+                let (ph, hover) = plot(ui, &still, "docker", ix, cy, iw, 160.0, 36.0, &percent_labels(), &lines, &readout);
                 cy += ph + 10.0;
                 let scale = format!("Memory (scale {})", format_bytes(mem_max as f64));
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("CPU", c, false), (scale.as_str(), mem_c, false)], hover.as_deref(), ix + iw);
@@ -552,7 +558,12 @@ impl App {
             let view = self.dev_view(*d, fd);
             widgets::tracked_text(&p, pos2(t.left() + 14.0, t.top() + 10.0), Align2::LEFT_TOP, &d.title().to_uppercase(), theme::ui(11.0), pal.text_faint, 0.14);
             widgets::text_fit(&p, pos2(t.right() - 14.0, t.top() + 9.0), Align2::RIGHT_TOP, &view.value, theme::mono(12.0), pal.text, t.width() * 0.6);
-            widgets::sparkline(&p, Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0)), &view.lines, 0.12, view.dashed_second);
+            let spark = Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0));
+            if *d == Device::Docker {
+                widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
+            } else {
+                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            }
             if resp.clicked() {
                 *act = Some(Act::Device(*d));
             }
@@ -599,7 +610,9 @@ impl App {
         let h = if wide { left_h.max(right_natural) } else { left_h };
 
         let left = Rect::from_min_size(pos2(x, y), vec2(lw, h));
-        let span = span_text(fd.hist.per_core.first().map_or(0, |s| s.values.len()), iv);
+        // What a core's sparkline (the cell less its 1 px inset) shows of the history.
+        let spark_w = (c_w - 6.0 * (cols - 1) as f32) / cols as f32 - 2.0;
+        let span = span_text(fd.hist.per_core.first().map_or(0, |s| widgets::spark_visible(spark_w, s.values.len(), s.capacity)), iv);
         let c = kit::section_card(&p, left, &pal, &format!("Logical processors \u{b7} last {span}"), "");
         // View toggle and fold button at the right of the heading.
         let mut tx = left.right() - 22.0;
@@ -799,7 +812,7 @@ impl App {
                     widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 38.0), Align2::LEFT_CENTER, &line, theme::mono(11.0), pal.text_faint, cw - 24.0);
                     if let (true, Some(s)) = (running, *series) {
                         let gr = Rect::from_min_max(pos2(r.left() + 12.0, r.top() + 54.0), pos2(r.right() - 12.0, r.bottom() - 12.0));
-                        widgets::sparkline(&p, gr, &[(s, blue, (0.0, 100.0))], 0.12, false);
+                        widgets::sparkline_unsynced(&p, gr, &[(s, blue, (0.0, 100.0))], 0.12);
                     }
                 }
             });
@@ -902,9 +915,11 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
     let mut text = None;
     if let (Some(pos), Some(first)) = (resp.hover_pos(), lines.first()) {
         let n = first.series.values.len();
-        let age = axis.age_at(gr.right() - pos.x).round().max(0.0) as usize;
+        // The samples sit where draw_graph put them this frame (shifted by the glide).
+        let offset = if cx.glide && n >= 2 { cx.phase.clamp(0.0, 1.0) - 1.0 } else { cx.phase.clamp(0.0, 1.0) };
+        let age = (axis.age_at(gr.right() - pos.x) - offset).round().max(0.0) as usize;
         if age < n {
-            let cx = axis.x_of(age as f32);
+            let cx = axis.x_of(age as f32 + offset).min(gr.right());
             p.line_segment([pos2(cx, gr.top()), pos2(cx, gr.bottom())], Stroke::new(1.0_f32, pal.raise(0.3)));
             for l in lines {
                 if let Some(v) = l.series.values.len().checked_sub(1 + age).and_then(|i| l.series.values.get(i)) {
