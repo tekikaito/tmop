@@ -115,6 +115,29 @@ pub const fn paging_word() -> &'static str {
     }
 }
 
+/// The soft limit [`raise_open_files_limit`] aims for.
+pub const OPEN_FILES_WANTED: u64 = 8192;
+
+/// Raises the soft limit on open files towards [`OPEN_FILES_WANTED`] (never above the hard
+/// limit), best effort. A macOS GUI app starts with 256, below what a permanent delete of a deeply
+/// nested folder holds open (one descriptor per level). No-op on Windows.
+pub fn raise_open_files_limit() {
+    #[cfg(unix)]
+    {
+        // SAFETY: an all-zero rlimit is valid; getrlimit/setrlimit only read and write `r`.
+        let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+            return;
+        }
+        let want = OPEN_FILES_WANTED.min(r.rlim_max);
+        if r.rlim_cur < want {
+            r.rlim_cur = want;
+            // SAFETY: as above.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) };
+        }
+    }
+}
+
 /// True when the session is a Wayland one (winit then picks its Wayland backend): no window
 /// levels, no taskbar hiding and possibly no server-side decorations.
 pub fn is_wayland() -> bool {

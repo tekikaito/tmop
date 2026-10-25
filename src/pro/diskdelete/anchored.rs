@@ -213,7 +213,7 @@ enum Stop {
     Mount(PathBuf),
     /// Another account's home folder (the path, the home as that account's entry lists it).
     Home(PathBuf, String),
-    /// Folders nested deeper than [`MAX_DEPTH`].
+    /// Folders nested deeper than the walk's depth limit ([`MAX_DEPTH`], or less as open files allow).
     Deep,
     Io(io::Error),
 }
@@ -221,9 +221,31 @@ enum Stop {
 /// Deeper trees are refused (one descriptor and one stack frame per level).
 const MAX_DEPTH: usize = 512;
 
+/// Descriptors kept free for the rest of TMOP while a delete walks.
+const FD_RESERVE: u64 = 64;
+
+/// How deep a delete may go with the descriptors this process has left: [`MAX_DEPTH`], or less
+/// when the soft limit on open files is low (TMOP raises it at startup, which may not succeed; a
+/// macOS GUI app starts with 256). A deeper tree is then refused before anything is removed
+/// instead of failing with "too many open files" part way.
+fn depth_budget() -> usize {
+    // SAFETY: an all-zero rlimit is valid; getrlimit only writes `r`.
+    let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 {
+        return MAX_DEPTH;
+    }
+    // Open now (the listing's own descriptor included).
+    let open = std::fs::read_dir("/dev/fd").map(|d| d.count() as u64).unwrap_or(FD_RESERVE);
+    // Each level holds one descriptor, the deepest briefly a second for its listing.
+    let free = r.rlim_cur.saturating_sub(open).saturating_sub(FD_RESERVE);
+    usize::try_from(free).unwrap_or(usize::MAX).min(MAX_DEPTH)
+}
+
 struct Walk<'a> {
     dev: u64,
     mnt: Option<u64>,
+    /// Folders deeper than this are refused ([`depth_budget`]).
+    max_depth: usize,
     removed: u64,
     /// This user (folders of other accounts are checked against their home folders).
     me: u32,
@@ -262,7 +284,7 @@ impl Walk<'_> {
     /// The folder `name` in `dir` (`path` for messages, `depth` levels below the item), checked
     /// and, unless `dry`, removed.
     fn dir(&mut self, dir: RawFd, name: &CStr, path: &Path, depth: usize, dry: bool) -> Result<(), Stop> {
-        if depth > MAX_DEPTH {
+        if depth > self.max_depth {
             return Err(Stop::Deep);
         }
         let sub = match open_at(dir, name, LIST) {
@@ -366,11 +388,13 @@ fn remove_with(a: &Anchor, me: u32, home_of: &dyn Fn(u32) -> Option<String>) -> 
     }
     // The parent's device and mount: the item and everything below must share both.
     let parent = stat_at(a.dir_fd(), c"").map_err(|e| short(&e))?;
-    let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0, me, home_of, homes: Default::default() };
+    let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), max_depth: depth_budget(), removed: 0, me, home_of, homes: Default::default() };
+    let max_depth = w.max_depth;
     let stop = |s: Stop, removed: u64| -> String {
         let why = match s {
             Stop::Mount(p) => format!("{} is another file system or mount", p.display()),
             Stop::Home(p, h) => format!("{} is in another user's home folder ({h})", p.display()),
+            Stop::Deep if max_depth < MAX_DEPTH => format!("folders are nested more than {max_depth} levels deep, more than the limit on open files allows"),
             Stop::Deep => format!("folders are nested more than {MAX_DEPTH} levels deep"),
             Stop::Io(e) => short(&e),
         };
@@ -479,7 +503,7 @@ mod tests {
         let a = Anchor::new(&proj).unwrap();
         let parent = stat_at(a.dir_fd(), c"").unwrap();
         let none = |_: u32| None;
-        let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0, me: euid(), home_of: &none, homes: Default::default() };
+        let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), max_depth: MAX_DEPTH, removed: 0, me: euid(), home_of: &none, homes: Default::default() };
         assert!(w.mnt.is_some(), "statx gives mount ids on this kernel");
         assert!(matches!(w.dir(a.dir_fd(), a.cname(), &proj, 0, true), Err(Stop::Mount(p)) if p == proj.join("data")));
         assert!(docs.join("precious.txt").exists());
@@ -574,6 +598,27 @@ mod tests {
         std::fs::create_dir_all(&q).unwrap();
         remove(&Anchor::new(&base.join("w")).unwrap()).unwrap();
         assert!(!base.join("w").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// DEL-4: the depth limit follows the descriptors left (a macOS GUI app may have 256), and a
+    /// walk with a lower limit refuses a deeper tree whole.
+    #[test]
+    fn the_depth_limit_follows_the_open_files_left() {
+        let budget = depth_budget();
+        assert!(budget > 0 && budget <= MAX_DEPTH, "{budget}");
+        let base = sandbox("budget");
+        let mut p = base.join("v");
+        for _ in 0..6 {
+            p.push("d");
+        }
+        std::fs::create_dir_all(&p).unwrap();
+        let a = Anchor::new(&base.join("v")).unwrap();
+        let parent = stat_at(a.dir_fd(), c"").unwrap();
+        let none = |_: u32| None;
+        let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), max_depth: 3, removed: 0, me: euid(), home_of: &none, homes: Default::default() };
+        assert!(matches!(w.dir(a.dir_fd(), a.cname(), &base.join("v"), 0, true), Err(Stop::Deep)));
+        assert!(p.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

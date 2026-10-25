@@ -257,6 +257,7 @@ fn main() -> eframe::Result<()> {
         Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?])
     });
 
+    tmop::platform::raise_open_files_limit();
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
     if let Some(skin) = value(&["--popout-skin="]) {
