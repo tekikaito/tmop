@@ -68,17 +68,31 @@ impl FakeFs {
         self.owners.insert(at.into(), uid);
         self
     }
+    /// Every path the fake knows, with the folders above them.
+    fn known(&self) -> std::collections::BTreeSet<String> {
+        let mut all = std::collections::BTreeSet::new();
+        for p in self.links.keys().chain(self.owners.keys()).chain(self.ids.keys()).chain(self.dirs.iter()) {
+            all.extend(ancestors(p));
+            all.insert(p.trim_end_matches('/').to_string());
+        }
+        all
+    }
 }
 
 impl UnixFs for FakeFs {
     fn lstat(&self, path: &str) -> Option<FsInfo> {
         let path = path.trim_end_matches('/');
+        let holds = self.known().iter().any(|k| strictly_under(k, path));
         Some(FsInfo {
             owner: self.owners.get(path).copied().unwrap_or(ME),
             id: self.ids.get(path).copied().unwrap_or((9, path.len() as u64 + 1000)),
             is_link: self.links.contains_key(path),
-            is_dir: self.dirs.iter().any(|d| d == path) || ["/etc", "/usr", "/home/me", "/Users/me"].contains(&path),
+            is_dir: holds || self.dirs.iter().any(|d| d == path) || ["/etc", "/usr", "/home/me", "/Users/me"].contains(&path),
         })
+    }
+    fn entries(&self, path: &str) -> Option<Vec<(String, FsInfo)>> {
+        let path = path.trim_end_matches('/');
+        Some(self.known().into_iter().filter(|k| k.rsplit_once('/').is_some_and(|(parent, _)| parent == path)).map(|k| (k.rsplit_once('/').unwrap().1.to_string(), self.lstat(&k).unwrap())).collect())
     }
     fn canonical(&self, path: &str) -> Option<String> {
         let mut todo: Vec<String> = path.split('/').filter(|c| !c.is_empty()).rev().map(String::from).collect();
@@ -534,4 +548,106 @@ fn hidden_library_sync_and_moved_trash() {
             assert!(matches!(verdict(fl, path, dir, &r, &fs), Verdict::Blocked(_)), "{fl:?} {path}");
         }
     }
+}
+
+/// UX1/E1/R1: TMOP as root, LDAP accounts (in no passwd file, not enumerated) with their homes in
+/// a plain local `/export/home`: a root-owned folder holding such a home, and a root-owned folder
+/// inside one, are another user's home all the same; a root-owned folder holding files of other
+/// accounts (not their homes) warns.
+#[test]
+fn root_meets_homes_inside_root_owned_folders() {
+    for fl in FLAVORS {
+        let mut r = rules(fl);
+        r.sys.unix.uid = Some(0);
+        r.sys.unix.homes = vec![norm_unix(fl, "/root")];
+        let mut fs = FakeFs::default()
+            .owner("/export", 0)
+            .owner("/export/home", 0)
+            .owner("/export/home/alice", 1234)
+            .owner("/export/home/alice/.ssh/id_ed25519", 1234)
+            .owner("/export/home/alice/thesis.tex", 1234)
+            .owner("/export/home/alice/build", 0)
+            .owner("/export/home/alice/build/out.o", 0)
+            .owner("/proj", 0)
+            .owner("/proj/shared", 0)
+            .owner("/proj/shared/bob", 1235)
+            .owner("/proj/shared/bob/notes.txt", 1235)
+            .owner("/proj/shared/tools", 0)
+            .owner("/proj/shared/tools/x", 0);
+        fs.homes.insert(1234, "/export/home/alice".into());
+        fs.homes.insert(1235, "/home/bob".into());
+        for (path, dir, needle) in [
+            ("/export/home", true, "contains another user's home folder"),
+            ("/export/home/alice", true, "another user's home folder"),
+            ("/export/home/alice/build", true, "another user's home folder"),
+            ("/export/home/alice/build/out.o", false, "another user's home folder"),
+        ] {
+            let v = verdict(fl, path, dir, &r, &fs);
+            assert!(matches!(&v, Verdict::Blocked(why) if why.contains(needle) && why.contains("/export/home/alice")), "{fl:?} {path}: {v:?}");
+        }
+        let v = verdict(fl, "/proj/shared", true, &r, &fs);
+        assert!(matches!(&v, Verdict::Warn(w) if w.iter().any(|x| x.contains("files of another user"))), "{fl:?} {v:?}");
+        assert_eq!(verdict(fl, "/proj/shared/tools", true, &r, &fs), Verdict::Allowed, "{fl:?}");
+        // A walk cut short says so.
+        let c = contents(fl, "/proj/shared", &r.sys.unix, &fs, 2);
+        assert!(!c.complete && c.home.is_none());
+        // Not as root: the folder of root is refused as root's anyway, nothing is walked.
+        r.sys.unix.uid = Some(ME);
+        assert!(matches!(verdict(fl, "/proj/shared", true, &r, &fs), Verdict::Blocked(why) if why.contains("root")));
+    }
+}
+
+/// UX2: Fedora Atomic (Silverblue, Kinoite, Bazzite): data disks under /var/mnt (`/mnt` links
+/// there) hold user files, and root's home is /var/roothome. The mount points and the folders
+/// above them, and /var otherwise, stay blocked.
+#[test]
+fn fedora_atomic_data_disks_and_root_home() {
+    for fl in FLAVORS {
+        let mut r = rules(fl);
+        r.sys.unix.mounts.push(norm_unix(fl, "/var/mnt/data"));
+        let fs = FakeFs::default().link("/mnt", "var/mnt").link("/root", "var/roothome").owner("/var/roothome/x.iso", 0).owner("/root/x.iso", 0);
+        for (path, dir) in [("/mnt/data/movies/a.mkv", false), ("/var/mnt/data/movies/a.mkv", false), ("/mnt/data/movies", true), ("/var/mnt/data/steam", true)] {
+            assert_eq!(verdict(fl, path, dir, &r, &fs), Verdict::Allowed, "{fl:?} {path}");
+        }
+        for (path, dir) in [("/var/mnt/data", true), ("/mnt/data", true), ("/var/mnt", true), ("/var/mnt/notmounted/x", false), ("/var/lib/x", false)] {
+            assert!(matches!(verdict(fl, path, dir, &r, &fs), Verdict::Blocked(_)), "{fl:?} {path}");
+        }
+        r.sys.unix.uid = Some(0);
+        r.sys.unix.homes = vec![norm_unix(fl, "/root"), norm_unix(fl, "/var/roothome")];
+        assert_eq!(verdict(fl, "/root/x.iso", false, &r, &fs), Verdict::Allowed, "{fl:?}");
+        assert!(matches!(verdict(fl, "/var/roothome", true, &r, &fs), Verdict::Blocked(_)));
+    }
+}
+
+/// UX4: a path that is not UTF-8 cannot be looked up by its string, so the owner and link checks
+/// would be skipped: it is refused.
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt;
+    let r = Rules { sys: crate::pro::diskdelete::system_paths(), inv: Inventory::default() };
+    let p = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/tmop-b\xe4ckup"));
+    assert!(matches!(crate::pro::diskdelete::classify_resolved(p, meta(true), &r), Verdict::Blocked(why) if why.contains("UTF-8")));
+}
+
+/// UX1 on the real file system, as root only (it gives files away): a folder holding files of an
+/// account the user database does not know warns before a root delete.
+#[cfg(target_os = "linux")]
+#[test]
+fn real_root_delete_of_mixed_ownership_warns() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let r = Rules { sys: crate::pro::diskdelete::system_paths(), inv: Inventory::default() };
+    let base = std::env::temp_dir().join(format!("tmop-del-mixed-{}", std::process::id()));
+    let alice = base.join("home").join("alice");
+    std::fs::create_dir_all(alice.join(".ssh")).unwrap();
+    std::fs::write(alice.join(".ssh").join("id_ed25519"), b"k").unwrap();
+    for p in [alice.clone(), alice.join(".ssh"), alice.join(".ssh").join("id_ed25519")] {
+        std::os::unix::fs::lchown(&p, Some(4_000_123), Some(4_000_123)).unwrap();
+    }
+    let v = crate::pro::diskdelete::classify_resolved(&base.join("home"), meta(true), &r);
+    assert!(matches!(&v, Verdict::Warn(w) if w.iter().any(|x| x.contains("files of another user"))), "{v:?}");
+    let _ = std::fs::remove_dir_all(&base);
 }

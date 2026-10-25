@@ -355,7 +355,12 @@ pub fn classify_win(path: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
 pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
     #[cfg(unix)]
     {
-        unix::classify_fs(unix::FLAVOR, &path.to_string_lossy(), meta, rules, &unix::RealFs)
+        // The checks look the path up by its string: a name that is not UTF-8 would not be found
+        // (its owner, links and contents unknown), so it is not judged at all.
+        match path.to_str() {
+            Some(s) => unix::classify_fs(unix::FLAVOR, s, meta, rules, &unix::RealFs),
+            None => Verdict::Blocked("the path is not valid UTF-8; rename it first".into()),
+        }
     }
     #[cfg(not(unix))]
     {

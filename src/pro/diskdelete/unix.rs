@@ -126,7 +126,11 @@ const USERS_ROOTS: &[&str] = &["/home", "/Users", "/var/home"];
 /// Temporary folders that may sit inside a system tree.
 const FIXED_TEMP: &[&str] = &["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"];
 /// Home folders that live inside a system tree.
-const ROOT_HOMES: &[&str] = &["/root", "/var/root", "/private/var/root"];
+/// (`/var/roothome` is root's on Fedora Atomic: Silverblue, Kinoite, Bazzite...)
+const ROOT_HOMES: &[&str] = &["/root", "/var/root", "/private/var/root", "/var/roothome"];
+/// Folders whose mounts hold user data although they sit in a system tree: udisks' removable
+/// media, and Fedora Atomic's `/var/mnt` (`/mnt` links there).
+const DATA_MOUNT_ROOTS: &[&str] = &["/run/media", "/var/mnt"];
 /// Trash and file system metadata stores, wherever they are (any component).
 const STORES: &[&str] = &[".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100", ".TemporaryItems", ".MobileBackups"];
 /// Inside the home folder: blocked with everything below.
@@ -382,8 +386,9 @@ pub fn classify_unix(flavor: Flavor, n: &str, meta: ItemMeta, owner: Option<u32>
         if c.len() == 1 {
             return blocked("top-level system folder");
         }
-        // Removable media under /run/media (udisks) hold user files, not system ones.
-        let media = u.mounts.iter().any(|m| strictly_under(m, &k(flavor, "/run/media")) && strictly_under(n, m));
+        // Disks mounted under /run/media (udisks) or /var/mnt (Fedora Atomic) hold user files, not
+        // system ones. The mount point itself and the folders above it stay blocked.
+        let media = u.mounts.iter().any(|m| DATA_MOUNT_ROOTS.iter().any(|r| strictly_under(m, &k(flavor, r))) && strictly_under(n, m));
         if !media && !temps.iter().any(|t| strictly_under(n, t)) {
             if let Some(t) = system_tree(flavor, n) {
                 return blocked(format!("system folder (/{t})"));
@@ -470,6 +475,9 @@ pub trait UnixFs {
     /// The home folder of account `uid` as the system's user database says (directory services
     /// such as LDAP included, which `/etc/passwd` does not list).
     fn home_of(&self, uid: u32) -> Option<String>;
+    /// The entries of the folder `path` (name, the entry itself with links not followed); `None`
+    /// when it cannot be read whole.
+    fn entries(&self, path: &str) -> Option<Vec<(String, FsInfo)>>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -490,6 +498,80 @@ fn parent_resolved(path: &str, fs: &impl UnixFs) -> Option<String> {
     }
     let real = fs.canonical(if parent.is_empty() { "/" } else { parent })?;
     Some(join(&real, name))
+}
+
+/// The folders above `path` (`/a`, `/a/b` for `/a/b/c`), as given (not normalised).
+fn ancestors(path: &str) -> Vec<String> {
+    let parts: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    (1..parts.len()).map(|i| format!("/{}", parts[..i].join("/"))).collect()
+}
+
+/// The home folder of account `o` (as listed, and its normalised forms as given and resolved)
+/// when `o` is another account than root and this one, and its home is a real one that does not
+/// hold this user's own home.
+fn foreign_home(flavor: Flavor, o: u32, u: &UnixPaths, fs: &impl UnixFs) -> Option<(String, Vec<String>)> {
+    if o == 0 || Some(o) == u.uid {
+        return None;
+    }
+    let h = fs.home_of(o)?;
+    let homes: Vec<&String> = u.homes.iter().filter(|m| home_ok(flavor, m)).collect();
+    let hs: Vec<String> = [Some(h.clone()), fs.canonical(&h)].into_iter().flatten().map(|x| norm_unix(flavor, &x)).filter(|x| x.starts_with('/') && x != "/" && !comps(x).contains(&"..") && !homes.iter().any(|m| under(m, x))).collect();
+    (!hs.is_empty()).then_some((h, hs))
+}
+
+/// How many entries [`contents`] looks at before it gives up.
+const CONTENTS_LIMIT: usize = 50_000;
+
+/// What a folder holds, as far as owners go.
+#[derive(Debug, Default)]
+struct Contents {
+    /// Another account's home folder inside (as that account's database entry lists it).
+    home: Option<String>,
+    /// Owners other than root and this user.
+    others: std::collections::BTreeSet<u32>,
+    /// Every entry was looked at.
+    complete: bool,
+}
+
+/// Walks the folder `dir` (links not followed, other file systems not entered) for entries of
+/// other accounts and for their home folders, up to `limit` entries.
+fn contents(flavor: Flavor, dir: &str, u: &UnixPaths, fs: &impl UnixFs, limit: usize) -> Contents {
+    let mut out = Contents { complete: true, ..Default::default() };
+    let Some(dev) = fs.lstat(dir).map(|i| i.id.0) else {
+        out.complete = false;
+        return out;
+    };
+    let mut homes: std::collections::HashMap<u32, Option<(String, Vec<String>)>> = Default::default();
+    let mut todo = vec![dir.to_string()];
+    let mut seen = 0usize;
+    while let Some(d) = todo.pop() {
+        let Some(entries) = fs.entries(&d) else {
+            out.complete = false;
+            continue;
+        };
+        for (name, i) in entries {
+            seen += 1;
+            if seen > limit {
+                out.complete = false;
+                return out;
+            }
+            let p = join(&d, &name);
+            if i.owner != 0 && Some(i.owner) != u.uid {
+                out.others.insert(i.owner);
+                if let Some((h, hs)) = homes.entry(i.owner).or_insert_with(|| foreign_home(flavor, i.owner, u, fs)) {
+                    let np = norm_unix(flavor, &p);
+                    if hs.iter().any(|x| under(&np, x)) {
+                        out.home = Some(h.clone());
+                        return out;
+                    }
+                }
+            }
+            if i.is_dir && !i.is_link && i.id.0 == dev {
+                todo.push(p);
+            }
+        }
+    }
+    out
 }
 
 /// The folder a bind mount shows at `n`, when `n` is inside one.
@@ -515,16 +597,46 @@ pub fn classify_fs(flavor: Flavor, path: &str, meta: ItemMeta, rules: &Rules, fs
         return blocked("a protected folder under another name");
     }
     let real = parent_resolved(path, fs);
-    // Another account's item in that account's home folder, wherever the home is (`/u/alice`
-    // from LDAP is in no passwd file and under no usual users folder).
-    if let Some(o) = owner.filter(|o| *o != 0 && Some(*o) != u.uid) {
-        let homes: Vec<String> = u.homes.iter().filter(|h| home_ok(flavor, h)).cloned().collect();
-        if let Some(h) = fs.home_of(o) {
-            let hs: Vec<String> = [Some(h.clone()), fs.canonical(&h)].into_iter().flatten().map(|x| norm_unix(flavor, &x)).filter(|x| x.starts_with('/') && x != "/" && !comps(x).contains(&"..") && !homes.iter().any(|m| under(m, x))).collect();
-            let seen = [Some(n.clone()), real.as_ref().map(|r| norm_unix(flavor, r))];
-            if hs.iter().any(|x| seen.iter().flatten().any(|s| under(s, x))) {
-                return blocked(format!("another user's home folder ({h})"));
+    // Another account's home folder, wherever it is (`/u/alice` from LDAP is in no passwd file
+    // and under no usual users folder): the item or a folder above it owned by that account and
+    // inside its home (a root-owned `build` in alice's home is still in alice's home).
+    let seen: Vec<String> = [Some(n.clone()), real.as_ref().map(|r| norm_unix(flavor, r))].into_iter().flatten().collect();
+    let walked = real.clone().unwrap_or_else(|| path.to_string());
+    let chain = std::iter::once((path.to_string(), owner)).chain(ancestors(&walked).into_iter().map(|a| {
+        let o = fs.lstat(&a).map(|i| i.owner);
+        (a, o)
+    }));
+    for (_, o) in chain {
+        if let Some(h) = o.and_then(|o| foreign_home(flavor, o, u, fs)) {
+            if h.1.iter().any(|x| seen.iter().any(|s| under(s, x))) {
+                return blocked(format!("another user's home folder ({})", h.0));
             }
+        }
+    }
+    // Running as root, a folder may hold other accounts' homes and files that no list names:
+    // look inside (bounded) for whose they are.
+    if meta.is_dir && u.uid == Some(0) && info.is_some_and(|i| i.is_dir && !i.is_link) {
+        let c = contents(flavor, &walked, u, fs, CONTENTS_LIMIT);
+        if let Some(h) = c.home {
+            return blocked(format!("contains another user's home folder ({h})"));
+        }
+        let mut more: Vec<String> = Vec::new();
+        match c.others.len() {
+            0 => {}
+            1 => more.push("contains files of another user".into()),
+            x => more.push(format!("contains files of {x} other users")),
+        }
+        if !c.complete {
+            more.push("too large to check fully for other users' files".into());
+        }
+        if !more.is_empty() {
+            v = match v {
+                Verdict::Warn(mut a) => {
+                    a.extend(more);
+                    Verdict::Warn(a)
+                }
+                _ => Verdict::Warn(more),
+            };
         }
     }
     // (path, meta, owner, how it was reached, whether its warnings count)
@@ -586,6 +698,18 @@ impl UnixFs for RealFs {
         }
         SEEN.with(|s| s.borrow_mut().entry(uid).or_insert_with(|| pw_home(uid)).clone())
     }
+    fn entries(&self, path: &str) -> Option<Vec<(String, FsInfo)>> {
+        use std::os::unix::fs::MetadataExt;
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(path).ok()? {
+            let e = e.ok()?;
+            // A name that is not UTF-8 cannot be followed by its string: the folder is not read whole.
+            let name = e.file_name().into_string().ok()?;
+            let m = e.metadata().ok()?;
+            out.push((name, FsInfo { owner: m.uid(), id: (m.dev(), m.ino()), is_link: m.file_type().is_symlink(), is_dir: m.is_dir() }));
+        }
+        Some(out)
+    }
 }
 
 /// `getpwuid_r(uid)`'s home folder (NSS: files, LDAP, SSSD... alike).
@@ -618,7 +742,7 @@ fn pw_all() -> Vec<(u32, String)> {
     // SAFETY: setpwent/getpwent/endpwent on this worker thread only; each entry is copied before the next call.
     unsafe {
         libc::setpwent();
-        while out.len() < 100_000 {
+        while out.len() < 20_000 {
             let p = libc::getpwent();
             if p.is_null() {
                 break;
@@ -734,9 +858,13 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
     let canon = |p: &str| std::fs::canonicalize(p).ok().map(|c| c.to_string_lossy().into_owned());
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
-    let mut passwd = std::fs::read_to_string("/etc/passwd").map(|t| parse_passwd(&t)).unwrap_or_default();
+    // Local accounts (their homes are resolved below) and the user database's (directory services
+    // that enumerate; taken as listed: resolving would mount every user's network home).
+    let local = std::fs::read_to_string("/etc/passwd").map(|t| parse_passwd(&t)).unwrap_or_default();
+    let mut passwd = local.clone();
+    let mut listed: std::collections::HashSet<(u32, String)> = local.iter().cloned().collect();
     for e in pw_all() {
-        if !passwd.contains(&e) {
+        if listed.insert(e.clone()) {
             passwd.push(e);
         }
     }
@@ -808,16 +936,16 @@ pub fn build() -> (Vec<(String, &'static str)>, UnixPaths) {
 
     // Other accounts: passwd entries, and every folder in a users root that is not ours.
     let mut other_homes: Vec<String> = Vec::new();
-    let mut add_other = |p: &str| {
-        for v in [Some(n(p)), canon(p).map(|c| n(&c))].into_iter().flatten() {
-            if v != "/" && !homes.iter().any(|h| under(h, &v)) && !other_homes.contains(&v) {
+    let mut have: std::collections::HashSet<String> = Default::default();
+    for (u, h) in &passwd {
+        if *u == uid || !h.starts_with('/') {
+            continue;
+        }
+        let resolved = if local.iter().any(|(lu, lh)| lu == u && lh == h) { canon(h).map(|c| n(&c)) } else { None };
+        for v in [Some(n(h)), resolved].into_iter().flatten() {
+            if v != "/" && !homes.iter().any(|m| under(m, &v)) && have.insert(v.clone()) {
                 other_homes.push(v);
             }
-        }
-    };
-    for (u, h) in &passwd {
-        if *u != uid && h.starts_with('/') {
-            add_other(h);
         }
     }
 

@@ -211,18 +211,57 @@ impl Anchor {
 enum Stop {
     /// Another file system or mount at this path: nothing below it is entered.
     Mount(PathBuf),
+    /// Another account's home folder (the path, the home as that account's entry lists it).
+    Home(PathBuf, String),
+    /// Folders nested deeper than [`MAX_DEPTH`].
+    Deep,
     Io(io::Error),
 }
 
-struct Walk {
+/// Deeper trees are refused (one descriptor and one stack frame per level).
+const MAX_DEPTH: usize = 512;
+
+struct Walk<'a> {
     dev: u64,
     mnt: Option<u64>,
     removed: u64,
+    /// This user (folders of other accounts are checked against their home folders).
+    me: u32,
+    /// The home folder of an account (the user database).
+    home_of: &'a dyn Fn(u32) -> Option<String>,
+    homes: std::collections::HashMap<u32, Option<(String, Vec<String>)>>,
 }
 
-impl Walk {
-    /// The folder `name` in `dir` (`path` for messages), checked and, unless `dry`, removed.
-    fn dir(&mut self, dir: RawFd, name: &CStr, path: &Path, dry: bool) -> Result<(), Stop> {
+impl Walk<'_> {
+    /// `path` (a folder owned by `uid`) is that account's home folder or inside it, where the
+    /// account is neither root nor this user: the home as listed, when so.
+    fn foreign_home(&mut self, uid: u32, path: &Path) -> Option<String> {
+        use super::unix::{norm_unix, under, FLAVOR};
+        if uid == 0 || uid == self.me {
+            return None;
+        }
+        let home_of = self.home_of;
+        // (as listed, its normalised forms as given and resolved), once per account.
+        let (h, hs) = self
+            .homes
+            .entry(uid)
+            .or_insert_with(|| {
+                let h = home_of(uid)?;
+                let real = std::fs::canonicalize(&h).ok().map(|c| c.to_string_lossy().into_owned());
+                let hs = [Some(h.clone()), real].into_iter().flatten().map(|x| norm_unix(FLAVOR, &x)).filter(|x| x.starts_with('/') && x != "/" && !x.split('/').any(|c| c == "..")).collect();
+                Some((h, hs))
+            })
+            .as_ref()?;
+        let p = norm_unix(FLAVOR, &path.to_string_lossy());
+        hs.iter().any(|x: &String| under(&p, x)).then(|| h.clone())
+    }
+
+    /// The folder `name` in `dir` (`path` for messages, `depth` levels below the item), checked
+    /// and, unless `dry`, removed.
+    fn dir(&mut self, dir: RawFd, name: &CStr, path: &Path, depth: usize, dry: bool) -> Result<(), Stop> {
+        if depth > MAX_DEPTH {
+            return Err(Stop::Deep);
+        }
         let sub = match open_at(dir, name, LIST) {
             Ok(fd) => fd,
             // Replaced by a link or a file since it was listed: remove that, never follow it.
@@ -232,6 +271,9 @@ impl Walk {
         let st = stat_at(sub.as_raw_fd(), c"").map_err(Stop::Io)?;
         if dev_of(&st) != self.dev || (self.mnt.is_some() && mount_id(sub.as_raw_fd(), c"") != self.mnt) {
             return Err(Stop::Mount(path.to_path_buf()));
+        }
+        if let Some(h) = self.foreign_home(st.st_uid, path) {
+            return Err(Stop::Home(path.to_path_buf(), h));
         }
         // The entries first, with the listing stream closed before going deeper (one fd per level).
         let mut names: Vec<CString> = Vec::new();
@@ -270,7 +312,7 @@ impl Walk {
             }
         }
         for n in dirs {
-            self.dir(sub.as_raw_fd(), n, &path.join(OsStr::from_bytes(n.to_bytes())), dry)?;
+            self.dir(sub.as_raw_fd(), n, &path.join(OsStr::from_bytes(n.to_bytes())), depth + 1, dry)?;
         }
         if !dry {
             // SAFETY: a NUL-terminated name in an open folder.
@@ -301,9 +343,16 @@ fn mounts_at_or_below(item: &Path) -> Option<String> {
 }
 
 /// Deletes the item for good (a link itself, never its target). A folder is refused when it is
-/// or holds a mount point (by the mount table, the device and the mount id of every folder), and
-/// then nothing is deleted; when the removal fails part way, the error says so.
+/// or holds a mount point (by the mount table, the device and the mount id of every folder) or
+/// another account's home folder (every folder owned by another account is looked up in the user
+/// database), or is nested deeper than [`MAX_DEPTH`]; then nothing is deleted. When the removal
+/// fails part way, the error says so.
 pub fn remove(a: &Anchor) -> Result<(), String> {
+    use super::unix::UnixFs;
+    remove_with(a, euid(), &|uid| super::unix::RealFs.home_of(uid))
+}
+
+fn remove_with(a: &Anchor, me: u32, home_of: &dyn Fn(u32) -> Option<String>) -> Result<(), String> {
     let st = stat_at(a.dir_fd(), a.cname()).map_err(|e| short(&e))?;
     if !is_dir(&st) {
         // SAFETY: a NUL-terminated name in the open parent; a link is removed, never followed.
@@ -314,10 +363,12 @@ pub fn remove(a: &Anchor) -> Result<(), String> {
     }
     // The parent's device and mount: the item and everything below must share both.
     let parent = stat_at(a.dir_fd(), c"").map_err(|e| short(&e))?;
-    let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0 };
+    let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0, me, home_of, homes: Default::default() };
     let stop = |s: Stop, removed: u64| -> String {
         let why = match s {
             Stop::Mount(p) => format!("{} is another file system or mount", p.display()),
+            Stop::Home(p, h) => format!("{} is in another user's home folder ({h})", p.display()),
+            Stop::Deep => format!("folders are nested more than {MAX_DEPTH} levels deep"),
             Stop::Io(e) => short(&e),
         };
         if removed > 0 {
@@ -327,8 +378,8 @@ pub fn remove(a: &Anchor) -> Result<(), String> {
         }
     };
     let path = a.path();
-    w.dir(a.dir_fd(), a.cname(), &path, true).map_err(|s| stop(s, 0))?;
-    w.dir(a.dir_fd(), a.cname(), &path, false).map_err(|s| stop(s, w.removed))
+    w.dir(a.dir_fd(), a.cname(), &path, 0, true).map_err(|s| stop(s, 0))?;
+    w.dir(a.dir_fd(), a.cname(), &path, 0, false).map_err(|s| stop(s, w.removed))
 }
 
 #[cfg(test)]
@@ -421,9 +472,10 @@ mod tests {
         // The per-folder check alone (as when the mount appears after the table was read).
         let a = Anchor::new(&proj).unwrap();
         let parent = stat_at(a.dir_fd(), c"").unwrap();
-        let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0 };
+        let none = |_: u32| None;
+        let mut w = Walk { dev: dev_of(&parent), mnt: mount_id(a.dir_fd(), c""), removed: 0, me: euid(), home_of: &none, homes: Default::default() };
         assert!(w.mnt.is_some(), "statx gives mount ids on this kernel");
-        assert!(matches!(w.dir(a.dir_fd(), a.cname(), &proj, true), Err(Stop::Mount(p)) if p == proj.join("data")));
+        assert!(matches!(w.dir(a.dir_fd(), a.cname(), &proj, 0, true), Err(Stop::Mount(p)) if p == proj.join("data")));
         assert!(docs.join("precious.txt").exists());
         // The mount point itself.
         let e = remove(&Anchor::new(&proj.join("data")).unwrap()).unwrap_err();
@@ -452,6 +504,70 @@ mod tests {
             assert!(v.join("ro").join("sub").join("g").exists());
         }
         let _ = std::fs::set_permissions(v.join("ro").join("sub"), std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// UX1/E1/R1: a folder holding another account's home (an LDAP account in no passwd file, its
+    /// home under a plain `/export/home`) is refused with nothing deleted, as is that home itself.
+    /// The files here are this test's; the walk is told it runs as someone else, so they are
+    /// "alice's" and the user database says her home is `export/home/alice`.
+    #[test]
+    fn another_users_home_inside_is_never_deleted() {
+        let base = sandbox("homes");
+        let alice = base.join("export").join("home").join("alice");
+        std::fs::create_dir_all(alice.join(".ssh")).unwrap();
+        std::fs::write(alice.join(".ssh").join("id_ed25519"), b"k").unwrap();
+        std::fs::write(alice.join("thesis.tex"), b"t").unwrap();
+        // Root's own folders are never another user's: as root, the files are given away first.
+        let me = if euid() == 0 {
+            for p in [alice.clone(), alice.join(".ssh"), alice.join(".ssh").join("id_ed25519"), alice.join("thesis.tex")] {
+                std::os::unix::fs::lchown(&p, Some(4_000_123), Some(4_000_123)).unwrap();
+            }
+            4_000_123
+        } else {
+            euid()
+        };
+        let other = me.wrapping_add(7919);
+        let home = alice.to_string_lossy().into_owned();
+        let home_of = |uid: u32| (uid == me).then(|| home.clone());
+        for item in [base.join("export"), base.join("export").join("home"), alice.clone(), alice.join(".ssh")] {
+            let e = remove_with(&Anchor::new(&item).unwrap(), other, &home_of).unwrap_err();
+            assert!(e.contains("another user's home folder") && e.contains("nothing was deleted"), "{}: {e}", item.display());
+            assert!(alice.join(".ssh").join("id_ed25519").exists() && alice.join("thesis.tex").exists());
+        }
+        // A folder of that account outside its home is not refused here (the rules warn about it).
+        std::fs::create_dir_all(base.join("scratch").join("x")).unwrap();
+        remove_with(&Anchor::new(&base.join("scratch")).unwrap(), other, &home_of).unwrap();
+        assert!(!base.join("scratch").exists());
+        // As the account itself, its own folders go.
+        remove_with(&Anchor::new(&alice).unwrap(), me, &home_of).unwrap();
+        assert!(!alice.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// E2/R2: a tree nested deeper than MAX_DEPTH is refused before anything is removed (no
+    /// stack overflow, no running out of descriptors part way).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_too_deep_tree_is_refused_whole() {
+        let base = sandbox("deep");
+        let mut p = base.join("v");
+        for _ in 0..MAX_DEPTH + 5 {
+            p.push("d");
+        }
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("f"), b"f").unwrap();
+        let e = remove(&Anchor::new(&base.join("v")).unwrap()).unwrap_err();
+        assert!(e.contains("nested") && e.contains("nothing was deleted"), "{e}");
+        assert!(p.join("f").exists());
+        // Within the limit it goes.
+        let mut q = base.join("w");
+        for _ in 0..MAX_DEPTH - 1 {
+            q.push("d");
+        }
+        std::fs::create_dir_all(&q).unwrap();
+        remove(&Anchor::new(&base.join("w")).unwrap()).unwrap();
+        assert!(!base.join("w").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
