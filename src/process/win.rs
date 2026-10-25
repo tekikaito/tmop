@@ -417,29 +417,30 @@ pub(super) mod sys {
         }
     }
 
-    pub fn terminate(pid: u32) -> Result<(), String> {
+    // `_start` (the creation time) is not re-checked: unchanged Windows behaviour.
+    pub fn terminate(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_TERMINATE).map_err(err)?;
         unsafe { TerminateProcess(h.0, 1).map_err(err) }
     }
 
-    pub fn suspend(pid: u32) -> Result<(), String> {
+    pub fn suspend(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
         nt(unsafe { NtSuspendProcess(h.0) }, "NtSuspendProcess")
     }
 
-    pub fn resume(pid: u32) -> Result<(), String> {
+    pub fn resume(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
         nt(unsafe { NtResumeProcess(h.0) }, "NtResumeProcess")
     }
 
-    pub fn set_priority(pid: u32, p: Priority) -> Result<(), String> {
+    pub fn set_priority(pid: u32, _start: i64, p: Priority) -> Result<(), String> {
         let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
         unsafe { SetPriorityClass(h.0, priority_class(p)).map_err(err) }
     }
 
     /// Efficiency mode = EcoQoS (execution-speed throttling) + idle priority, as
     /// Windows Task Manager does; turning it off hands throttling back to the system.
-    pub fn set_efficiency(pid: u32, on: bool) -> Result<(), String> {
+    pub fn set_efficiency(pid: u32, _start: i64, on: bool) -> Result<(), String> {
         let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,

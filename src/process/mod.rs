@@ -4,14 +4,20 @@
 //! backend per target supplies the [`Enumerator`] and the action primitives (`sys::{terminate,
 //! suspend, resume, set_priority, set_efficiency, open_location}`): `win.rs`
 //! (`NtQuerySystemInformation`, `TerminateProcess`, `NtSuspendProcess`/`NtResumeProcess`,
-//! `SetPriorityClass`, EcoQoS via `SetProcessInformation`) and `stub.rs` for targets without a
-//! backend yet. A Linux or macOS backend plugs in beside `win.rs` with the same API.
+//! `SetPriorityClass`, EcoQoS via `SetProcessInformation`), `linux.rs` (`/proc`, signals through
+//! pidfd, nice and `SCHED_IDLE`; its pure parsers in `procfs.rs`) and `stub.rs` for targets
+//! without a backend yet. A macOS backend plugs in beside them with the same API.
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as imp;
+mod procfs;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
 use win as imp;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[path = "stub.rs"]
 mod imp;
 
@@ -25,6 +31,9 @@ use crate::platform::{Os, OS};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, OnceLock};
+
+/// How a backend reports that the OS refused an action for lack of rights (EPERM, ACCESS_DENIED).
+pub const ACCESS_DENIED: &str = "Access denied";
 
 /// What the process backend of this build can do (columns, menu items).
 pub fn caps() -> ProcCaps {
@@ -522,33 +531,35 @@ impl Column {
 pub mod actions {
     use super::{caps, imp, mark_efficiency, tree_of, Action, Priority, ProcCaps, ProcessRow};
 
-    /// The primitives [`run`] drives: the backend's `sys` functions, or a fake in tests.
+    /// The primitives [`run`] drives: the backend's `sys` functions, or a fake in tests. `start`
+    /// is the target's [`ProcessRow::create_time`]: a backend that addresses processes by pid
+    /// alone (Unix) checks it, so a reused pid is never hit.
     pub(crate) trait Sys {
-        fn terminate(&self, pid: u32) -> Result<(), String>;
-        fn suspend(&self, pid: u32) -> Result<(), String>;
-        fn resume(&self, pid: u32) -> Result<(), String>;
-        fn set_priority(&self, pid: u32, p: Priority) -> Result<(), String>;
-        fn set_efficiency(&self, pid: u32, on: bool) -> Result<(), String>;
+        fn terminate(&self, pid: u32, start: i64) -> Result<(), String>;
+        fn suspend(&self, pid: u32, start: i64) -> Result<(), String>;
+        fn resume(&self, pid: u32, start: i64) -> Result<(), String>;
+        fn set_priority(&self, pid: u32, start: i64, p: Priority) -> Result<(), String>;
+        fn set_efficiency(&self, pid: u32, start: i64, on: bool) -> Result<(), String>;
         fn open_location(&self, path: &str) -> Result<(), String>;
     }
 
     struct Native;
 
     impl Sys for Native {
-        fn terminate(&self, pid: u32) -> Result<(), String> {
-            imp::sys::terminate(pid)
+        fn terminate(&self, pid: u32, start: i64) -> Result<(), String> {
+            imp::sys::terminate(pid, start)
         }
-        fn suspend(&self, pid: u32) -> Result<(), String> {
-            imp::sys::suspend(pid)
+        fn suspend(&self, pid: u32, start: i64) -> Result<(), String> {
+            imp::sys::suspend(pid, start)
         }
-        fn resume(&self, pid: u32) -> Result<(), String> {
-            imp::sys::resume(pid)
+        fn resume(&self, pid: u32, start: i64) -> Result<(), String> {
+            imp::sys::resume(pid, start)
         }
-        fn set_priority(&self, pid: u32, p: Priority) -> Result<(), String> {
-            imp::sys::set_priority(pid, p)
+        fn set_priority(&self, pid: u32, start: i64, p: Priority) -> Result<(), String> {
+            imp::sys::set_priority(pid, start, p)
         }
-        fn set_efficiency(&self, pid: u32, on: bool) -> Result<(), String> {
-            imp::sys::set_efficiency(pid, on)
+        fn set_efficiency(&self, pid: u32, start: i64, on: bool) -> Result<(), String> {
+            imp::sys::set_efficiency(pid, start, on)
         }
         fn open_location(&self, path: &str) -> Result<(), String> {
             imp::sys::open_location(path)
@@ -564,7 +575,8 @@ pub mod actions {
         if !action.supported(caps) {
             return Err(format!("not available on {}", crate::platform::os_name()));
         }
-        let end = |pid: u32| if pid == std::process::id() { Err("refusing to terminate TMOP itself".to_string()) } else { sys.terminate(pid) };
+        let start_of = |pid: u32| if pid == row.pid { row.create_time } else { rows.iter().find(|r| r.pid == pid).map_or(0, |r| r.create_time) };
+        let end = |pid: u32| if pid == std::process::id() { Err("refusing to terminate TMOP itself".to_string()) } else { sys.terminate(pid, start_of(pid)) };
         match action {
             Action::EndTask => end(row.pid).map(|_| format!("Ended {} ({})", row.name, row.pid)),
             Action::EndTree => {
@@ -576,11 +588,11 @@ pub mod actions {
                     Err(failed.join("; "))
                 }
             }
-            Action::Suspend => sys.suspend(row.pid).map(|_| format!("Suspended {}", row.name)),
-            Action::Resume => sys.resume(row.pid).map(|_| format!("Resumed {}", row.name)),
-            Action::SetPriority(p) => sys.set_priority(row.pid, p).map(|_| format!("{} priority: {}", row.name, p.label())),
+            Action::Suspend => sys.suspend(row.pid, row.create_time).map(|_| format!("Suspended {}", row.name)),
+            Action::Resume => sys.resume(row.pid, row.create_time).map(|_| format!("Resumed {}", row.name)),
+            Action::SetPriority(p) => sys.set_priority(row.pid, row.create_time, p).map(|_| format!("{} priority: {}", row.name, p.label())),
             Action::Efficiency(on) => {
-                sys.set_efficiency(row.pid, on)?;
+                sys.set_efficiency(row.pid, row.create_time, on)?;
                 mark_efficiency((row.pid, row.create_time), on);
                 Ok(format!("{} {} for {}", super::efficiency_word(), if on { "on" } else { "off" }, row.name))
             }
@@ -589,6 +601,30 @@ pub mod actions {
                 None => Err("Image path unavailable".into()),
             },
         }
+    }
+}
+
+/// Retrying an action the OS refused ([`ACCESS_DENIED`]) as administrator: through `pkexec` on
+/// Linux (one `kill` or `renice` run from an argument vector, never a shell string). Never
+/// offered elsewhere.
+pub mod elevated {
+    #[cfg(target_os = "linux")]
+    pub use super::imp::elevated::{offered, run};
+
+    #[cfg(not(target_os = "linux"))]
+    use super::{Action, ProcessRow};
+
+    /// Whether the failure `err` of `action` can be retried as administrator here.
+    #[cfg(not(target_os = "linux"))]
+    pub fn offered(_action: Action, _err: &str) -> bool {
+        false
+    }
+
+    /// Runs `action` on `row` (its tree from `rows`) as administrator. Blocks until the
+    /// authorization prompt is answered; call it off the UI thread.
+    #[cfg(not(target_os = "linux"))]
+    pub fn run(_action: Action, _row: &ProcessRow, _rows: &[ProcessRow]) -> Result<String, String> {
+        Err(format!("not available on {}", crate::platform::os_name()))
     }
 }
 
@@ -660,19 +696,19 @@ mod tests {
     }
 
     impl actions::Sys for FakeSys {
-        fn terminate(&self, pid: u32) -> Result<(), String> {
-            self.call(format!("terminate {pid}"), pid)
+        fn terminate(&self, pid: u32, start: i64) -> Result<(), String> {
+            self.call(format!("terminate {pid}@{start}"), pid)
         }
-        fn suspend(&self, pid: u32) -> Result<(), String> {
+        fn suspend(&self, pid: u32, _start: i64) -> Result<(), String> {
             self.call(format!("suspend {pid}"), pid)
         }
-        fn resume(&self, pid: u32) -> Result<(), String> {
+        fn resume(&self, pid: u32, _start: i64) -> Result<(), String> {
             self.call(format!("resume {pid}"), pid)
         }
-        fn set_priority(&self, pid: u32, p: Priority) -> Result<(), String> {
+        fn set_priority(&self, pid: u32, _start: i64, p: Priority) -> Result<(), String> {
             self.call(format!("priority {pid} {}", p.label()), pid)
         }
-        fn set_efficiency(&self, pid: u32, on: bool) -> Result<(), String> {
+        fn set_efficiency(&self, pid: u32, _start: i64, on: bool) -> Result<(), String> {
             self.call(format!("efficiency {pid} {on}"), pid)
         }
         fn open_location(&self, path: &str) -> Result<(), String> {
@@ -690,7 +726,7 @@ mod tests {
         let rows = vec![row(900_001, 0, 10), row(900_002, 900_001, 20), row(me, 900_001, 30), row(900_003, 900_002, 40)];
         let sys = FakeSys { fail: vec![900_003], ..Default::default() };
         let err = run_with(&sys, &ALL_CAPS, Action::EndTree, &rows[0], &rows).unwrap_err();
-        assert_eq!(sys.calls(), ["terminate 900003", "terminate 900002", "terminate 900001"]);
+        assert_eq!(sys.calls(), ["terminate 900003@40", "terminate 900002@20", "terminate 900001@10"]);
         assert!(err.contains("900003: Access denied") && err.contains(&format!("{me}: refusing")), "{err}");
         let sys = FakeSys::default();
         assert_eq!(run_with(&sys, &ALL_CAPS, Action::EndTask, &rows[1], &rows).unwrap(), "Ended p900002 (900002)");
@@ -700,7 +736,7 @@ mod tests {
         assert_eq!(run_with(&sys, &ALL_CAPS, Action::OpenFileLocation, &rows[1], &rows).unwrap_err(), "Image path unavailable");
         let with_path = ProcessRow { path: Some("/x/y".into()), ..rows[1].clone() };
         assert!(run_with(&sys, &ALL_CAPS, Action::OpenFileLocation, &with_path, &rows).is_ok());
-        assert_eq!(sys.calls(), ["terminate 900002", "priority 900002 High", "suspend 900002", "open /x/y"]);
+        assert_eq!(sys.calls(), ["terminate 900002@20", "priority 900002 High", "suspend 900002", "open /x/y"]);
 
         // Efficiency mode is remembered per (pid, creation time) until turned off.
         let key = (rows[1].pid, rows[1].create_time);

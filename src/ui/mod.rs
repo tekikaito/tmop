@@ -403,6 +403,8 @@ pub struct App {
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
     pending: Option<process_actions::Pending>,
+    /// A process action running as administrator (`pkexec`); its status text arrives here.
+    elevated_job: Option<std::sync::mpsc::Receiver<String>>,
     /// "HOST {b7} user" shown in the header.
     machine: String,
     /// Ctrl+K was pressed: focus the header search on the next frame.
@@ -493,6 +495,7 @@ impl App {
             sort: (Column::Cpu, true),
             selected: None,
             pending: None,
+            elevated_job: None,
             machine: chrome::machine_line(),
             focus_search: false,
             status,
