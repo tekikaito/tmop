@@ -699,7 +699,9 @@ impl App {
                             changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
                         });
                         section(ui, &pal, &mut sections, SECTIONS[4], |ui| {
-                            changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, "Ask before applying Efficiency mode");
+                            if caps.proc.efficiency {
+                                changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, &format!("Ask before applying {}", crate::process::efficiency_word()));
+                            }
                             changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                             changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
                             changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");

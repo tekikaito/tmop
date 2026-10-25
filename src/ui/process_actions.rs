@@ -1,6 +1,6 @@
 //! Process actions (end task, end tree, efficiency mode, priority) and their confirmation dialog.
 
-use super::processes::{app_label, is_system_user, key_once};
+use super::processes::{app_label, key_once};
 use super::theme::{self, Palette};
 use super::widgets::Icon;
 use super::{kit, App};
@@ -54,7 +54,7 @@ impl App {
                 Some((format!("End the process tree of {} ({})? All descendant processes will also be asked to end.", row.name, row.pid), Confirm::EndTree { members }))
             }
             Action::Efficiency(true) if self.settings.general.confirm_efficiency_mode => {
-                Some((format!("Turn on efficiency mode for {}? It lowers its priority and may make it less responsive.", row.name), Confirm::Efficiency))
+                Some((format!("Turn on {} for {}? It lowers its priority and may make it less responsive.", process::efficiency_word().to_lowercase(), row.name), Confirm::Efficiency))
             }
             Action::SetPriority(Priority::Realtime) => Some(("Realtime priority can make the system unresponsive. Continue?".into(), Confirm::Realtime)),
             _ => None,
@@ -66,20 +66,12 @@ impl App {
     }
 
     pub(super) fn execute(&mut self, action: Action, row: &ProcessRow) {
-        #[cfg(windows)]
-        {
-            let rows = self.snapshot().2;
-            self.status = match process::actions::run(action, row, &rows) {
-                Ok(m) => m,
-                Err(e) => format!("{}: {e}", row.name),
-            };
-            self.sampler.refresh();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = (action, row);
-            self.status = "Process actions are only implemented on Windows".into();
-        }
+        let rows = self.snapshot().2;
+        self.status = match process::actions::run(action, row, &rows) {
+            Ok(m) => m,
+            Err(e) => format!("{}: {e}", row.name),
+        };
+        self.sampler.refresh();
     }
 
     pub(super) fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
@@ -98,7 +90,7 @@ impl App {
                     let mem: u64 = members.iter().map(|m| m.private_working_set).sum();
                     let cpu: f32 = members.iter().map(|m| m.cpu_pct).sum();
                     let windows = members.iter().filter(|m| m.has_window).count();
-                    let system = members.iter().filter(|m| is_system_user(m.user.as_deref())).count();
+                    let system = members.iter().filter(|m| process::is_system_account(m.user.as_deref())).count();
                     kit::dialog_header(
                         ui,
                         pal,
