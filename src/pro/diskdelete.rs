@@ -1,6 +1,7 @@
 //! Deleting from Disk Space: the safety classifier (one pure function used by the manual delete
-//! and by Cleanup), the inventory it consults, and the delete worker (Recycle Bin through the
-//! shell, or permanent through `std::fs`). Nothing here touches the disk unless `run` is called.
+//! and by Cleanup), the inventory it consults, and the delete worker (Recycle Bin / Trash through
+//! [`super::trash`], or permanent through `std::fs`). Nothing here touches the disk unless `run`
+//! is called.
 //!
 //! Rules are deterministic: [`classify`] returns `Blocked` (never deletable), `Warn` (deletable
 //! after an explicit acknowledgement) or `Allowed`. System locations are resolved at runtime
@@ -783,7 +784,7 @@ fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Opt
         std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
     });
     let stamp = super::display_stamp();
-    let recycler = (mode == Mode::Recycle).then(Recycler::new);
+    let trasher = (mode == Mode::Recycle).then(super::trash::Trasher::new);
     for t in targets {
         let blocked_now = rules.and_then(|r| match classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
             Verdict::Blocked(why) => Some(why),
@@ -794,9 +795,11 @@ fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Opt
         } else if let Some(why) = blocked_now {
             Err(format!("blocked ({why})"))
         } else {
-            match (&recycler, mode) {
-                (Some(r), Mode::Recycle) => r.delete(&t.path, t.size),
-                _ => delete_permanent(&t.path),
+            // A Recycle never falls back to a permanent delete: what cannot go to the bin stays.
+            match (&trasher, mode) {
+                (Some(r), Mode::Recycle) => r.trash(&t.path, t.size),
+                (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
+                (_, Mode::Permanent) => delete_permanent(&t.path),
             }
         };
         if let Some(f) = log_file.as_mut() {
@@ -814,7 +817,7 @@ fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Opt
     rep
 }
 
-fn short_error(e: &std::io::Error) -> String {
+pub(crate) fn short_error(e: &std::io::Error) -> String {
     match (e.kind(), e.raw_os_error()) {
         (std::io::ErrorKind::NotFound, _) => "no longer exists".into(),
         (_, Some(32)) | (_, Some(33)) => "in use by another process".into(),
@@ -892,172 +895,26 @@ pub fn delete_permanent(path: &Path) -> Result<(), String> {
     r.map_err(|e| short_error(&e))
 }
 
-/// Moves items to the Recycle Bin through `IFileOperation`, one operation per item so a failure
-/// is attributed to its item. COM lives on the worker thread that created this.
-struct Recycler {
-    #[cfg(windows)]
-    com: bool,
-}
-
+/// The Windows Recycle Bin check, now in [`super::trash`].
 #[cfg(windows)]
-impl Recycler {
-    fn new() -> Self {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        // SAFETY: balanced with CoUninitialize in Drop when this succeeded.
-        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-        Recycler { com }
-    }
+pub use super::trash::has_recycle_bin;
 
-    fn delete(&self, path: &Path, size: u64) -> Result<(), String> {
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
-        use windows::Win32::UI::Shell::{
-            FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FILEOPERATION_FLAGS, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-        };
-        // The exact name is looked up in verbatim form (no trailing dot / space folding to a sibling). The shell
-        // rejects verbatim (backslash-backslash-question) paths with E_INVALIDARG, so it gets the plain path, and only for names Win32 cannot fold.
-        let vpath = verbatim(path);
-        if folds_to_sibling(path) {
-            return Err("the name ends with a dot or space; use permanent delete".into());
-        }
-        if std::fs::symlink_metadata(&vpath).is_err() {
-            return Err("no longer exists".into());
-        }
-        // The shell destroys instead of recycling when the bin is switched off or too small for the
-        // item, without saying so: refuse rather than delete permanently behind the dialog's back.
-        if let Some(limits) = bin_limits(path) {
-            if limits.nuke {
-                return Err("the Recycle Bin is turned off for this drive; use permanent delete".into());
+/// Blocks the items of a [`Mode::Recycle`] delete whose volume has no Recycle Bin / Trash, with
+/// the reason: they are left where they are, never deleted permanently instead. Returns how
+/// many it blocked and whether every bin involved keeps everything ([`super::trash::limit_known`]).
+pub fn block_untrashable(items: &mut [Assessed], vols: &mut super::trash::Volumes) -> (usize, bool) {
+    let (mut blocked, mut capped) = (0, true);
+    for a in items.iter_mut().filter(|a| !matches!(a.verdict, Verdict::Blocked(_))) {
+        let (why, keeps) = vols.check(&a.target.path);
+        match why {
+            Some(why) => {
+                a.verdict = Verdict::Blocked(format!("can't go to the {}: {why}", crate::platform::trash_word()));
+                blocked += 1;
             }
-            if limits.max_bytes.is_some_and(|m| size > m) {
-                return Err("too large for the Recycle Bin; use permanent delete".into());
-            }
-        }
-        let w = super::winutil::wide(&path.to_string_lossy());
-        // SAFETY: COM calls on the thread that initialised COM; `w` is NUL-terminated and outlives them.
-        let r: windows::core::Result<bool> = unsafe {
-            (|| {
-                let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
-                op.SetOperationFlags(FILEOPERATION_FLAGS(FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0 | FOF_ALLOWUNDO.0 | FOFX_RECYCLEONDELETE.0))?;
-                let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None)?;
-                op.DeleteItem(&item, None)?;
-                op.PerformOperations()?;
-                Ok(op.GetAnyOperationsAborted()?.as_bool())
-            })()
-        };
-        match r {
-            Ok(false) if std::fs::symlink_metadata(&vpath).is_err() => Ok(()),
-            Ok(_) => Err("could not be moved to the Recycle Bin".into()),
-            Err(e) if e.code().0 as u32 == 0x8007_0005 => Err("access denied".into()),
-            Err(e) => Err(e.message()),
+            None => capped &= keeps,
         }
     }
-}
-
-#[cfg(windows)]
-impl Drop for Recycler {
-    fn drop(&mut self) {
-        if self.com {
-            // SAFETY: matches the successful CoInitializeEx in `new`.
-            unsafe { windows::Win32::System::Com::CoUninitialize() };
-        }
-    }
-}
-
-#[cfg(not(windows))]
-impl Recycler {
-    fn new() -> Self {
-        Recycler {}
-    }
-    fn delete(&self, _: &Path, _: u64) -> Result<(), String> {
-        Err("the Recycle Bin is only available on Windows".into())
-    }
-}
-
-/// How the Recycle Bin of a volume is configured.
-#[cfg(windows)]
-struct BinLimits {
-    /// "Don't move files to the Recycle Bin" (volume setting or policy): the shell deletes for good.
-    nuke: bool,
-    /// MaxCapacity in bytes; bigger items are deleted for good by the shell.
-    max_bytes: Option<u64>,
-}
-
-#[cfg(windows)]
-fn bin_limits(path: &Path) -> Option<BinLimits> {
-    use super::winutil::{Key, View};
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    let n = norm_path(path);
-    let b = n.as_bytes();
-    if b.len() < 3 || b[1] != b':' {
-        return None;
-    }
-    let mut limits = BinLimits { nuke: false, max_bytes: None };
-    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        if let Some(k) = Key::open(root, r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", View::Default) {
-            limits.nuke |= k.u32("NoRecycleFiles").unwrap_or(0) != 0;
-        }
-    }
-    let mount = super::winutil::wide(&format!("{}:\\", b[0] as char));
-    let mut vol = [0u16; 64];
-    // SAFETY: NUL-terminated mount point, output buffer sized as passed.
-    if unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(mount.as_ptr()), &mut vol) }.is_ok() {
-        // `\?\Volume{guid}\` -> `{guid}`
-        let name = super::winutil::from_wide(&vol);
-        if let (Some(a), Some(z)) = (name.find('{'), name.find('}')) {
-            let sub = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{}", &name[a..=z]);
-            if let Some(k) = Key::open(HKEY_CURRENT_USER, &sub, View::Default) {
-                limits.nuke |= k.u32("NukeOnDelete").unwrap_or(0) != 0;
-                limits.max_bytes = k.u32("MaxCapacity").filter(|&m| m > 0).map(|m| m as u64 * 1024 * 1024);
-            }
-        }
-    }
-    Some(limits)
-}
-
-/// False for network, optical and RAM volumes, when the volume has no Recycle Bin (removable FAT
-/// sticks) or the bin is switched off: deletion there is permanent and the dialog says so.
-#[cfg(windows)]
-pub fn has_recycle_bin(path: &Path) -> bool {
-    if bin_limits(path).is_some_and(|l| l.nuke) {
-        return false;
-    }
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
-    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let n = norm_path(path);
-    let b = n.as_bytes();
-    if b.len() < 3 || b[1] != b':' || b[2] != b'\\' {
-        return false;
-    }
-    let root = super::winutil::wide(&format!("{}:\\", b[0] as char));
-    // SAFETY: NUL-terminated root; the info struct has cbSize set.
-    unsafe {
-        if !matches!(GetDriveTypeW(PCWSTR(root.as_ptr())), 2 | 3) {
-            return false;
-        }
-        let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
-        SHQueryRecycleBinW(PCWSTR(root.as_ptr()), &mut info).is_ok()
-    }
-}
-
-#[cfg(not(windows))]
-pub fn has_recycle_bin(_: &Path) -> bool {
-    false
-}
-
-/// The volume of `path` has a Recycle Bin size limit on record (`BitBucket\Volume\{guid}\MaxCapacity`).
-/// Without one the shell may delete large items for good, so the dialogs must not promise a restore.
-#[cfg(windows)]
-pub fn recycle_limit_known(path: &Path) -> bool {
-    bin_limits(path).is_some_and(|l| l.max_bytes.is_some())
-}
-
-#[cfg(not(windows))]
-pub fn recycle_limit_known(_: &Path) -> bool {
-    false
+    (blocked, capped)
 }
 
 // ---------------------------------------------------------------- elevation

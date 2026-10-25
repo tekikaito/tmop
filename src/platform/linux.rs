@@ -20,6 +20,11 @@ pub fn data_dir() -> PathBuf {
     xdg::data_dir(&env).unwrap_or_else(|| super::unix::private_temp(xdg::DIR))
 }
 
+/// `$XDG_DATA_HOME` (`~/.local/share`), where the home Trash lives.
+pub fn data_home() -> Option<PathBuf> {
+    xdg::data_home(&env)
+}
+
 /// `$XDG_CONFIG_HOME/tmop` (`~/.config/tmop`): settings and palettes.
 pub fn config_dir() -> PathBuf {
     xdg::config_dir(&env).unwrap_or_else(|| super::unix::private_temp(xdg::DIR))

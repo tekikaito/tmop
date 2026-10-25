@@ -26,9 +26,14 @@ fn base(env: Env, var: &str, fallback: &str) -> Option<PathBuf> {
     absolute(env, var).or_else(|| absolute(env, "HOME").map(|h| h.join(fallback)))
 }
 
+/// `$XDG_DATA_HOME`, else `~/.local/share` (the home Trash is its `Trash` folder).
+pub fn data_home(env: Env) -> Option<PathBuf> {
+    base(env, "XDG_DATA_HOME", ".local/share")
+}
+
 /// `$XDG_DATA_HOME/tmop`, else `~/.local/share/tmop`.
 pub fn data_dir(env: Env) -> Option<PathBuf> {
-    base(env, "XDG_DATA_HOME", ".local/share").map(|d| d.join(DIR))
+    data_home(env).map(|d| d.join(DIR))
 }
 
 /// `$XDG_CONFIG_HOME/tmop`, else `~/.config/tmop`.
@@ -153,6 +158,7 @@ mod tests {
     fn xdg_overrides_win_over_home() {
         with(&[("HOME", "/home/alex"), ("XDG_DATA_HOME", "/data"), ("XDG_CONFIG_HOME", "/cfg")], |env| {
             assert_eq!(data_dir(env), Some(Path::new("/data").join("tmop")));
+            assert_eq!(data_home(env), Some(PathBuf::from("/data")));
             assert_eq!(config_dir(env), Some(Path::new("/cfg").join("tmop")));
         });
     }

@@ -37,6 +37,7 @@ pub mod plist;
 pub mod power;
 pub mod recorder;
 pub mod sysfmt;
+pub mod trash;
 #[cfg(windows)]
 pub(crate) mod restartmgr;
 pub mod volcache;
