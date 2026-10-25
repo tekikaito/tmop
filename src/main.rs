@@ -258,6 +258,9 @@ fn main() -> eframe::Result<()> {
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
         .with_maximized(args.iter().any(|a| a == "--maximized"));
+    if let Some(icon) = tmop::icon::window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     if popout_only {
         let skins = tmop::skin::scan(&tmop::skin::default_skin_dirs());
         let skin = skins.get(&settings.popout.skin).cloned().unwrap_or_else(tmop::skin::Skin::classic);

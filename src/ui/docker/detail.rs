@@ -460,7 +460,7 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
             let labels: Vec<(&str, Option<usize>)> = allowed.iter().map(|t| (t.label(), None)).collect();
             let selected = allowed.iter().position(|t| *t == current).unwrap_or(0);
             let clicked = widgets::tab_bar(ui, band, &pal, &labels, selected, None);
-            mark_tabs(&p, band, &pal, allowed, marked, selected);
+            mark_tabs(&p, band, &pal, allowed, marked);
             let tab = clicked.map(|i| allowed[i]).unwrap_or(current);
             state.tab = tab;
             Some(tab)
@@ -523,11 +523,11 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
 }
 
 /// A green dot on the tabs that have a live session.
-fn mark_tabs(p: &egui::Painter, band: Rect, pal: &Palette, tabs: &[DetailTab], marked: &[DetailTab], selected: usize) {
+fn mark_tabs(p: &egui::Painter, band: Rect, pal: &Palette, tabs: &[DetailTab], marked: &[DetailTab]) {
     let mut x = band.left();
-    for (i, t) in tabs.iter().enumerate() {
-        let font = if i == selected { theme::semibold(13.0) } else { theme::ui(13.0) };
-        let w = widgets::text_width(p, t.label(), font) + 28.0;
+    for t in tabs {
+        // Same widths as `widgets::tab_bar`, which sizes every tab for the Medium weight.
+        let w = widgets::text_width(p, t.label(), theme::semibold(13.0)) + 28.0;
         if marked.contains(t) {
             p.circle_filled(pos2(x + w - 8.0, band.top() + 10.0), 3.0, pal.ok);
         }
