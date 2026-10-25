@@ -247,7 +247,10 @@ impl Walk<'_> {
             .entry(uid)
             .or_insert_with(|| {
                 let h = home_of(uid)?;
-                let real = std::fs::canonicalize(&h).ok().map(|c| c.to_string_lossy().into_owned());
+                // Only the parent is resolved (Fedora Atomic's /home -> /var/home): resolving the
+                // home itself would mount a directory-service account's automounted network home.
+                let p = Path::new(&h);
+                let real = p.parent().zip(p.file_name()).and_then(|(dir, name)| std::fs::canonicalize(dir).ok().map(|d| d.join(name).to_string_lossy().into_owned()));
                 let hs = [Some(h.clone()), real].into_iter().flatten().map(|x| norm_unix(FLAVOR, &x)).filter(|x| x.starts_with('/') && x != "/" && !x.split('/').any(|c| c == "..")).collect();
                 Some((h, hs))
             })

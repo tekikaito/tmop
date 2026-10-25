@@ -182,6 +182,26 @@ pub const fn can_empty() -> bool {
     cfg!(any(windows, target_os = "linux"))
 }
 
+/// The home Trash (`$XDG_DATA_HOME/Trash`) when the data folder, or the nearest folder above it
+/// that exists, belongs to this account: `sudo -E` keeps the invoking user's `$HOME`, and root
+/// must neither fill nor empty that user's Trash.
+#[cfg(target_os = "linux")]
+fn home_trash() -> Option<std::path::PathBuf> {
+    let d = crate::platform::data_home()?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    trash_if_owned(&d, me, |p| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).ok().map(|m| m.uid())
+    })
+}
+
+/// `data/Trash` when the nearest existing folder of `data` and those above it (`owner`) is `me`'s.
+#[cfg(any(target_os = "linux", test))]
+fn trash_if_owned(data: &Path, me: u32, owner: impl Fn(&Path) -> Option<u32>) -> Option<std::path::PathBuf> {
+    (data.ancestors().find_map(owner)? == me).then(|| data.join("Trash"))
+}
+
 /// Why `path` cannot go to the bin (`None` when it can). Checks without creating anything.
 pub fn unavailable(path: &Path) -> Option<String> {
     #[cfg(windows)]
@@ -190,7 +210,7 @@ pub fn unavailable(path: &Path) -> Option<String> {
     }
     #[cfg(target_os = "linux")]
     {
-        fdo::locate(&absolute(path).ok()?, crate::platform::data_home().map(|d| d.join("Trash")).as_deref(), false).err()
+        fdo::locate(&absolute(path).ok()?, home_trash().as_deref(), false).err()
     }
     #[cfg(target_os = "macos")]
     {
@@ -227,7 +247,7 @@ pub fn size() -> Option<(u64, u64)> {
     }
     #[cfg(target_os = "linux")]
     {
-        crate::platform::data_home().map(|d| fdo::size_in(&d.join("Trash")))
+        home_trash().map(|t| fdo::size_in(&t))
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -247,9 +267,9 @@ pub fn empty() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        match crate::platform::data_home() {
-            Some(d) => fdo::empty_in(&d.join("Trash")),
-            None => Err(format!("no home folder, so no {}", trash_word())),
+        match home_trash() {
+            Some(t) => fdo::empty_in(&t),
+            None => Err(format!("no home folder of this account, so no {}", trash_word())),
         }
     }
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -284,7 +304,7 @@ impl Trasher {
     pub fn trash_anchored(&self, a: &super::diskdelete::anchored::Anchor) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
-            fdo::trash_anchored(a, crate::platform::data_home().map(|d| d.join("Trash")).as_deref())
+            fdo::trash_anchored(a, home_trash().as_deref())
         }
         #[cfg(target_os = "macos")]
         {
@@ -863,6 +883,22 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_accounts_home_has_its_trash() {
+        // `sudo -E`: root (0) with the user's (1000) data folder.
+        let owner = |p: &Path| match p.to_str() {
+            Some("/home/me/.local/share") | Some("/home/me") => Some(1000),
+            Some("/root") | Some("/") => Some(0),
+            _ => None,
+        };
+        let data = Path::new("/home/me/.local/share");
+        assert_eq!(trash_if_owned(data, 1000, owner), Some(data.join("Trash")));
+        assert_eq!(trash_if_owned(data, 0, owner), None);
+        // Not created yet: the nearest folder above decides.
+        assert_eq!(trash_if_owned(Path::new("/root/.local/share"), 0, owner), Some(Path::new("/root/.local/share/Trash").to_path_buf()));
+        assert_eq!(trash_if_owned(Path::new("/nowhere/x"), 1000, owner), None, "only / exists, and it is root's");
+    }
 
     #[test]
     fn percent_encoding_round_trips() {

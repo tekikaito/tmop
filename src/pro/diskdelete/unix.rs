@@ -515,7 +515,9 @@ fn foreign_home(flavor: Flavor, o: u32, u: &UnixPaths, fs: &impl UnixFs) -> Opti
     }
     let h = fs.home_of(o)?;
     let homes: Vec<&String> = u.homes.iter().filter(|m| home_ok(flavor, m)).collect();
-    let hs: Vec<String> = [Some(h.clone()), fs.canonical(&h)].into_iter().flatten().map(|x| norm_unix(flavor, &x)).filter(|x| x.starts_with('/') && x != "/" && !comps(x).contains(&"..") && !homes.iter().any(|m| under(m, x))).collect();
+    // Only the parent is resolved (Fedora Atomic's /home -> /var/home): resolving the home itself
+    // would mount a directory-service account's automounted network home.
+    let hs: Vec<String> = [Some(h.clone()), parent_resolved(&h, fs)].into_iter().flatten().map(|x| norm_unix(flavor, &x)).filter(|x| x.starts_with('/') && x != "/" && !comps(x).contains(&"..") && !homes.iter().any(|m| under(m, x))).collect();
     (!hs.is_empty()).then_some((h, hs))
 }
 
