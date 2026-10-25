@@ -109,8 +109,9 @@ pub struct CleanDone {
 
 impl CleanupUi {
     /// After a Clean up: drop what it deleted from the fixed locations instead of measuring them all again
-    /// (seconds), take the Recycle Bin read by the job, and query only the handlers it changed.
-    pub fn after_clean(&mut self, report: &Report, done: CleanDone) {
+    /// (seconds), take the Recycle Bin read by the job, and query only the handlers it changed (only with
+    /// `volcache`: elsewhere no handler query runs that would clear the flag again).
+    pub fn after_clean(&mut self, report: &Report, done: CleanDone, volcache: bool) {
         let gone: HashSet<&std::path::Path> = report.deleted.iter().map(|t| t.path.as_path()).collect();
         let loading = self.fixed.is_loading();
         match self.fixed.ok_mut() {
@@ -127,8 +128,15 @@ impl CleanupUi {
             }
             None => self.started = false,
         }
-        self.vols_only = Some(done.requery);
-        self.vols_dirty = true;
+        if volcache {
+            self.vols_only = Some(done.requery);
+            self.vols_dirty = true;
+        }
+    }
+
+    /// A measurement or handler query is due or running, so a Clean up would act on stale sizes.
+    pub fn measuring(&self, volcache: bool) -> bool {
+        (volcache && self.vols_dirty) || self.vols.is_loading() || self.fixed.is_loading()
     }
 
     /// Polls the handler query. When a partial one leaves a handler that covers a category failed or missing,
@@ -502,7 +510,7 @@ impl App {
     /// Opens the confirm dialog for the checked categories.
     fn clean_request(&mut self, rows: &[ProcessRow], elevated: bool, epoch: u64) {
         let c = &self.pro.clean;
-        if !self.pro.del.delete_safe || c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.vols_dirty || c.vols.is_loading() || c.fixed.is_loading() {
+        if !self.pro.del.delete_safe || c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.measuring(self.caps.volcache) {
             return;
         }
         let mut cats = Vec::new();
@@ -864,12 +872,25 @@ mod tests {
         let (a, b) = (CleanItem { path: PathBuf::from("a"), ..item(5, false) }, CleanItem { path: PathBuf::from("b"), ..item(7, false) });
         with_fixed(&mut c, vec![measured(Category::BrowserCaches, vec![a, b]), measured(Category::RecycleBin, vec![])]);
         let gone = Target { path: PathBuf::from("a"), size: 5, is_dir: false, node: None, file: None };
-        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, done(&["Thumbnail Cache", "Recycle Bin"], 42));
+        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, done(&["Thumbnail Cache", "Recycle Bin"], 42), true);
         let m = c.measured(Category::BrowserCaches, 0).unwrap();
         assert_eq!((m.bytes, m.count), (7, 1));
         assert_eq!(c.measured(Category::RecycleBin, 0).unwrap().bytes, 42);
         assert!(c.started, "fixed locations are not measured again");
         assert!(c.vols_dirty && c.vols_only == Some(vec!["Thumbnail Cache".to_string(), "Recycle Bin".to_string()]));
+        assert!(c.measuring(true), "the next Clean up waits for the handler query");
+    }
+
+    #[test]
+    fn after_clean_without_volcache_does_not_block_the_next_clean_up() {
+        let mut c = CleanupUi::default();
+        with_fixed(&mut c, vec![measured(Category::RecycleBin, vec![])]);
+        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0), false);
+        assert!(!c.vols_dirty && c.vols_only.is_none());
+        assert!(!c.measuring(false));
+        // A stale flag never blocks where no handler query would clear it.
+        c.vols_dirty = true;
+        assert!(!c.measuring(false) && c.measuring(true));
     }
 
     #[test]
@@ -880,7 +901,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             Ok(Fixed { sys: Default::default(), measured: vec![] })
         });
-        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0));
+        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0), true);
         assert!(!c.started);
     }
 

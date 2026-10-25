@@ -468,7 +468,7 @@ impl App {
         d.freed += rep.freed;
         d.sel.clear();
         match out.clean {
-            Some(done) => self.pro.clean.after_clean(&rep, done),
+            Some(done) => self.pro.clean.after_clean(&rep, done, self.caps.volcache),
             None => self.pro.clean.started = false, // Cleanup measures again
         }
         self.status = format!("{} freed", format_bytes(rep.freed as f64));
