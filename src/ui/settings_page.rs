@@ -7,6 +7,7 @@ use super::widgets::{self, Button, ButtonSize, Icon};
 use super::{App, FrameData, Page};
 use crate::fonts;
 use crate::palette::{self, PaletteCatalog, PaletteFile, SYSTEM};
+use crate::platform::Caps;
 use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
@@ -19,7 +20,14 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 
 /// Width of the section list, and the sections it lists (in page order).
 const NAV_W: f32 = 180.0;
-const SECTIONS: [&str; 8] = ["Appearance", "Graphs", "General", "Window management", "Other options", "Task Manager", "Skins and files", "About"];
+const SECTIONS: [&str; 8] = ["Appearance", "Graphs", "General", "Window management", "Other options", TASK_MANAGER, "Skins and files", "About"];
+/// The section only Windows has (see [`shown_sections`]).
+const TASK_MANAGER: &str = "Task Manager";
+
+/// [`SECTIONS`] this OS shows. A hidden section's settings keep their values in the file.
+fn shown_sections(caps: &Caps) -> Vec<&'static str> {
+    SECTIONS.into_iter().filter(|s| *s != TASK_MANAGER || caps.taskmgr_replace).collect()
+}
 
 /// The accent swatches after "Palette default": (name, `appearance.accent`).
 const ACCENTS: [(&str, &str); 4] = [("Teal", "#5EEAD4"), ("Indigo", "#8B9CFF"), ("Pink", "#FFB4C8"), ("Amber", "#F5B86B")];
@@ -545,6 +553,7 @@ fn active_section(tops: &[f32], top: f32, at_end: bool, picked: Option<usize>) -
 impl App {
     pub fn settings_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
+        let caps = self.caps;
         let subtitle = format!("saved automatically \u{b7} {} \u{b7} {}", settings::default_path().display(), Page::Settings.shortcut());
         let body = self.page_title(ui, &pal, "Settings", &subtitle);
         let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right() - 16.0, body.bottom()));
@@ -673,9 +682,9 @@ impl App {
                                 });
                             });
                             row(ui, &pal, "Default start page", |ui| {
-                                let cur = Page::from_id(&s.general.default_page).title();
+                                let cur = Page::from_id_on(&s.general.default_page, &caps).title();
                                 egui::ComboBox::from_id_salt("page").width(200.0).selected_text(cur).show_ui(ui, |ui| {
-                                    for p in Page::NAV.iter().chain([Page::Settings].iter()) {
+                                    for p in Page::start_choices(&caps) {
                                         changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), p.title()).changed();
                                     }
                                 });
@@ -695,7 +704,9 @@ impl App {
                             changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
                             changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
                         });
-                        section(ui, &pal, &mut sections, SECTIONS[5], |ui| self.replace_section(ui, &pal));
+                        if caps.taskmgr_replace {
+                            section(ui, &pal, &mut sections, TASK_MANAGER, |ui| self.replace_section(ui, &pal));
+                        }
                         section(ui, &pal, &mut sections, SECTIONS[6], |ui| {
                             ui.add_space(2.0);
                             ui.horizontal_wrapped(|ui| {
@@ -740,7 +751,7 @@ impl App {
             ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("picked")));
         }
         ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("target")));
-        for (i, name) in SECTIONS.iter().enumerate() {
+        for (i, name) in shown_sections(&caps).into_iter().enumerate() {
             let r = Rect::from_min_size(nav.min + vec2(0.0, i as f32 * 36.0), vec2(NAV_W, 34.0));
             let resp = ui.interact(r, nav_id.with(i), Sense::click());
             let on = i == active;
@@ -870,6 +881,15 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Task Manager section is Windows-only; the others stay in page order.
+    #[test]
+    fn sections_follow_caps() {
+        assert_eq!(shown_sections(&Caps::WINDOWS), SECTIONS.to_vec());
+        let linux = shown_sections(&Caps::LINUX);
+        assert_eq!(linux.len(), SECTIONS.len() - 1);
+        assert!(!linux.contains(&TASK_MANAGER) && linux.last() == Some(&"About"));
+    }
 
     /// The metric rows lay out with colour keying on and off and leave the settings alone
     /// until something is edited.

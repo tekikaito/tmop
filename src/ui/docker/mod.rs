@@ -188,11 +188,10 @@ impl DockerState {
         self.notify_enabled = settings.docker.contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
     }
 
-    /// Whether the Docker page is listed in the navigation.
-    pub fn visible(&self, settings: &Settings) -> bool {
-        // The engine is offered wherever it can run, so it can be set up from here.
-        let engine_supported = cfg!(windows);
-        !settings.docker.hide_page && (self.installed || self.last_status == EngineStatus::Connected || engine_supported)
+    /// Whether the Docker page is listed in the navigation. `engine`: TMOP's own engine is
+    /// offered on this OS, so the page is listed to set it up from even without Docker.
+    pub fn visible(&self, settings: &Settings, engine: bool) -> bool {
+        !settings.docker.hide_page && (self.installed || self.last_status == EngineStatus::Connected || engine)
     }
 
     /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as
@@ -390,6 +389,9 @@ impl App {
     pub fn docker_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
         self.docker.refresh_snap();
+        if self.docker.ui.tab == Tab::Engine && !self.caps.engine {
+            self.docker.ui.tab = Tab::Containers;
+        }
         let active = self.active_name();
         let full = ui.max_rect();
         let (subtitle, dot) = self.engine_line(&active, &pal);
@@ -420,6 +422,8 @@ impl App {
         let stacked = area.width() < 1000.0;
         self.tab_strip(ui, tabs, &pal, &active, stacked);
         let content = Rect::from_min_max(pos2(area.left(), tabs.bottom() + if stacked { SWITCH_ROW_H } else { 0.0 } + 14.0), area.max);
+        // TODO(D8): off Windows, the read-only "Local Docker" status panel (detected socket and
+        // context, start hints) takes the Engine tab's place here. Not built yet.
         if self.docker.ui.tab == Tab::Engine {
             // The engine tab has no detail aside, so its content takes the whole width.
             self.docker.ui.detail.terminals.set_visible(None);
@@ -596,9 +600,12 @@ impl App {
             ("Engine", None),
         ];
         const ORDER: [Tab; 6] = [Tab::Containers, Tab::Stacks, Tab::Images, Tab::Volumes, Tab::Networks, Tab::Engine];
+        // TMOP's engine (WSL) exists on Windows only. The read-only "Local Docker" status tab
+        // for Linux and macOS (plan D8) goes in this last slot in a later change.
+        let shown = if self.caps.engine { ORDER.len() } else { ORDER.len() - 1 };
         let current = self.docker.ui.tab;
-        let selected = ORDER.iter().position(|t| *t == current).unwrap_or(0);
-        if let Some(i) = widgets::tab_bar(ui, rect, pal, &tabs, selected, None) {
+        let selected = ORDER[..shown].iter().position(|t| *t == current).unwrap_or(0);
+        if let Some(i) = widgets::tab_bar(ui, rect, pal, &tabs[..shown], selected, None) {
             self.docker.ui.tab = ORDER[i];
         }
         let top = if stacked { rect.bottom() + 6.0 } else { rect.top() };

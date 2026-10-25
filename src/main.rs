@@ -12,7 +12,7 @@
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
-//!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
+//!   TMOP /s | /p <hwnd> | /c   screensaver conventions (Windows, built with `--features screensaver`; a no-op elsewhere)
 //!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
 //!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
 //!   TMOP --volume-caches=query:<drive>[:<ids>]   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:; only <ids> when given) as JSON lines (Windows only)
@@ -50,7 +50,7 @@ fn dump() {
     }
 }
 
-#[cfg(feature = "screensaver")]
+#[cfg(all(windows, feature = "screensaver"))]
 mod scr {
     use eframe::egui;
     use tmop::metrics::{history_capacity, Sampler};
@@ -194,7 +194,7 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    #[cfg(feature = "screensaver")]
+    #[cfg(all(windows, feature = "screensaver"))]
     {
         let looks_like_scr = args.first().map(|a| a.starts_with('/') || a == "-s" || a == "-p" || a == "-c").unwrap_or(false)
             || std::env::current_exe().map(|p| p.extension().map(|e| e.eq_ignore_ascii_case("scr")).unwrap_or(false)).unwrap_or(false);

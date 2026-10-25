@@ -54,6 +54,9 @@ impl ReplaceUi {
 impl App {
     /// Per-frame work: finished changes and handed-over Task Manager launches.
     pub fn replace_poll(&mut self, ctx: &egui::Context) {
+        if !self.caps.taskmgr_replace {
+            return;
+        }
         if self.replace.job.poll() {
             self.status = match self.replace.job.get() {
                 Some(Ok(m)) | Some(Err(m)) => m.clone(),
@@ -67,7 +70,7 @@ impl App {
         let request = self.replace.inbox.as_ref().and_then(|i| i.take());
         if let Some(page) = request {
             if !page.is_empty() {
-                self.page = Page::from_id(&page);
+                self.page = Page::from_id_on(&page, &self.caps);
             }
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -78,7 +81,7 @@ impl App {
     /// "Open Windows Task Manager" for the overflow menu, while a TMOP copy replaces it. True
     /// when it was clicked.
     pub fn replace_menu_item(&mut self, ui: &mut egui::Ui) -> bool {
-        if !self.replace.state.is_tmop() {
+        if !self.caps.taskmgr_replace || !self.replace.state.is_tmop() {
             return false;
         }
         let busy = self.replace.job.is_loading();
@@ -94,7 +97,7 @@ impl App {
     /// Banner shown when Task Manager launches point at a TMOP.exe that no longer exists.
     pub fn replace_banner(&mut self, ctx: &egui::Context, pal: &Palette) {
         let State::OtherTmop { path, exists: false } = &self.replace.state else { return };
-        if self.replace.banner_dismissed {
+        if self.replace.banner_dismissed || !self.caps.taskmgr_replace {
             return;
         }
         let text = format!("Ctrl+Shift+Esc is set to open TMOP at {}, which no longer exists, so no task manager opens.", path.display());

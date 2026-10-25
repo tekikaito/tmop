@@ -138,12 +138,12 @@ impl App {
 
     /// The Docker device is listed while the engine is reachable and the Docker page is enabled.
     fn docker_listed(&self) -> bool {
-        self.docker.visible(&self.settings) && self.docker.last_status == EngineStatus::Connected
+        self.docker_visible() && self.docker.last_status == EngineStatus::Connected
     }
 
     pub fn performance_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         // Still connecting is not a reason to leave the page; a disabled or unreachable engine is.
-        if self.device == Device::Docker && (!self.docker.visible(&self.settings) || self.docker.last_status == EngineStatus::Unreachable) {
+        if self.device == Device::Docker && (!self.docker_visible() || self.docker.last_status == EngineStatus::Unreachable) {
             self.device = Device::Cpu;
         }
         if self.device == Device::Cpu {

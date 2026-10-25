@@ -33,6 +33,7 @@ pub mod widgets;
 use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::palette::{self, PaletteCatalog};
+use crate::platform::Caps;
 use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
@@ -113,6 +114,27 @@ impl Page {
             _ => Page::Summary,
         }
     }
+
+    /// Whether this page has anything to show with `caps`. Summary, Settings and the pages fed by
+    /// the metrics and processes backends are always there.
+    pub fn supported(self, caps: &Caps) -> bool {
+        match self {
+            Page::SystemInfo | Page::StartupApps | Page::Services | Page::Drivers | Page::InstalledApps | Page::Connections | Page::PowerFreq => caps.inventory,
+            _ => true,
+        }
+    }
+
+    /// [`Page::from_id`], with Summary in place of a page `caps` does not support (`--page=`,
+    /// `general.defaultPage`, Task Manager hand-offs).
+    pub fn from_id_on(id: &str, caps: &Caps) -> Self {
+        Some(Page::from_id(id)).filter(|p| p.supported(caps)).unwrap_or(Page::Summary)
+    }
+
+    /// The choices for the default start page: the supported pages of [`Page::NAV`], then Settings.
+    pub fn start_choices(caps: &Caps) -> Vec<Page> {
+        Page::NAV.into_iter().chain([Page::Settings]).filter(|p| p.supported(caps)).collect()
+    }
+
     pub fn id(self) -> &'static str {
         match self {
             Page::Summary => "summary",
@@ -359,8 +381,14 @@ pub struct Launch {
     pub engine_test: Option<String>,
 }
 
+/// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
+pub fn visible_pages(caps: &Caps, docker: bool) -> Vec<Page> {
+    Page::NAV.into_iter().filter(|p| p.supported(caps) && (*p != Page::Docker || docker)).collect()
+}
 
 pub struct App {
+    /// What this OS and session support, probed once at start-up.
+    pub caps: Caps,
     pub settings: Settings,
     pub settings_dirty: bool,
     pub catalog: SkinCatalog,
@@ -429,7 +457,12 @@ impl App {
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
         let palettes = palette::scan(&palette::default_dir());
-        let page = launch.start_page.unwrap_or_else(|| Page::from_id(&settings.general.default_page));
+        let caps = Caps::get();
+        let page = match launch.start_page {
+            Some(p) if p.supported(&caps) => p,
+            Some(_) => Page::Summary,
+            None => Page::from_id_on(&settings.general.default_page, &caps),
+        };
         let device = launch.start_device.as_deref().and_then(|d| Device::ALL.into_iter().find(|x| x.key() == d)).unwrap_or(Device::Cpu);
         // A normal settings load needs no message.
         let mut status = if status.ends_with("(Loaded)") { String::new() } else { status };
@@ -440,6 +473,7 @@ impl App {
         let settings_popout_on = settings.popout.mode != "off";
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
+            caps,
             docker,
             perf_docker: performance::DockerPerfCache::default(),
             summary: summary::SummaryState::default(),
@@ -477,12 +511,13 @@ impl App {
             pro: pro_pages::ProState::default(),
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
-            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only),
+            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
         let mut app = app;
+        app.pro.del.delete_safe = caps.delete_safe;
         if !app.settings.general.recording_folder.is_empty() {
             app.recorder.dir = std::path::PathBuf::from(&app.settings.general.recording_folder);
         }
@@ -508,10 +543,10 @@ impl App {
         if let Some((container, command)) = launch.docker_terminal {
             app.docker.ui.detail.terminals.request(container, command);
         }
-        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id) {
+        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id).filter(|t| app.caps.engine || *t != docker::Tab::Engine) {
             app.docker.ui.tab = tab;
         }
-        match launch.engine_test.as_deref() {
+        match launch.engine_test.as_deref().filter(|_| app.caps.engine) {
             Some("setup") => {
                 // Same as the wizard: the engine's context becomes the active one once it runs.
                 app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.docker.engine_data_dir));
@@ -554,9 +589,15 @@ impl App {
         MetricColors::from_settings(&self.settings.graphs)
     }
 
-    /// `Page::NAV` without the pages that are hidden right now (Docker when its page is off).
+    /// `Page::NAV` without the pages that are hidden right now: unsupported ones, and Docker
+    /// when its page is off.
     pub fn visible_pages(&self) -> Vec<Page> {
-        Page::NAV.into_iter().filter(|p| *p != Page::Docker || self.docker.visible(&self.settings)).collect()
+        visible_pages(&self.caps, self.docker_visible())
+    }
+
+    /// Whether the Docker page is listed.
+    pub fn docker_visible(&self) -> bool {
+        self.docker.visible(&self.settings, self.caps.engine)
     }
 
     pub fn bloom(&self) -> f32 {
@@ -905,7 +946,7 @@ impl App {
         self.docker.poll(self.page == Page::Docker);
         self.docker.refresh_snap();
         self.refresh_docker_perf();
-        if self.page == Page::Docker && !self.docker.visible(&self.settings) {
+        if (self.page == Page::Docker && !self.docker_visible()) || !self.page.supported(&self.caps) {
             self.page = Page::Summary;
         }
         let (snap, mut hist, rows) = self.snapshot();
@@ -1006,3 +1047,34 @@ impl App {
 
 #[allow(dead_code)]
 fn _unused(_: Vec2) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_pages_follow_caps_and_the_docker_switch() {
+        assert_eq!(visible_pages(&Caps::WINDOWS, true), Page::NAV.to_vec());
+        assert_eq!(visible_pages(&Caps::LINUX, true), Page::NAV.to_vec());
+        assert!(!visible_pages(&Caps::WINDOWS, false).contains(&Page::Docker));
+        // A made-up OS without the inventory backends keeps the monitoring pages, in NAV order.
+        let fake = Caps { inventory: false, ..Caps::WINDOWS };
+        let shown = visible_pages(&fake, true);
+        let expect = [Page::Summary, Page::Performance, Page::Processes, Page::Docker, Page::AppHistory, Page::Users, Page::FlightRecorder, Page::DiskSpace, Page::Benchmarks];
+        assert_eq!(shown, expect);
+        assert!(Page::NAV.iter().all(|p| shown.contains(p) == p.supported(&fake)));
+    }
+
+    #[test]
+    fn unsupported_start_pages_fall_back_to_summary() {
+        let fake = Caps { inventory: false, ..Caps::LINUX };
+        assert_eq!(Page::from_id_on("services", &fake), Page::Summary);
+        assert_eq!(Page::from_id_on("services", &Caps::LINUX), Page::Services);
+        assert_eq!(Page::from_id_on("disk-space", &fake), Page::DiskSpace);
+        assert_eq!(Page::from_id_on("settings", &fake), Page::Settings);
+        assert_eq!(Page::from_id_on("nonsense", &Caps::WINDOWS), Page::Summary);
+        let choices = Page::start_choices(&fake);
+        assert!(!choices.contains(&Page::Services) && choices.last() == Some(&Page::Settings));
+        assert_eq!(Page::start_choices(&Caps::WINDOWS).len(), Page::NAV.len() + 1);
+    }
+}
