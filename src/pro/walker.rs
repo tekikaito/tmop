@@ -11,7 +11,8 @@
 //! another device are skipped, and so are the kernel's pseudo trees (`/proc`, `/sys`, `/dev`,
 //! `/run`; macOS `/dev`, `/Volumes`, `/System/Volumes`) even when they share it. Scanning `/` on
 //! macOS also admits the APFS Data volume, where the firmlinks (`/Users`, `/Applications`...)
-//! lead. Sizes are allocated blocks, and a file with several hard links counts once.
+//! lead; on Linux the other mounted subvolumes of a btrfs file system below the root count too.
+//! Sizes are allocated blocks, and a file with several hard links counts once.
 
 use super::diskspace::{ext_of, FileRec, Names, Node, Publisher, ScanMethod, F_HIDDEN, NO_PARENT};
 use std::collections::{HashMap, HashSet};
@@ -49,6 +50,15 @@ impl Bounds {
         let skip: &[&str] = if cfg!(target_os = "macos") { &["/dev", "/Volumes", "/System/Volumes", "/.vol", "/net", "/home"] } else { &["/proc", "/sys", "/dev", "/run"] };
         if cfg!(target_os = "macos") && root == Path::new("/") {
             devs.extend(dev("/System/Volumes/Data"));
+        }
+        // The other mounted subvolumes of a btrfs file system (Fedora's `/home` below `/`).
+        #[cfg(target_os = "linux")]
+        if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
+            for p in super::mounts::same_fs_points(&super::mounts::parse_mountinfo(&text), &root.to_string_lossy()) {
+                if let Some(d) = dev(&p).filter(|d| !devs.contains(d)) {
+                    devs.push(d);
+                }
+            }
         }
         Bounds { devs, skip: skip.iter().map(PathBuf::from).filter(|p| p.as_path() != root).collect() }
     }

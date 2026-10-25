@@ -1,7 +1,7 @@
 //! Mounted file systems off Windows: the Disk Space volume cards and the size of a file system.
 //!
 //! Linux reads `/proc/self/mountinfo` (octal-escaped fields, one line per mount, bind mounts and
-//! btrfs subvolumes included) and keeps one entry per real device; labels come from the
+//! btrfs subvolumes included) and keeps one entry per real device (per subvolume on btrfs); labels come from the
 //! `/dev/disk/by-label` links and the removable flag from sysfs. macOS asks `getfsstat` and folds
 //! the APFS helper volumes under `/System/Volumes` into the boot volume `/`. The parsers and the
 //! filters are pure and tested on every host; only the I/O shells are cfg-gated.
@@ -23,6 +23,8 @@ pub struct Mount {
     pub fs: String,
     /// `/dev/sda1`, `server:/export`, `tmpfs`, ...
     pub source: String,
+    /// The btrfs subvolume of the mount (`subvol=` of the super options), empty otherwise.
+    pub subvol: String,
 }
 
 /// Undoes the kernel's `\ooo` octal escapes (space, tab, newline and backslash in paths).
@@ -56,7 +58,8 @@ pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
                 return None;
             }
             let (maj, min) = f[2].split_once(':')?;
-            Some(Mount { dev: (maj.parse().ok()?, min.parse().ok()?), root: unescape(f[3]), point: unescape(f[4]), fs: f[sep + 1].to_string(), source: unescape(f[sep + 2]) })
+            let subvol = f.get(sep + 3).and_then(|o| o.split(',').find_map(|o| o.strip_prefix("subvol="))).map(unescape).unwrap_or_default();
+            Some(Mount { dev: (maj.parse().ok()?, min.parse().ok()?), root: unescape(f[3]), point: unescape(f[4]), fs: f[sep + 1].to_string(), source: unescape(f[sep + 2]), subvol })
         })
         .collect()
 }
@@ -107,21 +110,50 @@ pub fn linux_kind(fs: &str, point: &str) -> Option<&'static str> {
     }
 }
 
-/// The mounts worth a volume card, with their kind: one per device (bind mounts and further btrfs
-/// subvolumes of a device already shown are dropped, the shortest mount point wins), sorted by
-/// mount point so `/` comes first.
+/// The btrfs subvolume a mount shows, `None` for other file systems (and kernels without
+/// `subvol=` in the options).
+fn subvolume(m: &Mount) -> Option<&str> {
+    (m.fs == "btrfs" && !m.subvol.is_empty()).then_some(m.subvol.as_str())
+}
+
+/// The mounts worth a volume card, with their kind: one per device, and on btrfs one per mounted
+/// subvolume (Fedora's `/` and `/home` are two subvolumes of one partition). Bind mounts of a
+/// sub-folder are dropped when their file system (or subvolume) already has a card; among the
+/// rest the shortest mount point wins. Sorted by mount point so `/` comes first.
 pub fn pick_linux(mut mounts: Vec<Mount>) -> Vec<(Mount, &'static str)> {
-    mounts.sort_by(|a, b| a.point.len().cmp(&b.point.len()).then_with(|| a.point.cmp(&b.point)));
+    let bind = |m: &Mount| m.root != subvolume(m).unwrap_or("/");
+    mounts.sort_by(|a, b| bind(a).cmp(&bind(b)).then_with(|| a.point.len().cmp(&b.point.len())).then_with(|| a.point.cmp(&b.point)));
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in mounts {
         let Some(kind) = linux_kind(&m.fs, &m.point) else { continue };
-        let key = if m.source.starts_with("/dev/") { m.source.clone() } else { format!("{}:{}", m.dev.0, m.dev.1) };
+        let key = match (m.source.starts_with("/dev/"), subvolume(&m)) {
+            (true, Some(sub)) => format!("{}\0{sub}", m.source),
+            (true, None) => m.source.clone(),
+            (false, _) => format!("{}:{}", m.dev.0, m.dev.1),
+        };
         if seen.insert(key) {
             out.push((m, kind));
         }
     }
     out.sort_by(|a, b| a.0.point.cmp(&b.0.point));
+    out
+}
+
+/// The other mount points below `path` that belong to the same btrfs file system as `path`
+/// itself. Each subvolume has its own `st_dev`, so a scan that stays on one device would skip
+/// them although the volume's used space counts them. Empty for other file systems.
+pub fn same_fs_points(mounts: &[Mount], path: &str) -> Vec<String> {
+    let points: Vec<String> = mounts.iter().map(|m| m.point.clone()).collect();
+    let Some(at) = mount_of(path, &points) else { return Vec::new() };
+    // The last mount at a point is the one on top.
+    let Some(m) = mounts.iter().rev().find(|m| m.point == at) else { return Vec::new() };
+    if m.fs != "btrfs" || !m.source.starts_with("/dev/") {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = mounts.iter().filter(|o| o.fs == "btrfs" && o.source == m.source && o.point != m.point && std::path::Path::new(&o.point).starts_with(path)).map(|o| o.point.clone()).collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -275,13 +307,30 @@ pub fn volumes() -> Vec<Volume> {
     pick_linux(parse_mountinfo(&text))
         .into_iter()
         .filter_map(|(m, kind)| {
-            let (total, free) = space(Path::new(&m.point)).filter(|s| s.0 > 0)?;
+            // statvfs of a hard-mounted share whose server is gone never returns: such a share
+            // gets no card rather than holding up the others.
+            let sizes = if kind == "Network" { space_within(&m.point, std::time::Duration::from_secs(2)) } else { space(Path::new(&m.point)) };
+            let (total, free) = sizes.filter(|s| s.0 > 0)?;
             let kind = if kind == "Fixed" && linux_removable(m.dev) { "Removable" } else { kind };
             let dev = std::fs::canonicalize(&m.source).unwrap_or_else(|_| m.source.clone().into());
             let label = labels.get(&dev).cloned().unwrap_or_default();
             Some(Volume { root: m.point, label, fs: m.fs, kind, total, free })
         })
         .collect()
+}
+
+/// [`space`] on a thread of its own, given up after `wait` (the thread is left behind).
+#[cfg(target_os = "linux")]
+fn space_within(point: &str, wait: std::time::Duration) -> Option<(u64, u64)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let point = point.to_string();
+    std::thread::Builder::new()
+        .name("tmop-statvfs".into())
+        .spawn(move || {
+            let _ = tx.send(space(Path::new(&point)));
+        })
+        .ok()?;
+    rx.recv_timeout(wait).ok().flatten()
 }
 
 /// Device node -> file system label, from the `/dev/disk/by-label` links.
@@ -347,8 +396,8 @@ garbage line
     fn mountinfo_fields_and_escapes() {
         let m = parse_mountinfo(MOUNTINFO);
         assert_eq!(m.len(), 16, "the garbage line is skipped");
-        assert_eq!(m[0], Mount { dev: (259, 2), root: "/".into(), point: "/".into(), fs: "ext4".into(), source: "/dev/nvme0n1p2".into() });
-        assert_eq!(m[6].root, "/@home");
+        assert_eq!(m[0], Mount { dev: (259, 2), root: "/".into(), point: "/".into(), fs: "ext4".into(), source: "/dev/nvme0n1p2".into(), subvol: String::new() });
+        assert_eq!((m[6].root.as_str(), m[6].subvol.as_str()), ("/@home", "/@home"));
         assert_eq!(m[9].point, "/run/media/alex/My Stick");
         assert_eq!(m[10].source, r"nas:/export\share");
         assert_eq!(m[11].source, r"C:\");
@@ -370,7 +419,34 @@ garbage line
     fn one_card_per_real_device() {
         let v = pick_linux(parse_mountinfo(MOUNTINFO));
         let got: Vec<(&str, &str)> = v.iter().map(|(m, k)| (m.point.as_str(), *k)).collect();
-        assert_eq!(got, [("/", "Fixed"), ("/boot/efi", "Fixed"), ("/home", "Fixed"), ("/media/cdrom", "Optical"), ("/mnt/c", "Network"), ("/mnt/nas", "Network"), ("/run/media/alex/My Stick", "Removable")]);
+        assert_eq!(got, [("/", "Fixed"), ("/boot/efi", "Fixed"), ("/home", "Fixed"), ("/media/cdrom", "Optical"), ("/mnt/c", "Network"), ("/mnt/nas", "Network"), ("/run/media/alex/My Stick", "Removable"), ("/srv/data", "Fixed")]);
+    }
+
+    /// Fedora Workstation: `/` and `/home` are subvolumes of one btrfs partition, and a folder of
+    /// `/home` is bind-mounted at `/w`.
+    const FEDORA: &str = "\
+60 1 0:35 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p3 rw,seclabel,compress=zstd:1,ssd,space_cache=v2,subvolid=257,subvol=/root
+61 60 259:2 / /boot rw,relatime shared:2 - ext4 /dev/nvme0n1p2 rw,seclabel
+62 60 0:35 /home /home rw,relatime shared:3 - btrfs /dev/nvme0n1p3 rw,seclabel,compress=zstd:1,ssd,space_cache=v2,subvolid=256,subvol=/home
+63 60 0:35 /home/alex/www /w rw,relatime shared:3 - btrfs /dev/nvme0n1p3 rw,seclabel,compress=zstd:1,ssd,space_cache=v2,subvolid=256,subvol=/home
+64 60 259:5 / /data rw,relatime shared:4 - xfs /dev/sdb1 rw
+";
+
+    #[test]
+    fn btrfs_subvolumes_get_their_own_cards() {
+        let v = pick_linux(parse_mountinfo(FEDORA));
+        let got: Vec<&str> = v.iter().map(|(m, _)| m.point.as_str()).collect();
+        assert_eq!(got, ["/", "/boot", "/data", "/home"], "the bind mount at /w is not a card although its point is shorter");
+    }
+
+    #[test]
+    fn a_btrfs_scan_includes_the_other_subvolumes_below_it() {
+        let m = parse_mountinfo(FEDORA);
+        assert_eq!(same_fs_points(&m, "/"), ["/home", "/w"]);
+        assert!(same_fs_points(&m, "/home").is_empty(), "nothing of it is mounted below /home");
+        assert!(same_fs_points(&m, "/home/alex").is_empty());
+        assert!(same_fs_points(&m, "/data").is_empty(), "not btrfs");
+        assert!(same_fs_points(&parse_mountinfo(MOUNTINFO), "/").is_empty(), "ext4 root");
     }
 
     #[test]
