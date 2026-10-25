@@ -8,6 +8,7 @@ use super::{kit, App};
 use crate::pro::diskdelete::{self, Assessed, ItemMeta, Mode, Report, Rules, Target, Verdict};
 use crate::pro::diskspace::Tree;
 use crate::pro::Loader;
+use crate::platform::{file_manager, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::HashSet;
@@ -139,16 +140,16 @@ pub struct MenuOut {
 
 /// Why Disk Space deletes and Clean up are unavailable while `Caps::delete_safe` is off.
 pub fn delete_off_reason() -> String {
-    format!("Deleting is not available on {} yet: the safety checks that protect system and personal folders are still being built.", crate::platform::os_name())
+    format!("Deleting is not available on {} yet: the safety checks that protect system and personal folders are still being built.", os_name())
 }
 
 /// (first line, destination line, permanent) of the confirm dialog.
 pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool, capped: bool) -> (String, String, bool) {
     let first = format!("{n} item{} \u{2022} {}", if n == 1 { "" } else { "s" }, format_bytes(size as f64));
     match (mode, has_bin) {
-        (Mode::Recycle, true) if !capped => (first, "Items go to the Recycle Bin, but large items may be deleted permanently by Windows.".into(), true),
-        (Mode::Recycle, true) => (first, "Items go to the Recycle Bin and can be restored.".into(), false),
-        (Mode::Recycle, false) => (first, "This volume has no Recycle Bin: items are deleted permanently.".into(), true),
+        (Mode::Recycle, true) if !capped => (first, format!("Items go to the {}, but large items may be deleted permanently by {}.", trash_word(), os_name()), true),
+        (Mode::Recycle, true) => (first, format!("Items go to the {} and can be restored.", trash_word()), false),
+        (Mode::Recycle, false) => (first, format!("This volume has no {}: items are deleted permanently.", trash_word()), true),
         (Mode::Permanent, _) => (first, "Items are deleted permanently. This cannot be undone.".into(), true),
     }
 }
@@ -192,7 +193,7 @@ pub fn file_target(t: &Tree, idx: usize) -> Option<Target> {
 /// the full check.
 pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_safe: bool, out: &mut MenuOut) {
     out.want_rules = delete_safe;
-    if ui.button("Show in Explorer").clicked() {
+    if ui.button(format!("Show in {}", file_manager())).clicked() {
         let _ = kit::reveal(&t.path);
         ui.close_menu();
     }
@@ -209,7 +210,7 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_sa
             _ => None,
         })
     };
-    for (label, mode) in [("Move to Recycle Bin", Mode::Recycle), ("Delete permanently\u{2026}", Mode::Permanent)] {
+    for (label, mode) in [(format!("Move to {}", trash_word()), Mode::Recycle), ("Delete permanently\u{2026}".to_string(), Mode::Permanent)] {
         let r = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
         let r = match &blocked {
             Some(why) => r.on_disabled_hover_text(why),
@@ -339,10 +340,10 @@ impl DiskDeleteUi {
                     ui.label(RichText::new(format!("{} selected \u{2022} {}", picked.len(), format_bytes(total as f64))).font(theme::semibold(13.0)).color(pal.text));
                     ui.add_space(8.0);
                     if !self.delete_safe {
-                        ui.add(egui::Label::new(RichText::new(format!("Deleting is not available on {} yet", crate::platform::os_name())).font(theme::ui(12.0)).color(pal.text_faint))).on_hover_text(delete_off_reason());
+                        ui.add(egui::Label::new(RichText::new(format!("Deleting is not available on {} yet", os_name())).font(theme::ui(12.0)).color(pal.text_faint))).on_hover_text(delete_off_reason());
                         return;
                     }
-                    if Button::new("Move to Recycle Bin").size(ButtonSize::Medium).show(ui, pal).clicked() {
+                    if Button::new(&format!("Move to {}", trash_word())).size(ButtonSize::Medium).show(ui, pal).clicked() {
                         mode = Some(Mode::Recycle);
                     }
                     if Button::danger("Delete permanently").size(ButtonSize::Medium).show(ui, pal).clicked() {
@@ -496,9 +497,9 @@ impl App {
         let mut answer = None;
         let n = all.len();
         let items = format!("{n} item{}", if n == 1 { "" } else { "s" });
-        let title = if permanent { format!("Delete **{items}** permanently?") } else { format!("Move **{items}** to the Recycle Bin?") };
+        let title = if permanent { format!("Delete **{items}** permanently?") } else { format!("Move **{items}** to the {}?", trash_word()) };
         let icon = if permanent { (Icon::Octagon, st.danger) } else { (Icon::Disk, st.info) };
-        let goes_to = if permanent { "Deleted for good" } else { "Recycle Bin" };
+        let goes_to = if permanent { "Deleted for good" } else { trash_word() };
         let warn_count = if assessed.is_none() { "Checking\u{2026}".to_string() } else if warns.is_empty() { "None".to_string() } else { warns.len().to_string() };
         kit::dialog(ctx, "disk-delete", |ui| {
             kit::dialog_header(ui, pal, Some(icon), &title, &dest);
@@ -526,7 +527,7 @@ impl App {
                 ui.checkbox(&mut ack, "I know what I'm doing");
                 ui.add_space(4.0);
             }
-            answer = confirm_row(ui, pal, "Cancel", if permanent { "Delete permanently" } else { "Move to Recycle Bin" }, if permanent { ButtonKind::DangerFill } else { ButtonKind::Primary }, ok_to_go);
+            answer = confirm_row(ui, pal, "Cancel", if permanent { "Delete permanently".to_string() } else { format!("Move to {}", trash_word()) }.as_str(), if permanent { ButtonKind::DangerFill } else { ButtonKind::Primary }, ok_to_go);
         });
         p.ack = ack;
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -642,9 +643,9 @@ mod tests {
     #[test]
     fn dialog_summary_text() {
         let (a, b, perm) = summary_text(1, 1024, Mode::Recycle, true, true);
-        assert!(a.starts_with("1 item ") && b.contains("Recycle Bin") && !perm);
+        assert!(a.starts_with("1 item ") && b.contains(trash_word()) && !perm);
         let (a, b, perm) = summary_text(3, 0, Mode::Recycle, false, true);
-        assert!(a.starts_with("3 items") && b.contains("no Recycle Bin") && perm);
+        assert!(a.starts_with("3 items") && b.contains(&format!("no {}", trash_word())) && perm);
         let (_, b, perm) = summary_text(2, 0, Mode::Permanent, true, true);
         assert!(b.contains("cannot be undone") && perm);
         let (_, b, _) = summary_text(1, 0, Mode::Recycle, true, false);
