@@ -193,9 +193,9 @@ impl App {
             if resp.secondary_clicked() {
                 reveal = Some(r.path.clone());
             }
-            resp.on_hover_text("Click to play back, right-click to show in Explorer");
+            resp.on_hover_text(format!("Click to play back, right-click to show in {}", crate::platform::file_manager()));
         }
-        widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, "Right-click shows the file in Explorer.", theme::ui(11.0), pal.text_faint, content.width());
+        widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, &format!("Right-click shows the file in {}.", crate::platform::file_manager()), theme::ui(11.0), pal.text_faint, content.width());
         if close_playback {
             self.pro.playback = None;
         }
