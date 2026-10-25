@@ -1,7 +1,7 @@
 //! macOS backend of [`crate::platform`]: `~/Library/Application Support`, Finder via `open`.
 
 use super::unix::spawn_reaped;
-pub use super::unix::{hide_console, hostname, is_elevated, local_time};
+pub use super::unix::{hide_console, home, hostname, is_elevated, local_time};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

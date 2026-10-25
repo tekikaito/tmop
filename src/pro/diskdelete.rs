@@ -4,17 +4,36 @@
 //!
 //! Rules are deterministic: [`classify`] returns `Blocked` (never deletable), `Warn` (deletable
 //! after an explicit acknowledgement) or `Allowed`. System locations are resolved at runtime
-//! (Windows may live on `D:`), never hard-coded.
+//! (Windows may live on `D:`), never hard-coded. Off Windows the rules are those of [`unix`]
+//! (protected-paths table, mounts, home folder); the Windows rules stay pure and judge WSL's
+//! Windows drives there too.
 
 use super::diskspace::Tree;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub mod unix;
+
+pub use unix::UnixPaths;
+
 // ---------------------------------------------------------------- path helpers (pure)
 
-/// Lower-case, `\`-separated, no `\\?\` / `\\?\UNC\` prefix, no trailing `\` except on a drive root.
+/// The comparison form of `p` for this OS: [`norm_path_win`] on Windows, [`unix::norm_unix`]
+/// elsewhere (`/`-separated, case kept on Linux).
 pub fn norm_path(p: &Path) -> String {
-    let mut s = p.to_string_lossy().replace('/', "\\");
+    #[cfg(windows)]
+    {
+        norm_path_win(&p.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        unix::norm_unix(unix::FLAVOR, &p.to_string_lossy())
+    }
+}
+
+/// Lower-case, `\`-separated, no `\\?\` / `\\?\UNC\` prefix, no trailing `\` except on a drive root.
+pub fn norm_path_win(p: &str) -> String {
+    let mut s = p.replace('/', "\\");
     let low = s.to_ascii_lowercase();
     if low.starts_with(r"\\?\unc\") {
         s = format!(r"\\{}", &s[8..]);
@@ -134,6 +153,8 @@ pub struct SystemPaths {
     pub temp: String,
     /// `%LOCALAPPDATA%` of the current user (Cleanup).
     pub local_appdata: String,
+    /// What the Linux and macOS rules need (empty on Windows).
+    pub unix: UnixPaths,
 }
 
 #[cfg(windows)]
@@ -211,7 +232,14 @@ pub fn system_paths() -> SystemPaths {
     sp
 }
 
-#[cfg(not(windows))]
+/// Linux and macOS: the user folders (`known`) and [`UnixPaths`]; the Windows fields stay empty.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn system_paths() -> SystemPaths {
+    let (known, unix) = unix::build();
+    SystemPaths { known, unix, ..Default::default() }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn system_paths() -> SystemPaths {
     SystemPaths::default()
 }
@@ -299,16 +327,41 @@ fn blocked(r: &str) -> Verdict {
     Verdict::Blocked(r.to_string())
 }
 
-/// Safety verdict for deleting `path`. Pure apart from 8.3 expansion of paths containing `~`.
+/// Safety verdict for deleting `path`. Pure apart from 8.3 expansion of paths containing `~`
+/// (Windows); off Windows the lexical [`unix`] rules (owner and links unknown).
 pub fn classify(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
-    let n = norm_path_long(path);
-    classify_norm(&n, meta, rules)
+    #[cfg(windows)]
+    {
+        classify_norm(&norm_path_long(path), meta, rules)
+    }
+    #[cfg(not(windows))]
+    {
+        unix::classify_lexical(unix::FLAVOR, &path.to_string_lossy(), meta, rules)
+    }
+}
+
+/// The Windows rules for a Windows path, on any host (tests; WSL's drives).
+pub fn classify_win(path: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
+    classify_norm(&norm_path_win(path), meta, rules)
 }
 
 /// Strictest of the lexical verdict and the verdict for the path as the file system resolves it:
 /// junctions and symlinks in the parent chain are followed, so `C:\Documents and Settings\x`
 /// cannot hide `C:\Users\x`. The item itself is not followed (a link is deleted, not its target).
+/// Off Windows see [`unix::classify_fs`] (also owner, a link item's target and bind mounts).
 pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
+    #[cfg(unix)]
+    {
+        unix::classify_fs(unix::FLAVOR, &path.to_string_lossy(), meta, rules, &unix::RealFs)
+    }
+    #[cfg(not(unix))]
+    {
+        classify_resolved_win(path, meta, rules)
+    }
+}
+
+#[cfg(not(unix))]
+fn classify_resolved_win(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
     let lexical = classify(path, meta, rules);
     if matches!(lexical, Verdict::Blocked(_)) {
         return lexical;
@@ -333,6 +386,7 @@ pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict 
 }
 
 /// `path` with its parent chain resolved (links followed), verbatim prefix removed.
+#[cfg(not(unix))]
 fn resolved_path(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
@@ -615,7 +669,8 @@ pub fn assess(targets: Vec<Target>, rules: &Rules) -> Vec<Assessed> {
         let files: Vec<PathBuf> = idx.iter().map(|&i| out[i].target.path.clone()).collect();
         for (p, holders) in in_use(&files) {
             if let Some(a) = out.iter_mut().find(|a| a.target.path == p) {
-                let reason = format!("in use by {}", holders.join(", "));
+                // Unix deletes an open file at once, but its space comes back only when it is closed.
+                let reason = if cfg!(windows) { format!("in use by {}", holders.join(", ")) } else { format!("in use by {}; the space is freed once it closes the file", holders.join(", ")) };
                 a.verdict = match std::mem::replace(&mut a.verdict, Verdict::Allowed) {
                     Verdict::Warn(mut r) => {
                         r.push(reason);
@@ -629,14 +684,9 @@ pub fn assess(targets: Vec<Target>, rules: &Rules) -> Vec<Assessed> {
     out
 }
 
-#[cfg(windows)]
+/// Processes holding each file open (see [`super::inuse`]).
 pub(crate) fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    super::restartmgr::in_use(files)
-}
-
-#[cfg(not(windows))]
-pub(crate) fn in_use(_: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    HashMap::new()
+    super::inuse::in_use(files)
 }
 
 /// Targets for the deleted record in a scan tree: folders by node, files by index.
@@ -695,6 +745,16 @@ pub fn run(targets: Vec<Target>, mode: Mode, rules: Option<&Rules>) -> Report {
     if !crate::platform::Caps::get().delete_safe {
         return refuse_all(targets, mode);
     }
+    // Off Windows no caller can skip the classifier, and the mounts are read again: something
+    // may have been mounted since the rules were built.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let fresh = {
+        let mut r = rules.cloned().unwrap_or_else(|| Rules { sys: system_paths(), inv: Inventory::default() });
+        unix::refresh_mounts(&mut r.sys.unix);
+        r
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let rules = Some(&fresh);
     run_with_log(targets, mode, Some(&default_log()), rules)
 }
 
@@ -706,7 +766,12 @@ fn refuse_all(targets: Vec<Target>, mode: Mode) -> Report {
 
 /// Why `path` must never be deleted whatever the rules say (pure, no I/O).
 pub(crate) fn refuse_reason(path: &Path) -> Option<&'static str> {
-    (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
+    if cfg!(windows) {
+        (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
+    } else {
+        (!path.has_root() || path.file_name().is_none() || norm_path(path) == "/" || path.components().any(|c| matches!(c, std::path::Component::ParentDir)))
+            .then_some("refusing to delete the root, a relative path or a path with '..'")
+    }
 }
 
 fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
@@ -810,6 +875,13 @@ pub fn delete_permanent(path: &Path) -> Result<(), String> {
     };
     #[cfg(not(windows))]
     let (link, dir) = (md.file_type().is_symlink(), md.is_dir());
+    // `remove_dir_all` does not follow links but does descend into mounted file systems.
+    #[cfg(unix)]
+    if dir && !link {
+        if let Some(m) = unix::other_device_below(path) {
+            return Err(format!("contains a mount point ({}); nothing was deleted", m.display()));
+        }
+    }
     let r = if dir && link {
         std::fs::remove_dir(path)
     } else if dir {

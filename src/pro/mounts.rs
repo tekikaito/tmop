@@ -148,6 +148,89 @@ pub fn macos_kind(point: &str, fs: &str, local: bool, dont_browse: bool) -> Opti
     Some((kind, name))
 }
 
+/// What the delete classifier needs to know about mounts: every mount point (pseudo file systems
+/// included), the bind mounts with the folder each one shows, and WSL's Windows drives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MountTable {
+    pub points: Vec<String>,
+    /// (mount point, the folder it shows) for mounts of a sub-folder of an already mounted file system.
+    pub binds: Vec<(String, String)>,
+    /// (mount point, drive letter) of WSL's `drvfs` mounts (`/mnt/c` is `C:\`).
+    pub drives: Vec<(String, char)>,
+}
+
+/// The drive letter of a WSL `drvfs` mount (9p with a `C:\` source on WSL 2, `drvfs` on WSL 1).
+pub fn wsl_drive(m: &Mount) -> Option<char> {
+    if !matches!(m.fs.as_str(), "9p" | "drvfs") {
+        return None;
+    }
+    let b = m.source.as_bytes();
+    let letter = (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || (b.len() == 3 && matches!(b[2], b'\\' | b'/')))).then(|| (b[0] as char).to_ascii_lowercase())?;
+    Some(letter)
+}
+
+/// [`MountTable`] from parsed `/proc/self/mountinfo`. A mount whose root is not `/` shows a
+/// sub-folder of its file system; when the same device is also mounted whole, that sub-folder has
+/// a real path, which is what the bind mount reaches.
+pub fn table_linux(mounts: &[Mount]) -> MountTable {
+    let mut t = MountTable::default();
+    for m in mounts {
+        if !t.points.contains(&m.point) {
+            t.points.push(m.point.clone());
+        }
+        if let Some(l) = wsl_drive(m).filter(|l| !t.drives.contains(&(m.point.clone(), *l))) {
+            t.drives.push((m.point.clone(), l));
+        }
+        if m.root != "/" {
+            if let Some(whole) = mounts.iter().find(|o| o.dev == m.dev && o.root == "/") {
+                let shown = format!("{}{}", whole.point.trim_end_matches('/'), m.root);
+                if shown != m.point && !t.binds.iter().any(|(p, _)| *p == m.point) {
+                    t.binds.push((m.point.clone(), shown));
+                }
+            }
+        }
+    }
+    t
+}
+
+/// The mount table from `/proc/self/mountinfo` (empty when it cannot be read).
+#[cfg(target_os = "linux")]
+pub fn table() -> MountTable {
+    std::fs::read_to_string("/proc/self/mountinfo").map(|s| table_linux(&parse_mountinfo(&s))).unwrap_or_default()
+}
+
+/// Every mount point from `getfsstat` (macOS has no bind mounts or WSL drives).
+#[cfg(target_os = "macos")]
+pub fn table() -> MountTable {
+    let mut points: Vec<String> = statfs_all().iter().map(|s| c_str(&s.f_mntonname)).filter(|p| !p.is_empty()).collect();
+    points.sort();
+    points.dedup();
+    MountTable { points, ..Default::default() }
+}
+
+#[cfg(target_os = "macos")]
+fn c_str(b: &[libc::c_char]) -> String {
+    let b: Vec<u8> = b.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+    String::from_utf8_lossy(&b).into_owned()
+}
+
+/// Every mounted file system (`getfsstat`, without waiting on unresponsive network mounts).
+#[cfg(target_os = "macos")]
+fn statfs_all() -> Vec<libc::statfs> {
+    // SAFETY: a null buffer asks only for the number of mounts.
+    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    // SAFETY: an all-zero statfs is valid.
+    let mut buf: Vec<libc::statfs> = (0..n as usize + 8).map(|_| unsafe { std::mem::zeroed() }).collect();
+    let bytes = (buf.len() * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: `buf` holds `bytes` bytes of statfs records; getfsstat fills at most that many.
+    let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    buf.truncate(usize::try_from(got).unwrap_or(0));
+    buf
+}
+
 /// (total, available to the caller) bytes of the file system holding `path`.
 #[cfg(target_os = "linux")]
 pub fn space(path: &Path) -> Option<(u64, u64)> {
@@ -212,25 +295,10 @@ fn linux_removable(dev: (u32, u32)) -> bool {
 /// Volume cards from `getfsstat`.
 #[cfg(target_os = "macos")]
 pub fn volumes() -> Vec<Volume> {
-    let cstr = |b: &[libc::c_char]| {
-        let b: Vec<u8> = b.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
-        String::from_utf8_lossy(&b).into_owned()
-    };
-    // SAFETY: a null buffer asks only for the number of mounts.
-    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    if n <= 0 {
-        return Vec::new();
-    }
-    // SAFETY: an all-zero statfs is valid.
-    let mut buf: Vec<libc::statfs> = (0..n as usize + 8).map(|_| unsafe { std::mem::zeroed() }).collect();
-    let bytes = (buf.len() * std::mem::size_of::<libc::statfs>()) as libc::c_int;
-    // SAFETY: `buf` holds `bytes` bytes of statfs records; getfsstat fills at most that many.
-    let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
-    let got = usize::try_from(got).unwrap_or(0).min(buf.len());
-    let mut out: Vec<Volume> = buf[..got]
+    let mut out: Vec<Volume> = statfs_all()
         .iter()
         .filter_map(|s| {
-            let (point, fs) = (cstr(&s.f_mntonname), cstr(&s.f_fstypename));
+            let (point, fs) = (c_str(&s.f_mntonname), c_str(&s.f_fstypename));
             let (kind, label) = macos_kind(&point, &fs, s.f_flags & libc::MNT_LOCAL as u32 != 0, s.f_flags & libc::MNT_DONTBROWSE as u32 != 0)?;
             let bsize = u64::from(s.f_bsize);
             let total = s.f_blocks.saturating_mul(bsize);
@@ -296,6 +364,22 @@ garbage line
         let v = pick_linux(parse_mountinfo(MOUNTINFO));
         let got: Vec<(&str, &str)> = v.iter().map(|(m, k)| (m.point.as_str(), *k)).collect();
         assert_eq!(got, [("/", "Fixed"), ("/boot/efi", "Fixed"), ("/home", "Fixed"), ("/media/cdrom", "Optical"), ("/mnt/c", "Network"), ("/mnt/nas", "Network"), ("/run/media/alex/My Stick", "Removable")]);
+    }
+
+    #[test]
+    fn mount_table_for_the_delete_classifier() {
+        let t = table_linux(&parse_mountinfo(MOUNTINFO));
+        assert_eq!(t.points.len(), 16);
+        assert!(["/", "/proc", "/home", "/srv/www", "/run/media/alex/My Stick", "/mnt/c", "/tmp"].iter().all(|p| t.points.iter().any(|q| q == p)));
+        // Only the ext4 bind of /var/www has its whole file system mounted too; the btrfs
+        // subvolumes do not, so they have no other path.
+        assert_eq!(t.binds, [("/srv/www".to_string(), "/var/www".to_string())]);
+        assert_eq!(t.drives, [("/mnt/c".to_string(), 'c')]);
+        let m = |fs: &str, source: &str| Mount { fs: fs.into(), source: source.into(), ..Default::default() };
+        assert_eq!(wsl_drive(&m("drvfs", "D:")), Some('d'));
+        assert_eq!(wsl_drive(&m("9p", "drivers")), None);
+        assert_eq!(wsl_drive(&m("ext4", "C:\\")), None);
+        assert_eq!(wsl_drive(&m("9p", "C:\\x")), None);
     }
 
     #[test]
