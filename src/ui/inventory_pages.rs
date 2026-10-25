@@ -482,7 +482,10 @@ impl App {
         let st = theme::status(&pal);
         let full = self.settings.general.show_full_account_name;
         let list = user_rows(fd.rows, full);
-        let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} sessions", list.len()), Page::Users.shortcut().into()]));
+        // Without sign-in sessions (Linux, macOS) every row is one account.
+        let sessions = self.caps.proc.session;
+        let rows_word = if sessions { "sessions" } else { "accounts" };
+        let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} {rows_word}", list.len()), Page::Users.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 100.0, |ui| refresh = Button::new("Refresh").show(ui, &pal).clicked());
         if refresh {
@@ -493,8 +496,8 @@ impl App {
         let interactive = list.iter().filter(|u| u.is_active()).count();
         let top = list.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu));
         let tiles = [
-            StatTile::new("Accounts", list.len().to_string(), "Distinct account / session pairs"),
-            StatTile::new("Signed in", interactive.to_string(), "Sessions with app windows"),
+            StatTile::new("Accounts", list.len().to_string(), if sessions { "Distinct account / session pairs" } else { "Accounts with processes" }),
+            StatTile::new("Signed in", interactive.to_string(), if sessions { "Sessions with app windows" } else { "Accounts with app windows" }),
             StatTile::new("Busiest", top.map(|t| format!("{:.1}%", t.cpu)).unwrap_or_default(), top.map(|t| short_account(&t.user).to_string()).unwrap_or_default()).bar(top.map(|t| t.cpu / 100.0).unwrap_or(0.0), st.danger),
             StatTile::new("Processes", fd.rows.len().to_string(), format!("{} with windows", fd.rows.iter().filter(|r| r.has_window).count())),
         ];
@@ -503,7 +506,9 @@ impl App {
         let stt = &self.pro.inv.users_table;
         let mut order: Vec<usize> = (0..list.len()).filter(|i| table::matches(&stt.filter, &[&list[*i].user])).collect();
         let trends: Vec<Vec<f32>> = list.iter().map(|u| self.pro.inv.history.user_trend(u.session, |raw| if full { raw == u.user } else { short_account(raw) == u.user })).collect();
-        stt.sort(&list, &mut order, |a, b, col| match col {
+        // Table column -> the column of the full layout (the Session column is left out without sessions).
+        let logical = move |col: usize| if sessions || col == 0 { col } else { col + 1 };
+        stt.sort(&list, &mut order, |a, b, col| match logical(col) {
             0 => cmp_str(&a.user, &b.user),
             1 => a.session.cmp(&b.session),
             2 => a.procs.cmp(&b.procs),
@@ -522,11 +527,12 @@ impl App {
         let table_bottom = if shown.is_some() { area.bottom() - card_h - BLOCK_GAP } else { area.bottom() };
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), pos2(area.right(), table_bottom.max(area.top() + used + BLOCK_GAP + 120.0)));
 
-        let cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        let all_cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        let cols: Vec<Col> = all_cols.into_iter().enumerate().filter(|(n, _)| sessions || *n != 1).map(|(_, c)| c).collect();
         let spark_color = pal.accent;
         let cell = |i: usize, col: usize| -> Cell {
             let u = &list[i];
-            match col {
+            match logical(col) {
                 0 => {
                     let name = short_account(&u.user);
                     let cell = Cell::new(name);
@@ -554,7 +560,8 @@ impl App {
         if let Some(i) = shown {
             let u = &list[i];
             let card = Rect::from_min_max(pos2(area.left(), area.bottom() - card_h), area.max);
-            let content = section_card(&p, card, &pal, &format!("Session {} \u{b7} {} \u{b7} top apps", u.session, short_account(&u.user)), "");
+            let title = if sessions { format!("Session {} \u{b7} {} \u{b7} top apps", u.session, short_account(&u.user)) } else { format!("{} \u{b7} top apps", short_account(&u.user)) };
+            let content = section_card(&p, card, &pal, &title, "");
             if apps.is_empty() {
                 empty_state(&p, content, &pal, "No processes in this session.");
             } else {

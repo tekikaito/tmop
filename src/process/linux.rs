@@ -251,7 +251,9 @@ impl Enumerator {
                 path: id.path,
                 threads: st.threads,
                 handles: files,
-                session_id: st.session,
+                // The POSIX session id is per terminal and daemon, not a sign-in session like
+                // Windows' (the Users page would split every account into dozens of rows).
+                session_id: 0,
                 base_priority: st.nice,
                 priority: None,
                 private_working_set: status.rss_anon,
@@ -291,20 +293,19 @@ impl Enumerator {
     }
 
     /// The pids that own a window: the X11 client list on X11; on Wayland (or without an X
-    /// server) the `.desktop` heuristic plus the XWayland clients.
+    /// server) the `.desktop` heuristic. Wayland sessions are not asked over X11: GNOME starts
+    /// Xwayland on demand, and TMOP's connection would start it and keep it running.
     fn window_owners(&mut self, apps: &[(u32, u32, Option<u32>, Option<String>)]) -> HashSet<u32> {
         // Only this user's processes: a pid from the X server can belong to another pid namespace
         // (Flatpak sandboxes, an X server in a container such as WSLg's) and name a stranger.
         let me = euid();
         let mine: HashSet<u32> = apps.iter().filter(|a| a.2 == Some(me)).map(|a| a.0).collect();
-        let x11 = self.x11.client_pids().map(|p| p.into_iter().filter(|p| mine.contains(p)).collect::<HashSet<u32>>());
+        let x11 = if crate::platform::is_wayland() { None } else { self.x11.client_pids() };
         match x11 {
-            Some(pids) if !crate::platform::is_wayland() => pids,
-            x11 => {
+            Some(pids) => pids.into_iter().filter(|p| mine.contains(p)).collect(),
+            None => {
                 let procs: Vec<(u32, u32, Option<u32>, Option<&str>)> = apps.iter().map(|a| (a.0, a.1, a.2, a.3.as_deref())).collect();
-                let mut pids = procfs::heuristic_windows(&procs, me);
-                pids.extend(x11.unwrap_or_default());
-                pids
+                procfs::heuristic_windows(&procs, me)
             }
         }
     }
@@ -640,7 +641,8 @@ pub(super) mod elevated {
             _ if row.pid == me => return Err("refusing to act on TMOP itself".into()),
             _ => vec![(row.pid, row.create_time)],
         };
-        let live: Vec<u32> = targets.into_iter().filter(|(p, s)| *p > 1 && start_of(*p) == Some(*s)).map(|t| t.0).collect();
+        let targets: Vec<(u32, i64)> = targets.into_iter().filter(|(p, s)| *p > 1 && start_of(*p) == Some(*s)).collect();
+        let live: Vec<u32> = targets.iter().map(|t| t.0).collect();
         if live.is_empty() {
             return Err("the process has exited".into());
         }
@@ -660,6 +662,23 @@ pub(super) mod elevated {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(procfs::pkexec_error(out.status.code(), stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")));
+        }
+        // The retry sends one SIGTERM (a second prompt for CONT or KILL would be a nuisance): a
+        // stopped process or one that ignores it is still there, which the message says.
+        if matches!(action, Action::EndTask | Action::EndTree) {
+            let running = |(p, s): &(u32, i64)| read_stat(*p).is_some_and(|st| !matches!(st.state, 'Z' | 'X') && stamp(&st) == *s);
+            let end = Instant::now() + Duration::from_secs(2);
+            while targets.iter().any(running) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let left = targets.iter().filter(|t| running(t)).count();
+            if left > 0 {
+                return Ok(if matches!(action, Action::EndTask) {
+                    format!("Asked {} ({}) to end as root; it is still running (stopped, or it ignores the request)", row.name, row.pid)
+                } else {
+                    format!("Asked {} process(es) to end as root; {left} still running (stopped, or ignoring the request)", live.len())
+                });
+            }
         }
         Ok(match action {
             Action::EndTree => format!("Ended {} process(es) as root", live.len()),
