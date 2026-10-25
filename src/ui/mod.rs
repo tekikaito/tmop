@@ -662,7 +662,7 @@ impl App {
             "normal" => egui::WindowLevel::Normal,
             _ => egui::WindowLevel::AlwaysOnTop,
         };
-        let builder = ViewportBuilder::default()
+        let mut builder = ViewportBuilder::default()
             .with_title(format!("TMOP \u{2014} {}", skin.name))
             .with_inner_size(popout::desired_size(&skin))
             .with_resizable(false)
@@ -670,6 +670,9 @@ impl App {
             .with_transparent(true)
             .with_taskbar(false)
             .with_window_level(level);
+        if let Some(icon) = crate::icon::window_icon() {
+            builder = builder.with_icon(icon);
+        }
         let close = ctx.show_viewport_immediate(ViewportId::from_hash_of("tmop-popout"), builder, |ctx, _class| {
             let c = self.popout_ui(ctx, fd);
             c || ctx.input(|i| i.viewport().close_requested())
