@@ -22,6 +22,7 @@
 
 pub mod common;
 pub mod hwinfo;
+pub mod mac_parse;
 
 #[cfg_attr(windows, path = "win.rs")]
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
@@ -536,7 +537,8 @@ mod tests {
         let _ = probe();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg_attr(not(windows), allow(unused_variables))]
     #[test]
     fn collector_smoke() {
         let mut c = Collector::new();
@@ -546,6 +548,10 @@ mod tests {
         assert!(snap.memory.total > 0);
         assert!(snap.cpu.logical_count > 0);
         assert!((0.0..=100.0).contains(&snap.cpu.total_pct));
+        #[cfg(target_os = "macos")]
+        assert_eq!(snap.cpu.per_core_pct.len(), snap.cpu.logical_count);
+        // macOS: rows arrive with the libproc enumerator (PR-M).
+        #[cfg(windows)]
         assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
     }
 }
