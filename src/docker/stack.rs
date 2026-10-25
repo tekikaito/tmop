@@ -3,6 +3,7 @@
 
 use super::backend::err_text;
 use super::model::{Container, Network, Stack, Volume};
+use crate::platform::hide_console;
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{RemoveContainerOptions, RemoveVolumeOptions};
 use bollard::Docker;
@@ -274,35 +275,8 @@ pub fn open_in_editor(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("File not found: {}", path.display()));
     }
-    let mut cmd = open_command(path);
-    hide_console(&mut cmd);
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::platform::open_path(path)
 }
-
-#[cfg(windows)]
-fn open_command(path: &Path) -> Command {
-    let mut cmd = Command::new("explorer.exe");
-    cmd.arg(path);
-    cmd
-}
-
-#[cfg(not(windows))]
-fn open_command(path: &Path) -> Command {
-    let mut cmd = Command::new("xdg-open");
-    cmd.arg(path);
-    cmd
-}
-
-/// Keeps console windows of child processes from flashing on Windows.
-#[cfg(windows)]
-fn hide_console(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console(_cmd: &mut Command) {}
 
 /// The compose file of a stack, when it exists on this machine.
 ///

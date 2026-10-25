@@ -28,11 +28,13 @@ pub mod summary;
 pub mod table;
 pub mod terminal;
 pub mod theme;
+pub mod titlebar;
 pub mod widgets;
 
 use crate::docker::model::EngineStatus;
 use crate::metrics::{history_capacity, History, Sampler, Snapshot};
 use crate::palette::{self, PaletteCatalog};
+use crate::platform::Caps;
 use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
@@ -113,6 +115,27 @@ impl Page {
             _ => Page::Summary,
         }
     }
+
+    /// Whether this page has anything to show with `caps`. Summary, Settings and the pages fed by
+    /// the metrics and processes backends are always there.
+    pub fn supported(self, caps: &Caps) -> bool {
+        match self {
+            Page::SystemInfo | Page::StartupApps | Page::Services | Page::Drivers | Page::InstalledApps | Page::Connections | Page::PowerFreq => caps.inventory,
+            _ => true,
+        }
+    }
+
+    /// [`Page::from_id`], with Summary in place of a page `caps` does not support (`--page=`,
+    /// `general.defaultPage`, Task Manager hand-offs).
+    pub fn from_id_on(id: &str, caps: &Caps) -> Self {
+        Some(Page::from_id(id)).filter(|p| p.supported(caps)).unwrap_or(Page::Summary)
+    }
+
+    /// The choices for the default start page: the supported pages of [`Page::NAV`], then Settings.
+    pub fn start_choices(caps: &Caps) -> Vec<Page> {
+        Page::NAV.into_iter().chain([Page::Settings]).filter(|p| p.supported(caps)).collect()
+    }
+
     pub fn id(self) -> &'static str {
         match self {
             Page::Summary => "summary",
@@ -149,7 +172,7 @@ impl Page {
             Page::FlightRecorder => "Flight Recorder",
             Page::Connections => "Connections",
             Page::InstalledApps => "Installed Apps",
-            Page::Drivers => "Drivers",
+            Page::Drivers => crate::pro::drivers::DRIVERS_TITLE,
             Page::DiskSpace => "Disk Space",
             Page::Benchmarks => "Benchmarks",
             Page::Settings => "Settings",
@@ -192,7 +215,7 @@ impl Page {
             Page::FlightRecorder => "Recorder",
             Page::Connections => "Connect.",
             Page::InstalledApps => "Apps",
-            Page::Drivers => "Drivers",
+            Page::Drivers => crate::pro::drivers::DRIVERS_RAIL,
             Page::DiskSpace => "Disk",
             Page::Benchmarks => "Bench",
             Page::Settings => "Settings",
@@ -359,8 +382,14 @@ pub struct Launch {
     pub engine_test: Option<String>,
 }
 
+/// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
+pub fn visible_pages(caps: &Caps, docker: bool) -> Vec<Page> {
+    Page::NAV.into_iter().filter(|p| p.supported(caps) && (*p != Page::Docker || docker)).collect()
+}
 
 pub struct App {
+    /// What this OS and session support, probed once at start-up.
+    pub caps: Caps,
     pub settings: Settings,
     pub settings_dirty: bool,
     pub catalog: SkinCatalog,
@@ -375,12 +404,19 @@ pub struct App {
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
     pending: Option<process_actions::Pending>,
+    /// A process action running as administrator (`pkexec`); its status text arrives here.
+    elevated_job: Option<std::sync::mpsc::Receiver<String>>,
     /// "HOST {b7} user" shown in the header.
     machine: String,
     /// Ctrl+K was pressed: focus the header search on the next frame.
     focus_search: bool,
     pub status: String,
     applied_top: Option<bool>,
+    /// The OS light/dark theme egui reports (winit), read every frame.
+    system_theme: Option<egui::Theme>,
+    /// TMOP draws the title bar, window buttons and resize edges (see
+    /// [`crate::platform::desktop::own_title_bar`]).
+    pub own_title_bar: bool,
     /// The palette last given to egui's style.
     applied_pal: Option<Palette>,
     /// The `appearance.displayFont` last installed, and whether it fell back to Michroma.
@@ -429,7 +465,12 @@ impl App {
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
         let palettes = palette::scan(&palette::default_dir());
-        let page = launch.start_page.unwrap_or_else(|| Page::from_id(&settings.general.default_page));
+        let caps = Caps::get();
+        let page = match launch.start_page {
+            Some(p) if p.supported(&caps) => p,
+            Some(_) => Page::Summary,
+            None => Page::from_id_on(&settings.general.default_page, &caps),
+        };
         let device = launch.start_device.as_deref().and_then(|d| Device::ALL.into_iter().find(|x| x.key() == d)).unwrap_or(Device::Cpu);
         // A normal settings load needs no message.
         let mut status = if status.ends_with("(Loaded)") { String::new() } else { status };
@@ -440,6 +481,7 @@ impl App {
         let settings_popout_on = settings.popout.mode != "off";
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
+            caps,
             docker,
             perf_docker: performance::DockerPerfCache::default(),
             summary: summary::SummaryState::default(),
@@ -459,10 +501,13 @@ impl App {
             sort: (Column::Cpu, true),
             selected: None,
             pending: None,
+            elevated_job: None,
             machine: chrome::machine_line(),
             focus_search: false,
             status,
             applied_top: None,
+            system_theme: cc.egui_ctx.system_theme(),
+            own_title_bar: !popout_only && crate::platform::desktop::own_title_bar(),
             applied_pal: None,
             display_font,
             font_list: settings_page::FontList::default(),
@@ -477,12 +522,13 @@ impl App {
             pro: pro_pages::ProState::default(),
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
-            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only),
+            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
         let mut app = app;
+        app.pro.del.delete_safe = caps.delete_safe;
         if !app.settings.general.recording_folder.is_empty() {
             app.recorder.dir = std::path::PathBuf::from(&app.settings.general.recording_folder);
         }
@@ -511,7 +557,7 @@ impl App {
         if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id) {
             app.docker.ui.tab = tab;
         }
-        match launch.engine_test.as_deref() {
+        match launch.engine_test.as_deref().filter(|_| app.caps.engine) {
             Some("setup") => {
                 // Same as the wizard: the engine's context becomes the active one once it runs.
                 app.docker.engine.setup(crate::engine::Overrides::from_env().data_dir(&app.settings.docker.engine_data_dir));
@@ -528,14 +574,14 @@ impl App {
         app
     }
 
-    /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following
-    /// Windows) for `system` and for an id that isn't installed.
+    /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following the
+    /// system) for `system` and for an id that isn't installed.
     pub fn palette_id(&self) -> String {
         let id = &self.settings.appearance.theme;
         if id != palette::SYSTEM && self.palettes.get(id).is_some() {
             return id.clone();
         }
-        if matches!(dark_light_system(), Some(false)) { "light" } else { "dark" }.into()
+        if matches!(dark_light_system(self.system_theme), Some(false)) { "light" } else { "dark" }.into()
     }
 
     /// The palette in use, with `appearance.accent` applied.
@@ -554,9 +600,15 @@ impl App {
         MetricColors::from_settings(&self.settings.graphs)
     }
 
-    /// `Page::NAV` without the pages that are hidden right now (Docker when its page is off).
+    /// `Page::NAV` without the pages that are hidden right now: unsupported ones, and Docker
+    /// when its page is off.
     pub fn visible_pages(&self) -> Vec<Page> {
-        Page::NAV.into_iter().filter(|p| *p != Page::Docker || self.docker.visible(&self.settings)).collect()
+        visible_pages(&self.caps, self.docker_visible())
+    }
+
+    /// Whether the Docker page is listed.
+    pub fn docker_visible(&self) -> bool {
+        self.docker.visible(&self.settings, self.caps.engine)
     }
 
     pub fn bloom(&self) -> f32 {
@@ -658,12 +710,14 @@ impl App {
     fn popout_viewport(&mut self, ctx: &egui::Context, fd: &FrameData<'_>) {
         let skin = self.current_skin();
         let level = match self.popout_mode().as_str() {
+            _ if !self.caps.window_levels => egui::WindowLevel::Normal,
             "desktop" => egui::WindowLevel::AlwaysOnBottom,
             "normal" => egui::WindowLevel::Normal,
             _ => egui::WindowLevel::AlwaysOnTop,
         };
         let mut builder = ViewportBuilder::default()
             .with_title(format!("TMOP \u{2014} {}", skin.name))
+            .with_app_id(crate::APP_ID)
             .with_inner_size(popout::desired_size(&skin))
             .with_resizable(false)
             .with_decorations(false)
@@ -790,12 +844,15 @@ pub fn fmt_hms(d: Duration) -> String {
     }
 }
 
-/// `Some(true)` when Windows apps use dark mode, `None` when unknown.
-fn dark_light_system() -> Option<bool> {
+/// `Some(true)` when the system uses dark mode, `None` when unknown. Windows: the apps' setting
+/// in the registry. Elsewhere egui's system theme (`reported`, from winit), else the desktop's
+/// setting where one is read ([`crate::platform::desktop::desktop_dark`]).
+fn dark_light_system(reported: Option<egui::Theme>) -> Option<bool> {
     #[cfg(windows)]
     {
         use windows::core::w;
         use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+        let _ = reported;
         let mut v: u32 = 0;
         let mut size = std::mem::size_of::<u32>() as u32;
         let st = unsafe {
@@ -816,7 +873,10 @@ fn dark_light_system() -> Option<bool> {
     }
     #[cfg(not(windows))]
     {
-        None
+        match reported {
+            Some(theme) => Some(theme == egui::Theme::Dark),
+            None => crate::platform::desktop::desktop_dark(),
+        }
     }
 }
 
@@ -883,6 +943,7 @@ impl Default for Profile {
 
 impl App {
     fn update_inner(&mut self, ctx: &egui::Context) {
+        self.system_theme = ctx.system_theme();
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
         widgets::set_ink(&pal);
@@ -904,7 +965,7 @@ impl App {
         self.docker.poll(self.page == Page::Docker);
         self.docker.refresh_snap();
         self.refresh_docker_perf();
-        if self.page == Page::Docker && !self.docker.visible(&self.settings) {
+        if (self.page == Page::Docker && !self.docker_visible()) || !self.page.supported(&self.caps) {
             self.page = Page::Summary;
         }
         let (snap, mut hist, rows) = self.snapshot();
@@ -935,7 +996,7 @@ impl App {
         };
         self.smooth.step(&snap, dt, hf);
         widgets::set_spark_glide(phase, hf && interval.is_some());
-        if self.applied_top != Some(self.settings.window.always_on_top) {
+        if self.caps.window_levels && self.applied_top != Some(self.settings.window.always_on_top) {
             let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
             self.applied_top = Some(self.settings.window.always_on_top);
@@ -957,6 +1018,9 @@ impl App {
             self.replace_banner(ctx, &pal);
             self.status_bar(ctx, &pal, &snap);
             self.rail(ctx, &pal);
+            if self.own_title_bar {
+                titlebar::frame(ctx, &pal);
+            }
             let frame = egui::Frame::none().inner_margin(egui::Margin { left: 8.0, right: 32.0, top: 12.0, bottom: 36.0 });
             egui::CentralPanel::default().frame(frame).show(ctx, |ui| match self.page {
                 Page::Summary => self.summary_page(ui, &fd),
@@ -1005,3 +1069,34 @@ impl App {
 
 #[allow(dead_code)]
 fn _unused(_: Vec2) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_pages_follow_caps_and_the_docker_switch() {
+        assert_eq!(visible_pages(&Caps::WINDOWS, true), Page::NAV.to_vec());
+        assert_eq!(visible_pages(&Caps::LINUX, true), Page::NAV.to_vec());
+        assert!(!visible_pages(&Caps::WINDOWS, false).contains(&Page::Docker));
+        // A made-up OS without the inventory backends keeps the monitoring pages, in NAV order.
+        let fake = Caps { inventory: false, ..Caps::WINDOWS };
+        let shown = visible_pages(&fake, true);
+        let expect = [Page::Summary, Page::Performance, Page::Processes, Page::Docker, Page::AppHistory, Page::Users, Page::FlightRecorder, Page::DiskSpace, Page::Benchmarks];
+        assert_eq!(shown, expect);
+        assert!(Page::NAV.iter().all(|p| shown.contains(p) == p.supported(&fake)));
+    }
+
+    #[test]
+    fn unsupported_start_pages_fall_back_to_summary() {
+        let fake = Caps { inventory: false, ..Caps::LINUX };
+        assert_eq!(Page::from_id_on("services", &fake), Page::Summary);
+        assert_eq!(Page::from_id_on("services", &Caps::LINUX), Page::Services);
+        assert_eq!(Page::from_id_on("disk-space", &fake), Page::DiskSpace);
+        assert_eq!(Page::from_id_on("settings", &fake), Page::Settings);
+        assert_eq!(Page::from_id_on("nonsense", &Caps::WINDOWS), Page::Summary);
+        let choices = Page::start_choices(&fake);
+        assert!(!choices.contains(&Page::Services) && choices.last() == Some(&Page::Settings));
+        assert_eq!(Page::start_choices(&Caps::WINDOWS).len(), Page::NAV.len() + 1);
+    }
+}

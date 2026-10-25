@@ -83,7 +83,7 @@ impl Log {
 
     /// Writes one `[HH:MM:SS] message` line.
     pub fn line(&self, msg: &str) {
-        let (_, _, _, h, m, s) = crate::pro::local_time();
+        let (_, _, _, h, m, s) = crate::platform::local_time();
         let text = format!("[{h:02}:{m:02}:{s:02}] {msg}\n");
         // stderr is absent in the GUI-subsystem build; a failed write is not an error here.
         let _ = io::stderr().write_all(text.as_bytes());

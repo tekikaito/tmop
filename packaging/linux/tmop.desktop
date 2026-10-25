@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TMOP
+GenericName=System Monitor
+Comment=Task Manager OverPowered: a skinnable system monitor
+Exec=tmop
+Icon=tmop
+Terminal=false
+Categories=System;Monitor;
+Keywords=task;manager;process;monitor;cpu;memory;disk;network;docker;
+StartupNotify=true
+StartupWMClass=tmop

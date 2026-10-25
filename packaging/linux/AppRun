@@ -1,0 +1,4 @@
+#!/bin/sh
+# Entry point of the TMOP AppImage: runs the bundled binary with the caller's arguments.
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/usr/bin/tmop" "$@"

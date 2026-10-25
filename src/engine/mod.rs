@@ -89,14 +89,14 @@ impl Overrides {
     }
 }
 
-/// `%LOCALAPPDATA%\TMOP\engine`
+/// `engine` in [`crate::platform::data_dir`] (Windows: `%LOCALAPPDATA%\TMOP\engine`)
 pub fn default_data_dir() -> PathBuf {
-    crate::pro::data_dir().join("engine")
+    crate::platform::data_dir().join("engine")
 }
 
-/// `%LOCALAPPDATA%\TMOP\bin`
+/// `bin` in [`crate::platform::data_dir`] (Windows: `%LOCALAPPDATA%\TMOP\bin`)
 pub fn default_bin_dir() -> PathBuf {
-    crate::pro::data_dir().join("bin")
+    crate::platform::data_dir().join("bin")
 }
 
 /// Release tag for this build, e.g. `v0.1.0`.

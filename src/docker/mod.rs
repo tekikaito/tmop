@@ -6,7 +6,9 @@
 //! * [`model`] holds engine data as plain Rust types, so no `bollard` type leaks
 //!   into the UI;
 //! * [`backend`] runs the background worker: polling, stats, events and commands;
-//! * [`client`] turns an [`context::Endpoint`] into a connected `bollard::Docker`.
+//! * [`client`] turns an [`context::Endpoint`] into a connected `bollard::Docker`;
+//! * [`local`] finds the engines on this machine (Linux and macOS sockets) and explains
+//!   why one cannot be reached.
 
 pub mod backend;
 pub mod client;
@@ -18,6 +20,7 @@ pub mod run;
 pub mod stack;
 
 pub mod context;
+pub mod local;
 pub mod model;
 
 /// Maximum number of containers that keep their own stats history.

@@ -11,8 +11,9 @@
 //! * a file from a newer TMOP opens read-only with defaults and is never overwritten;
 //! * writes go through a temporary file (`.tmp.`) and a corrupt file is set aside (`.corrupt.`).
 //!
-//! TMOP stores its file at `%LOCALAPPDATA%\TMOP\settings.json` and can import TMOG's file
-//! from `%LOCALAPPDATA%\TMOG\Task Manager\settings.json` (read-only).
+//! TMOP stores its file as `settings.json` in [`crate::platform::config_dir`] (Windows:
+//! `%LOCALAPPDATA%\TMOP`); on Windows it can import TMOG's file from
+//! `%LOCALAPPDATA%\TMOG\Task Manager\settings.json` (read-only).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -130,7 +131,8 @@ pub struct Docker {
     pub contexts: BTreeMap<String, DockerContextSettings>,
     /// Hosts added in TMOP; shown in the host picker next to the Docker CLI contexts.
     pub hosts: Vec<DockerHost>,
-    /// Data folder of TMOP's own Docker engine; empty means `%LOCALAPPDATA%\TMOP\engine`.
+    /// Data folder of TMOP's own Docker engine; empty means `engine` in the data dir
+    /// (`%LOCALAPPDATA%\TMOP\engine` on Windows).
     pub engine_data_dir: String,
     /// Looks for a newer engine release when the Docker page starts.
     pub engine_update_check: bool,
@@ -558,32 +560,30 @@ fn strip_unknown(obj: &mut Map<String, Value>, shape: &Map<String, Value>, prefi
 }
 
 /// One-time move of the pre-rename data folder (`%LOCALAPPDATA%\tmog-rs`: settings, skins,
-/// recordings) to `%LOCALAPPDATA%\TMOP`. Does nothing when the new folder already exists.
+/// recordings) to `%LOCALAPPDATA%\TMOP`. Does nothing when the new folder already exists, and
+/// nothing off Windows, where the old folder never existed.
 pub fn migrate_legacy_dir() {
-    let base = local_app_data();
-    let (old, new) = (base.join(crate::LEGACY_APP_DIR), base.join(crate::APP_DIR));
+    let Some(old) = crate::platform::legacy_data_dir() else { return };
+    let new = crate::platform::data_dir();
     if old.is_dir() && !new.exists() {
         let _ = std::fs::rename(&old, &new);
     }
 }
 
-/// `%LOCALAPPDATA%\TMOP\settings.json`
+/// `settings.json` in [`crate::platform::config_dir`] (Windows: `%LOCALAPPDATA%\TMOP\settings.json`).
 pub fn default_path() -> PathBuf {
-    local_app_data().join(crate::APP_DIR).join("settings.json")
+    crate::platform::config_dir().join("settings.json")
 }
 
-/// TMOG's settings file, used only for one-way import.
-pub fn tmog_path() -> PathBuf {
-    local_app_data().join("TMOG").join("Task Manager").join("settings.json")
-}
-
-fn local_app_data() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+/// TMOG's settings file, used only for one-way import; `None` off Windows, where TMOG never ran.
+pub fn tmog_path() -> Option<PathBuf> {
+    crate::platform::tmog_dir().map(|d| d.join("Task Manager").join("settings.json"))
 }
 
 /// Reads TMOG's settings file and converts it (never modifies it).
 pub fn import_tmog() -> Result<Load, String> {
-    std::fs::read_to_string(tmog_path()).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t))
+    let path = tmog_path().ok_or("TMOG settings exist only on Windows")?;
+    std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t))
 }
 
 /// Loads TMOP's settings; on first run imports TMOG's file if present.
@@ -593,10 +593,10 @@ pub fn load_or_import() -> (Settings, String) {
         let load = Settings::load(&own);
         let line = load.describe(&format!("settings: {}", own.display()));
         (load, line)
-    } else if tmog_path().exists() {
+    } else if let Some(tmog) = tmog_path().filter(|p| p.exists()) {
         let load = import_tmog().unwrap_or_else(|e| Load::defaults(LoadOutcome::Corrupt(e)));
         let _ = load.settings.save(&own);
-        let line = load.describe(&format!("settings imported from {}", tmog_path().display()));
+        let line = load.describe(&format!("settings imported from {}", tmog.display()));
         (load, line)
     } else {
         return (Settings::default(), "settings: defaults".into());
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn installed_tmog_settings_parse_when_present() {
-        let Ok(text) = std::fs::read_to_string(tmog_path()) else { return };
+        let Some(Ok(text)) = tmog_path().map(std::fs::read_to_string) else { return };
         let load = Settings::from_json(&text).expect("TMOG settings should parse");
         assert!(matches!(load.outcome, LoadOutcome::MigratedV12));
     }

@@ -1,6 +1,6 @@
 name: Pages
 
-# Publishes docs/ (download page, install.ps1, screenshots) to https://tekikaito.github.io/tmop/.
+# Publishes docs/ (download page, install.ps1, install.sh, screenshots) to https://tekikaito.github.io/tmop/.
 # The repository's Pages source must be set to "GitHub Actions".
 on:
   push:

@@ -6,13 +6,13 @@
 //!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
 //!   TMOP --docker-terminal=<container>[;<command>]
 //!                         open a terminal session in a container on the Docker page
-//!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
+//!   TMOP --docker-tab=<tab>    open the Docker page on engine (local)|containers|stacks|images|volumes|networks (test-only)
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
-//!   TMOP /s | /p <hwnd> | /c   screensaver conventions (build with `--features screensaver`)
+//!   TMOP /s | /p <hwnd> | /c   screensaver conventions (Windows, built with `--features screensaver`; a no-op elsewhere)
 //!   TMOP --engine-relay        run the Docker engine named-pipe relay (single instance, Windows only)
 //!   TMOP --engine-relay-stop   ask the running relay to stop, then exit (Windows only)
 //!   TMOP --volume-caches=query:<drive>[:<ids>]   helper: print the Windows Disk Cleanup handlers of <drive> (C or C:; only <ids> when given) as JSON lines (Windows only)
@@ -30,16 +30,25 @@ fn dump() {
     std::thread::sleep(std::time::Duration::from_secs(1));
     let (s, procs) = c.collect();
     println!("CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz);
-    println!(
-        "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
-        s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
-    );
-    println!("Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total - s.memory.available, s.memory.total);
+    if cfg!(windows) {
+        println!(
+            "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
+            s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
+        );
+    } else {
+        let diag: String = s.cpu.diag.iter().map(|(k, v)| format!("  {k} {v}")).collect();
+        println!("Clock    base {:?} MHz  max {:?}  boost {:?}  live {}{diag}", s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.boost_mhz, s.cpu.clock_live);
+    }
+    println!("Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total.saturating_sub(s.memory.available), s.memory.total);
+    if !cfg!(windows) {
+        println!("Swap     {:?} / {:?} bytes  commit {:?} / {:?}", s.memory.swap_used, s.memory.swap_total, s.memory.commit_used, s.memory.commit_limit);
+    }
     println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
     println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
     println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
     println!("Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources);
-    println!("Procs    {} processes, {} threads, {} handles", s.process_count, s.thread_count, s.handle_count);
+    let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
+    println!("Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count);
     let mut top: Vec<_> = procs.iter().collect();
     top.sort_by_key(|p| std::cmp::Reverse(p.private_working_set));
     for p in top.iter().take(5) {
@@ -50,7 +59,7 @@ fn dump() {
     }
 }
 
-#[cfg(feature = "screensaver")]
+#[cfg(all(windows, feature = "screensaver"))]
 mod scr {
     use eframe::egui;
     use tmop::metrics::{history_capacity, Sampler};
@@ -194,7 +203,7 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    #[cfg(feature = "screensaver")]
+    #[cfg(all(windows, feature = "screensaver"))]
     {
         let looks_like_scr = args.first().map(|a| a.starts_with('/') || a == "-s" || a == "-p" || a == "-c").unwrap_or(false)
             || std::env::current_exe().map(|p| p.extension().map(|e| e.eq_ignore_ascii_case("scr")).unwrap_or(false)).unwrap_or(false);
@@ -248,6 +257,7 @@ fn main() -> eframe::Result<()> {
         Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?])
     });
 
+    tmop::platform::raise_open_files_limit();
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
     if let Some(skin) = value(&["--popout-skin="]) {
@@ -255,11 +265,17 @@ fn main() -> eframe::Result<()> {
     }
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title(format!("{} \u{2013} {}", tmop::APP_NAME, tmop::APP_LONG_NAME))
+        .with_app_id(tmop::APP_ID)
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
         .with_maximized(args.iter().any(|a| a == "--maximized"));
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
+    }
+    // A Wayland compositor without server-side decorations (GNOME): TMOP's header becomes the
+    // title bar instead of winit's bare fallback frame.
+    if !popout_only && tmop::platform::desktop::own_title_bar() {
+        viewport = viewport.with_decorations(false);
     }
     if popout_only {
         let skins = tmop::skin::scan(&tmop::skin::default_skin_dirs());

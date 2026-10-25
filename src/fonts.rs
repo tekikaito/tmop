@@ -6,6 +6,9 @@
 //!   fonts are left out (see [`Face::listed`]);
 //! * a family's bytes are read with `GetFontData`; a face in a TrueType collection is read as
 //!   the whole collection (the `ttcf` table) plus its index in it (see [`collection_index`]);
+//! * off Windows the font folders are scanned instead ([`sfnt`]): Linux `~/.local/share/fonts`,
+//!   `/usr/share/fonts` and the folders fontconfig names, macOS the `Library/Fonts` folders;
+//!   families come from the OpenType `name` table, the regular upright face is the one loaded;
 //! * a saved family that isn't installed (or can't be parsed) falls back to the default; the
 //!   saved value is kept (see [`resolve`]).
 
@@ -150,8 +153,17 @@ pub fn collection_index(ttc: &[u8], name_table: &[u8]) -> Option<u32> {
     })
 }
 
-/// The installed families for the picker (see [`families`]). Slow (hundreds of fonts): call it
-/// off the UI thread. Empty off Windows.
+pub mod sfnt;
+
+/// The faces in this machine's font folders, scanned once (off Windows).
+#[cfg(not(windows))]
+fn scanned() -> &'static [sfnt::ScannedFace] {
+    static FACES: std::sync::OnceLock<Vec<sfnt::ScannedFace>> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| sfnt::scan(&sfnt::font_dirs()))
+}
+
+/// The installed families for the picker (see [`families`] and [`sfnt::families`]). Slow
+/// (hundreds of fonts): call it off the UI thread.
 pub fn installed() -> Vec<String> {
     #[cfg(windows)]
     {
@@ -159,7 +171,7 @@ pub fn installed() -> Vec<String> {
     }
     #[cfg(not(windows))]
     {
-        Vec::new()
+        sfnt::families(scanned())
     }
 }
 
@@ -172,8 +184,9 @@ pub fn load(family: &str) -> Option<FontFile> {
     }
     #[cfg(not(windows))]
     {
-        let _ = family;
-        None
+        let face = sfnt::pick(scanned(), family)?;
+        let bytes = std::fs::read(&face.path).ok()?;
+        Some(FontFile { family: family.trim().into(), bytes, index: face.face.index })
     }
 }
 
@@ -357,6 +370,20 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| ui.label(egui::RichText::new("TMOP 42%").font(theme::display(20.0))));
             });
         }
+    }
+
+    /// Against this machine's font folders: every listed family loads a face egui can use (the
+    /// first few are checked; a CI runner may have no fonts at all).
+    #[cfg(not(windows))]
+    #[test]
+    fn reads_scanned_fonts() {
+        let list = installed();
+        assert!(!list.iter().any(|f| is_built_in(f) || f.starts_with('.')));
+        for family in list.iter().take(5) {
+            let file = load(family).unwrap_or_else(|| panic!("{family} is listed but does not load"));
+            assert!(file.parses(), "{family}");
+        }
+        assert_eq!(load("No Such Font 4f1c"), None);
     }
 
     /// A two-face collection: each face is found by its `name` table; anything else isn't.

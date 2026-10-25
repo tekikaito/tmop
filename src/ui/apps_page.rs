@@ -17,9 +17,15 @@ impl App {
         let pal = fd.pal;
         let st = theme::status(&pal);
         self.pro.apps.poll();
+        let windows = cfg!(windows);
+        let source = match self.pro.apps.ok() {
+            _ if windows => "the Uninstall registry keys".to_string(),
+            Some(a) if !a.is_empty() => crate::pro::apps::sources(a),
+            _ => "the package databases".to_string(),
+        };
         let subtitle = match self.pro.apps.ok() {
-            Some(a) => format!("from the Uninstall registry keys \u{b7} {} entries", a.len()),
-            None => "from the Uninstall registry keys".to_string(),
+            Some(a) => format!("from {source} \u{b7} {} entries", a.len()),
+            None => format!("from {source}"),
         };
         let body = self.page_title(ui, &pal, "Installed Apps", &subtitle);
         let (tools, area) = page_layout(body, 360.0);
@@ -42,20 +48,21 @@ impl App {
         if let Some(b) = biggest {
             largest = largest.bar(b.size as f32 / total.max(1) as f32, st.warn);
         }
+        let breakdown = if windows { format!("{user} per-user, {x86} 32-bit") } else { source_counts(apps) };
         let tiles = [
-            StatTile::new("Apps", apps.len().to_string(), format!("{user} per-user, {x86} 32-bit")),
-            StatTile::new("Reported size", format_bytes(total as f64), "Sum of EstimatedSize"),
+            StatTile::new("Apps", apps.len().to_string(), breakdown),
+            StatTile::new("Reported size", format_bytes(total as f64), if windows { "Sum of EstimatedSize" } else { "Sum of the reported sizes" }),
             StatTile::new("Publishers", publishers.len().to_string(), "Distinct publishers"),
             largest,
         ];
         let tiles_h = stat_grid(&p, area, &pal, &tiles, 190.0);
         let table_rect = egui::Rect::from_min_max(egui::pos2(area.left(), area.top() + tiles_h + 14.0), area.max);
         if apps.is_empty() {
-            empty_state(&p, table_rect, &pal, self.pro.apps.error().unwrap_or("Reading the Uninstall registry keys\u{2026}"));
+            empty_state(&p, table_rect, &pal, self.pro.apps.error().unwrap_or(if windows { "Reading the Uninstall registry keys\u{2026}" } else { "Reading installed packages\u{2026}" }));
             return;
         }
         let st_table = &self.pro.apps_table;
-        let mut order: Vec<usize> = (0..apps.len()).filter(|i| table::matches(&st_table.filter, &[&apps[*i].name, &apps[*i].publisher, &apps[*i].version])).collect();
+        let mut order: Vec<usize> = (0..apps.len()).filter(|i| table::matches(&st_table.filter, &[&apps[*i].name, &apps[*i].publisher, &apps[*i].version, if windows { "" } else { apps[*i].scope }])).collect();
         st_table.sort(apps, &mut order, |a, b, col| match col {
             0 => cmp_str(&a.name, &b.name),
             1 => cmp_str(&a.publisher, &b.publisher),
@@ -65,7 +72,7 @@ impl App {
             5 => a.scope.cmp(b.scope),
             _ => cmp_str(&a.location, &b.location),
         });
-        let cols = [Col::text("Name", 320.0), Col::text("Publisher", 220.0), Col::text("Version", 130.0), Col::text("Installed", 100.0), Col::num("Size", 90.0), Col::text("Scope", 130.0), Col::text("Location", 300.0)];
+        let cols = [Col::text("Name", 320.0), Col::text("Publisher", 220.0), Col::text("Version", 130.0), Col::text("Installed", 100.0), Col::num("Size", 90.0), Col::text(if windows { "Scope" } else { "Source" }, 130.0), Col::text("Location", 300.0)];
         let key = |i: usize| format!("{}|{}", apps[i].key, apps[i].scope);
         let cell = |i: usize, col: usize| -> Cell {
             let a = &apps[i];
@@ -86,5 +93,30 @@ impl App {
                 let _ = kit::reveal(&loc);
             }
         }
+    }
+}
+
+/// "1890 dpkg, 12 Flatpak, 3 Snap": entries per source, the largest three.
+fn source_counts(apps: &[InstalledApp]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for a in apps {
+        match counts.iter_mut().find(|c| c.0 == a.scope) {
+            Some(c) => c.1 += 1,
+            None => counts.push((a.scope, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    counts.iter().take(3).map(|(s, n)| format!("{n} {s}")).collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_per_source() {
+        let app = |scope| InstalledApp { scope, ..Default::default() };
+        assert_eq!(source_counts(&[]), "");
+        assert_eq!(source_counts(&[app("Snap"), app("dpkg"), app("dpkg"), app("Flatpak"), app("Flatpak (user)")]), "2 dpkg, 1 Flatpak, 1 Flatpak (user)");
     }
 }

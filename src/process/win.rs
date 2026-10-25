@@ -1,7 +1,7 @@
 //! Windows process enumeration (NtQuerySystemInformation) and actions.
 
-use super::{Action, Priority, ProcessRow};
-use std::collections::{HashMap, HashSet};
+use super::{Priority, ProcessRow, Totals};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::Instant;
 use windows::core::{PCWSTR, PWSTR};
@@ -17,7 +17,6 @@ use windows::Win32::System::Threading::{
 };
 
 pub(crate) const SYSTEM_PROCESS_INFORMATION_CLASS: u32 = 5;
-pub(crate) const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS: u32 = 8;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 const MAX_BUFFER: usize = 64 * 1024 * 1024; // safety limit
 
@@ -97,11 +96,6 @@ fn all_threads_suspended(buf: &[u8], first_thread: usize, n: usize) -> bool {
     true
 }
 
-/// Raw SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION array (processor group 0).
-pub fn query_processor_performance(size: usize) -> Result<Vec<u8>, String> {
-    query_system_information(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS, size)
-}
-
 /// x64 SYSTEM_PROCESS_INFORMATION (fixed part, 256 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -171,20 +165,10 @@ pub struct Enumerator {
     descriptions: HashMap<String, Option<String>>,
 }
 
-/// Processes this app put into efficiency mode, keyed by (pid, creation time).
-static EFFICIENCY: std::sync::LazyLock<std::sync::Mutex<HashSet<(u32, i64)>>> =
-    std::sync::LazyLock::new(Default::default);
-
 impl Default for Enumerator {
     fn default() -> Self {
         Self::new()
     }
-}
-
-pub struct Totals {
-    pub processes: usize,
-    pub threads: usize,
-    pub handles: usize,
 }
 
 impl Enumerator {
@@ -202,7 +186,7 @@ impl Enumerator {
         let mut totals = Totals { processes: 0, threads: 0, handles: 0 };
         let mut offset = 0usize;
         let mut guard = 0;
-        let efficiency = EFFICIENCY.lock().map(|g| g.clone()).unwrap_or_default();
+        let efficiency = super::efficiency_marks();
         let windowed = windowed_pids();
         loop {
             guard += 1;
@@ -265,6 +249,7 @@ impl Enumerator {
                 handles: spi.handle_count,
                 session_id: spi.session_id,
                 base_priority: spi.base_priority,
+                priority: None,
                 private_working_set: spi.working_set_private_size.max(0) as u64,
                 working_set: spi.working_set_size as u64,
                 commit: spi.pagefile_usage as u64,
@@ -283,9 +268,7 @@ impl Enumerator {
         }
         // Forget identities of exited processes.
         self.identity_cache.retain(|k, _| next_prev.get(&k.0).map(|p| p.create_time == k.1).unwrap_or(false));
-        if let Ok(mut g) = EFFICIENCY.lock() {
-            g.retain(|k| next_prev.get(&k.0).map(|p| p.create_time == k.1).unwrap_or(false));
-        }
+        super::retain_efficiency(|k| next_prev.get(&k.0).map(|p| p.create_time == k.1).unwrap_or(false));
         self.prev = next_prev;
         self.last = Some(now);
         Ok((rows, totals))
@@ -403,7 +386,8 @@ fn token_user(h: &OwnedHandle) -> Option<String> {
     }
 }
 
-pub mod actions {
+/// The action primitives [`super::actions::run`] drives.
+pub(super) mod sys {
     use super::*;
 
     fn priority_class(p: Priority) -> PROCESS_CREATION_FLAGS {
@@ -433,32 +417,30 @@ pub mod actions {
         }
     }
 
-    pub fn terminate(pid: u32) -> Result<(), String> {
-        if pid == std::process::id() {
-            return Err("refusing to terminate TMOP itself".into());
-        }
+    // `_start` (the creation time) is not re-checked: unchanged Windows behaviour.
+    pub fn terminate(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_TERMINATE).map_err(err)?;
         unsafe { TerminateProcess(h.0, 1).map_err(err) }
     }
 
-    pub fn suspend(pid: u32) -> Result<(), String> {
+    pub fn suspend(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
         nt(unsafe { NtSuspendProcess(h.0) }, "NtSuspendProcess")
     }
 
-    pub fn resume(pid: u32) -> Result<(), String> {
+    pub fn resume(pid: u32, _start: i64) -> Result<(), String> {
         let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
         nt(unsafe { NtResumeProcess(h.0) }, "NtResumeProcess")
     }
 
-    pub fn set_priority(pid: u32, p: Priority) -> Result<(), String> {
+    pub fn set_priority(pid: u32, _start: i64, p: Priority) -> Result<(), String> {
         let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
         unsafe { SetPriorityClass(h.0, priority_class(p)).map_err(err) }
     }
 
     /// Efficiency mode = EcoQoS (execution-speed throttling) + idle priority, as
     /// Windows Task Manager does; turning it off hands throttling back to the system.
-    pub fn set_efficiency(pid: u32, on: bool) -> Result<(), String> {
+    pub fn set_efficiency(pid: u32, _start: i64, on: bool) -> Result<(), String> {
         let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -477,51 +459,11 @@ pub mod actions {
         }
     }
 
-    pub fn open_file_location(path: &str) -> Result<(), String> {
+    pub fn open_location(path: &str) -> Result<(), String> {
         std::process::Command::new("explorer.exe")
             .arg(format!("/select,{path}"))
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
-    }
-
-    /// Runs `action` against `row`; `rows` is needed for process trees.
-    pub fn run(action: Action, row: &ProcessRow, rows: &[ProcessRow]) -> Result<String, String> {
-        match action {
-            Action::EndTask => terminate(row.pid).map(|_| format!("Ended {} ({})", row.name, row.pid)),
-            Action::EndTree => {
-                let pids = super::super::tree_of(rows, row.pid);
-                let mut failed = Vec::new();
-                for p in &pids {
-                    if let Err(e) = terminate(*p) {
-                        failed.push(format!("{p}: {e}"));
-                    }
-                }
-                if failed.is_empty() {
-                    Ok(format!("Ended {} process(es)", pids.len()))
-                } else {
-                    Err(failed.join("; "))
-                }
-            }
-            Action::Suspend => suspend(row.pid).map(|_| format!("Suspended {}", row.name)),
-            Action::Resume => resume(row.pid).map(|_| format!("Resumed {}", row.name)),
-            Action::SetPriority(p) => set_priority(row.pid, p).map(|_| format!("{} priority: {}", row.name, p.label())),
-            Action::Efficiency(on) => {
-                set_efficiency(row.pid, on)?;
-                let key = (row.pid, row.create_time);
-                if let Ok(mut g) = EFFICIENCY.lock() {
-                    if on {
-                        g.insert(key);
-                    } else {
-                        g.remove(&key);
-                    }
-                }
-                Ok(format!("Efficiency mode {} for {}", if on { "on" } else { "off" }, row.name))
-            }
-            Action::OpenFileLocation => match &row.path {
-                Some(p) => open_file_location(p).map(|_| String::new()),
-                None => Err("Image path unavailable".into()),
-            },
-        }
     }
 }

@@ -8,14 +8,18 @@
 //! * [`recorder`]     flight recorder ring buffer and CSV recording
 //! * [`power`]        power scheme, processor policy, battery
 //! * [`connections`]  TCP/UDP endpoints with owning process
-//! * [`apps`]         installed applications (Uninstall registry keys)
-//! * [`drivers`]      kernel driver services and loaded kernel modules
+//! * [`apps`]         installed applications (Uninstall keys, package databases, .app bundles)
+//! * [`drivers`]      drivers and services (SCM; systemd and kernel modules; launchd and kexts)
+//! * [`plist`]        property-list reader (XML and binary) for the macOS backends
 //! * [`cleanup`]      Disk Space cleanup categories and their measuring
 //! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
 //! * [`mft`]          NTFS Master File Table reader (fast scan method when elevated)
 //! * [`walker`]       parallel directory walker (scan method otherwise)
+//! * [`mounts`]       mounted file systems off Windows (mountinfo, getfsstat)
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
+//! * [`inuse`]        which processes hold a file open (Restart Manager, /proc, libproc)
 //! * [`inventory`]    system info, services, startup apps
+//! * [`sysfmt`]       pure parsers for os-release, `.desktop` files and XML property lists
 
 pub mod apps;
 pub mod bench;
@@ -25,10 +29,15 @@ pub mod diskdelete;
 pub mod diskspace;
 pub mod drivers;
 pub mod icons;
+pub mod inuse;
 pub mod inventory;
 pub mod mft;
+pub mod mounts;
+pub mod plist;
 pub mod power;
 pub mod recorder;
+pub mod sysfmt;
+pub mod trash;
 #[cfg(windows)]
 pub(crate) mod restartmgr;
 pub mod volcache;
@@ -124,35 +133,15 @@ impl<T: Send + 'static> Loader<T> {
     }
 }
 
-/// `%LOCALAPPDATA%\TMOP`
-pub fn data_dir() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join(crate::APP_DIR)
-}
-
-/// Local wall-clock time as (year, month, day, hour, minute, second).
-pub fn local_time() -> (u16, u16, u16, u16, u16, u16) {
-    #[cfg(windows)]
-    {
-        // SAFETY: GetLocalTime only writes the returned struct.
-        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-        (t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
-    }
-    #[cfg(not(windows))]
-    {
-        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        (1970, 1, 1, ((s / 3600) % 24) as u16, ((s / 60) % 60) as u16, (s % 60) as u16)
-    }
-}
-
 /// `YYYYMMDD-HHMMSS` in local time, for file names.
 pub fn file_stamp() -> String {
-    let (y, mo, d, h, mi, s) = local_time();
+    let (y, mo, d, h, mi, s) = crate::platform::local_time();
     format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
 /// `YYYY-MM-DD HH:MM:SS` in local time.
 pub fn display_stamp() -> String {
-    let (y, mo, d, h, mi, s) = local_time();
+    let (y, mo, d, h, mi, s) = crate::platform::local_time();
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 

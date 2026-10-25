@@ -6,8 +6,10 @@ use super::theme::{self, Palette};
 use super::widgets::{self, draw_icon, Button, ButtonKind, ButtonSize, Icon};
 use super::{kit, App};
 use crate::pro::diskdelete::{self, Assessed, ItemMeta, Mode, Report, Rules, Target, Verdict};
+use crate::pro::trash;
 use crate::pro::diskspace::Tree;
 use crate::pro::Loader;
+use crate::platform::{file_manager, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::HashSet;
@@ -80,7 +82,8 @@ pub struct PendingDelete {
     pub targets: Vec<Target>,
     pub mode: Mode,
     pub ack: bool,
-    /// False when the volume has no Recycle Bin (known once assessed).
+    /// False when some items of a Recycle have no Recycle Bin / Trash on their volume (known once
+    /// assessed): those are skipped with the reason, never deleted permanently instead.
     pub has_bin: bool,
     /// Every drive has a Recycle Bin size limit on record (otherwise large items may be deleted for good).
     pub bin_capped: bool,
@@ -109,6 +112,9 @@ pub struct JobOut {
 
 #[derive(Default)]
 pub struct DiskDeleteUi {
+    /// Deleting is offered (`Caps::delete_safe`, set by `App::new`). Off, Disk Space only
+    /// analyzes and every delete entry says why ([`delete_off_reason`]).
+    pub delete_safe: bool,
     pub elevated: Option<bool>,
     pub relaunch: Loader<()>,
     pub rules: Loader<Arc<Rules>>,
@@ -134,13 +140,19 @@ pub struct MenuOut {
 
 // ---------------------------------------------------------------- pure helpers
 
-/// (first line, destination line, permanent) of the confirm dialog.
+/// Why Disk Space deletes and Clean up are unavailable while `Caps::delete_safe` is off.
+pub fn delete_off_reason() -> String {
+    format!("Deleting is not available on {} yet: the safety checks that protect system and personal folders are still being built.", os_name())
+}
+
+/// (first line, destination line, permanent) of the confirm dialog. `has_bin` false: some items
+/// of a Recycle have no bin and are skipped; a Recycle never turns into a permanent delete.
 pub fn summary_text(n: usize, size: u64, mode: Mode, has_bin: bool, capped: bool) -> (String, String, bool) {
     let first = format!("{n} item{} \u{2022} {}", if n == 1 { "" } else { "s" }, format_bytes(size as f64));
     match (mode, has_bin) {
-        (Mode::Recycle, true) if !capped => (first, "Items go to the Recycle Bin, but large items may be deleted permanently by Windows.".into(), true),
-        (Mode::Recycle, true) => (first, "Items go to the Recycle Bin and can be restored.".into(), false),
-        (Mode::Recycle, false) => (first, "This volume has no Recycle Bin: items are deleted permanently.".into(), true),
+        (Mode::Recycle, true) if !capped => (first, format!("Items go to the {}, but large items may be deleted permanently by {}.", trash_word(), os_name()), true),
+        (Mode::Recycle, true) => (first, format!("Items go to the {} and can be restored.", trash_word()), false),
+        (Mode::Recycle, false) => (first, format!("Items with no {} on their volume are skipped and left where they are; nothing is deleted permanently.", trash_word()), false),
         (Mode::Permanent, _) => (first, "Items are deleted permanently. This cannot be undone.".into(), true),
     }
 }
@@ -179,11 +191,12 @@ pub fn file_target(t: &Tree, idx: usize) -> Option<Target> {
     Some(Target { path: t.file_path(f), size: f.size, is_dir: false, node: None, file: Some(idx) })
 }
 
-/// Context menu of one item. Delete entries are greyed with the reason when the rules are
-/// loaded and block the item; otherwise the dialog does the full check.
-pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, out: &mut MenuOut) {
-    out.want_rules = true;
-    if ui.button("Show in Explorer").clicked() {
+/// Context menu of one item. Delete entries are greyed with the reason when deleting is off
+/// (`delete_safe` false) or the rules are loaded and block the item; otherwise the dialog does
+/// the full check.
+pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_safe: bool, out: &mut MenuOut) {
+    out.want_rules = delete_safe;
+    if ui.button(format!("Show in {}", file_manager())).clicked() {
         let _ = kit::reveal(&t.path);
         ui.close_menu();
     }
@@ -192,11 +205,17 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, out: &mut
         ui.close_menu();
     }
     ui.separator();
-    let blocked = rules.and_then(|r| match diskdelete::classify(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
-        Verdict::Blocked(why) => Some(why),
-        _ => None,
-    });
-    for (label, mode) in [("Move to Recycle Bin", Mode::Recycle), ("Delete permanently\u{2026}", Mode::Permanent)] {
+    let blocked = if !delete_safe {
+        Some(delete_off_reason())
+    } else {
+        rules.and_then(|r| match diskdelete::classify(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
+            Verdict::Blocked(why) => Some(why),
+            _ => None,
+        })
+    };
+    // No file-system I/O here (the menu is drawn every frame): whether the item's volume has a
+    // bin is asked by the dialog's background check, which skips it with the reason.
+    for (label, mode) in [(format!("Move to {}", trash_word()), Mode::Recycle), ("Delete permanently\u{2026}".to_string(), Mode::Permanent)] {
         let r = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
         let r = match &blocked {
             Some(why) => r.on_disabled_hover_text(why),
@@ -285,7 +304,7 @@ impl DiskDeleteUi {
 
     /// Opens the confirm dialog for `targets`.
     pub fn request(&mut self, targets: Vec<Target>, mode: Mode, epoch: u64, rows: &[ProcessRow]) {
-        if targets.is_empty() || self.pending.is_some() || self.job.is_loading() {
+        if !self.delete_safe || targets.is_empty() || self.pending.is_some() || self.job.is_loading() {
             return;
         }
         self.next_id += 1;
@@ -306,7 +325,7 @@ impl DiskDeleteUi {
         }
         resp.context_menu(|ui| {
             if let Some(t) = mk(i) {
-                item_menu(ui, &t, rules, out);
+                item_menu(ui, &t, rules, self.delete_safe, out);
             }
         });
     }
@@ -325,7 +344,11 @@ impl DiskDeleteUi {
                 kit::floating_bar(ui, bar.translate(vec2(0.0, 12.0)), "disk-selection", |ui| {
                     ui.label(RichText::new(format!("{} selected \u{2022} {}", picked.len(), format_bytes(total as f64))).font(theme::semibold(13.0)).color(pal.text));
                     ui.add_space(8.0);
-                    if Button::new("Move to Recycle Bin").size(ButtonSize::Medium).show(ui, pal).clicked() {
+                    if !self.delete_safe {
+                        ui.add(egui::Label::new(RichText::new(format!("Deleting is not available on {} yet", os_name())).font(theme::ui(12.0)).color(pal.text_faint))).on_hover_text(delete_off_reason());
+                        return;
+                    }
+                    if Button::new(&format!("Move to {}", trash_word())).size(ButtonSize::Medium).show(ui, pal).clicked() {
                         mode = Some(Mode::Recycle);
                     }
                     if Button::danger("Delete permanently").size(ButtonSize::Medium).show(ui, pal).clicked() {
@@ -333,7 +356,7 @@ impl DiskDeleteUi {
                     }
                 });
             }
-            if mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
+            if self.delete_safe && mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
                 let (del, shift) = ui.input(|i| (i.key_pressed(egui::Key::Delete), i.modifiers.shift));
                 if del {
                     mode = Some(if shift { Mode::Permanent } else { Mode::Recycle });
@@ -349,7 +372,8 @@ impl DiskDeleteUi {
 // ---------------------------------------------------------------- App glue
 
 impl App {
-    /// Amber banner at the top of Disk Space while TMOP is not elevated.
+    /// Amber banner at the top of Disk Space while TMOP is not elevated (Windows: the relaunch
+    /// needs `Caps::elevate_relaunch`).
     pub fn disk_admin_panel(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
         let st = theme::status(pal);
         let p = ui.painter().clone();
@@ -400,22 +424,12 @@ impl App {
                 d.rules.start(move || Ok(Arc::new(diskdelete::build_rules(procs))));
             } else if p.assessed.is_none() && !d.assess.is_loading() && !d.rules.is_loading() {
                 if let Some(rules) = d.rules.ok().cloned() {
-                    let (targets, id) = (p.targets.clone(), p.id);
+                    let (targets, id, mode) = (p.targets.clone(), p.id, p.mode);
                     d.assess.start(move || {
-                        let mut roots: Vec<std::path::Component> = Vec::new();
-                        let mut has_bin = true;
-                        let mut bin_capped = true;
-                        for t in &targets {
-                            let root = t.path.components().next();
-                            if let Some(r) = root {
-                                if !roots.contains(&r) {
-                                    roots.push(r);
-                                    has_bin &= diskdelete::has_recycle_bin(&t.path);
-                                    bin_capped &= diskdelete::recycle_limit_known(&t.path);
-                                }
-                            }
-                        }
-                        Ok(AssessOut { id, items: diskdelete::assess(targets, &rules), has_bin, bin_capped })
+                        let mut items = diskdelete::assess(targets, &rules);
+                        // A Recycle skips what has no bin (with the reason); it never deletes it permanently.
+                        let (no_bin, bin_capped) = if mode == Mode::Recycle { diskdelete::block_untrashable(&mut items, &mut trash::Volumes::default()) } else { (0, true) };
+                        Ok(AssessOut { id, items, has_bin: no_bin == 0, bin_capped })
                     });
                 }
             }
@@ -449,7 +463,7 @@ impl App {
         d.freed += rep.freed;
         d.sel.clear();
         match out.clean {
-            Some(done) => self.pro.clean.after_clean(&rep, done),
+            Some(done) => self.pro.clean.after_clean(&rep, done, self.caps.volcache),
             None => self.pro.clean.started = false, // Cleanup measures again
         }
         self.status = format!("{} freed", format_bytes(rep.freed as f64));
@@ -478,9 +492,18 @@ impl App {
         let mut answer = None;
         let n = all.len();
         let items = format!("{n} item{}", if n == 1 { "" } else { "s" });
-        let title = if permanent { format!("Delete **{items}** permanently?") } else { format!("Move **{items}** to the Recycle Bin?") };
-        let icon = if permanent { (Icon::Octagon, st.danger) } else { (Icon::Disk, st.info) };
-        let goes_to = if permanent { "Deleted for good" } else { "Recycle Bin" };
+        // Some items have no bin: they are skipped, and the user may choose a permanent delete instead.
+        let no_bin = assessed.is_some() && p.mode == Mode::Recycle && !p.has_bin;
+        let mut go_permanent = false;
+        let title = if permanent {
+            format!("Delete **{items}** permanently?")
+        } else if no_bin && n == 0 {
+            format!("Can't move these items to the {}", trash_word())
+        } else {
+            format!("Move **{items}** to the {}?", trash_word())
+        };
+        let icon = if permanent { (Icon::Octagon, st.danger) } else if no_bin { (Icon::Alert, st.warn) } else { (Icon::Disk, st.info) };
+        let goes_to = if permanent { "Deleted for good" } else { trash_word() };
         let warn_count = if assessed.is_none() { "Checking\u{2026}".to_string() } else if warns.is_empty() { "None".to_string() } else { warns.len().to_string() };
         kit::dialog(ctx, "disk-delete", |ui| {
             kit::dialog_header(ui, pal, Some(icon), &title, &dest);
@@ -508,9 +531,28 @@ impl App {
                 ui.checkbox(&mut ack, "I know what I'm doing");
                 ui.add_space(4.0);
             }
-            answer = confirm_row(ui, pal, "Cancel", if permanent { "Delete permanently" } else { "Move to Recycle Bin" }, if permanent { ButtonKind::DangerFill } else { ButtonKind::Primary }, ok_to_go);
+            if no_bin {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Items without a {} can only be deleted for good.", trash_word())).font(theme::ui(12.0)).color(pal.text_dim));
+                    // It turns the whole selection into a permanent delete (shown again to confirm).
+                    go_permanent = Button::danger("Delete all permanently instead\u{2026}").size(ButtonSize::Small).show(ui, pal).clicked();
+                });
+                ui.add_space(4.0);
+            }
+            answer = confirm_row(ui, pal, "Cancel", if permanent { "Delete permanently".to_string() } else { format!("Move to {}", trash_word()) }.as_str(), if permanent { ButtonKind::DangerFill } else { ButtonKind::Primary }, ok_to_go);
         });
         p.ack = ack;
+        if go_permanent {
+            // A new request in permanent mode, checked again and confirmed again in the dialog.
+            p.mode = Mode::Permanent;
+            p.ack = false;
+            p.assessed = None;
+            self.pro.del.next_id += 1;
+            if let Some(p) = self.pro.del.pending.as_mut() {
+                p.id = self.pro.del.next_id;
+            }
+            return;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             answer = Some(false);
         }
@@ -523,13 +565,18 @@ impl App {
 
     /// Hands the deletable targets to the worker thread.
     fn disk_start_job(&mut self) {
+        if !self.pro.del.delete_safe {
+            self.pro.del.pending = None;
+            return;
+        }
         if self.pro.del.job.is_loading() {
             self.status = "A delete is already running; try again when it has finished".into();
             return;
         }
         let Some(p) = self.pro.del.pending.take() else { return };
         let Some(items) = p.assessed else { return };
-        let mode = if p.mode == Mode::Recycle && !p.has_bin { Mode::Permanent } else { p.mode };
+        // Never downgraded: items without a bin were blocked by the assessment and are left alone.
+        let mode = p.mode;
         let targets: Vec<Target> = items.into_iter().filter(|a| !matches!(a.verdict, Verdict::Blocked(_))).map(|a| a.target).collect();
         let epoch = p.epoch;
         let rules = self.pro.del.rules.ok().cloned();
@@ -620,9 +667,10 @@ mod tests {
     #[test]
     fn dialog_summary_text() {
         let (a, b, perm) = summary_text(1, 1024, Mode::Recycle, true, true);
-        assert!(a.starts_with("1 item ") && b.contains("Recycle Bin") && !perm);
+        assert!(a.starts_with("1 item ") && b.contains(trash_word()) && !perm);
+        // No bin for some items: they are skipped, never deleted permanently instead.
         let (a, b, perm) = summary_text(3, 0, Mode::Recycle, false, true);
-        assert!(a.starts_with("3 items") && b.contains("no Recycle Bin") && perm);
+        assert!(a.starts_with("3 items") && b.contains(&format!("no {}", trash_word())) && b.contains("nothing is deleted permanently") && !perm);
         let (_, b, perm) = summary_text(2, 0, Mode::Permanent, true, true);
         assert!(b.contains("cannot be undone") && perm);
         let (_, b, _) = summary_text(1, 0, Mode::Recycle, true, false);

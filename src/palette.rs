@@ -1,4 +1,5 @@
-//! `.tmoptheme` palettes: the built-in ones and the custom ones in `%LOCALAPPDATA%\TMOP\themes`.
+//! `.tmoptheme` palettes: the built-in ones and the custom ones in `themes` under
+//! [`crate::platform::config_dir`] (Windows: `%LOCALAPPDATA%\TMOP\themes`).
 //!
 //! Format notes:
 //! * a palette is a JSON file `<id>.tmoptheme`:
@@ -148,9 +149,9 @@ pub fn built_in() -> Vec<PaletteFile> {
     .collect()
 }
 
-/// `%LOCALAPPDATA%\TMOP\themes`
+/// `themes` in [`crate::platform::config_dir`] (Windows: `%LOCALAPPDATA%\TMOP\themes`).
 pub fn default_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join(crate::APP_DIR).join("themes")
+    crate::platform::config_dir().join("themes")
 }
 
 fn is_palette_file(path: &Path) -> bool {

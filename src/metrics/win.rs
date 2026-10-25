@@ -1,6 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
+use super::common::{cpu_brand, fold_gpu, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
 use std::collections::HashMap;
@@ -31,34 +32,51 @@ fn ft(f: FILETIME) -> u64 {
     ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
 }
 
-/// Processor brand string from CPUID leaves 0x8000_0002..4 (cached).
-pub fn cpu_brand() -> String {
-    static BRAND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BRAND
-        .get_or_init(|| {
-            #[cfg(target_arch = "x86_64")]
-            {
-                // CPUID is available on every x86-64 processor.
-                let max = std::arch::x86_64::__cpuid(0x8000_0000).eax;
-                if max < 0x8000_0004 {
-                    return String::new();
-                }
-                let mut bytes = Vec::with_capacity(48);
-                for leaf in 0x8000_0002u32..=0x8000_0004 {
-                    let r = std::arch::x86_64::__cpuid(leaf);
-                    for reg in [r.eax, r.ebx, r.ecx, r.edx] {
-                        bytes.extend_from_slice(&reg.to_le_bytes());
-                    }
-                }
-                let s = String::from_utf8_lossy(&bytes);
-                s.trim_end_matches('\0').split_whitespace().collect::<Vec<_>>().join(" ")
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                String::new()
-            }
-        })
-        .clone()
+pub const SOURCES: Sources = Sources {
+    disk: "Active time (all physical disks)",
+    network: "Throughput (GetIfTable2, all adapters)",
+    gpu: "Busiest engine of the busiest adapter (PDH GPU Engine counters)",
+    no_gpu: "No GPU Engine performance counters were reported.",
+    thermal: "ACPI thermal zones (firmware sensors, not the CPU package)",
+    thermal_hint: HWINFO_HINT,
+    sensor: "ACPI zone",
+    handles: "Handles",
+};
+
+/// Windows reports clocks, and the thermal card always has ACPI zones or the HWiNFO hint.
+pub fn probe() -> Probe {
+    Probe { clocks: true, thermal: true }
+}
+
+const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS: u32 = 8;
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQuerySystemInformation(class: u32, info: *mut std::ffi::c_void, len: u32, ret_len: *mut u32) -> windows::Win32::Foundation::NTSTATUS;
+}
+
+/// Raw SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION array (processor group 0). `size` should be
+/// entry size x processors: the call fails unless the length is a whole number of entries, so
+/// on a mismatch it retries with the length the system names (else twice the size).
+pub fn query_processor_performance(size: usize) -> Result<Vec<u8>, String> {
+    let mut size = size.max(1);
+    for _ in 0..4 {
+        let mut buf = vec![0u8; size];
+        let mut needed = 0u32;
+        // SAFETY: buf is writable for size bytes; needed receives the length.
+        let st = unsafe { NtQuerySystemInformation(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS, buf.as_mut_ptr().cast(), size as u32, &mut needed) };
+        if st.0 == STATUS_INFO_LENGTH_MISMATCH {
+            size = if needed as usize > size { needed as usize } else { size * 2 };
+            continue;
+        }
+        if st.0 < 0 {
+            return Err(format!("NtQuerySystemInformation({SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION_CLASS}) failed: 0x{:08X}", st.0 as u32));
+        }
+        buf.truncate(needed.max(1) as usize);
+        return Ok(buf);
+    }
+    Err("SystemProcessorPerformanceInformation kept growing".into())
 }
 
 /// A PDH query with named counters.
@@ -164,9 +182,9 @@ struct ProcessorPowerInformation {
 pub struct Collector {
     seq: u64,
     logical: usize,
-    prev_sys: Option<(u64, u64, u64)>,
+    prev_sys: Option<Ticks>,
     prev_cores: Vec<ProcessorPerformance>,
-    prev_net: Option<(Instant, u64, u64)>,
+    prev_net: Option<NetMark>,
     pdh: Option<Pdh>,
     procs: Enumerator,
     /// Registry `~MHz` of CPU 0 (read once).
@@ -231,6 +249,9 @@ impl Collector {
         self.memory(&mut snap);
         self.network(&mut snap);
         let mut gpu_by_pid = HashMap::new();
+        // Windows always shows the disk readouts (0% when PDH or its PhysicalDisk counter is
+        // missing), as before 0.6; the PDH error below says why they stay at zero.
+        snap.disk.available = true;
         if let Some(pdh) = &self.pdh {
             pdh.collect();
             // Disk
@@ -238,7 +259,7 @@ impl Collector {
                 snap.disk.active_pct = (100.0 - idle).clamp(0.0, 100.0) as f32;
             }
             snap.disk.read_bps = pdh.value("disk_read").unwrap_or(0.0);
-            let pagefile_size = snap.memory.commit_limit.saturating_sub(snap.memory.total);
+            let pagefile_size = snap.memory.swap_total.unwrap_or(0);
             snap.memory.swap_used = pdh.value("pagefile").map(|pct| (pct / 100.0 * pagefile_size as f64) as u64);
             snap.disk.write_bps = pdh.value("disk_write").unwrap_or(0.0);
             // GPU
@@ -281,7 +302,7 @@ impl Collector {
             Ok((rows, t)) => {
                 snap.process_count = t.processes;
                 snap.thread_count = t.threads;
-                snap.handle_count = t.handles;
+                snap.handle_count = Some(t.handles);
                 rows
             }
             Err(e) => {
@@ -296,52 +317,24 @@ impl Collector {
         snap.cpu.logical_count = self.logical;
         let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
         if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_ok() {
-            let cur = (ft(idle), ft(kernel), ft(user));
-            if let Some(p) = self.prev_sys {
-                let di = cur.0.saturating_sub(p.0) as f64;
-                let dk = cur.1.saturating_sub(p.1) as f64;
-                let du = cur.2.saturating_sub(p.2) as f64;
-                let total = dk + du;
-                if total > 0.0 {
-                    snap.cpu.total_pct = (((total - di) / total) * 100.0).clamp(0.0, 100.0) as f32;
-                    snap.cpu.kernel_pct = (((dk - di).max(0.0) / total) * 100.0).clamp(0.0, 100.0) as f32;
-                }
+            let cur = Ticks { idle: ft(idle), kernel: ft(kernel), user: ft(user) };
+            if let Some((busy, kern)) = self.prev_sys.and_then(|p| tick_delta_pct(p, cur)) {
+                snap.cpu.total_pct = busy;
+                snap.cpu.kernel_pct = kern;
             }
             self.prev_sys = Some(cur);
         }
         // Per logical processor (processor group 0 only).
         let entry = std::mem::size_of::<ProcessorPerformance>();
-        if let Ok(buf) = crate::process::query_processor_performance(entry * self.logical) {
+        if let Ok(buf) = query_processor_performance(entry * self.logical) {
             let n = buf.len() / entry;
             let cores: Vec<ProcessorPerformance> =
                 (0..n).map(|i| unsafe { std::ptr::read_unaligned(buf.as_ptr().add(i * entry).cast()) }).collect();
             if self.prev_cores.len() == cores.len() {
-                snap.cpu.per_core_kernel_pct = cores
-                    .iter()
-                    .zip(&self.prev_cores)
-                    .map(|(c, p)| {
-                        let total = (c.kernel - p.kernel + c.user - p.user) as f64;
-                        let busy_kernel = ((c.kernel - p.kernel) - (c.idle - p.idle)).max(0) as f64;
-                        if total > 0.0 {
-                            ((busy_kernel / total) * 100.0).clamp(0.0, 100.0) as f32
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                snap.cpu.per_core_pct = cores
-                    .iter()
-                    .zip(&self.prev_cores)
-                    .map(|(c, p)| {
-                        let total = (c.kernel - p.kernel + c.user - p.user) as f64;
-                        let idle = (c.idle - p.idle) as f64;
-                        if total > 0.0 {
-                            (((total - idle) / total) * 100.0).clamp(0.0, 100.0) as f32
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
+                let ticks = |c: &ProcessorPerformance| Ticks { idle: c.idle as u64, kernel: c.kernel as u64, user: c.user as u64 };
+                let shares: Vec<(f32, f32)> = cores.iter().zip(&self.prev_cores).map(|(c, p)| tick_delta_pct(ticks(p), ticks(c)).unwrap_or((0.0, 0.0))).collect();
+                snap.cpu.per_core_pct = shares.iter().map(|s| s.0).collect();
+                snap.cpu.per_core_kernel_pct = shares.iter().map(|s| s.1).collect();
             }
             self.prev_cores = cores;
         }
@@ -407,8 +400,10 @@ impl Collector {
             } else {
                 0.0
             };
-            snap.memory.commit_limit = m.ullTotalPageFile;
-            snap.memory.commit_used = m.ullTotalPageFile.saturating_sub(m.ullAvailPageFile);
+            snap.memory.commit_limit = Some(m.ullTotalPageFile);
+            snap.memory.commit_used = Some(m.ullTotalPageFile.saturating_sub(m.ullAvailPageFile));
+            // The commit limit is physical memory plus the page files.
+            snap.memory.swap_total = Some(m.ullTotalPageFile.saturating_sub(m.ullTotalPhys));
             let mut pi = windows::Win32::System::ProcessStatus::PERFORMANCE_INFORMATION {
                 cb: std::mem::size_of::<windows::Win32::System::ProcessStatus::PERFORMANCE_INFORMATION>() as u32,
                 ..Default::default()
@@ -423,6 +418,8 @@ impl Collector {
     }
 
     fn network(&mut self, snap: &mut Snapshot) {
+        // Like the disk: Windows always shows the network readouts (0 B/s if GetIfTable2 fails).
+        snap.network.available = true;
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         if unsafe { GetIfTable2(&mut table) }.is_err() || table.is_null() {
             snap.errors.push("GetIfTable2 failed".into());
@@ -444,16 +441,7 @@ impl Collector {
             FreeMibTable(table as *const _);
         }
         let now = Instant::now();
-        if let Some((t, prx, ptx)) = self.prev_net {
-            let dt = now.duration_since(t).as_secs_f64().max(1e-3);
-            snap.network.rx_bps = rx.saturating_sub(prx) as f64 / dt;
-            snap.network.tx_bps = tx.saturating_sub(ptx) as f64 / dt;
-        }
-        snap.network.link_bps = link as f64;
-        if link > 0 {
-            let bits = (snap.network.rx_bps + snap.network.tx_bps) * 8.0;
-            snap.network.utilization_pct = (bits / link as f64 * 100.0).clamp(0.0, 100.0) as f32;
-        }
+        snap.network = net_delta(self.prev_net, now, rx, tx, link);
         self.prev_net = Some((now, rx, tx));
     }
 }
@@ -484,33 +472,9 @@ pub(crate) fn parse_gpu_instance(name: &str) -> Option<(u32, String, String)> {
     Some((pid, luid, engtype))
 }
 
-/// System GPU % = busiest (adapter, engine type) summed over processes;
-/// per-process GPU % = that process's busiest engine type.
+/// The PDH `GPU Engine(*)` instances folded by [`fold_gpu`] (unparsable names are skipped).
 pub(crate) fn aggregate_gpu(items: &[(String, f64)]) -> (GpuSample, HashMap<u32, f32>) {
-    let mut by_engine: HashMap<(String, String), f64> = HashMap::new();
-    let mut by_pid: HashMap<u32, HashMap<String, f64>> = HashMap::new();
-    for (name, v) in items {
-        let Some((pid, luid, eng)) = parse_gpu_instance(name) else { continue };
-        *by_engine.entry((luid, eng.clone())).or_default() += v;
-        *by_pid.entry(pid).or_default().entry(eng).or_default() += v;
-    }
-    let mut gpu = GpuSample { available: true, ..Default::default() };
-    let busiest_luid = by_engine.iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|((l, _), _)| l.clone());
-    if let Some(luid) = busiest_luid {
-        let mut engines: Vec<(String, f32)> = by_engine
-            .iter()
-            .filter(|((l, _), _)| *l == luid)
-            .map(|((_, e), v)| (e.clone(), v.min(100.0) as f32))
-            .collect();
-        engines.sort_by(|a, b| a.0.cmp(&b.0));
-        gpu.utilization_pct = engines.iter().map(|e| e.1).fold(0.0, f32::max);
-        gpu.engines = engines;
-    }
-    let per_pid = by_pid
-        .into_iter()
-        .map(|(pid, e)| (pid, e.values().copied().fold(0.0, f64::max).min(100.0) as f32))
-        .collect();
-    (gpu, per_pid)
+    fold_gpu(items.iter().filter_map(|(name, v)| parse_gpu_instance(name).map(|(pid, luid, eng)| (pid, luid, eng, *v))))
 }
 
 #[cfg(test)]
@@ -550,5 +514,20 @@ mod tests {
         assert_eq!(per_core_perf_mhz(&items, 2000, 2), Some(vec![2600, 2200]));
         assert_eq!(per_core_perf_mhz(&items, 2000, 3), None);
         assert_eq!(per_core_perf_mhz(&items, 2000, 0), None);
+    }
+
+    /// The call wants a whole number of entries (a 4 KiB buffer fails with a length mismatch);
+    /// one entry per logical processor reaches the per-core graphs.
+    #[test]
+    fn processor_performance_per_core() {
+        let e = std::mem::size_of::<ProcessorPerformance>();
+        let mut c = Collector::new();
+        let buf = query_processor_performance(e * c.logical).unwrap();
+        assert_eq!(buf.len(), e * c.logical);
+        let _ = c.collect();
+        std::thread::sleep(Duration::from_millis(200));
+        let (s, _) = c.collect();
+        assert_eq!(s.cpu.per_core_pct.len(), s.cpu.logical_count);
+        assert_eq!(s.cpu.per_core_kernel_pct.len(), s.cpu.logical_count);
     }
 }

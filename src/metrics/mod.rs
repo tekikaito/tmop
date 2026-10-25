@@ -1,6 +1,16 @@
 //! System metrics: snapshot types, history buffers and the background sampler.
 //!
-//! Sources:
+//! One backend per target, chosen at compile time like [`crate::platform`]: `win.rs`,
+//! `linux.rs`, `macos.rs` and `stub.rs` for anything else. Each provides the same items:
+//! * `Collector` with `new()` and `collect(&mut self) -> (Snapshot, Vec<ProcessRow>)`;
+//! * `probe() -> Probe`, what this machine reports (narrows [`crate::platform::Caps`] once);
+//! * `SOURCES: Sources`, how the UI names the backend's sources and gaps.
+//!
+//! Shared, pure helpers (CPUID brand, tick deltas, network rates, GPU fold, CPU temperature
+//! labels) live in [`common`]. A value an OS cannot provide is `None` / `available: false` in the
+//! snapshot, never 0, and the UI hides it.
+//!
+//! Windows sources:
 //! * CPU total/kernel: `GetSystemTimes`; per logical CPU: `NtQuerySystemInformation`
 //!   (`SystemProcessorPerformanceInformation`); clock: `CallNtPowerInformation(ProcessorInformation)`.
 //! * Memory: `GlobalMemoryStatusEx`.
@@ -10,9 +20,22 @@
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin).
 //! * Processes: `NtQuerySystemInformation(SystemProcessInformation)`.
 
+pub mod common;
 pub mod hwinfo;
+pub mod procfs;
+#[cfg(target_os = "linux")]
+mod nvml;
+pub mod mac_parse;
+
+#[cfg_attr(windows, path = "win.rs")]
+#[cfg_attr(target_os = "linux", path = "linux.rs")]
+#[cfg_attr(target_os = "macos", path = "macos.rs")]
+#[cfg_attr(not(any(windows, target_os = "linux", target_os = "macos")), path = "stub.rs")]
+mod imp;
+
+pub use imp::{probe, Collector, SOURCES};
 #[cfg(windows)]
-mod win;
+pub use imp::query_processor_performance;
 
 use crate::process::ProcessRow;
 use std::collections::VecDeque;
@@ -27,24 +50,30 @@ pub struct CpuSample {
     pub per_core_pct: Vec<f32>,
     /// Kernel share of each logical processor (%).
     pub per_core_kernel_pct: Vec<f32>,
+    /// Average clock (live when `clock_live`, else the static base). None where the OS reports
+    /// no clocks (Apple Silicon).
     pub current_mhz: Option<u32>,
+    /// Highest clock a core may reach, as the OS reports it.
     pub max_mhz: Option<u32>,
-    /// Base clock: registry `~MHz`, cross-checked with PDH (see `clock::clock_base`).
+    /// Base clock (Windows: registry `~MHz`, cross-checked with PDH; see `clock::clock_base`).
     pub base_mhz: Option<u32>,
-    /// `MaxMhz` from the power API when it exceeds the base (the boost clock).
+    /// The boost clock: the maximum when it exceeds the base.
     pub boost_mhz: Option<u32>,
-    /// `MhzLimit` from the power API (max over cores).
+    /// Windows: `MhzLimit` from the power API (max over cores). None elsewhere.
     pub mhz_limit: Option<u32>,
-    /// Raw `\Processor Information(_Total)\% Processor Performance`.
+    /// Windows: raw `\Processor Information(_Total)\% Processor Performance`. None elsewhere.
     pub perf_pct: Option<f64>,
-    /// Raw `\Processor Information(_Total)\Processor Frequency`.
+    /// Windows: raw `\Processor Information(_Total)\Processor Frequency`. None elsewhere.
     pub pdh_freq_mhz: Option<u32>,
-    /// True when `current_mhz` came from a live PDH reading; false = static base clock.
+    /// Other backends' clock diagnostics for `--dump`, as (label, value).
+    pub diag: Vec<(&'static str, f64)>,
+    /// True when `current_mhz` came from a live reading; false = static base clock.
     pub clock_live: bool,
+    /// Logical processors; at least 1 in every published snapshot.
     pub logical_count: usize,
     /// Current clock of each logical processor (MHz), when available.
     pub per_core_mhz: Vec<u32>,
-    /// CPUID brand string ("AMD Ryzen 7 ..."), empty when unknown.
+    /// Brand string ("AMD Ryzen 7 ..."), empty when unknown.
     pub name: String,
 }
 
@@ -53,16 +82,22 @@ pub struct MemorySample {
     pub total: u64,
     pub available: u64,
     pub used_pct: f32,
-    pub commit_used: u64,
-    pub commit_limit: u64,
-    /// System file cache (`GetPerformanceInfo`).
+    /// Committed memory and its limit (Windows commit charge, Linux `Committed_AS` /
+    /// `CommitLimit`). None where the OS has no such figure (macOS).
+    pub commit_used: Option<u64>,
+    pub commit_limit: Option<u64>,
+    /// File cache.
     pub cached: u64,
-    /// Page file bytes in use (PDH `\\Paging File(_Total)\\% Usage`), when known.
+    /// Size of the page file (Windows) or swap, when known.
+    pub swap_total: Option<u64>,
+    /// Page file / swap bytes in use, when known.
     pub swap_used: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct DiskSample {
+    /// The disk counters were read; false = unsupported or failed (not idle).
+    pub available: bool,
     pub active_pct: f32,
     pub read_bps: f64,
     pub write_bps: f64,
@@ -70,9 +105,11 @@ pub struct DiskSample {
 
 #[derive(Clone, Debug, Default)]
 pub struct NetworkSample {
+    /// The interface counters were read; false = unsupported or failed (not idle).
+    pub available: bool,
     pub rx_bps: f64,
     pub tx_bps: f64,
-    /// Sum of link speeds of up hardware interfaces (bits/s).
+    /// Sum of link speeds of up hardware interfaces (bits/s); 0 when unknown.
     pub link_bps: f64,
     pub utilization_pct: f32,
 }
@@ -91,7 +128,7 @@ pub struct GpuSample {
 pub struct ThermalSample {
     /// (zone name, °C)
     pub zones: Vec<(String, f32)>,
-    /// CPU temperature from HWiNFO shared memory: (reading label, °C).
+    /// CPU temperature (HWiNFO shared memory on Windows, hwmon on Linux): (reading label, °C).
     pub cpu: Option<(String, f32)>,
     /// Which sources were checked, e.g. "ACPI: no zones · HWiNFO: not running".
     pub sources: String,
@@ -103,8 +140,39 @@ impl ThermalSample {
     }
 }
 
-/// Hint shown where no temperature source is available.
+/// Windows' hint where no temperature source is available (see [`Sources::thermal_hint`]).
 pub const HWINFO_HINT: &str = "Enable Shared Memory Support in HWiNFO (Settings \u{2192} Main) for CPU temperature";
+
+/// How the UI names a backend's sources and gaps; each backend exports one as `SOURCES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sources {
+    /// Disk card subtitle.
+    pub disk: &'static str,
+    /// Network card subtitle.
+    pub network: &'static str,
+    /// GPU card subtitle.
+    pub gpu: &'static str,
+    /// GPU card note when no GPU reading exists.
+    pub no_gpu: &'static str,
+    /// Thermal card subtitle while the snapshot names no sources.
+    pub thermal: &'static str,
+    /// What to do when no temperature is available (no trailing period).
+    pub thermal_hint: &'static str,
+    /// Short name of the sensor behind the hottest reading (popout).
+    pub sensor: &'static str,
+    /// What `Snapshot::handle_count` counts: "Handles" or "Open files".
+    pub handles: &'static str,
+}
+
+/// What this machine's metrics backend reports; [`crate::platform::Caps::get`] narrows its
+/// constant `clocks` and `thermal` flags with it once at start-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Probe {
+    /// Clock speeds (a base or a current clock).
+    pub clocks: bool,
+    /// A temperature source, or at least one worth a hint.
+    pub thermal: bool,
+}
 
 /// Pure CPU clock conversions.
 pub mod clock {
@@ -159,8 +227,22 @@ pub struct Snapshot {
     pub uptime: Duration,
     pub process_count: usize,
     pub thread_count: usize,
-    pub handle_count: usize,
+    /// Open handles (Windows) or open files; None when the OS has no system-wide count.
+    pub handle_count: Option<usize>,
     pub errors: Vec<String>,
+}
+
+impl Snapshot {
+    /// Whether disk figures should show. The placeholder before the first sample counts as
+    /// known, so readouts do not jump when it arrives.
+    pub fn disk_known(&self) -> bool {
+        self.seq == 0 || self.disk.available
+    }
+
+    /// Whether network figures should show; see [`Snapshot::disk_known`].
+    pub fn net_known(&self) -> bool {
+        self.seq == 0 || self.network.available
+    }
 }
 
 /// Ring buffer of recent values for graphs.
@@ -343,7 +425,9 @@ impl Sampler {
                         let due = (ms > 0 && last.elapsed() >= Duration::from_millis(ms)) || refresh_now.swap(false, Ordering::Relaxed);
                         if due {
                             last = Instant::now();
-                            let (snap, procs) = collector.collect();
+                            let (mut snap, procs) = collector.collect();
+                            // Invariant: CPU% normalisers divide by it.
+                            snap.cpu.logical_count = snap.cpu.logical_count.max(1);
                             if let Ok(mut g) = shared.lock() {
                                 // Copy-on-write: clones only if a frame still holds the old one.
                                 Arc::make_mut(&mut g.history).push(&snap);
@@ -372,28 +456,6 @@ impl Sampler {
 impl Drop for Sampler {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-#[cfg(windows)]
-pub use win::Collector;
-
-/// Non-Windows stub so the library (and its tests) still compile elsewhere.
-#[cfg(not(windows))]
-pub struct Collector;
-#[cfg(not(windows))]
-impl Default for Collector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-#[cfg(not(windows))]
-impl Collector {
-    pub fn new() -> Self {
-        Collector
-    }
-    pub fn collect(&mut self) -> (Snapshot, Vec<ProcessRow>) {
-        (Snapshot { errors: vec!["metrics are only implemented on Windows".into()], ..Default::default() }, Vec::new())
     }
 }
 
@@ -453,16 +515,54 @@ mod tests {
         assert_eq!(ThermalSample::default().max_c(), None);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn placeholder_counts_as_known_until_a_sample_says_otherwise() {
+        let mut s = Snapshot::default();
+        assert!(s.disk_known() && s.net_known());
+        s.seq = 1;
+        assert!(!s.disk_known() && !s.net_known());
+        s.disk.available = true;
+        s.network.available = true;
+        assert!(s.disk_known() && s.net_known());
+    }
+
+    /// Every backend, stubs included: collects without panicking, keeps the logical-count
+    /// invariant and names its sources.
+    #[test]
+    fn backend_contract() {
+        let mut c = Collector::new();
+        let (snap, _) = c.collect();
+        assert!(snap.cpu.logical_count >= 1);
+        assert_eq!(snap.seq, 1);
+        let s = SOURCES;
+        assert!([s.disk, s.network, s.gpu, s.no_gpu, s.thermal, s.thermal_hint, s.sensor, s.handles].iter().all(|t| !t.is_empty()));
+        assert!(!s.thermal_hint.ends_with('.'));
+        let _ = probe();
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
     fn collector_smoke() {
         let mut c = Collector::new();
         let _ = c.collect();
-        std::thread::sleep(Duration::from_millis(300));
+        // Keep one core busy so the CPU reading cannot be a legitimate 0.
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(300) {
+            std::hint::black_box(t.elapsed());
+        }
         let (snap, procs) = c.collect();
-        assert!(snap.memory.total > 0);
+        assert!(snap.memory.total > 0 && snap.memory.available > 0);
         assert!(snap.cpu.logical_count > 0);
-        assert!((0.0..=100.0).contains(&snap.cpu.total_pct));
+        assert!(snap.cpu.total_pct > 0.0 && snap.cpu.total_pct <= 100.0, "cpu {}", snap.cpu.total_pct);
+        assert!(snap.uptime > Duration::ZERO);
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(snap.cpu.per_core_pct.len(), snap.cpu.logical_count);
+        }
+        if cfg!(target_os = "linux") {
+            assert!(snap.process_count > 0 && snap.thread_count >= snap.process_count);
+            assert!(snap.disk.available && snap.network.available, "{:?}", snap.errors);
+            assert!(snap.errors.is_empty(), "{:?}", snap.errors);
+        }
         assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
     }
 }

@@ -1,20 +1,42 @@
 //! Deleting from Disk Space: the safety classifier (one pure function used by the manual delete
-//! and by Cleanup), the inventory it consults, and the delete worker (Recycle Bin through the
-//! shell, or permanent through `std::fs`). Nothing here touches the disk unless `run` is called.
+//! and by Cleanup), the inventory it consults, and the delete worker (Recycle Bin / Trash through
+//! [`super::trash`], or permanent through `std::fs`). Nothing here touches the disk unless `run`
+//! is called.
 //!
 //! Rules are deterministic: [`classify`] returns `Blocked` (never deletable), `Warn` (deletable
 //! after an explicit acknowledgement) or `Allowed`. System locations are resolved at runtime
-//! (Windows may live on `D:`), never hard-coded.
+//! (Windows may live on `D:`), never hard-coded. Off Windows the rules are those of [`unix`]
+//! (protected-paths table, mounts, home folder); the Windows rules stay pure and judge WSL's
+//! Windows drives there too.
 
 use super::diskspace::Tree;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod anchored;
+pub mod unix;
+
+pub use unix::UnixPaths;
+
 // ---------------------------------------------------------------- path helpers (pure)
 
-/// Lower-case, `\`-separated, no `\\?\` / `\\?\UNC\` prefix, no trailing `\` except on a drive root.
+/// The comparison form of `p` for this OS: [`norm_path_win`] on Windows, [`unix::norm_unix`]
+/// elsewhere (`/`-separated, case kept on Linux).
 pub fn norm_path(p: &Path) -> String {
-    let mut s = p.to_string_lossy().replace('/', "\\");
+    #[cfg(windows)]
+    {
+        norm_path_win(&p.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        unix::norm_unix(unix::FLAVOR, &p.to_string_lossy())
+    }
+}
+
+/// Lower-case, `\`-separated, no `\\?\` / `\\?\UNC\` prefix, no trailing `\` except on a drive root.
+pub fn norm_path_win(p: &str) -> String {
+    let mut s = p.replace('/', "\\");
     let low = s.to_ascii_lowercase();
     if low.starts_with(r"\\?\unc\") {
         s = format!(r"\\{}", &s[8..]);
@@ -134,6 +156,8 @@ pub struct SystemPaths {
     pub temp: String,
     /// `%LOCALAPPDATA%` of the current user (Cleanup).
     pub local_appdata: String,
+    /// What the Linux and macOS rules need (empty on Windows).
+    pub unix: UnixPaths,
 }
 
 #[cfg(windows)]
@@ -211,7 +235,14 @@ pub fn system_paths() -> SystemPaths {
     sp
 }
 
-#[cfg(not(windows))]
+/// Linux and macOS: the user folders (`known`) and [`UnixPaths`]; the Windows fields stay empty.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn system_paths() -> SystemPaths {
+    let (known, unix) = unix::build();
+    SystemPaths { known, unix, ..Default::default() }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn system_paths() -> SystemPaths {
     SystemPaths::default()
 }
@@ -299,16 +330,46 @@ fn blocked(r: &str) -> Verdict {
     Verdict::Blocked(r.to_string())
 }
 
-/// Safety verdict for deleting `path`. Pure apart from 8.3 expansion of paths containing `~`.
+/// Safety verdict for deleting `path`. Pure apart from 8.3 expansion of paths containing `~`
+/// (Windows); off Windows the lexical [`unix`] rules (owner and links unknown).
 pub fn classify(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
-    let n = norm_path_long(path);
-    classify_norm(&n, meta, rules)
+    #[cfg(windows)]
+    {
+        classify_norm(&norm_path_long(path), meta, rules)
+    }
+    #[cfg(not(windows))]
+    {
+        unix::classify_lexical(unix::FLAVOR, &path.to_string_lossy(), meta, rules)
+    }
+}
+
+/// The Windows rules for a Windows path, on any host (tests; WSL's drives).
+pub fn classify_win(path: &str, meta: ItemMeta, rules: &Rules) -> Verdict {
+    classify_norm(&norm_path_win(path), meta, rules)
 }
 
 /// Strictest of the lexical verdict and the verdict for the path as the file system resolves it:
 /// junctions and symlinks in the parent chain are followed, so `C:\Documents and Settings\x`
 /// cannot hide `C:\Users\x`. The item itself is not followed (a link is deleted, not its target).
+/// Off Windows see [`unix::classify_fs`] (also owner, a link item's target and bind mounts).
 pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
+    #[cfg(unix)]
+    {
+        // The checks look the path up by its string: a name that is not UTF-8 would not be found
+        // (its owner, links and contents unknown), so it is not judged at all.
+        match path.to_str() {
+            Some(s) => unix::classify_fs(unix::FLAVOR, s, meta, rules, &unix::RealFs),
+            None => Verdict::Blocked("the path is not valid UTF-8; rename it first".into()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        classify_resolved_win(path, meta, rules)
+    }
+}
+
+#[cfg(not(unix))]
+fn classify_resolved_win(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict {
     let lexical = classify(path, meta, rules);
     if matches!(lexical, Verdict::Blocked(_)) {
         return lexical;
@@ -333,6 +394,7 @@ pub fn classify_resolved(path: &Path, meta: ItemMeta, rules: &Rules) -> Verdict 
 }
 
 /// `path` with its parent chain resolved (links followed), verbatim prefix removed.
+#[cfg(not(unix))]
 fn resolved_path(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
@@ -615,7 +677,8 @@ pub fn assess(targets: Vec<Target>, rules: &Rules) -> Vec<Assessed> {
         let files: Vec<PathBuf> = idx.iter().map(|&i| out[i].target.path.clone()).collect();
         for (p, holders) in in_use(&files) {
             if let Some(a) = out.iter_mut().find(|a| a.target.path == p) {
-                let reason = format!("in use by {}", holders.join(", "));
+                // Unix deletes an open file at once, but its space comes back only when it is closed.
+                let reason = if cfg!(windows) { format!("in use by {}", holders.join(", ")) } else { format!("in use by {}; the space is freed once it closes the file", holders.join(", ")) };
                 a.verdict = match std::mem::replace(&mut a.verdict, Verdict::Allowed) {
                     Verdict::Warn(mut r) => {
                         r.push(reason);
@@ -629,14 +692,9 @@ pub fn assess(targets: Vec<Target>, rules: &Rules) -> Vec<Assessed> {
     out
 }
 
-#[cfg(windows)]
+/// Processes holding each file open (see [`super::inuse`]).
 pub(crate) fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    super::restartmgr::in_use(files)
-}
-
-#[cfg(not(windows))]
-pub(crate) fn in_use(_: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    HashMap::new()
+    super::inuse::in_use(files)
 }
 
 /// Targets for the deleted record in a scan tree: folders by node, files by index.
@@ -685,21 +743,46 @@ pub fn log_line(stamp: &str, mode: Mode, size: u64, result: &Result<(), String>,
 }
 
 pub fn default_log() -> PathBuf {
-    super::data_dir().join("deletions.log")
+    crate::platform::data_dir().join("deletions.log")
 }
 
 /// Runs on a worker thread. Callers should have removed Blocked targets; with `rules` every target
-/// is classified once more right before it is deleted and Blocked ones are skipped.
+/// is classified once more right before it is deleted and Blocked ones are skipped. Where
+/// [`Caps::delete_safe`](crate::platform::Caps) is off nothing is touched and every target is skipped.
 pub fn run(targets: Vec<Target>, mode: Mode, rules: Option<&Rules>) -> Report {
+    if !crate::platform::Caps::get().delete_safe {
+        return refuse_all(targets, mode);
+    }
+    // Off Windows no caller can skip the classifier, and the mounts are read again: something
+    // may have been mounted since the rules were built.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let fresh = {
+        let mut r = rules.cloned().unwrap_or_else(|| Rules { sys: system_paths(), inv: Inventory::default() });
+        unix::refresh_mounts(&mut r.sys.unix);
+        r
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let rules = Some(&fresh);
     run_with_log(targets, mode, Some(&default_log()), rules)
+}
+
+/// Every target skipped, nothing deleted or logged: deleting is not offered on this OS yet.
+fn refuse_all(targets: Vec<Target>, mode: Mode) -> Report {
+    let why = format!("deleting is not available on {} yet", crate::platform::os_name());
+    Report { skipped: targets.into_iter().map(|t| (t, why.clone())).collect(), mode, ..Default::default() }
 }
 
 /// Why `path` must never be deleted whatever the rules say (pure, no I/O).
 pub(crate) fn refuse_reason(path: &Path) -> Option<&'static str> {
-    (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
+    if cfg!(windows) {
+        (is_drive_root(&norm_path(path)) || path.file_name().is_none()).then_some("refusing to delete a drive root")
+    } else {
+        (!path.has_root() || path.file_name().is_none() || norm_path(path) == "/" || path.components().any(|c| matches!(c, std::path::Component::ParentDir)))
+            .then_some("refusing to delete the root, a relative path or a path with '..'")
+    }
 }
 
-pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
+fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules: Option<&Rules>) -> Report {
     let mut rep = Report { mode, ..Default::default() };
     let mut log_file = log.and_then(|p| {
         if let Some(d) = p.parent() {
@@ -708,21 +791,11 @@ pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules:
         std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
     });
     let stamp = super::display_stamp();
-    let recycler = (mode == Mode::Recycle).then(Recycler::new);
+    let trasher = (mode == Mode::Recycle).then(super::trash::Trasher::new);
     for t in targets {
-        let blocked_now = rules.and_then(|r| match classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
-            Verdict::Blocked(why) => Some(why),
-            _ => None,
-        });
-        let result = if let Some(why) = refuse_reason(&t.path) {
-            Err(why.to_string())
-        } else if let Some(why) = blocked_now {
-            Err(format!("blocked ({why})"))
-        } else {
-            match (&recycler, mode) {
-                (Some(r), Mode::Recycle) => r.delete(&t.path, t.size),
-                _ => delete_permanent(&t.path),
-            }
+        let result = match refuse_reason(&t.path) {
+            Some(why) => Err(why.to_string()),
+            None => act(&t, mode, rules, trasher.as_ref()),
         };
         if let Some(f) = log_file.as_mut() {
             use std::io::Write;
@@ -739,7 +812,50 @@ pub fn run_with_log(targets: Vec<Target>, mode: Mode, log: Option<&Path>, rules:
     rep
 }
 
-fn short_error(e: &std::io::Error) -> String {
+/// Classifies `t` once more and deletes or recycles it. A Recycle never falls back to a permanent
+/// delete: what cannot go to the bin stays.
+#[cfg(not(unix))]
+fn act(t: &Target, mode: Mode, rules: Option<&Rules>, trasher: Option<&super::trash::Trasher>) -> Result<(), String> {
+    if let Some(r) = rules {
+        if let Verdict::Blocked(why) = classify_resolved(&t.path, ItemMeta { is_dir: t.is_dir, size: t.size, is_reparse: false }, r) {
+            return Err(format!("blocked ({why})"));
+        }
+    }
+    match (trasher, mode) {
+        (Some(r), Mode::Recycle) => r.trash(&t.path, t.size),
+        (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
+        (_, Mode::Permanent) => delete_permanent(&t.path),
+    }
+}
+
+/// Off Windows the parent folder is resolved and opened first ([`anchored::Anchor`]); the item is
+/// then judged as given and as resolved, with its type as it is now, and deleted or moved
+/// relative to that open folder, so a link swapped into the path afterwards changes nothing.
+/// A Recycle never falls back to a permanent delete.
+#[cfg(unix)]
+fn act(t: &Target, mode: Mode, rules: Option<&Rules>, trasher: Option<&super::trash::Trasher>) -> Result<(), String> {
+    let a = anchored::Anchor::new(&t.path)?;
+    let is_dir = a.kind()? == Some(true);
+    if is_dir != t.is_dir {
+        return Err(format!("it is now a {} (changed since the scan); scan again", if is_dir { "folder" } else { "file or link" }));
+    }
+    if let Some(r) = rules {
+        let meta = ItemMeta { is_dir, size: t.size, is_reparse: false };
+        let real = a.path();
+        for p in std::iter::once(t.path.as_path()).chain((real != t.path).then_some(real.as_path())) {
+            if let Verdict::Blocked(why) = classify_resolved(p, meta, r) {
+                return Err(format!("blocked ({why})"));
+            }
+        }
+    }
+    match (trasher, mode) {
+        (Some(r), Mode::Recycle) => r.trash_anchored(&a),
+        (None, Mode::Recycle) => Err(format!("could not reach the {}", crate::platform::trash_word())),
+        (_, Mode::Permanent) => anchored::remove(&a),
+    }
+}
+
+pub(crate) fn short_error(e: &std::io::Error) -> String {
     match (e.kind(), e.raw_os_error()) {
         (std::io::ErrorKind::NotFound, _) => "no longer exists".into(),
         (_, Some(32)) | (_, Some(33)) => "in use by another process".into(),
@@ -772,8 +888,16 @@ pub fn folds_to_sibling(path: &Path) -> bool {
     path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().ends_with(['.', ' '])))
 }
 
+/// Permanent delete off Windows, through [`anchored`]: a link is removed itself, never its target;
+/// no link swapped into the path is followed and no mount point is entered.
+#[cfg(unix)]
+pub fn delete_permanent(path: &Path) -> Result<(), String> {
+    anchored::remove(&anchored::Anchor::new(path)?)
+}
+
 /// Permanent delete. A link (symlink or junction) is removed itself, never its target. Works on the
 /// verbatim form of `path` (see [`verbatim`]) on Windows.
+#[cfg(not(unix))]
 pub fn delete_permanent(path: &Path) -> Result<(), String> {
     // Win32 does not normalise verbatim paths (`..` would not resolve) and cannot make a relative path
     // verbatim (a trailing dot or space would still fold to a sibling).
@@ -800,7 +924,7 @@ pub fn delete_permanent(path: &Path) -> Result<(), String> {
     };
     #[cfg(not(windows))]
     let (link, dir) = (md.file_type().is_symlink(), md.is_dir());
-    let r = if dir && link {
+    let r =if dir && link {
         std::fs::remove_dir(path)
     } else if dir {
         std::fs::remove_dir_all(path)
@@ -810,186 +934,29 @@ pub fn delete_permanent(path: &Path) -> Result<(), String> {
     r.map_err(|e| short_error(&e))
 }
 
-/// Moves items to the Recycle Bin through `IFileOperation`, one operation per item so a failure
-/// is attributed to its item. COM lives on the worker thread that created this.
-struct Recycler {
-    #[cfg(windows)]
-    com: bool,
-}
-
+/// The Windows Recycle Bin check, now in [`super::trash`].
 #[cfg(windows)]
-impl Recycler {
-    fn new() -> Self {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        // SAFETY: balanced with CoUninitialize in Drop when this succeeded.
-        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-        Recycler { com }
-    }
+pub use super::trash::has_recycle_bin;
 
-    fn delete(&self, path: &Path, size: u64) -> Result<(), String> {
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
-        use windows::Win32::UI::Shell::{
-            FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FILEOPERATION_FLAGS, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-        };
-        // The exact name is looked up in verbatim form (no trailing dot / space folding to a sibling). The shell
-        // rejects verbatim (backslash-backslash-question) paths with E_INVALIDARG, so it gets the plain path, and only for names Win32 cannot fold.
-        let vpath = verbatim(path);
-        if folds_to_sibling(path) {
-            return Err("the name ends with a dot or space; use permanent delete".into());
-        }
-        if std::fs::symlink_metadata(&vpath).is_err() {
-            return Err("no longer exists".into());
-        }
-        // The shell destroys instead of recycling when the bin is switched off or too small for the
-        // item, without saying so: refuse rather than delete permanently behind the dialog's back.
-        if let Some(limits) = bin_limits(path) {
-            if limits.nuke {
-                return Err("the Recycle Bin is turned off for this drive; use permanent delete".into());
+/// Blocks the items of a [`Mode::Recycle`] delete whose volume has no Recycle Bin / Trash, with
+/// the reason: they are left where they are, never deleted permanently instead. Returns how
+/// many it blocked and whether every bin involved keeps everything ([`super::trash::limit_known`]).
+pub fn block_untrashable(items: &mut [Assessed], vols: &mut super::trash::Volumes) -> (usize, bool) {
+    let (mut blocked, mut capped) = (0, true);
+    for a in items.iter_mut().filter(|a| !matches!(a.verdict, Verdict::Blocked(_))) {
+        let (why, keeps) = vols.check(&a.target.path);
+        match why {
+            Some(why) => {
+                a.verdict = Verdict::Blocked(format!("can't go to the {}: {why}", crate::platform::trash_word()));
+                blocked += 1;
             }
-            if limits.max_bytes.is_some_and(|m| size > m) {
-                return Err("too large for the Recycle Bin; use permanent delete".into());
-            }
-        }
-        let w = super::winutil::wide(&path.to_string_lossy());
-        // SAFETY: COM calls on the thread that initialised COM; `w` is NUL-terminated and outlives them.
-        let r: windows::core::Result<bool> = unsafe {
-            (|| {
-                let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
-                op.SetOperationFlags(FILEOPERATION_FLAGS(FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0 | FOF_ALLOWUNDO.0 | FOFX_RECYCLEONDELETE.0))?;
-                let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None)?;
-                op.DeleteItem(&item, None)?;
-                op.PerformOperations()?;
-                Ok(op.GetAnyOperationsAborted()?.as_bool())
-            })()
-        };
-        match r {
-            Ok(false) if std::fs::symlink_metadata(&vpath).is_err() => Ok(()),
-            Ok(_) => Err("could not be moved to the Recycle Bin".into()),
-            Err(e) if e.code().0 as u32 == 0x8007_0005 => Err("access denied".into()),
-            Err(e) => Err(e.message()),
+            None => capped &= keeps,
         }
     }
-}
-
-#[cfg(windows)]
-impl Drop for Recycler {
-    fn drop(&mut self) {
-        if self.com {
-            // SAFETY: matches the successful CoInitializeEx in `new`.
-            unsafe { windows::Win32::System::Com::CoUninitialize() };
-        }
-    }
-}
-
-#[cfg(not(windows))]
-impl Recycler {
-    fn new() -> Self {
-        Recycler {}
-    }
-    fn delete(&self, _: &Path, _: u64) -> Result<(), String> {
-        Err("the Recycle Bin is only available on Windows".into())
-    }
-}
-
-/// How the Recycle Bin of a volume is configured.
-#[cfg(windows)]
-struct BinLimits {
-    /// "Don't move files to the Recycle Bin" (volume setting or policy): the shell deletes for good.
-    nuke: bool,
-    /// MaxCapacity in bytes; bigger items are deleted for good by the shell.
-    max_bytes: Option<u64>,
-}
-
-#[cfg(windows)]
-fn bin_limits(path: &Path) -> Option<BinLimits> {
-    use super::winutil::{Key, View};
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    let n = norm_path(path);
-    let b = n.as_bytes();
-    if b.len() < 3 || b[1] != b':' {
-        return None;
-    }
-    let mut limits = BinLimits { nuke: false, max_bytes: None };
-    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        if let Some(k) = Key::open(root, r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", View::Default) {
-            limits.nuke |= k.u32("NoRecycleFiles").unwrap_or(0) != 0;
-        }
-    }
-    let mount = super::winutil::wide(&format!("{}:\\", b[0] as char));
-    let mut vol = [0u16; 64];
-    // SAFETY: NUL-terminated mount point, output buffer sized as passed.
-    if unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(mount.as_ptr()), &mut vol) }.is_ok() {
-        // `\?\Volume{guid}\` -> `{guid}`
-        let name = super::winutil::from_wide(&vol);
-        if let (Some(a), Some(z)) = (name.find('{'), name.find('}')) {
-            let sub = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{}", &name[a..=z]);
-            if let Some(k) = Key::open(HKEY_CURRENT_USER, &sub, View::Default) {
-                limits.nuke |= k.u32("NukeOnDelete").unwrap_or(0) != 0;
-                limits.max_bytes = k.u32("MaxCapacity").filter(|&m| m > 0).map(|m| m as u64 * 1024 * 1024);
-            }
-        }
-    }
-    Some(limits)
-}
-
-/// False for network, optical and RAM volumes, when the volume has no Recycle Bin (removable FAT
-/// sticks) or the bin is switched off: deletion there is permanent and the dialog says so.
-#[cfg(windows)]
-pub fn has_recycle_bin(path: &Path) -> bool {
-    if bin_limits(path).is_some_and(|l| l.nuke) {
-        return false;
-    }
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
-    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let n = norm_path(path);
-    let b = n.as_bytes();
-    if b.len() < 3 || b[1] != b':' || b[2] != b'\\' {
-        return false;
-    }
-    let root = super::winutil::wide(&format!("{}:\\", b[0] as char));
-    // SAFETY: NUL-terminated root; the info struct has cbSize set.
-    unsafe {
-        if !matches!(GetDriveTypeW(PCWSTR(root.as_ptr())), 2 | 3) {
-            return false;
-        }
-        let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
-        SHQueryRecycleBinW(PCWSTR(root.as_ptr()), &mut info).is_ok()
-    }
-}
-
-#[cfg(not(windows))]
-pub fn has_recycle_bin(_: &Path) -> bool {
-    false
-}
-
-/// The volume of `path` has a Recycle Bin size limit on record (`BitBucket\Volume\{guid}\MaxCapacity`).
-/// Without one the shell may delete large items for good, so the dialogs must not promise a restore.
-#[cfg(windows)]
-pub fn recycle_limit_known(path: &Path) -> bool {
-    bin_limits(path).is_some_and(|l| l.max_bytes.is_some())
-}
-
-#[cfg(not(windows))]
-pub fn recycle_limit_known(_: &Path) -> bool {
-    false
+    (blocked, capped)
 }
 
 // ---------------------------------------------------------------- elevation
-
-pub fn is_elevated() -> bool {
-    #[cfg(windows)]
-    {
-        super::winutil::is_elevated()
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
 
 /// Command line for the elevated copy. Windows argv parsing reads `\"` as a literal quote, so a
 /// backslash run at the end of the quoted root (`C:\`) is doubled.

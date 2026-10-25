@@ -63,7 +63,9 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
             text: if s.gpu.available { format!("{:.0}%", s.gpu.utilization_pct) } else { "N/A".into() },
             aux: if s.gpu.dedicated_used > 0 { format!("{:.1} GB", s.gpu.dedicated_used as f64 / 1073741824.0) } else { String::new() },
         },
+        Quadrant::Disk if !s.disk_known() => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
         Quadrant::Disk => Reading { quadrant: q, fraction: pct(sm.disk), text: format!("{:.0}%", s.disk.active_pct), aux: format!("R {}  W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) },
+        Quadrant::Network if !s.net_known() => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
         Quadrant::Network => Reading {
             quadrant: q,
             fraction: pct(sm.net),
@@ -75,7 +77,7 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
                 quadrant: q,
                 fraction: Some((sm.thermal / 100.0).clamp(0.0, 1.0)),
                 text: if fahrenheit { format!("{:.0}\u{b0}F", c * 9.0 / 5.0 + 32.0) } else { format!("{c:.0}\u{b0}C") },
-                aux: "ACPI zone".into(),
+                aux: crate::metrics::SOURCES.sensor.into(),
             },
             None => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: "no sensor".into() },
         },
