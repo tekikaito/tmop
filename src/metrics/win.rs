@@ -249,10 +249,12 @@ impl Collector {
         self.memory(&mut snap);
         self.network(&mut snap);
         let mut gpu_by_pid = HashMap::new();
+        // Windows always shows the disk readouts (0% when PDH or its PhysicalDisk counter is
+        // missing), as before 0.6; the PDH error below says why they stay at zero.
+        snap.disk.available = true;
         if let Some(pdh) = &self.pdh {
             pdh.collect();
             // Disk
-            snap.disk.available = pdh.counters.contains_key("disk_idle");
             if let Some(idle) = pdh.value("disk_idle") {
                 snap.disk.active_pct = (100.0 - idle).clamp(0.0, 100.0) as f32;
             }
