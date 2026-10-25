@@ -22,6 +22,9 @@
 
 pub mod common;
 pub mod hwinfo;
+pub mod procfs;
+#[cfg(target_os = "linux")]
+mod nvml;
 
 #[cfg_attr(windows, path = "win.rs")]
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
@@ -536,16 +539,30 @@ mod tests {
         let _ = probe();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn collector_smoke() {
         let mut c = Collector::new();
         let _ = c.collect();
-        std::thread::sleep(Duration::from_millis(300));
+        // Keep one core busy so the CPU reading cannot be a legitimate 0.
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(300) {
+            std::hint::black_box(t.elapsed());
+        }
         let (snap, procs) = c.collect();
-        assert!(snap.memory.total > 0);
+        assert!(snap.memory.total > 0 && snap.memory.available > 0);
         assert!(snap.cpu.logical_count > 0);
-        assert!((0.0..=100.0).contains(&snap.cpu.total_pct));
-        assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
+        assert!(snap.cpu.total_pct > 0.0 && snap.cpu.total_pct <= 100.0, "cpu {}", snap.cpu.total_pct);
+        assert!(snap.uptime > Duration::ZERO);
+        if cfg!(target_os = "linux") {
+            assert_eq!(snap.cpu.per_core_pct.len(), snap.cpu.logical_count);
+            assert!(snap.process_count > 0 && snap.thread_count >= snap.process_count);
+            assert!(snap.disk.available && snap.network.available, "{:?}", snap.errors);
+            assert!(snap.errors.is_empty(), "{:?}", snap.errors);
+        }
+        // The Linux enumerator lands with work package PR-L.
+        if cfg!(windows) {
+            assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
+        }
     }
 }
