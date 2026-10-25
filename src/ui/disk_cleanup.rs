@@ -18,7 +18,7 @@ use crate::platform::{elevation_word, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -240,16 +240,32 @@ fn to_target(i: &cleanup::CleanItem) -> Target {
     Target { path: i.path.clone(), size: i.size, is_dir: i.is_dir, node: i.node, file: i.file }
 }
 
-/// Drops the targets that another selected folder already holds (a cache folder that also has a
+/// Drops the items that another kept folder already holds (a cache folder that also has a
 /// `node_modules` inside, the same folder in two categories), so nothing is counted or deleted
-/// twice. The first category to list a path keeps it.
-pub fn drop_nested(cats: &mut Vec<CatSel>) {
-    let dirs: HashSet<PathBuf> = cats.iter().flat_map(|c| &c.targets).filter(|t| t.is_dir).map(|t| t.path.clone()).collect();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    for c in cats.iter_mut() {
-        c.targets.retain(|t| t.path.ancestors().skip(1).all(|a| !dirs.contains(a)) && seen.insert(t.path.clone()));
+/// twice. `key` gives (path, is_dir, live): only a live (not Blocked) folder holds what is under
+/// it, so an item inside a skipped folder stays in its own category, and a live copy of a path
+/// wins over a Blocked one. Otherwise the first list to name a path keeps it.
+pub fn keep_outermost<T>(lists: &mut [Vec<T>], key: impl Fn(&T) -> (&Path, bool, bool)) {
+    let (mut live, mut live_dirs): (HashSet<PathBuf>, HashSet<PathBuf>) = Default::default();
+    for (p, dir, _) in lists.iter().flatten().map(&key).filter(|k| k.2) {
+        live.insert(p.to_path_buf());
+        if dir {
+            live_dirs.insert(p.to_path_buf());
+        }
     }
-    cats.retain(|c| !c.targets.is_empty());
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for l in lists.iter_mut() {
+        l.retain(|x| {
+            let (p, _, alive) = key(x);
+            p.ancestors().skip(1).all(|a| !live_dirs.contains(a)) && (alive || !live.contains(p)) && seen.insert(p.to_path_buf())
+        });
+    }
+}
+
+/// [`keep_outermost`] over the assessed items of a clean up, run after the safety check so a
+/// folder that is skipped does not take the items inside it along.
+pub fn drop_nested(items: &mut [Vec<Assessed>]) {
+    keep_outermost(items, |a| (a.target.path.as_path(), a.target.is_dir, !matches!(a.verdict, Verdict::Blocked(_))));
 }
 
 // ---------------------------------------------------------------- page
@@ -554,7 +570,6 @@ impl App {
                 cats.push(CatSel { cat, targets });
             }
         }
-        drop_nested(&mut cats);
         let vols = c.selected_vols(elevated);
         if cats.is_empty() && bin_bytes.is_none() && vols.is_empty() {
             return;
@@ -597,6 +612,8 @@ impl App {
                         for (list, _) in items.iter_mut().zip(&counts).filter(|(_, (_, m))| *m == Mode::Recycle) {
                             bin_capped &= diskdelete::block_untrashable(list, &mut vols).1;
                         }
+                        // Only now: a folder that is skipped must not take the items inside it along.
+                        drop_nested(&mut items);
                         Ok(CleanAssess { id, items, bin_capped })
                     });
                 }
@@ -617,10 +634,17 @@ impl App {
         let live = |v: &Verdict| !matches!(v, Verdict::Blocked(_));
         // (category, items, bytes) of what will actually be deleted.
         let mut lines: Vec<(Category, u64, u64)> = Vec::new();
+        // Until the check is done: an estimate that counts every folder once.
+        let est = a.is_none().then(|| {
+            let mut t: Vec<Vec<Target>> = p.cats.iter().map(|cs| cs.targets.clone()).collect();
+            keep_outermost(&mut t, |x| (x.path.as_path(), x.is_dir, true));
+            t
+        });
         for (i, cs) in p.cats.iter().enumerate() {
-            let (n, bytes) = match a {
-                Some(a) => a.items[i].iter().filter(|x| live(&x.verdict)).fold((0u64, 0u64), |(n, b), x| (n + 1, b + x.target.size)),
-                None => (cs.targets.len() as u64, cs.targets.iter().map(|t| t.size).sum()),
+            let (n, bytes) = match (a, &est) {
+                (Some(a), _) => a.items[i].iter().filter(|x| live(&x.verdict)).fold((0u64, 0u64), |(n, b), x| (n + 1, b + x.target.size)),
+                (None, Some(e)) => (e[i].len() as u64, e[i].iter().map(|t| t.size).sum()),
+                (None, None) => (cs.targets.len() as u64, cs.targets.iter().map(|t| t.size).sum()),
             };
             if n > 0 {
                 lines.push((cs.cat, n, bytes));
@@ -865,22 +889,29 @@ mod tests {
     fn nested_targets_are_cleaned_once() {
         let base = std::env::temp_dir().join("tmop-nested");
         let t = |rel: &str, is_dir: bool| Target { path: rel.split('/').fold(base.clone(), |p, c| p.join(c)), size: 1, is_dir, node: None, file: None };
-        let mut cats = vec![
-            CatSel { cat: Category::UserCache, targets: vec![t("cache/tool", true), t("cache/lock", false)] },
-            CatSel { cat: Category::DevArtifacts, targets: vec![t("cache/tool/node_modules", true), t("proj/node_modules", true), t("cache/lock", false)] },
-            CatSel { cat: Category::OldDownloads, targets: vec![t("cache/tool/x.zip", false)] },
+        let ok = |rel: &str, is_dir: bool| Assessed { target: t(rel, is_dir), verdict: Verdict::Allowed };
+        let no = |rel: &str, is_dir: bool| Assessed { target: t(rel, is_dir), verdict: Verdict::Blocked("in use".into()) };
+        let paths = |items: &[Vec<Assessed>]| items.iter().map(|l| l.iter().map(|x| x.target.path.clone()).collect()).collect::<Vec<Vec<PathBuf>>>();
+        let p = |rel: &str| t(rel, true).path;
+        let mut items = vec![
+            vec![ok("cache/tool", true), ok("cache/lock", false)],
+            vec![ok("cache/tool/node_modules", true), ok("proj/node_modules", true), ok("cache/lock", false)],
+            vec![ok("cache/tool/x.zip", false)],
         ];
-        drop_nested(&mut cats);
-        let left: Vec<(Category, Vec<PathBuf>)> = cats.iter().map(|c| (c.cat, c.targets.iter().map(|x| x.path.clone()).collect())).collect();
-        assert_eq!(
-            left,
-            vec![(Category::UserCache, vec![t("cache/tool", true).path, t("cache/lock", false).path]), (Category::DevArtifacts, vec![t("proj/node_modules", true).path])],
-            "a category left empty is dropped"
-        );
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![p("cache/tool"), p("cache/lock")], vec![p("proj/node_modules")], vec![]], "lists stay aligned with their categories");
+        // A skipped folder holds nothing: what is inside it is cleaned by its own category.
+        let mut items = vec![vec![no("tmp/x", true)], vec![ok("tmp/x/node_modules", true)]];
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![p("tmp/x")], vec![p("tmp/x/node_modules")]]);
+        // A live copy of a path wins over a Blocked one (no bin for the Trash category, say).
+        let mut items = vec![vec![no("tmp/x", true)], vec![ok("tmp/x/node_modules", true), ok("tmp/x", true)]];
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![], vec![p("tmp/x")]]);
         // A file named like a folder prefix is not a parent.
-        let mut cats = vec![CatSel { cat: Category::UserCache, targets: vec![t("a", false), t("ab", true), t("a/b", false)] }];
-        drop_nested(&mut cats);
-        assert_eq!(cats[0].targets.len(), 3);
+        let mut items = vec![vec![ok("a", false), ok("ab", true), ok("a/b", false)]];
+        drop_nested(&mut items);
+        assert_eq!(items[0].len(), 3);
     }
 
     #[test]
