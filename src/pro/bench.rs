@@ -657,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "diskspace::free_space has no Unix backend yet, so the write test refuses to run")]
     fn disk_tests_are_bounded_and_clean_up() {
         let dir = std::env::temp_dir().join(format!("tmop-bench-test-{}", std::process::id()));
         let cancel = AtomicBool::new(false);

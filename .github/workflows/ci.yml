@@ -47,10 +47,13 @@ jobs:
           cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
           cargo clippy --locked --target ${{ matrix.target }} --all-targets --features screensaver -- -D warnings
 
-  docker-linux:
-    name: Docker integration tests (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  # Built on 22.04 for the glibc 2.35 floor of the Linux release. The GUI stack (winit, glutin,
+  # xkbcommon) loads X11, Wayland and GL with dlopen and rfd talks to the XDG portal over D-Bus
+  # in pure Rust, so building needs no -dev packages.
+  linux:
+    name: Build, test and lint (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -60,21 +63,68 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-docker
+          key: linux-x86_64
 
-      - name: Install system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libasound2-dev
+      - name: Build
+        run: cargo build --locked
 
       - name: Docker info
         run: |
           docker version
           docker info --format '{{.ServerVersion}}'
 
-      # The full suite runs in the Windows jobs; here only the tests that need a Docker engine.
+      # The full suite, including the docker_* integration tests against the runner's engine.
       - name: Test
-        run: cargo test --locked --test docker_exec --test docker_files --test docker_logs --test docker_run
+        run: cargo test --locked
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  linux-arm64:
+    name: Build and test (aarch64-unknown-linux-gnu)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-aarch64
+
+      - name: Build
+        run: cargo build --locked
+
+      # The Docker suites run in the x86_64 job only.
+      - name: Test
+        run: cargo test --locked --lib --bins
+
+  macos:
+    name: Build, test and lint (macOS)
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - name: Build (aarch64)
+        run: cargo build --locked --target aarch64-apple-darwin
+
+      # The runner has no Docker engine; the docker_* suites run in the Linux job.
+      - name: Test (aarch64)
+        run: cargo test --locked --target aarch64-apple-darwin --lib --bins
+
+      - name: Clippy (aarch64)
+        run: cargo clippy --locked --target aarch64-apple-darwin --all-targets -- -D warnings
+
+      - name: Build (x86_64)
+        run: cargo build --locked --target x86_64-apple-darwin
