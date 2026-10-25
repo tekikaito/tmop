@@ -27,7 +27,8 @@ const SHOWN_MEMBERS: usize = 3;
 const STRIP_H: f32 = 108.0;
 /// Width of the "Columns" button at the right end of the filter tabs.
 const COLUMNS_W: f32 = 140.0;
-const VIEWS: [&str; 6] = ["All", "Apps", "Background", "Windows", "Services", "Suspended"];
+/// The filter tabs; the fourth holds the OS's own processes ("Windows", else "System").
+const VIEWS: [&str; 6] = ["All", "Apps", "Background", process::os_group(), "Services", "Suspended"];
 
 /// Column display order; the first entries are the ones shown by default.
 const ORDER: [Column; 23] = [
@@ -275,33 +276,11 @@ fn summed_spark(rows: &[ProcessRow], members: &[usize], spark: &HashMap<(u32, i6
     (c, m)
 }
 
-/// Lower-cased `%SystemRoot%`.
-fn system_root() -> &'static str {
-    static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).trim_end_matches('\\').to_lowercase())
-}
-
-/// Whether `path` lies under the folder `root` (case-insensitive, `root` lower case).
-fn path_under(path: &str, root: &str) -> bool {
-    let (p, r) = (path.as_bytes(), root.as_bytes());
-    p.len() > r.len() && p[..r.len()].eq_ignore_ascii_case(r) && p[r.len()] == b'\\'
-}
-
-fn is_windows_process(r: &ProcessRow) -> bool {
-    r.path.as_deref().is_some_and(|p| path_under(p, system_root()))
-}
-
-/// Runs as SYSTEM, LOCAL SERVICE or NETWORK SERVICE.
-pub(super) fn is_system_user(user: Option<&str>) -> bool {
-    let name = user.map(|u| u.rsplit('\\').next().unwrap_or(u).trim().to_ascii_uppercase());
-    matches!(name.as_deref(), Some("SYSTEM" | "LOCAL SERVICE" | "NETWORK SERVICE"))
-}
-
-/// Filter tab `view` (3 Windows, 4 Services, 5 Suspended) accepts `r`.
+/// Filter tab `view` (3 Windows / System, 4 Services, 5 Suspended) accepts `r`.
 fn in_view(view: usize, r: &ProcessRow) -> bool {
     match view {
-        3 => is_windows_process(r),
-        4 => is_system_user(r.user.as_deref()) && !r.has_window,
+        3 => process::is_os_process(r),
+        4 => process::is_service(r),
         5 => r.status == Status::Suspended,
         _ => true,
     }
@@ -668,7 +647,8 @@ impl App {
                 }
                 egui::popup::popup_below_widget(ui, id, &resp, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui| {
                     ui.set_min_width(170.0);
-                    for c in ORDER.into_iter().filter(|c| *c != Column::Name) {
+                    let caps = self.caps.proc;
+                    for c in ORDER.into_iter().filter(|c| *c != Column::Name && c.supported(&caps)) {
                         let mut shown = self.column_visible(c);
                         if ui.checkbox(&mut shown, c.title()).changed() {
                             self.set_column_visible(c, shown);
@@ -683,6 +663,7 @@ impl App {
         let max_mem = visible.iter().map(|i| rows[*i].private_working_set).max().unwrap_or(1).max(1) as f32;
         let max_io = visible.iter().map(|i| rows[*i].read_bps.max(rows[*i].write_bps)).fold(0.0f64, f64::max).max(1.0) as f32;
         let span = samples_text(SPARK_LEN, iv);
+        let proc_caps = self.caps.proc;
         let mut cols: Vec<PCol> = Vec::new();
         for c in ORDER.into_iter().filter(|c| self.column_visible(*c)) {
             cols.push(PCol::Data(c));
@@ -838,7 +819,7 @@ impl App {
                                 }
                             }
                             resp.context_menu(|ui| {
-                                if let Some(a) = action_menu(ui, r) {
+                                if let Some(a) = action_menu(ui, r, &proc_caps) {
                                     menu_pick = Some((a, r.clone()));
                                 }
                             });
@@ -893,7 +874,7 @@ impl App {
                 let info = format!("{n} process{} \u{b7} {:.1}% CPU \u{b7} {}", if n == 1 { "" } else { "es" }, self.shown_cpu(agg.cpu, logical), format_bytes(agg.mem as f64));
                 ui.label(RichText::new(info).font(theme::mono(12.0)).color(pal.text_dim));
                 let (label, action) = if r.status == Status::Suspended { ("Resume", Action::Resume) } else { ("Suspend", Action::Suspend) };
-                if Button::new(label).size(ButtonSize::Medium).show(ui, &pal).clicked() {
+                if proc_caps.suspend && Button::new(label).size(ButtonSize::Medium).show(ui, &pal).clicked() {
                     requested = Some((action, r.clone()));
                 }
                 if Button::primary("End task").size(ButtonSize::Medium).show(ui, &pal).clicked() {
@@ -967,10 +948,12 @@ impl App {
         let icon = Rect::from_min_size(pos2(x0, y), vec2(64.0, 64.0));
         widgets::icon_box(&p, icon, &pal, tex, r.name.chars().next().unwrap_or('?'));
         let tx = icon.right() + 22.0;
+        let caps = self.caps.proc;
+        let eff_off = format!("{}: off", process::efficiency_word());
         let buttons = [
             (r.path.is_some().then_some("Open file location"), ButtonKind::Secondary, Some(Icon::Folder), Action::OpenFileLocation),
-            (Some(if r.efficiency { "Efficiency mode: off" } else { "Efficiency mode" }), ButtonKind::Secondary, None, Action::Efficiency(!r.efficiency)),
-            (Some(if r.status == Status::Suspended { "Resume" } else { "Suspend" }), ButtonKind::Secondary, None, if r.status == Status::Suspended { Action::Resume } else { Action::Suspend }),
+            (caps.efficiency.then_some(if r.efficiency { eff_off.as_str() } else { process::efficiency_word() }), ButtonKind::Secondary, None, Action::Efficiency(!r.efficiency)),
+            (caps.suspend.then_some(if r.status == Status::Suspended { "Resume" } else { "Suspend" }), ButtonKind::Secondary, None, if r.status == Status::Suspended { Action::Resume } else { Action::Suspend }),
             (Some("End task"), ButtonKind::Primary, None, Action::EndTask),
             (Some("End task tree\u{2026}"), ButtonKind::Danger, None, Action::EndTree),
         ];
@@ -1161,13 +1144,15 @@ impl App {
             (pid, Some(name)) => format!("{name} ({pid})"),
             (pid, None) => format!("({pid})"),
         };
-        vec![
+        let caps = self.caps.proc;
+        let threads = if caps.handles { format!("{} \u{b7} {} {}", r.threads, r.handles, process::handles_word()) } else { r.threads.to_string() };
+        let mut facts = vec![
             ("App", format!("{group} \u{b7} {group_n} process{}", if group_n == 1 { "" } else { "es" }), false, None),
             ("Parent", parent_text, true, parent.map(|_| st.info)),
             ("Started", started, true, None),
             ("Type", ty, false, None),
-            ("Priority", priority_text(r.base_priority), false, None),
-            ("Threads", format!("{} \u{b7} {} handles", r.threads, r.handles), true, None),
+            ("Priority", priority_text(r), false, None),
+            ("Threads", threads, true, None),
             ("Status", r.status.label().to_string(), false, None),
             ("Architecture", if r.arch.is_empty() { dash() } else { r.arch.to_string() }, false, None),
             ("CPU", format!("{:.1}% \u{b7} {}", self.shown_cpu(r.cpu_pct, logical), format_cpu_time(r.cpu_time)), true, None),
@@ -1175,7 +1160,9 @@ impl App {
             ("Commit", format_bytes(r.commit as f64), true, None),
             ("Page faults", r.page_faults.to_string(), true, None),
             ("Session", r.session_id.to_string(), true, None),
-        ]
+        ];
+        facts.retain(|f| (f.0 != "Architecture" || caps.arch) && (f.0 != "Session" || caps.session));
+        facts
     }
 
     /// The Network tab: the process's connections in a table.
@@ -1226,6 +1213,9 @@ impl App {
     pub fn column_visible(&self, c: Column) -> bool {
         if c == Column::Name {
             return true;
+        }
+        if !c.supported(&self.caps.proc) {
+            return false;
         }
         let hidden = &self.settings.window.process_table_hidden_columns;
         if default_hidden(c) {
@@ -1296,18 +1286,9 @@ fn app_group(rows: &[ProcessRow], by_pid: &HashMap<u32, usize>, i: usize) -> (St
     (app_label(&rows[root]), members.len())
 }
 
-/// Priority class of a base priority value, else the number.
-fn priority_text(base: i32) -> String {
-    let class = match base {
-        4 => Some(Priority::Idle),
-        6 => Some(Priority::BelowNormal),
-        8 => Some(Priority::Normal),
-        10 => Some(Priority::AboveNormal),
-        13 => Some(Priority::High),
-        24 => Some(Priority::Realtime),
-        _ => None,
-    };
-    class.map(|p| p.label().to_string()).unwrap_or_else(|| base.to_string())
+/// Priority class of a process, else its number.
+fn priority_text(r: &ProcessRow) -> String {
+    Priority::from_row(r).map(|p| p.label().to_string()).unwrap_or_else(|| r.base_priority.to_string())
 }
 
 const FILETIME_UNIX: i64 = 116_444_736_000_000_000;
@@ -1536,10 +1517,10 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
                 let tex = icons.for_process(r.pid, r.path.as_deref());
                 widgets::icon_box(&p, Rect::from_min_size(pos2(ix, cy - 12.0), vec2(24.0, 24.0)), pal, tex, r.name.chars().next().unwrap_or('?'));
             }
-            let windows = !child && is_windows_process(r);
+            let windows = !child && process::is_os_process(r);
             let count = (cx.size > 1).then(|| cx.size.to_string());
             let eco = r.efficiency;
-            let tail_w = count.as_ref().map(|c| widgets::text_width(&p, c, theme::mono(11.0)) + 8.0).unwrap_or(0.0) + if windows { widgets::badge_width(&p, "WINDOWS") + 8.0 } else { 0.0 } + if eco { 30.0 } else { 0.0 };
+            let tail_w = count.as_ref().map(|c| widgets::text_width(&p, c, theme::mono(11.0)) + 8.0).unwrap_or(0.0) + if windows { widgets::badge_width(&p, process::os_badge()) + 8.0 } else { 0.0 } + if eco { 30.0 } else { 0.0 };
             let (nf, nc) = if child { (theme::ui(13.0), pal.text_dim) } else { (theme::semibold(13.0), pal.text) };
             let nr = widgets::text_fit(&p, pos2(name_x, cy), Align2::LEFT_CENTER, &r.name, nf, nc, rect.right() - name_x - 10.0 - tail_w);
             let mut x = nr.right() + 8.0;
@@ -1548,7 +1529,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
                 x = tr.right() + 8.0;
             }
             if windows {
-                let br = widgets::badge(&p.with_clip_rect(rect), pos2(x, cy), "WINDOWS", pal);
+                let br = widgets::badge(&p.with_clip_rect(rect), pos2(x, cy), process::os_badge(), pal);
                 x = br.right() + 8.0;
             }
             if eco {
@@ -1639,7 +1620,8 @@ enum MenuPick {
     Details,
 }
 
-fn action_menu(ui: &mut egui::Ui, r: &ProcessRow) -> Option<MenuPick> {
+/// The context menu of a process; `caps` leaves out what the backend cannot do.
+fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps) -> Option<MenuPick> {
     let mut out = None;
     kit::menu_header(ui, &format!("{} \u{b7} PID {}", r.name, r.pid));
     if kit::menu_item(ui, "End task", Some("Del"), false) {
@@ -1648,19 +1630,19 @@ fn action_menu(ui: &mut egui::Ui, r: &ProcessRow) -> Option<MenuPick> {
     if kit::menu_item(ui, "End task tree\u{2026}", Some("\u{21e7} Del"), true) {
         out = Some(MenuPick::Do(Action::EndTree));
     }
-    if r.status == Status::Suspended {
-        if kit::menu_item(ui, "Resume", None, false) {
-            out = Some(MenuPick::Do(Action::Resume));
+    if caps.suspend {
+        let (label, action) = if r.status == Status::Suspended { ("Resume", Action::Resume) } else { ("Suspend", Action::Suspend) };
+        if kit::menu_item(ui, label, None, false) {
+            out = Some(MenuPick::Do(action));
         }
-    } else if kit::menu_item(ui, "Suspend", None, false) {
-        out = Some(MenuPick::Do(Action::Suspend));
     }
-    if kit::menu_item(ui, if r.efficiency { "Efficiency mode: turn off" } else { "Efficiency mode" }, None, false) {
+    let eff_off = format!("{}: turn off", process::efficiency_word());
+    if caps.efficiency && kit::menu_item(ui, if r.efficiency { &eff_off } else { process::efficiency_word() }, None, false) {
         out = Some(MenuPick::Do(Action::Efficiency(!r.efficiency)));
     }
     ui.separator();
     ui.menu_button(RichText::new("Set priority").font(theme::ui(13.0)), |ui| {
-        for p in Priority::ALL {
+        for p in Priority::ALL.into_iter().filter(|p| Action::SetPriority(*p).supported(caps)) {
             if kit::menu_item(ui, p.label(), None, false) {
                 out = Some(MenuPick::Do(Action::SetPriority(p)));
             }
@@ -1708,17 +1690,10 @@ mod tests {
     }
 
     #[test]
-    fn system_accounts_and_windows_paths() {
-        assert!(is_system_user(Some("SYSTEM")) && is_system_user(Some(r"NT AUTHORITY\Local Service")) && is_system_user(Some("network service")));
-        assert!(!is_system_user(Some("alex")) && !is_system_user(None));
-        assert!(path_under(r"C:\Windows\System32\svchost.exe", r"c:\windows"));
-        assert!(!path_under(r"C:\Windows2\x.exe", r"c:\windows") && !path_under(r"C:\Program Files\x.exe", r"c:\windows"));
-    }
-
-    #[test]
     fn views_filter_rows() {
-        let mut r = row(10, 4, 1, "svchost.exe");
-        r.user = Some("SYSTEM".into());
+        // A service of this OS: SYSTEM on Windows, a root daemon started by init elsewhere.
+        let mut r = if cfg!(windows) { row(10, 4, 1, "svchost.exe") } else { row(10, 1, 1, "sshd") };
+        r.user = Some(if cfg!(windows) { "SYSTEM" } else { "root" }.into());
         assert!(in_view(4, &r) && !in_view(5, &r));
         r.has_window = true;
         assert!(!in_view(4, &r));
@@ -1869,7 +1844,7 @@ mod tests {
                         });
                     }
                     let mut out = None;
-                    egui::Area::new(egui::Id::new("menu-smoke")).show(ctx, |ui| out = action_menu(ui, &r));
+                    egui::Area::new(egui::Id::new("menu-smoke")).show(ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc));
                     assert!(out.is_none());
                 });
             });
@@ -1878,9 +1853,11 @@ mod tests {
 
     #[test]
     fn base_priority_names() {
-        assert_eq!(priority_text(8), "Normal");
-        assert_eq!(priority_text(13), "High");
-        assert_eq!(priority_text(7), "7");
+        let at = |v| ProcessRow { base_priority: v, ..Default::default() };
+        let (normal, high) = if cfg!(windows) { (8, 13) } else { (0, -10) };
+        assert_eq!(priority_text(&at(normal)), "Normal");
+        assert_eq!(priority_text(&at(high)), "High");
+        assert_eq!(priority_text(&at(7)), "7");
     }
 
     #[test]

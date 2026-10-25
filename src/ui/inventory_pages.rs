@@ -486,7 +486,7 @@ impl App {
         }
         let area = page_area(body);
         let p = ui.painter().clone();
-        let interactive = list.iter().filter(|u| u.session > 0 && u.apps > 0).count();
+        let interactive = list.iter().filter(|u| u.is_active()).count();
         let top = list.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu));
         let tiles = [
             StatTile::new("Accounts", list.len().to_string(), "Distinct account / session pairs"),
@@ -526,7 +526,7 @@ impl App {
                 0 => {
                     let name = short_account(&u.user);
                     let cell = Cell::new(name);
-                    let cell = if is_windows_account(name) { cell.badge("WINDOWS") } else { cell };
+                    let cell = if crate::process::is_system_account(Some(name)) { cell.badge(crate::process::os_badge()) } else { cell };
                     if full && name != u.user {
                         cell.sub(&u.user)
                     } else {
@@ -540,7 +540,7 @@ impl App {
                 5 => Cell::new(format_rate(u.io)),
                 6 => Cell::new("").spark(trends[i].clone(), spark_color, true),
                 _ if u.is_active() => Cell::new("Active \u{b7} console").dot(st.ok).color(st.ok),
-                _ if u.session == 0 => Cell::new("Services \u{b7} no window").color(pal.text_dim),
+                _ if u.session == 0 && self.caps.proc.session => Cell::new("Services \u{b7} no window").color(pal.text_dim),
                 _ => Cell::new("Background \u{b7} no window").color(pal.text_dim),
             }
         };
@@ -574,7 +574,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.services.poll();
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
-        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, "Service Control Manager".into(), Page::Services.shortcut().into()]));
+        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, service_manager().into(),Page::Services.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {
             refresh = Button::new("Refresh").show(ui, &pal).clicked();
@@ -602,9 +602,14 @@ fn clip_name(name: &str) -> String {
     }
 }
 
-/// A built-in Windows account (marked with a WINDOWS badge).
-fn is_windows_account(name: &str) -> bool {
-    ["SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"].iter().any(|a| name.eq_ignore_ascii_case(a))
+/// Who runs the services: the source named on the Services page.
+const fn service_manager() -> &'static str {
+    use crate::platform::{Os, OS};
+    match OS {
+        Os::Linux => "systemd",
+        Os::MacOs => "launchd",
+        _ => "Service Control Manager",
+    }
 }
 
 /// One row of the Users table: an account in one session.
@@ -620,9 +625,9 @@ struct UserRow {
 }
 
 impl UserRow {
-    /// Signed in with app windows.
+    /// Signed in with app windows (in an interactive session, where the OS has sessions).
     fn is_active(&self) -> bool {
-        self.session > 0 && self.apps > 0
+        (self.session > 0 || !crate::process::caps().session) && self.apps > 0
     }
 }
 
@@ -762,6 +767,6 @@ mod tests {
         assert_eq!(tiles_height(1000.0, 4, 190.0), STAT_TILE_H);
         assert_eq!(tiles_height(300.0, 4, 190.0), 4.0 * STAT_TILE_H + 3.0 * STAT_GAP);
         assert_eq!(subtitle(&["a".into(), String::new(), "b".into()]), "a \u{b7} b");
-        assert!(is_windows_account("system") && !is_windows_account("alex"));
+        assert!(crate::process::is_system_account(Some(if cfg!(windows) { "system" } else { "root" })) && !crate::process::is_system_account(Some("alex")));
     }
 }
