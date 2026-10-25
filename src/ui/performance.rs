@@ -812,7 +812,7 @@ impl App {
             .filter(|_| self.caps.clocks)
             .chain([
             ("Kernel time", format!("{:.1}%", s.cpu.kernel_pct)),
-            ("Power plan", plan),
+            (crate::pro::power::scheme_words().0, plan),
             ("Sockets", det.sockets.max(1).to_string()),
             ("Physical cores", det.cores.to_string()),
             ("Logical processors", s.cpu.logical_count.to_string()),
@@ -821,8 +821,9 @@ impl App {
             ("L1 cache", format_bytes(det.l1 as f64)),
             ("L2 cache", format_bytes(det.l2 as f64)),
             ("L3 cache", format_bytes(det.l3 as f64)),
-            ("Fast Startup", yes_no(det.fast_startup)),
         ])
+        // Fast Startup is a Windows setting; other OSes report None and get no row.
+        .chain((cfg!(windows) || det.fast_startup.is_some()).then(|| ("Fast Startup", yes_no(det.fast_startup))))
         .map(|(k, v)| (k.to_string(), v, false, None))
         .collect();
         let cols = if w >= 900.0 { 3 } else if w >= 560.0 { 2 } else { 1 };

@@ -541,7 +541,6 @@ mod tests {
     }
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    #[cfg_attr(not(windows), allow(unused_variables))]
     #[test]
     fn collector_smoke() {
         let mut c = Collector::new();
@@ -564,8 +563,6 @@ mod tests {
             assert!(snap.disk.available && snap.network.available, "{:?}", snap.errors);
             assert!(snap.errors.is_empty(), "{:?}", snap.errors);
         }
-        // Rows arrive once the process enumerators (PR-L, PR-M) feed the collectors.
-        #[cfg(windows)]
         assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
     }
 }

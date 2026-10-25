@@ -47,28 +47,13 @@ pub fn free_space(path: &Path) -> Option<u64> {
     Some(free)
 }
 
-/// `statvfs` on Linux (`f_bavail * f_frsize`); `statfs` on macOS, whose `statvfs` has 32-bit
-/// block counts.
-#[cfg(unix)]
-#[allow(clippy::unnecessary_cast)] // the field widths differ per target
+/// `statvfs` on Linux, `statfs` on macOS (see [`super::mounts::space`]).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn free_space(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: an all-zero statfs is valid; statfs only writes it for a NUL-terminated path.
-        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-        (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_bsize as u64)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // SAFETY: an all-zero statvfs is valid; statvfs only writes it for a NUL-terminated path.
-        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-        (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
-    }
+    super::mounts::space(path).map(|(_, free)| free)
 }
 
-#[cfg(not(any(windows, unix)))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn free_space(_path: &Path) -> Option<u64> {
     None
 }

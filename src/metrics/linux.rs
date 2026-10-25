@@ -9,15 +9,15 @@
 //! * Thermal: hwmon (`k10temp`, `zenpower`, `coretemp` for the CPU) and `thermal_zone*`.
 //! * Uptime `/proc/uptime`, open files `/proc/sys/fs/file-nr`, threads `/proc/loadavg`.
 //!
-//! Process rows come from the Linux process enumerator (work package PR-L); until it lands the
-//! collector counts processes and threads only.
+//! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
+//! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
 use super::common::{cpu_brand, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::nvml::Nvml;
 use super::procfs::{self, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
-use crate::process::ProcessRow;
-use std::collections::HashSet;
+use crate::process::{Enumerator, ProcessRow};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -83,6 +83,7 @@ pub struct Collector {
     freq_base: Option<u64>,
     name: String,
     nvml: NvmlState,
+    procs: Enumerator,
 }
 
 impl Default for Collector {
@@ -105,6 +106,7 @@ impl Collector {
             freq_base: read_u64(cpu0.join("base_frequency")).or_else(|| read_u64(cpu0.join("amd_pstate_nominal_freq"))),
             name,
             nvml: NvmlState::Untried,
+            procs: Enumerator::new(),
         }
     }
 
@@ -124,7 +126,15 @@ impl Collector {
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));
         snap.thread_count = read("/proc/loadavg").and_then(|l| procfs::parse_loadavg_threads(&l)).unwrap_or(0);
         snap.process_count = fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).count()).unwrap_or(0);
-        (snap, Vec::new())
+        // No per-process GPU source yet (DRM fdinfo), so the GPU column stays 0.
+        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &HashMap::new()) {
+            Ok((rows, _)) => rows,
+            Err(e) => {
+                snap.errors.push(e);
+                Vec::new()
+            }
+        };
+        (snap, rows)
     }
 
     fn cpu(&mut self, snap: &mut Snapshot) {

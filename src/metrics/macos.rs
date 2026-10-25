@@ -15,14 +15,13 @@
 //!   `processor_set_statistics(PROCESSOR_SET_LOAD_INFO)`.
 //! * No temperatures (no public sensors).
 //!
-//! Process rows come from the libproc enumerator of work package PR-M; until it lands the list
-//! is empty. The FFI below is declared by hand (libSystem, IOKit, CoreFoundation) so no binding
+//! Process rows come from the libproc enumerator ([`crate::process::Enumerator`]). The FFI below is declared by hand (libSystem, IOKit, CoreFoundation) so no binding
 //! crate is needed; the decoding is pure and lives in [`super::mac_parse`].
 
 use super::common::{brand_from_bytes, cpu_brand, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::mac_parse::*;
 use super::{MemorySample, Probe, Snapshot, Sources};
-use crate::process::ProcessRow;
+use crate::process::{Enumerator, ProcessRow};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::mem::MaybeUninit;
@@ -378,6 +377,7 @@ pub struct Collector {
     prev_net: Option<NetMark>,
     prev_disk: Option<(Instant, HashMap<u64, DiskCounters>)>,
     keys: Keys,
+    procs: Enumerator,
 }
 
 impl Default for Collector {
@@ -405,6 +405,7 @@ impl Collector {
             prev_net: None,
             prev_disk: None,
             keys: Keys::new(),
+            procs: Enumerator::new(),
         }
     }
 
@@ -426,7 +427,15 @@ impl Collector {
             snap.process_count = l.task_count.max(0) as usize;
             snap.thread_count = l.thread_count.max(0) as usize;
         }
-        (snap, Vec::new())
+        // No per-process GPU source, so the GPU column stays 0.
+        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &HashMap::new()) {
+            Ok((rows, _)) => rows,
+            Err(e) => {
+                snap.errors.push(e);
+                Vec::new()
+            }
+        };
+        (snap, rows)
     }
 
     /// The per-processor tick counters; the kernel's copy is freed again.
