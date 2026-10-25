@@ -348,10 +348,14 @@ mod io {
             return Err("No loadable kernel modules are loaded: this kernel has its drivers built in.".into());
         }
         let names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
-        let infos = match run_capture("modinfo", &names, TIMEOUT) {
+        // modinfo lives in sbin, which a user's $PATH lacks on Debian.
+        let modinfo = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"].iter().map(|d| format!("{d}/modinfo")).find(|p| std::path::Path::new(p).is_file()).unwrap_or_else(|| "modinfo".into());
+        let infos = match run_capture(&modinfo, &names, TIMEOUT) {
             Ok(out) => parse_modinfo(&out),
+            // Without modinfo the modules are listed without details.
+            Err(e) if e.starts_with("could not start") => Vec::new(),
             // One module modinfo cannot find fails the batch: ask one by one.
-            Err(_) => names.iter().filter_map(|n| run_capture("modinfo", &[n], Duration::from_secs(3)).ok()).flat_map(|o| parse_modinfo(&o)).collect(),
+            Err(_) => names.iter().filter_map(|n| run_capture(&modinfo, &[n], Duration::from_secs(3)).ok()).flat_map(|o| parse_modinfo(&o)).collect(),
         };
         Ok(modules_to_services(&mods, &infos))
     }
