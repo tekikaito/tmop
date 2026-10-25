@@ -15,6 +15,8 @@ pub(super) enum Confirm {
     EndTask,
     Efficiency,
     Realtime,
+    /// The OS refused the action (the question holds why); offer it again as administrator.
+    Elevate,
 }
 
 /// An action waiting for the user's answer to `question`.
@@ -69,12 +71,55 @@ impl App {
         let rows = self.snapshot().2;
         self.status = match process::actions::run(action, row, &rows) {
             Ok(m) => m,
+            Err(e) if process::elevated::offered(action, &e) => {
+                let question = format!("{}: {e}", row.name);
+                self.pending = Some(Pending { action, row: row.clone(), question: question.clone(), kind: Confirm::Elevate });
+                question
+            }
             Err(e) => format!("{}: {e}", row.name),
         };
         self.sampler.refresh();
     }
 
+    /// Runs `action` as administrator on a worker thread (the system asks for the password); the
+    /// outcome lands in the status line through [`App::poll_elevated`].
+    fn execute_elevated(&mut self, ctx: &egui::Context, action: Action, row: ProcessRow) {
+        let rows = self.snapshot().2;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("tmop-elevated".into()).spawn(move || {
+            let text = match process::elevated::run(action, &row, &rows) {
+                Ok(m) => m,
+                Err(e) => format!("{}: {e}", row.name),
+            };
+            let _ = tx.send(text);
+            ctx.request_repaint();
+        });
+        match spawned {
+            Ok(_) => {
+                self.elevated_job = Some(rx);
+                self.status = "Waiting for administrator authorization\u{2026}".into();
+            }
+            Err(e) => self.status = format!("could not start the elevated action: {e}"),
+        }
+    }
+
+    /// Picks up the result of [`App::execute_elevated`].
+    fn poll_elevated(&mut self) {
+        let Some(rx) = &self.elevated_job else { return };
+        match rx.try_recv() {
+            Ok(text) => {
+                self.status = text;
+                self.elevated_job = None;
+                self.sampler.refresh();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.elevated_job = None,
+        }
+    }
+
     pub(super) fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        self.poll_elevated();
         let Some(p) = &self.pending else { return };
         let st = theme::status(pal);
         let logical = self.snapshot().0.cpu.logical_count;
@@ -128,6 +173,20 @@ impl App {
                         None => None,
                     };
                 }
+                Confirm::Elevate => {
+                    kit::dialog_header(
+                        ui,
+                        pal,
+                        Some((Icon::Shield, st.warn)),
+                        &format!("**{}** needs administrator rights", row.name),
+                        &format!("{}. Retry as administrator asks for an administrator password and runs only this one action.", p.question),
+                    );
+                    answer = match kit::dialog_buttons(ui, pal, &[DialogButton::Secondary("Cancel"), DialogButton::Primary("Retry as administrator")]) {
+                        Some(0) => Some(Answer::Cancel),
+                        Some(_) => Some(Answer::Confirm),
+                        None => None,
+                    };
+                }
                 Confirm::Efficiency | Confirm::Realtime => {
                     let (title, body) = split_question(&p.question);
                     let warn: Color32 = st.warn;
@@ -151,6 +210,7 @@ impl App {
             let p = self.pending.take().expect("pending");
             match a {
                 Answer::Cancel => {}
+                Answer::Confirm if matches!(p.kind, Confirm::Elevate) => self.execute_elevated(ctx, p.action, p.row),
                 Answer::Confirm => self.execute(p.action, &p.row),
                 Answer::OnlyRoot => self.execute(Action::EndTask, &p.row),
             }

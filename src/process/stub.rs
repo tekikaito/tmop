@@ -25,23 +25,23 @@ impl Enumerator {
 pub(super) mod sys {
     use super::*;
 
-    pub fn terminate(_pid: u32) -> Result<(), String> {
+    pub fn terminate(_pid: u32, _start: i64) -> Result<(), String> {
         Err(unsupported())
     }
 
-    pub fn suspend(_pid: u32) -> Result<(), String> {
+    pub fn suspend(_pid: u32, _start: i64) -> Result<(), String> {
         Err(unsupported())
     }
 
-    pub fn resume(_pid: u32) -> Result<(), String> {
+    pub fn resume(_pid: u32, _start: i64) -> Result<(), String> {
         Err(unsupported())
     }
 
-    pub fn set_priority(_pid: u32, _p: Priority) -> Result<(), String> {
+    pub fn set_priority(_pid: u32, _start: i64, _p: Priority) -> Result<(), String> {
         Err(unsupported())
     }
 
-    pub fn set_efficiency(_pid: u32, _on: bool) -> Result<(), String> {
+    pub fn set_efficiency(_pid: u32, _start: i64, _on: bool) -> Result<(), String> {
         Err(unsupported())
     }
 

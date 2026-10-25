@@ -378,9 +378,14 @@ impl Drop for Sampler {
 #[cfg(windows)]
 pub use win::Collector;
 
-/// Non-Windows stub so the library (and its tests) still compile elsewhere.
+/// Non-Windows stub until the per-OS metrics backends land: no system metrics, but the process
+/// table of the process backend (where this OS has one).
 #[cfg(not(windows))]
-pub struct Collector;
+pub struct Collector {
+    seq: u64,
+    logical: usize,
+    procs: crate::process::Enumerator,
+}
 #[cfg(not(windows))]
 impl Default for Collector {
     fn default() -> Self {
@@ -390,10 +395,23 @@ impl Default for Collector {
 #[cfg(not(windows))]
 impl Collector {
     pub fn new() -> Self {
-        Collector
+        let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Collector { seq: 0, logical, procs: crate::process::Enumerator::new() }
     }
     pub fn collect(&mut self) -> (Snapshot, Vec<ProcessRow>) {
-        (Snapshot { errors: vec!["metrics are only implemented on Windows".into()], ..Default::default() }, Vec::new())
+        self.seq += 1;
+        let mut snap = Snapshot { seq: self.seq, errors: vec![format!("system metrics are not implemented on {} yet", crate::platform::os_name())], ..Default::default() };
+        snap.cpu.logical_count = self.logical;
+        match self.procs.collect(self.logical, &std::collections::HashMap::new()) {
+            Ok((rows, t)) => {
+                (snap.process_count, snap.thread_count, snap.handle_count) = (t.processes, t.threads, t.handles);
+                (snap, rows)
+            }
+            Err(e) => {
+                snap.errors.push(e);
+                (snap, Vec::new())
+            }
+        }
     }
 }
 
