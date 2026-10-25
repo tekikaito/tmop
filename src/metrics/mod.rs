@@ -25,6 +25,7 @@ pub mod hwinfo;
 pub mod procfs;
 #[cfg(target_os = "linux")]
 mod nvml;
+pub mod mac_parse;
 
 #[cfg_attr(windows, path = "win.rs")]
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
@@ -539,7 +540,8 @@ mod tests {
         let _ = probe();
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[cfg_attr(not(windows), allow(unused_variables))]
     #[test]
     fn collector_smoke() {
         let mut c = Collector::new();
@@ -554,15 +556,16 @@ mod tests {
         assert!(snap.cpu.logical_count > 0);
         assert!(snap.cpu.total_pct > 0.0 && snap.cpu.total_pct <= 100.0, "cpu {}", snap.cpu.total_pct);
         assert!(snap.uptime > Duration::ZERO);
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
             assert_eq!(snap.cpu.per_core_pct.len(), snap.cpu.logical_count);
+        }
+        if cfg!(target_os = "linux") {
             assert!(snap.process_count > 0 && snap.thread_count >= snap.process_count);
             assert!(snap.disk.available && snap.network.available, "{:?}", snap.errors);
             assert!(snap.errors.is_empty(), "{:?}", snap.errors);
         }
-        // The Linux enumerator lands with work package PR-L.
-        if cfg!(windows) {
-            assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
-        }
+        // Rows arrive once the process enumerators (PR-L, PR-M) feed the collectors.
+        #[cfg(windows)]
+        assert!(procs.iter().any(|p| p.pid == std::process::id()), "own process not enumerated");
     }
 }
