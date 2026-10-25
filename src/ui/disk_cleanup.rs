@@ -14,7 +14,7 @@ use crate::pro::diskdelete::{self, Assessed, Mode, Report, SystemPaths, Target, 
 use crate::pro::diskspace::Tree;
 use crate::pro::volcache::{self, Handler};
 use crate::pro::{trash, Loader};
-use crate::platform::{os_name, trash_word};
+use crate::platform::{elevation_word, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::{HashMap, HashSet};
@@ -166,7 +166,12 @@ impl CleanupUi {
     /// (or has not answered yet) nothing is hidden, so nothing is lost.
     pub fn visible(&self, elevated: bool) -> Vec<Category> {
         let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v, elevated)).unwrap_or_default();
-        Category::ALL.into_iter().filter(|c| c.supported() && !hidden.contains(c)).collect()
+        Category::all().iter().copied().filter(|c| c.supported() && !hidden.contains(c)).collect()
+    }
+
+    /// `cat` cannot be selected: root-only rows always, administrator-only ones unless elevated.
+    pub fn locked(cat: Category, elevated: bool) -> bool {
+        cat.read_only() || (cat.needs_admin() && !elevated)
     }
 
     /// Handlers shown in the "Windows Disk Cleanup" group.
@@ -233,6 +238,18 @@ pub fn footer_totals(ms: &[(&Measured, bool)], elevated: bool) -> (u64, usize) {
 
 fn to_target(i: &cleanup::CleanItem) -> Target {
     Target { path: i.path.clone(), size: i.size, is_dir: i.is_dir, node: i.node, file: i.file }
+}
+
+/// Drops the targets that another selected folder already holds (a cache folder that also has a
+/// `node_modules` inside, the same folder in two categories), so nothing is counted or deleted
+/// twice. The first category to list a path keeps it.
+pub fn drop_nested(cats: &mut Vec<CatSel>) {
+    let dirs: HashSet<PathBuf> = cats.iter().flat_map(|c| &c.targets).filter(|t| t.is_dir).map(|t| t.path.clone()).collect();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for c in cats.iter_mut() {
+        c.targets.retain(|t| t.path.ancestors().skip(1).all(|a| !dirs.contains(a)) && seen.insert(t.path.clone()));
+    }
+    cats.retain(|c| !c.targets.is_empty());
 }
 
 // ---------------------------------------------------------------- page
@@ -311,11 +328,12 @@ impl App {
         let c = &self.pro.clean;
         let visible = c.visible(elevated);
         let vol_rows = c.vol_list(elevated);
+        let needs = format!("needs {}", elevation_word());
 
         // What is selected and what there is in total.
         let ms: Vec<(&Measured, bool)> = visible
             .iter()
-            .filter(|cat| !(cat.needs_admin() && !elevated))
+            .filter(|&&cat| !CleanupUi::locked(cat, elevated))
             .filter_map(|&cat| c.measured(cat, epoch).map(|m| (m, c.is_checked(cat))))
             .collect();
         let (mut total, mut n) = footer_totals(&ms, elevated);
@@ -391,13 +409,16 @@ impl App {
                 }
                 for cat in visible.iter().copied() {
                     let m = c.measured(cat, epoch);
-                    let locked = cat.needs_admin() && !elevated;
+                    let locked = CleanupUi::locked(cat, elevated);
                     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                     let can_expand = m.is_some_and(|m| !m.items.is_empty());
                     if resp.clicked() && can_expand {
                         expands.push(cat);
                     }
                     list_row(ui.painter(), r, &pal, RowLook::Plain, resp.hovered());
+                    if cat.read_only() {
+                        resp.on_hover_text(format!("Only {} can clean this up; TMOP shows its size and leaves it alone", elevation_word()));
+                    }
                     let mut v = c.is_checked(cat) && !locked;
                     let cb = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
                     if ui.add_enabled_ui(!locked, |ui| ui.put(cb, egui::Checkbox::without_text(&mut v)).changed()).inner {
@@ -423,9 +444,9 @@ impl App {
                         } else {
                             let admin_items = m.items.iter().filter(|i| i.needs_admin).count();
                             let (sub, col) = if locked {
-                                ("needs administrator".to_string(), st.warn)
+                                (needs.clone(), st.warn)
                             } else if admin_items > 0 && !elevated {
-                                (format!("{} items \u{2022} {admin_items} need administrator", m.count), st.warn)
+                                (format!("{} items \u{2022} {admin_items} need {}", m.count, elevation_word()), st.warn)
                             } else if cat == Category::RecycleBin {
                                 (format!("{} items", m.count), pal.text_dim)
                             } else {
@@ -434,7 +455,7 @@ impl App {
                             (format_bytes(m.bytes as f64), sub, col)
                         }
                     } else if locked {
-                        ("\u{2014}".to_string(), "needs administrator".to_string(), st.warn)
+                        ("\u{2014}".to_string(), needs.clone(), st.warn)
                     } else {
                         ("Measuring\u{2026}".to_string(), String::new(), pal.text_dim)
                     };
@@ -518,7 +539,7 @@ impl App {
         let mut cats = Vec::new();
         let mut bin_bytes = None;
         for cat in c.visible(elevated) {
-            if !c.is_checked(cat) || (cat.needs_admin() && !elevated) {
+            if !c.is_checked(cat) || CleanupUi::locked(cat, elevated) {
                 continue;
             }
             let Some(m) = c.measured(cat, epoch) else { continue };
@@ -533,6 +554,7 @@ impl App {
                 cats.push(CatSel { cat, targets });
             }
         }
+        drop_nested(&mut cats);
         let vols = c.selected_vols(elevated);
         if cats.is_empty() && bin_bytes.is_none() && vols.is_empty() {
             return;
@@ -825,6 +847,43 @@ mod tests {
     }
 
     #[test]
+    fn root_only_rows_are_never_selectable() {
+        for elevated in [false, true] {
+            for cat in [Category::SystemJournal, Category::PackageCache, Category::SystemCaches] {
+                assert!(CleanupUi::locked(cat, elevated), "{cat:?} even as {}", elevation_word());
+            }
+            assert_eq!(CleanupUi::locked(Category::WindowsTemp, elevated), !elevated);
+            assert!(!CleanupUi::locked(Category::UserCache, elevated) && !CleanupUi::locked(Category::UserTemp, elevated));
+        }
+        // Checking one by hand does not change that.
+        let mut c = CleanupUi::default();
+        c.checked.insert(Category::PackageCache, true);
+        assert!(c.is_checked(Category::PackageCache) && CleanupUi::locked(Category::PackageCache, true));
+    }
+
+    #[test]
+    fn nested_targets_are_cleaned_once() {
+        let base = std::env::temp_dir().join("tmop-nested");
+        let t = |rel: &str, is_dir: bool| Target { path: rel.split('/').fold(base.clone(), |p, c| p.join(c)), size: 1, is_dir, node: None, file: None };
+        let mut cats = vec![
+            CatSel { cat: Category::UserCache, targets: vec![t("cache/tool", true), t("cache/lock", false)] },
+            CatSel { cat: Category::DevArtifacts, targets: vec![t("cache/tool/node_modules", true), t("proj/node_modules", true), t("cache/lock", false)] },
+            CatSel { cat: Category::OldDownloads, targets: vec![t("cache/tool/x.zip", false)] },
+        ];
+        drop_nested(&mut cats);
+        let left: Vec<(Category, Vec<PathBuf>)> = cats.iter().map(|c| (c.cat, c.targets.iter().map(|x| x.path.clone()).collect())).collect();
+        assert_eq!(
+            left,
+            vec![(Category::UserCache, vec![t("cache/tool", true).path, t("cache/lock", false).path]), (Category::DevArtifacts, vec![t("proj/node_modules", true).path])],
+            "a category left empty is dropped"
+        );
+        // A file named like a folder prefix is not a parent.
+        let mut cats = vec![CatSel { cat: Category::UserCache, targets: vec![t("a", false), t("ab", true), t("a/b", false)] }];
+        drop_nested(&mut cats);
+        assert_eq!(cats[0].targets.len(), 3);
+    }
+
+    #[test]
     fn checked_defaults_to_preselection() {
         let mut c = CleanupUi::default();
         assert!(c.is_checked(Category::UserTemp) && !c.is_checked(Category::DevArtifacts));
@@ -853,12 +912,13 @@ mod tests {
         for hidden in [Category::UserTemp, Category::WindowsTemp, Category::RecycleBin, Category::ThumbnailCache] {
             assert!(!vis.contains(&hidden), "{hidden:?}");
         }
-        for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts, Category::WerReports] {
+        let listed = [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts, Category::WerReports];
+        for kept in listed.into_iter().filter(|c| Category::all().contains(c)) {
             assert!(vis.contains(&kept), "{kept:?}");
         }
         // The helper failed: nothing is hidden.
         let failed = with_vols(Err("timed out".into()));
-        let all: Vec<Category> = Category::ALL.into_iter().filter(|c| c.supported()).collect();
+        let all: Vec<Category> = Category::all().iter().copied().filter(|c| c.supported()).collect();
         assert_eq!(failed.visible(true), all);
         assert_eq!(CleanupUi::default().visible(true), all);
     }
@@ -940,7 +1000,8 @@ mod tests {
         assert!(!c.visible(true).contains(&Category::UserTemp));
         // A needs-admin handler covers nothing when not elevated.
         let adm = with_vols(Ok(vec![handler("Temporary Files", 10, true)]));
-        assert!(adm.visible(false).contains(&Category::UserTemp));
+        // (User temp is a Windows category.)
+        assert_eq!(adm.visible(false).contains(&Category::UserTemp), Category::all().contains(&Category::UserTemp));
         assert!(!adm.visible(true).contains(&Category::UserTemp));
     }
 

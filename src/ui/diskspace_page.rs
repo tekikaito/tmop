@@ -63,8 +63,8 @@ impl App {
         let mut stop = false;
         let mut mode_click = None;
         toolbar(ui, tools, |ui| {
-            // Clean up lists Windows categories only; it stays hidden elsewhere until it has its own.
-            if self.pro.del.delete_safe || self.caps.volcache {
+            // Clean up wherever this OS has categories; its actions stay off while deleting is (delete_safe).
+            if !crate::pro::cleanup::Category::all().is_empty() {
                 mode_click = widgets::segmented(ui, &["Analyze", "Clean up"], self.pro.disk_mode as usize, &pal, false);
             }
             if progress.running {

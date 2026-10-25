@@ -6,6 +6,7 @@
 
 use super::diskdelete::{Mode, SystemPaths};
 use super::diskspace::{filetime_to_system, Tree, NO_PARENT};
+use crate::platform::{Os, OS};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -23,25 +24,77 @@ pub enum Category {
     RecycleBin,
     OldDownloads,
     DevArtifacts,
+    /// `~/.cache` (Linux) or `~/Library/Caches` (macOS).
+    UserCache,
+    /// `~/Library/Logs` (macOS).
+    UserLogs,
+    /// `~/Library/Developer/Xcode/DerivedData` (macOS).
+    XcodeDerivedData,
+    /// The systemd journal (Linux, root only: shown, never cleaned).
+    SystemJournal,
+    /// apt / dnf / pacman downloads (Linux, root only: shown, never cleaned).
+    PackageCache,
+    /// `/Library/Caches` (macOS, root only: shown, never cleaned).
+    SystemCaches,
 }
 
+const WINDOWS: &[Category] = &[
+    Category::UserTemp,
+    Category::WindowsTemp,
+    Category::BrowserCaches,
+    Category::CrashDumps,
+    Category::WerReports,
+    Category::ThumbnailCache,
+    Category::UpdateDownloads,
+    Category::DeliveryOptimization,
+    Category::RecycleBin,
+    Category::OldDownloads,
+    Category::DevArtifacts,
+];
+const LINUX: &[Category] = &[
+    Category::UserCache,
+    Category::ThumbnailCache,
+    Category::RecycleBin,
+    Category::OldDownloads,
+    Category::DevArtifacts,
+    Category::SystemJournal,
+    Category::PackageCache,
+];
+/// No Trash: listing `~/.Trash` needs Full Disk Access (see [`super::trash::can_empty`]).
+const MACOS: &[Category] = &[
+    Category::UserCache,
+    Category::UserLogs,
+    Category::XcodeDerivedData,
+    Category::OldDownloads,
+    Category::DevArtifacts,
+    Category::SystemCaches,
+];
+const OTHER: &[Category] = &[Category::OldDownloads, Category::DevArtifacts];
+
 impl Category {
-    pub const ALL: [Category; 11] = [
-        Category::UserTemp,
-        Category::WindowsTemp,
-        Category::BrowserCaches,
-        Category::CrashDumps,
-        Category::WerReports,
-        Category::ThumbnailCache,
-        Category::UpdateDownloads,
-        Category::DeliveryOptimization,
-        Category::RecycleBin,
-        Category::OldDownloads,
-        Category::DevArtifacts,
-    ];
+    /// The categories of `os`, in display order.
+    pub const fn for_os(os: Os) -> &'static [Category] {
+        match os {
+            Os::Windows => WINDOWS,
+            Os::Linux => LINUX,
+            Os::MacOs => MACOS,
+            Os::Other => OTHER,
+        }
+    }
+
+    /// The categories of this OS, in display order.
+    pub fn all() -> &'static [Category] {
+        Self::for_os(OS)
+    }
 
     pub fn title(self) -> &'static str {
         match self {
+            Category::UserCache => "User caches",
+            Category::UserLogs => "User logs",
+            Category::XcodeDerivedData => "Xcode DerivedData",
+            Category::SystemJournal => "System journal",
+            Category::PackageCache => "Package manager cache",
+            Category::SystemCaches => "System caches",
             Category::UserTemp => "User temp files older than 24 h",
             Category::WindowsTemp => "Windows temp",
             Category::BrowserCaches => "Browser caches",
@@ -59,6 +112,14 @@ impl Category {
 
     pub fn detail(self) -> &'static str {
         match self {
+            Category::UserCache if OS == Os::MacOs => "Everything in ~/Library/Caches; apps fill it again as needed",
+            Category::UserCache => "Everything in ~/.cache, browser caches included; apps fill it again as needed",
+            Category::UserLogs => "Everything in ~/Library/Logs, crash and diagnostic reports included",
+            Category::XcodeDerivedData => "Build products and indexes; Xcode makes them again on the next build",
+            Category::SystemJournal => "Logs in /var/log/journal; shrink them with journalctl --vacuum-time as root",
+            Category::PackageCache => "Downloaded apt, dnf or pacman packages; clear them with apt clean, dnf clean packages or paccache -r",
+            Category::SystemCaches => "/Library/Caches, shared by every user of this Mac",
+            Category::ThumbnailCache if OS != Os::Windows => "Thumbnails file managers and image viewers made; they are made again when needed",
             Category::UserTemp => "Files and folders in your temp folder that were not touched for a day",
             Category::WindowsTemp => "The system temp folder",
             Category::BrowserCaches => "Edge, Chrome and Firefox cache folders only; never profiles, passwords or history",
@@ -72,7 +133,7 @@ impl Category {
             Category::OldDownloads if cfg!(windows) => "Goes to the Recycle Bin; needs a scan that covers your Downloads folder",
             Category::OldDownloads => "Goes to the Trash; needs a scan that covers your Downloads folder",
             Category::DevArtifacts if cfg!(windows) => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Recycle Bin; needs a scan",
-            Category::DevArtifacts => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Trash; needs a scan",
+            Category::DevArtifacts => "node_modules, Rust target, __pycache__, Gradle/npm/pip/Yarn caches; goes to the Trash; needs a scan",
         }
     }
 
@@ -82,7 +143,13 @@ impl Category {
     }
 
     pub fn preselected(self) -> bool {
-        !matches!(self, Category::RecycleBin | Category::OldDownloads | Category::DevArtifacts)
+        !self.read_only() && !matches!(self, Category::RecycleBin | Category::OldDownloads | Category::DevArtifacts | Category::UserCache | Category::XcodeDerivedData)
+    }
+
+    /// Only root may clean it: measured and shown with a "needs root" label, never selectable and
+    /// never cleaned, even when TMOP runs as root (its own tool does that job properly).
+    pub fn read_only(self) -> bool {
+        matches!(self, Category::SystemJournal | Category::PackageCache | Category::SystemCaches)
     }
 
     /// Whole category needs administrator rights (CrashDumps and WerReports have admin-only items, see `CleanItem`).
@@ -205,6 +272,7 @@ fn dev_kind(tree: &Tree, node: u32, has_file: &dyn Fn(u32, bool) -> bool) -> Opt
         "target" if has_file(node, true) || has_file(n.parent, false) => Some("Rust target folder"),
         "caches" if pname == ".gradle" => Some("Gradle caches"),
         "npm-cache" => Some("npm cache"),
+        "__pycache__" if OS != Os::Windows => Some("Python bytecode cache"),
         "cache" if pname == "pip" => Some("pip cache"),
         "cache" if pname == "yarn" => Some("Yarn cache"),
         _ => None,
@@ -293,8 +361,84 @@ fn entries(dir: &Path, needs_admin: bool, keep: &dyn Fn(&str, Option<SystemTime>
     out
 }
 
-/// Everything except the Recycle Bin and the scan-based categories. Background thread.
+/// Everything except the Recycle Bin / Trash and the scan-based categories. Background thread.
 pub fn measure_fixed(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
+    if OS == Os::Windows {
+        return measure_windows(sys, now);
+    }
+    match UnixHome::current() {
+        Some(h) => measure_unix(OS, &h),
+        None => Category::all().iter().filter(|c| !c.needs_scan() && **c != Category::RecycleBin).map(|&c| Measured::failed(c, "no home folder")).collect(),
+    }
+}
+
+/// Where the Linux and macOS categories look: the home folder, the user cache folder and the
+/// folder the system locations hang off (`/`; a fixture folder in tests).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnixHome {
+    pub home: PathBuf,
+    pub cache: PathBuf,
+    pub root: PathBuf,
+}
+
+impl UnixHome {
+    /// `home` with the cache folder `xdg_cache` (`$XDG_CACHE_HOME`) when it is absolute, named like
+    /// a cache and neither `/` nor the home folder or above it; else `~/.cache`. A stray
+    /// `XDG_CACHE_HOME=$HOME` must never make the whole home folder a cache.
+    pub fn new(home: PathBuf, xdg_cache: Option<PathBuf>, root: PathBuf) -> Self {
+        let ok = |c: &PathBuf| c.is_absolute() && !home.starts_with(c) && c.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains("cache"));
+        let cache = xdg_cache.filter(ok).unwrap_or_else(|| home.join(".cache"));
+        UnixHome { home, cache, root }
+    }
+
+    /// This user's (`$HOME` or the passwd entry); `None` without a home folder or off Unix.
+    pub fn current() -> Option<UnixHome> {
+        #[cfg(unix)]
+        {
+            let xdg = if OS == Os::Linux { std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from) } else { None };
+            crate::platform::home().map(|h| UnixHome::new(h, xdg, PathBuf::from("/")))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+}
+
+/// The fixed-location categories of `os` (Linux or macOS) for `h`. The root-only ones are measured
+/// as far as they can be read; a missing location is an error row, not an empty one.
+pub fn measure_unix(os: Os, h: &UnixHome) -> Vec<Measured> {
+    let all = |_: &str, _: Option<SystemTime>| true;
+    let in_dir = |cat: Category, d: PathBuf| Measured::with_items(cat, entries(&d, false, &all));
+    let present = |cat: Category, dirs: &[&str], none: &str| {
+        let found: Vec<PathBuf> = dirs.iter().map(|d| d.split('/').fold(h.root.clone(), |p, c| p.join(c))).filter(|d| d.is_dir()).collect();
+        if found.is_empty() {
+            return Measured::failed(cat, none);
+        }
+        Measured::with_items(cat, found.iter().flat_map(|d| entries(d, false, &all)).collect())
+    };
+    let lib = h.home.join("Library");
+    let mut out = Vec::new();
+    for &cat in Category::for_os(os) {
+        out.push(match cat {
+            // Thumbnails are their own category.
+            Category::UserCache if os == Os::Linux => Measured::with_items(cat, entries(&h.cache, false, &|n, _| n != "thumbnails")),
+            Category::UserCache => in_dir(cat, lib.join("Caches")),
+            Category::ThumbnailCache => in_dir(cat, h.cache.join("thumbnails")),
+            Category::UserLogs => in_dir(cat, lib.join("Logs")),
+            Category::XcodeDerivedData => in_dir(cat, lib.join("Developer").join("Xcode").join("DerivedData")),
+            Category::SystemJournal => present(cat, &["var/log/journal", "run/log/journal"], "No journal on disk"),
+            Category::PackageCache => present(cat, &["var/cache/apt/archives", "var/cache/dnf", "var/cache/pacman/pkg"], "No apt, dnf or pacman cache"),
+            Category::SystemCaches => present(cat, &["Library/Caches"], "Not found"),
+            // The bin and the scan-based categories are measured elsewhere.
+            _ => continue,
+        });
+    }
+    out
+}
+
+/// The Windows locations ([`measure_fixed`] on Windows).
+fn measure_windows(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
     let all = |_: &str, _: Option<SystemTime>| true;
     let mut out = Vec::new();
 
@@ -477,10 +621,14 @@ mod tests {
                 i = n.parent;
             }
         }
-        Tree { root: PathBuf::from(r"c:\scan"), nodes, files: recs, names, extensions: vec![], method: ScanMethod::Walker }
+        Tree { root: scan_root(), nodes, files: recs, names, extensions: vec![], method: ScanMethod::Walker }
     }
 
-    #[cfg(windows)]
+    /// An absolute scan root on this host.
+    fn scan_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"c:\scan" } else { "/scan" })
+    }
+
     fn ticks(t: SystemTime) -> u64 {
         crate::pro::diskspace::system_to_filetime(t)
     }
@@ -526,6 +674,18 @@ mod tests {
         assert_eq!(m.bytes, 500 + 1 + 3 + 9);
     }
 
+    #[test]
+    fn pycache_is_a_dev_artifact_off_windows() {
+        // 0 scan, 1 app, 2 app/__pycache__, 3 app/node_modules, 4 app/node_modules/__pycache__
+        let dirs = [("scan", NO_PARENT), ("app", 0), ("__pycache__", 1), ("node_modules", 1), ("__pycache__", 3)];
+        let t = tree(&dirs, &[(2, "m.cpython-312.pyc", 40, 0), (4, "x.pyc", 2, 0)]);
+        assert_eq!(is_dev_artifact(&t, 2).is_some(), !cfg!(windows), "Windows keeps its 0.5 rules");
+        assert_eq!(is_dev_artifact(&t, 1), None);
+        // Inside node_modules it is covered by it.
+        let nodes: Vec<u32> = dev_artifacts(&t).items.iter().filter_map(|i| i.node).collect();
+        assert_eq!(nodes, if cfg!(windows) { vec![3] } else { vec![2, 3] });
+    }
+
     #[cfg(windows)]
     #[test]
     fn browser_cache_dirs_only_caches() {
@@ -543,7 +703,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(windows)]
     fn sandbox(tag: &str) -> PathBuf {
         let n = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let p = std::env::temp_dir().join(format!("tmop-clean-{tag}-{}-{n}", std::process::id()));
@@ -551,7 +710,6 @@ mod tests {
         p
     }
 
-    #[cfg(windows)]
     fn write(p: &Path, len: usize, age_days: u64) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         let f = std::fs::File::create(p).unwrap();
@@ -559,7 +717,6 @@ mod tests {
         f.set_modified(SystemTime::now() - Duration::from_secs(age_days * DAY)).unwrap();
     }
 
-    #[cfg(windows)]
     fn names_of(m: &Measured) -> Vec<String> {
         let mut v: Vec<String> = m.items.iter().map(|i| i.path.file_name().unwrap().to_string_lossy().to_string()).collect();
         v.sort();
@@ -613,7 +770,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(windows)]
+    /// A fixture home and system root: (home, root, UnixHome).
+    fn fixture_home(tag: &str) -> (PathBuf, PathBuf, UnixHome) {
+        let base = sandbox(tag);
+        let (home, root) = (base.join("home").join("me"), base.join("root"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let h = UnixHome::new(home.clone(), None, root.clone());
+        (home, root, h)
+    }
+
+    #[test]
+    fn linux_categories_on_a_fixture_home() {
+        let (home, root, h) = fixture_home("linux");
+        assert_eq!(h.cache, home.join(".cache"));
+        let at = |base: &Path, rel: &str| rel.split('/').fold(base.to_path_buf(), |p, c| p.join(c));
+        write(&at(&home, ".cache/pip/http/a"), 100, 0);
+        write(&at(&home, ".cache/google-chrome/Default/Cache/f_0001"), 30, 0);
+        write(&at(&home, ".cache/mozilla/firefox/x.default/cache2/entries/e1"), 20, 0);
+        write(&at(&home, ".cache/fontconfig.lock"), 1, 0);
+        write(&at(&home, ".cache/thumbnails/normal/0123.png"), 8, 0);
+        write(&at(&home, ".cache/thumbnails/large/4567.png"), 16, 0);
+        write(&at(&home, ".config/app/settings.ini"), 5, 0);
+        write(&at(&root, "var/log/journal/0abc/system.journal"), 64, 0);
+        write(&at(&root, "var/cache/apt/archives/pkg_1.0_amd64.deb"), 50, 0);
+        std::fs::create_dir_all(at(&root, "var/cache/apt/archives/partial")).unwrap();
+        let got = measure_unix(Os::Linux, &h);
+        let cats: Vec<Category> = got.iter().map(|m| m.cat).collect();
+        assert_eq!(cats, vec![Category::UserCache, Category::ThumbnailCache, Category::SystemJournal, Category::PackageCache], "the bin and the scan-based ones are measured elsewhere");
+        let get = |c: Category| got.iter().find(|m| m.cat == c).unwrap();
+        // Browser caches are part of ~/.cache; thumbnails are not listed twice; ~/.config is never touched.
+        assert_eq!(names_of(get(Category::UserCache)), vec!["fontconfig.lock", "google-chrome", "mozilla", "pip"]);
+        assert_eq!(get(Category::UserCache).bytes, 151);
+        assert_eq!(names_of(get(Category::ThumbnailCache)), vec!["large", "normal"]);
+        assert_eq!(get(Category::ThumbnailCache).bytes, 24);
+        assert_eq!((names_of(get(Category::SystemJournal)), get(Category::SystemJournal).bytes), (vec!["0abc".to_string()], 64));
+        assert_eq!(names_of(get(Category::PackageCache)), vec!["partial", "pkg_1.0_amd64.deb"]);
+        assert!(got.iter().all(|m| m.items.iter().all(|i| !i.needs_admin && i.path.starts_with(if m.cat.read_only() { &root } else { &home }))));
+        // Nothing there: empty user rows, error rows for the root-only ones.
+        let (_, _, bare) = fixture_home("linux-bare");
+        let got = measure_unix(Os::Linux, &bare);
+        assert!(got.iter().all(|m| m.items.is_empty()));
+        assert!(got.iter().all(|m| m.error.is_some() == m.cat.read_only()), "{got:?}");
+        let _ = std::fs::remove_dir_all(home.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(bare.home.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn macos_categories_on_a_fixture_home() {
+        let (home, root, h) = fixture_home("macos");
+        let at = |base: &Path, rel: &str| rel.split('/').fold(base.to_path_buf(), |p, c| p.join(c));
+        write(&at(&home, "Library/Caches/com.example.app/Cache.db"), 100, 0);
+        write(&at(&home, "Library/Caches/Homebrew/downloads/x.tar.gz"), 40, 0);
+        write(&at(&home, "Library/Logs/DiagnosticReports/a.ips"), 7, 0);
+        write(&at(&home, "Library/Developer/Xcode/DerivedData/App-abc/Build/x.o"), 300, 0);
+        write(&at(&home, "Library/Application Support/App/data.db"), 9, 0);
+        write(&at(&root, "Library/Caches/com.apple.x/c"), 11, 0);
+        // Linux locations mean nothing on macOS.
+        write(&at(&home, ".cache/pip/a"), 5, 0);
+        let got = measure_unix(Os::MacOs, &h);
+        let cats: Vec<Category> = got.iter().map(|m| m.cat).collect();
+        assert_eq!(cats, vec![Category::UserCache, Category::UserLogs, Category::XcodeDerivedData, Category::SystemCaches]);
+        let get = |c: Category| got.iter().find(|m| m.cat == c).unwrap();
+        assert_eq!(names_of(get(Category::UserCache)), vec!["Homebrew", "com.example.app"]);
+        assert_eq!(get(Category::UserCache).bytes, 140);
+        assert_eq!(names_of(get(Category::UserLogs)), vec!["DiagnosticReports"]);
+        assert_eq!((names_of(get(Category::XcodeDerivedData)), get(Category::XcodeDerivedData).bytes), (vec!["App-abc".to_string()], 300));
+        assert_eq!((names_of(get(Category::SystemCaches)), get(Category::SystemCaches).bytes), (vec!["com.apple.x".to_string()], 11));
+        let _ = std::fs::remove_dir_all(home.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn xdg_cache_home_only_when_it_is_a_cache_folder() {
+        let abs = |s: &str| PathBuf::from(if cfg!(windows) { format!("c:{s}") } else { s.to_string() });
+        let home = abs("/home/me");
+        let cache = |x: Option<&str>| UnixHome::new(home.clone(), x.map(abs), abs("/")).cache;
+        assert_eq!(cache(None), home.join(".cache"));
+        assert_eq!(cache(Some("/fast/me-cache")), abs("/fast/me-cache"));
+        assert_eq!(cache(Some("/home/me/.local/cache")), abs("/home/me/.local/cache"));
+        // Never the home folder, anything above it, or a folder not named like a cache.
+        for bad in ["/home/me", "/home", "/", "/home/me/Documents"] {
+            assert_eq!(cache(Some(bad)), home.join(".cache"), "{bad}");
+        }
+        assert_eq!(UnixHome::new(home.clone(), Some(PathBuf::from("rel/cache")), abs("/")).cache, home.join(".cache"));
+    }
+
     #[test]
     fn old_downloads_from_tree() {
         let now = SystemTime::now();
@@ -623,7 +864,9 @@ mod tests {
         let dirs = [("scan", NO_PARENT), ("Downloads", 0), ("oldsub", 1), ("newsub", 1)];
         let files = [(1, "old.zip", 100, old), (1, "new.zip", 200, new), (2, "a.bin", 7, old), (3, "b.bin", 9, new), (3, "c.bin", 9, old)];
         let t = tree(&dirs, &files);
-        let sys = SystemPaths { known: vec![(r"c:\scan\downloads".into(), "Downloads")], ..Default::default() };
+        // The known folder as the rules keep it (lower-case on Windows and macOS).
+        let dl = crate::pro::diskdelete::norm_path(&scan_root().join("Downloads"));
+        let sys = SystemPaths { known: vec![(dl, "Downloads")], ..Default::default() };
         let m = old_downloads(&t, &sys, now);
         assert!(m.error.is_none());
         let mut got = names_of(&m);
@@ -632,20 +875,47 @@ mod tests {
         assert_eq!(m.bytes, 107);
         assert!(m.items.iter().any(|i| i.is_dir && i.node == Some(2)) && m.items.iter().any(|i| i.file.is_some()));
         // Downloads outside the scan.
-        let other = SystemPaths { known: vec![(r"d:\users\me\downloads".into(), "Downloads")], ..Default::default() };
+        let elsewhere = if cfg!(windows) { r"d:\users\me\downloads" } else { "/home/me/Downloads" };
+        let other = SystemPaths { known: vec![(elsewhere.into(), "Downloads")], ..Default::default() };
         assert!(old_downloads(&t, &other, now).error.is_some());
     }
 
     #[test]
-    fn category_modes_and_preselection() {
-        let pre: Vec<bool> = Category::ALL.iter().map(|c| c.preselected()).collect();
+    fn category_lists_per_os() {
+        use Category::*;
+        // Windows keeps its 0.5 list, order and preselection.
+        assert_eq!(Category::for_os(Os::Windows), &[UserTemp, WindowsTemp, BrowserCaches, CrashDumps, WerReports, ThumbnailCache, UpdateDownloads, DeliveryOptimization, RecycleBin, OldDownloads, DevArtifacts]);
+        let pre: Vec<bool> = Category::for_os(Os::Windows).iter().map(|c| c.preselected()).collect();
         assert_eq!(pre, vec![true, true, true, true, true, true, true, true, false, false, false]);
-        for c in Category::ALL {
-            assert_eq!(c.mode() == Mode::Recycle, matches!(c, Category::OldDownloads | Category::DevArtifacts), "{c:?}");
-            assert_eq!(c.needs_scan(), c.mode() == Mode::Recycle);
+        assert_eq!(Category::for_os(Os::Linux), &[UserCache, ThumbnailCache, RecycleBin, OldDownloads, DevArtifacts, SystemJournal, PackageCache]);
+        assert_eq!(Category::for_os(Os::MacOs), &[UserCache, UserLogs, XcodeDerivedData, OldDownloads, DevArtifacts, SystemCaches]);
+        assert_eq!(Category::all(), Category::for_os(OS));
+        // No Windows-only category leaks elsewhere, and no category needs administrator off Windows.
+        for os in [Os::Linux, Os::MacOs, Os::Other] {
+            for c in Category::for_os(os) {
+                assert!(!Category::for_os(Os::Windows).contains(c) || matches!(c, ThumbnailCache | RecycleBin | OldDownloads | DevArtifacts), "{c:?}");
+                assert!(!c.needs_admin(), "{c:?}");
+            }
+        }
+        // Root-only rows: never preselected, never in the Windows list.
+        for c in [SystemJournal, PackageCache, SystemCaches] {
+            assert!(c.read_only() && !c.preselected() && !Category::for_os(Os::Windows).contains(&c));
+        }
+        assert!(Category::for_os(Os::Windows).iter().all(|c| !c.read_only()));
+    }
+
+    #[test]
+    fn category_modes_and_preselection() {
+        for os in [Os::Windows, Os::Linux, Os::MacOs] {
+            for &c in Category::for_os(os) {
+                assert_eq!(c.mode() == Mode::Recycle, matches!(c, Category::OldDownloads | Category::DevArtifacts), "{c:?}");
+                assert_eq!(c.needs_scan(), c.mode() == Mode::Recycle);
+            }
         }
         assert!(Category::WindowsTemp.needs_admin() && Category::UpdateDownloads.needs_admin() && Category::DeliveryOptimization.needs_admin());
         assert!(!Category::UserTemp.needs_admin() && !Category::CrashDumps.needs_admin());
+        assert!(Category::ThumbnailCache.preselected() && Category::UserLogs.preselected());
+        assert!(!Category::UserCache.preselected() && !Category::XcodeDerivedData.preselected());
     }
 
     #[cfg(windows)]
@@ -657,7 +927,8 @@ mod tests {
     #[test]
     fn trash_category_per_os() {
         assert_eq!(Category::RecycleBin.supported(), cfg!(any(windows, target_os = "linux")));
-        assert!(Category::ALL.iter().filter(|c| **c != Category::RecycleBin).all(|c| c.supported()));
+        assert!(Category::all().iter().filter(|c| **c != Category::RecycleBin).all(|c| c.supported()));
+        assert!(Category::all().iter().all(|c| c.supported()), "every listed category is offered");
         let word = crate::platform::trash_word();
         assert!(Category::RecycleBin.title().ends_with(word) && Category::DevArtifacts.detail().contains(word));
     }
