@@ -9,7 +9,7 @@ use super::theme;
 use super::widgets::{self, Button};
 use super::{App, FrameData, Page};
 use crate::metrics::Series;
-use crate::pro::inventory::{Sections, StartupApp};
+use crate::pro::inventory::{keys, Sections, StartupApp};
 use crate::pro::Loader;
 use crate::process::{format_bytes, format_cpu_time, format_rate, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
@@ -201,11 +201,11 @@ fn report_text(sections: &Sections) -> String {
 
 /// Values that are versions, builds, names or sizes read better in the mono font.
 fn is_mono(section: &str, key: &str) -> bool {
-    if section == "Display adapters" {
+    if section == keys::GPUS {
         return true;
     }
     let k = key.to_lowercase();
-    ["build", "version", "identifier", "speed", "memory", "logical", "computer name", "root", "date", "bios"].iter().any(|w| k.contains(w))
+    ["build", "kernel", "version", "identifier", "speed", "memory", "logical", "computer name", "root", "date", "bios"].iter().any(|w| k.contains(w))
 }
 
 /// Rows of stat tiles that `stat_grid` draws for `n` tiles in `width` (see [`kit::stat_grid`]).
@@ -243,7 +243,7 @@ impl App {
         let get = |sec: &str, k: &str| -> String {
             sections.as_ref().and_then(|s| s.iter().find(|x| x.0 == sec)).and_then(|x| x.1.iter().find(|r| r.0 == k)).map(|r| r.1.clone()).unwrap_or_default()
         };
-        let computer = Some(get("Device", "Computer name")).filter(|c| !c.is_empty()).or_else(crate::platform::hostname).unwrap_or_default();
+        let computer = Some(get(keys::DEVICE, keys::COMPUTER)).filter(|c| !c.is_empty()).or_else(crate::platform::hostname).unwrap_or_default();
         let read = inv.sysinfo_read_at.map(|(h, m, s)| format!("read {h:02}:{m:02}:{s:02}")).unwrap_or_default();
         let body = self.page_title(ui, &pal, "System Info", &subtitle(&[computer.clone(), read, Page::SystemInfo.shortcut().into()]));
         let mut refresh = false;
@@ -267,13 +267,16 @@ impl App {
         }
         let s = fd.snap;
         let st = theme::status(&pal);
-        let edition = get("Operating system", "Edition");
-        let version = get("Operating system", "Version");
-        let windows = subtitle_free(&[edition.strip_prefix("Windows ").unwrap_or(&edition).to_string(), version.clone()]);
-        let installed = get("Processor and memory", "Installed memory");
+        let edition = get(keys::OS, keys::EDITION);
+        let version = get(keys::OS, keys::VERSION);
+        // "Windows" over "11 Pro 24H2", "macOS" over "Sequoia 15.1", "Linux" over "Ubuntu 24.04.5 LTS".
+        let os = crate::platform::os_name();
+        let os_value = subtitle_free(&[edition.strip_prefix(&format!("{os} ")).unwrap_or(&edition).to_string(), version.clone()]);
+        let build_word = if crate::platform::OS == crate::platform::Os::Linux { "kernel" } else { "build" };
+        let installed = get(keys::CPU_MEM, keys::INSTALLED_MEM);
         let tiles = [
-            StatTile::new("Windows", windows, format!("build {}", get("Operating system", "OS build"))),
-            StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get("Processor and memory", "Processor") } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
+            StatTile::new(os, os_value, format!("{build_word} {}", get(keys::OS, keys::BUILD))),
+            StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get(keys::CPU_MEM, keys::PROCESSOR) } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
             StatTile::new("Memory", format_bytes(s.memory.total as f64), if installed.is_empty() { String::new() } else { format!("{installed} installed") }).bar(fd.smooth.memory / 100.0, theme::darken_for(&pal, theme::INDIGO)),
             StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::platform::local_time(), s.uptime))])),
         ];
@@ -283,7 +286,7 @@ impl App {
         let cols = (((w + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).clamp(1, 3);
         let card_w = (w - CARD_GAP * (cols - 1) as f32) / cols as f32;
         // Heading row + rows of 22 px; the Device card also has to clear its 96 x 64 drawing.
-        let heights: Vec<f32> = sections.iter().map(|(title, items)| (40.0 + items.len() as f32 * 22.0 + 18.0).max(if *title == "Device" { 96.0 } else { 0.0 })).collect();
+        let heights: Vec<f32> = sections.iter().map(|(title, items)| (40.0 + items.len() as f32 * 22.0 + 18.0).max(if *title == keys::DEVICE { 96.0 } else { 0.0 })).collect();
         let (at, cards_h) = masonry(&heights, cols);
         let total = tiles_height(w, tiles.len(), 190.0) + BLOCK_GAP + cards_h;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area).id_salt("sysinfo-scroll"), |ui| {
@@ -302,7 +305,7 @@ impl App {
                             (k.clone(), v.clone(), is_mono(title, k), good.then_some(st.ok))
                         })
                         .collect();
-                    if *title == "Device" {
+                    if *title == keys::DEVICE {
                         hardware::draw(&p, Rect::from_min_size(pos2(r.right() - 22.0 - 96.0, r.top() + 14.0), vec2(96.0, 64.0)), Hardware::Mainboard, pal.text_rail());
                         // The first rows sit beside the drawing.
                         let near = rows.len().min(2);
@@ -422,13 +425,14 @@ impl App {
         let st = theme::status(&pal);
         let list: &[StartupApp] = inv.startup.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let enabled = list.iter().filter(|a| a.enabled).count();
-        let folder = list.iter().filter(|a| a.location.starts_with("Startup folder")).count();
+        let [(pre_a, title_a, sub_a), (pre_b, title_b, sub_b)] = crate::pro::inventory::STARTUP_GROUPS;
+        let count = |prefix: &str| list.iter().filter(|a| a.location.starts_with(prefix)).count();
         let n = list.len().max(1) as f32;
         let tiles = [
             StatTile::new("Enabled", enabled.to_string(), format!("of {} startup entries", list.len())).bar(enabled as f32 / n, st.ok),
-            StatTile::new("Disabled", (list.len() - enabled).to_string(), "Turned off in Windows settings").bar((list.len() - enabled) as f32 / n, st.warn),
-            StatTile::new("Registry", (list.len() - folder).to_string(), "Run keys"),
-            StatTile::new("Startup folders", folder.to_string(), "Shortcuts in Startup"),
+            StatTile::new("Disabled", (list.len() - enabled).to_string(), crate::pro::inventory::STARTUP_DISABLED).bar((list.len() - enabled) as f32 / n, st.warn),
+            StatTile::new(title_a, count(pre_a).to_string(), sub_a),
+            StatTile::new(title_b, count(pre_b).to_string(), sub_b),
         ];
         let used = kit::stat_grid(&p, area, &pal, &tiles, 190.0);
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), area.max);

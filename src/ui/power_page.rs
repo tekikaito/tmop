@@ -7,6 +7,7 @@ use super::theme::{self, with_alpha};
 use super::widgets::{self, draw_graph, tracked_text, Graph, GraphLine, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
+use crate::platform::Os;
 use crate::pro::power::Battery;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
 use std::time::Duration;
@@ -18,7 +19,7 @@ impl App {
     pub fn power_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let st = theme::status(&pal);
-        let body = self.page_title(ui, &pal, "Power & Freq", "clocks, battery and the active power plan");
+        let body = self.page_title(ui, &pal, "Power & Freq", &format!("clocks, battery and the active {}", crate::pro::power::scheme_words().0.to_lowercase()));
         let (tools, area) = page_layout(body, 100.0);
         let mut refresh = false;
         toolbar(ui, tools, |ui| refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked());
@@ -70,17 +71,20 @@ impl App {
             }
             tiles.push(core);
         }
+        let (scheme, schemes) = crate::pro::power::scheme_words();
         tiles.push(StatTile::new(
-            "Power plan",
+            scheme,
             info.as_ref().map(|i| i.scheme_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "\u{2014}".into()),
-            info.as_ref().map(|i| format!("{} plans installed", i.schemes.len())).unwrap_or_else(|| "Reading power policy\u{2026}".into()),
+            info.as_ref().map(|i| if i.schemes.is_empty() { format!("No {schemes} offered") } else { format!("{} {schemes} installed", i.schemes.len()) }).unwrap_or_else(|| "Reading power policy\u{2026}".into()),
         ));
         let (rects, tiles_h) = tile_rects(area, tiles.len(), TILE_W);
         for (i, (r, t)) in rects.iter().zip(&tiles).enumerate() {
             stat_tile(&p, *r, &pal, &t.label, &t.value, &t.sub, t.bar, None);
             if let (0, Some(b)) = (i, &battery) {
                 battery_icon(&p, Rect::from_min_size(pos2(r.right() - 16.0 - 54.0, r.top() + 14.0), vec2(54.0, 36.0)), pal.text_rail(), st.ok, b.percent as f32 / 100.0);
-                let sub = if b.charging {
+                let sub = if b.charging && b.rate_mw <= 0 {
+                    "Charging".to_string()
+                } else if b.charging {
                     format!("Charging {:.1} W", b.rate_mw as f32 / 1000.0)
                 } else if b.rate_mw != 0 {
                     format!("Discharging {:.1} W", -(b.rate_mw as f32) / 1000.0)
@@ -112,17 +116,28 @@ impl App {
         };
 
         let low = hsplit(low_row, &[3.0, 2.0], 14.0);
-        let content = section_card(&p, low[0], &pal, "Processor power policy", info.as_ref().map(|i| i.scheme_name.as_str()).unwrap_or(""));
+        let policy_title = match crate::platform::OS {
+            Os::Linux => "CPU frequency policy",
+            Os::MacOs => "Power settings",
+            _ => "Processor power policy",
+        };
+        let content = section_card(&p, low[0], &pal, policy_title, info.as_ref().map(|i| i.scheme_name.as_str()).unwrap_or(""));
         match &info {
             Some(i) if !i.policy.is_empty() => {
+                // One value column when the OS does not split by power source.
+                let split = i.policy.iter().any(|r| !r.dc.is_empty());
                 let x_dc = content.right();
-                let x_ac = content.left() + content.width() * 0.72;
+                let x_ac = if split { content.left() + content.width() * 0.72 } else { x_dc };
                 let head = |x: f32, anchor: Align2, text: &str| {
                     tracked_text(&p, pos2(x, content.top() + 10.0), anchor, &text.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.08);
                 };
                 head(content.left(), Align2::LEFT_CENTER, "Setting");
-                head(x_ac, Align2::RIGHT_CENTER, "Plugged in");
-                head(x_dc, Align2::RIGHT_CENTER, "On battery");
+                if split {
+                    head(x_ac, Align2::RIGHT_CENTER, "Plugged in");
+                    head(x_dc, Align2::RIGHT_CENTER, "On battery");
+                } else {
+                    head(x_ac, Align2::RIGHT_CENTER, "Current");
+                }
                 for (k, row) in i.policy.iter().enumerate() {
                     let top = content.top() + 24.0 + k as f32 * 30.0;
                     if top + 30.0 > content.bottom() + 1.0 {
@@ -132,14 +147,19 @@ impl App {
                     let y = top + 15.0;
                     p.text(pos2(content.left(), y), Align2::LEFT_CENTER, row.name, theme::ui(13.0), pal.text_table());
                     p.text(pos2(x_ac, y), Align2::RIGHT_CENTER, &row.ac, theme::mono(12.0), pal.text_table());
-                    p.text(pos2(x_dc, y), Align2::RIGHT_CENTER, &row.dc, theme::mono(12.0), pal.text_table());
+                    if split {
+                        p.text(pos2(x_dc, y), Align2::RIGHT_CENTER, &row.dc, theme::mono(12.0), pal.text_table());
+                    }
                 }
             }
             _ => empty_state(&p, content, &pal, self.pro.power.error().unwrap_or("Reading power policy\u{2026}")),
         }
 
-        let content = section_card(&p, low[1], &pal, "Power plans", "");
+        let content = section_card(&p, low[1], &pal, &format!("{scheme}s"), "");
         let list = Rect::from_min_max(content.min, pos2(content.right(), content.bottom() - 20.0));
+        if info.as_ref().is_some_and(|i| i.schemes.is_empty()) {
+            empty_state(&p, list, &pal, &format!("No {schemes} offered"));
+        }
         if let Some(i) = &info {
             for (k, (guid, name, active)) in i.schemes.iter().enumerate() {
                 let r = Rect::from_min_size(pos2(list.left(), list.top() + k as f32 * 46.0), vec2(list.width(), 40.0));
@@ -153,7 +173,8 @@ impl App {
                 }
             }
         }
-        widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, "The active plan is read from powercfg; switch plans in Windows settings.", theme::ui(11.0), pal.text_faint, content.width());
+        let note = info.as_ref().map(|i| i.note.as_str()).filter(|n| !n.is_empty()).unwrap_or(crate::pro::power::DEFAULT_NOTE);
+        widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, note, theme::ui(11.0), pal.text_faint, content.width());
     }
 
     /// The "Clock history" card: average clock and fastest core over the history, the base clock

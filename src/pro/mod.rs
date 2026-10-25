@@ -8,7 +8,7 @@
 //! * [`recorder`]     flight recorder ring buffer and CSV recording
 //! * [`power`]        power scheme, processor policy, battery
 //! * [`connections`]  TCP/UDP endpoints with owning process
-//! * [`apps`]         installed applications (Uninstall registry keys)
+//! * [`apps`]         installed applications (Uninstall keys, package databases, .app bundles)
 //! * [`drivers`]      kernel driver services and loaded kernel modules
 //! * [`cleanup`]      Disk Space cleanup categories and their measuring
 //! * [`volcache`]     Windows Disk Cleanup handlers (helper process, `--volume-caches=`)
@@ -16,6 +16,7 @@
 //! * [`walker`]       parallel directory walker (scan method otherwise)
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
 //! * [`inventory`]    system info, services, startup apps
+//! * [`sysfmt`]       pure parsers for os-release, `.desktop` files and XML property lists
 
 pub mod apps;
 pub mod bench;
@@ -29,6 +30,7 @@ pub mod inventory;
 pub mod mft;
 pub mod power;
 pub mod recorder;
+pub mod sysfmt;
 #[cfg(windows)]
 pub(crate) mod restartmgr;
 pub mod volcache;
