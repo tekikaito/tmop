@@ -1442,11 +1442,24 @@ pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color3
     spark_lines(p, rect, lines, 0.0, true, |_| true);
 }
 
+/// Narrowest spacing of the samples of a live sparkline: a long history shows only its newest part.
+pub const SPARK_MIN_PX: f32 = 2.0;
+
+/// How many of `len` samples (history `cap`) a live sparkline `width` px wide shows.
+pub fn spark_visible(width: f32, len: usize, cap: usize) -> usize {
+    let px = (width / (cap.max(len).max(2) - 1) as f32).max(SPARK_MIN_PX);
+    len.min((width / px).floor() as usize + 1)
+}
+
 fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, dashed_at: impl Fn(usize) -> bool) {
-    let n = lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0);
-    if n < 2 {
+    if lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0) < 2 {
         return;
     }
+    // A live series keeps a fixed time scale (its full history, at least SPARK_MIN_PX per sample), so
+    // it grows in from the right instead of stretching (every point moving) while the history fills.
+    let n = lines.iter().map(|(s, _, _)| if live { s.capacity.max(s.values.len()) } else { s.values.len() }).max().unwrap_or(2).max(2);
+    let px = rect.width() / (n - 1) as f32;
+    let px = if live { px.max(SPARK_MIN_PX) } else { px };
     let smooth = SPARK_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
     let (phase, glide) = if live { spark_glide() } else { (0.0, false) };
     for (i, (series, color, range)) in lines.iter().enumerate() {
@@ -1454,7 +1467,7 @@ fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, 
         let color = spark_color(i, *color);
         let mut g = Graph::new(vec![GraphLine { series, color, range: *range }]);
         g.regions = 1;
-        g.px_per_update = rect.width() / (n - 1) as f32;
+        g.px_per_update = px;
         g.bloom = 0.0;
         g.markers = false;
         g.smooth = smooth;
@@ -2033,6 +2046,15 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 mod tests {
     use super::*;
     use crate::metrics::Series;
+
+    #[test]
+    fn live_sparklines_keep_a_fixed_scale() {
+        // 960-sample history in 200 px: 2 px per sample, so at most 101 samples show.
+        assert_eq!(spark_visible(200.0, 10, 960), 10);
+        assert_eq!(spark_visible(200.0, 960, 960), 101);
+        // A short history spans the whole width.
+        assert_eq!(spark_visible(200.0, 60, 60), 60);
+    }
 
     fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {
         let ctx = egui::Context::default();

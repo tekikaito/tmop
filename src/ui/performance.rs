@@ -299,7 +299,7 @@ impl App {
             }
             y += DEVICE_CARD_H + 6.0;
         }
-        let span = span_text(fd.hist.cpu.values.len(), self.settings.update_speed().interval());
+        let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.settings.update_speed().interval());
         p.text(pos2(list.left() + 2.0, y + 4.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
         let button = Rect::from_min_size(pos2(list.left(), y + 26.0), vec2(120.0, 28.0));
         if kit::row_ui(ui, button, |ui| Button::ghost("Refresh").size(ButtonSize::Compact).icon(Icon::Refresh).show(ui, &pal).clicked()) {
