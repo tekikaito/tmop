@@ -1320,6 +1320,21 @@ pub fn set_spark_smooth(on: bool) {
     SPARK_SMOOTH.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// How far the newest sample has scrolled in (0..1 of an update interval, as `f32` bits) and whether
+/// live sparklines glide it in; set once per frame from the update clock.
+static SPARK_PHASE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SPARK_GLIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_spark_glide(phase: f32, glide: bool) {
+    SPARK_PHASE.store(phase.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    SPARK_GLIDE.store(glide, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The frame's glide for a graph of live samples: (phase, glide).
+pub fn spark_glide() -> (f32, bool) {
+    (f32::from_bits(SPARK_PHASE.load(std::sync::atomic::Ordering::Relaxed)), SPARK_GLIDE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it,
 /// round-capped.
 pub fn ring(p: &egui::Painter, center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, track: Color32) {
@@ -1414,31 +1429,62 @@ pub fn spark_color(i: usize, color: Color32) -> Color32 {
 /// Each line is `(series, colour, (low, high))`. With `dashed_second` the second series is dashed
 /// and unfilled (network down solid, up dashed).
 pub fn sparkline(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_second: bool) {
-    spark_lines(p, rect, lines, fill, |i| dashed_second && i == 1);
+    spark_lines(p, rect, lines, fill, true, true, |i| dashed_second && i == 1);
+}
+
+/// [`sparkline`] for a series that is not sampled live (e.g. past benchmark results): no glide.
+pub fn sparkline_static(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
+    spark_lines(p, rect, lines, fill, false, false, |_| false);
 }
 
 /// [`sparkline`] with every line dashed and unfilled (`graphs.dashedSummary`).
 pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))]) {
-    spark_lines(p, rect, lines, 0.0, |_| true);
+    spark_lines(p, rect, lines, 0.0, true, true, |_| true);
 }
 
-fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_at: impl Fn(usize) -> bool) {
-    let n = lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0);
-    if n < 2 {
+/// [`sparkline`] for live samples on a clock of their own (Docker stats): fixed scale, no glide.
+pub fn sparkline_unsynced(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
+    spark_lines(p, rect, lines, fill, true, false, |_| false);
+}
+
+/// Spacing of the samples of a live sparkline whose history would be packed denser than 1 px per
+/// sample: it shows only the newest part of the history.
+pub const SPARK_MIN_PX: f32 = 2.0;
+
+/// Px per sample of a live sparkline `width` px wide over a history of `n` samples.
+fn spark_px(width: f32, n: usize) -> f32 {
+    let px = width / (n.max(2) - 1) as f32;
+    if px < 1.0 { SPARK_MIN_PX } else { px }
+}
+
+/// How many of `len` samples (history `cap`) a live sparkline `width` px wide shows.
+pub fn spark_visible(width: f32, len: usize, cap: usize) -> usize {
+    len.min((width / spark_px(width, cap.max(len))).floor() as usize + 1)
+}
+
+fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, glide: bool, dashed_at: impl Fn(usize) -> bool) {
+    if lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0) < 2 {
         return;
     }
+    // A live series keeps a fixed time scale (its full history, see spark_px), so it grows in from
+    // the right instead of stretching (every point moving) while the history fills.
+    let n = lines.iter().map(|(s, _, _)| if live { s.capacity.max(s.values.len()) } else { s.values.len() }).max().unwrap_or(2).max(2);
+    let px = if live { spark_px(rect.width(), n) } else { rect.width() / (n - 1) as f32 };
     let smooth = SPARK_SMOOTH.load(std::sync::atomic::Ordering::Relaxed);
+    let (phase, glide) = if glide { spark_glide() } else { (0.0, false) };
     for (i, (series, color, range)) in lines.iter().enumerate() {
         let dashed = dashed_at(i);
         let color = spark_color(i, *color);
         let mut g = Graph::new(vec![GraphLine { series, color, range: *range }]);
         g.regions = 1;
-        g.px_per_update = rect.width() / (n - 1) as f32;
+        g.px_per_update = px;
         g.bloom = 0.0;
         g.markers = false;
         g.smooth = smooth;
         g.line_width = 1.4;
         g.dashed = dashed;
+        g.phase = phase;
+        g.glide = glide;
         g.fill = if dashed { 0.0 } else { fill };
         draw_graph(p, rect, &g);
     }
@@ -2010,6 +2056,17 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 mod tests {
     use super::*;
     use crate::metrics::Series;
+
+    #[test]
+    fn live_sparklines_keep_a_fixed_scale() {
+        // 960-sample history in 200 px: 2 px per sample, so at most 101 samples show.
+        assert_eq!(spark_visible(200.0, 10, 960), 10);
+        assert_eq!(spark_visible(200.0, 960, 960), 101);
+        // A short history spans the whole width.
+        assert_eq!(spark_visible(200.0, 60, 60), 60);
+        // Down to 1 px per sample the whole history fits (a 60 s trend in 84 px).
+        assert_eq!(spark_visible(84.0, 60, 60), 60);
+    }
 
     fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {
         let ctx = egui::Context::default();

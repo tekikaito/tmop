@@ -177,7 +177,8 @@ impl App {
             }
             p.text(pos2(graph.left() - 8.0, y), Align2::RIGHT_CENTER, if k == 0 { "0".to_string() } else { format!("{:.1}", k as f32 * step / 1000.0) }, theme::mono(10.0), pal.text_faint);
         }
-        let px = graph.width() / (n - 1) as f32;
+        // The scale of the full history, so the trace grows in from the right while it fills.
+        let px = graph.width() / (fd.hist.clock.capacity.max(n).max(2) - 1) as f32;
         let smooth = self.settings.graphs.smooth_curves;
         let trace = |series: &Series, color: Color32, width: f32, fill: f32| {
             let mut g = Graph::new(vec![GraphLine { series, color, range: (0.0, top) }]);
@@ -188,6 +189,7 @@ impl App {
             g.smooth = smooth;
             g.line_width = width;
             g.fill = fill;
+            (g.phase, g.glide) = (fd.phase, fd.glide);
             draw_graph(&p, graph, &g);
         };
         if base > 0.0 {
