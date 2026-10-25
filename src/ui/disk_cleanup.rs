@@ -13,11 +13,12 @@ use crate::pro::cleanup::{self, Category, Measured};
 use crate::pro::diskdelete::{self, Assessed, Mode, Report, SystemPaths, Target, Verdict};
 use crate::pro::diskspace::Tree;
 use crate::pro::volcache::{self, Handler};
-use crate::pro::Loader;
+use crate::pro::{trash, Loader};
+use crate::platform::{elevation_word, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -49,11 +50,11 @@ pub struct CatSel {
 #[derive(Clone)]
 pub struct CleanAssess {
     pub id: u64,
-    /// Assessed items per `CleanPending::cats` entry, same order.
+    /// Assessed items per `CleanPending::cats` entry, same order. Items of the Recycle Bin / Trash
+    /// categories on a volume without one are Blocked with the reason (skipped, never deleted
+    /// permanently instead).
     pub items: Vec<Vec<Assessed>>,
-    /// Every drive of the Recycle Bin categories has a Recycle Bin.
-    pub bin_ok: bool,
-    /// Every such drive has a Recycle Bin size limit on record (else large items may be deleted for good).
+    /// Every bin those items go to has a size limit on record (else large items may be deleted for good).
     pub bin_capped: bool,
 }
 
@@ -109,8 +110,9 @@ pub struct CleanDone {
 
 impl CleanupUi {
     /// After a Clean up: drop what it deleted from the fixed locations instead of measuring them all again
-    /// (seconds), take the Recycle Bin read by the job, and query only the handlers it changed.
-    pub fn after_clean(&mut self, report: &Report, done: CleanDone) {
+    /// (seconds), take the Recycle Bin read by the job, and query only the handlers it changed (only with
+    /// `volcache`: elsewhere no handler query runs that would clear the flag again).
+    pub fn after_clean(&mut self, report: &Report, done: CleanDone, volcache: bool) {
         let gone: HashSet<&std::path::Path> = report.deleted.iter().map(|t| t.path.as_path()).collect();
         let loading = self.fixed.is_loading();
         match self.fixed.ok_mut() {
@@ -127,8 +129,15 @@ impl CleanupUi {
             }
             None => self.started = false,
         }
-        self.vols_only = Some(done.requery);
-        self.vols_dirty = true;
+        if volcache {
+            self.vols_only = Some(done.requery);
+            self.vols_dirty = true;
+        }
+    }
+
+    /// A measurement or handler query is due or running, so a Clean up would act on stale sizes.
+    pub fn measuring(&self, volcache: bool) -> bool {
+        (volcache && self.vols_dirty) || self.vols.is_loading() || self.fixed.is_loading()
     }
 
     /// Polls the handler query. When a partial one leaves a handler that covers a category failed or missing,
@@ -157,7 +166,12 @@ impl CleanupUi {
     /// (or has not answered yet) nothing is hidden, so nothing is lost.
     pub fn visible(&self, elevated: bool) -> Vec<Category> {
         let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v, elevated)).unwrap_or_default();
-        Category::ALL.into_iter().filter(|c| !hidden.contains(c)).collect()
+        Category::all().iter().copied().filter(|c| c.supported() && !hidden.contains(c)).collect()
+    }
+
+    /// `cat` cannot be selected: root-only rows always, administrator-only ones unless elevated.
+    pub fn locked(cat: Category, elevated: bool) -> bool {
+        cat.read_only() || (cat.needs_admin() && !elevated)
     }
 
     /// Handlers shown in the "Windows Disk Cleanup" group.
@@ -196,13 +210,14 @@ pub const VOL_DEST: &str = "removed by Windows Disk Cleanup (not recoverable)";
 
 /// (destination text, permanent) of a category in the confirm dialog. `capped`: the Recycle Bin has a size
 /// limit on record, otherwise Windows may delete large items for good and the text must not promise a restore.
-pub fn dest_text(cat: Category, bin_ok: bool, capped: bool) -> (&'static str, bool) {
+/// Items without a bin are not counted here: they are skipped (see [`CleanAssess::items`]).
+pub fn dest_text(cat: Category, capped: bool) -> (String, bool) {
     match (cat, cat.mode()) {
-        (Category::RecycleBin, _) => ("emptied by Windows, permanent", true),
-        (_, Mode::Recycle) if bin_ok && !capped => ("moved to the Recycle Bin; large items may be deleted permanently by Windows", true),
-        (_, Mode::Recycle) if bin_ok => ("moved to the Recycle Bin", false),
-        (_, Mode::Recycle) => ("deleted permanently (no Recycle Bin on this volume)", true),
-        _ => ("deleted permanently", true),
+        (Category::RecycleBin, _) if cfg!(windows) => ("emptied by Windows, permanent".into(), true),
+        (Category::RecycleBin, _) => ("emptied, permanent".into(), true),
+        (_, Mode::Recycle) if !capped => (format!("moved to the {}; large items may be deleted permanently by {}", trash_word(), os_name()), true),
+        (_, Mode::Recycle) => (format!("moved to the {}", trash_word()), false),
+        _ => ("deleted permanently".into(), true),
     }
 }
 
@@ -225,6 +240,34 @@ fn to_target(i: &cleanup::CleanItem) -> Target {
     Target { path: i.path.clone(), size: i.size, is_dir: i.is_dir, node: i.node, file: i.file }
 }
 
+/// Drops the items that another kept folder already holds (a cache folder that also has a
+/// `node_modules` inside, the same folder in two categories), so nothing is counted or deleted
+/// twice. `key` gives (path, is_dir, live): only a live (not Blocked) folder holds what is under
+/// it, so an item inside a skipped folder stays in its own category, and a live copy of a path
+/// wins over a Blocked one. Otherwise the first list to name a path keeps it.
+pub fn keep_outermost<T>(lists: &mut [Vec<T>], key: impl Fn(&T) -> (&Path, bool, bool)) {
+    let (mut live, mut live_dirs): (HashSet<PathBuf>, HashSet<PathBuf>) = Default::default();
+    for (p, dir, _) in lists.iter().flatten().map(&key).filter(|k| k.2) {
+        live.insert(p.to_path_buf());
+        if dir {
+            live_dirs.insert(p.to_path_buf());
+        }
+    }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for l in lists.iter_mut() {
+        l.retain(|x| {
+            let (p, _, alive) = key(x);
+            p.ancestors().skip(1).all(|a| !live_dirs.contains(a)) && (alive || !live.contains(p)) && seen.insert(p.to_path_buf())
+        });
+    }
+}
+
+/// [`keep_outermost`] over the assessed items of a clean up, run after the safety check so a
+/// folder that is skipped does not take the items inside it along.
+pub fn drop_nested(items: &mut [Vec<Assessed>]) {
+    keep_outermost(items, |a| (a.target.path.as_path(), a.target.is_dir, !matches!(a.verdict, Verdict::Blocked(_))));
+}
+
 // ---------------------------------------------------------------- page
 
 impl App {
@@ -233,6 +276,8 @@ impl App {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let epoch = self.pro.disk_epoch();
+        // Off Windows: no Windows Disk Cleanup handlers, and measuring only until deletes are safe.
+        let (volcache_on, delete_safe) = (self.caps.volcache, self.pro.del.delete_safe);
         {
             let c = &mut self.pro.clean;
             c.fixed.poll();
@@ -241,7 +286,7 @@ impl App {
             if !c.started && !c.fixed.is_loading() {
                 c.started = true;
                 // Windows Disk Cleanup sizes (helper process), cached until the next Refresh or delete.
-                c.vols_dirty = true;
+                c.vols_dirty = volcache_on;
                 c.fixed.start(|| {
                     let sys = diskdelete::system_paths();
                     let mut measured = cleanup::measure_fixed(&sys, SystemTime::now());
@@ -249,7 +294,7 @@ impl App {
                     Ok(Fixed { sys, measured })
                 });
             }
-            if c.vols_dirty && !c.vols.is_loading() {
+            if c.vols_dirty && !c.vols.is_loading() && volcache_on {
                 c.vols_dirty = false;
                 match (c.vols_only.take(), c.vols.ok().cloned()) {
                     (Some(ids), _) if ids.is_empty() => {}
@@ -299,11 +344,12 @@ impl App {
         let c = &self.pro.clean;
         let visible = c.visible(elevated);
         let vol_rows = c.vol_list(elevated);
+        let needs = format!("needs {}", elevation_word());
 
         // What is selected and what there is in total.
         let ms: Vec<(&Measured, bool)> = visible
             .iter()
-            .filter(|cat| !(cat.needs_admin() && !elevated))
+            .filter(|&&cat| !CleanupUi::locked(cat, elevated))
             .filter_map(|&cat| c.measured(cat, epoch).map(|m| (m, c.is_checked(cat))))
             .collect();
         let (mut total, mut n) = footer_totals(&ms, elevated);
@@ -330,7 +376,7 @@ impl App {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 // Windows Disk Cleanup: the handlers Windows' own Disk Cleanup offers. They replace TMOP's
                 // temp, thumbnail, Delivery Optimization, Recycle Bin and error report categories.
-                {
+                if volcache_on {
                     let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
                     let p = ui.painter();
                     tracked_text(p, pos2(hr.left() + 2.0, hr.center().y), Align2::LEFT_CENTER, "WINDOWS DISK CLEANUP", theme::semibold(11.0), pal.text_faint, 0.14);
@@ -379,13 +425,16 @@ impl App {
                 }
                 for cat in visible.iter().copied() {
                     let m = c.measured(cat, epoch);
-                    let locked = cat.needs_admin() && !elevated;
+                    let locked = CleanupUi::locked(cat, elevated);
                     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                     let can_expand = m.is_some_and(|m| !m.items.is_empty());
                     if resp.clicked() && can_expand {
                         expands.push(cat);
                     }
                     list_row(ui.painter(), r, &pal, RowLook::Plain, resp.hovered());
+                    if cat.read_only() {
+                        resp.on_hover_text(format!("Only {} can clean this up; TMOP shows its size and leaves it alone", elevation_word()));
+                    }
                     let mut v = c.is_checked(cat) && !locked;
                     let cb = Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
                     if ui.add_enabled_ui(!locked, |ui| ui.put(cb, egui::Checkbox::without_text(&mut v)).changed()).inner {
@@ -411,9 +460,9 @@ impl App {
                         } else {
                             let admin_items = m.items.iter().filter(|i| i.needs_admin).count();
                             let (sub, col) = if locked {
-                                ("needs administrator".to_string(), st.warn)
+                                (needs.clone(), st.warn)
                             } else if admin_items > 0 && !elevated {
-                                (format!("{} items \u{2022} {admin_items} need administrator", m.count), st.warn)
+                                (format!("{} items \u{2022} {admin_items} need {}", m.count, elevation_word()), st.warn)
                             } else if cat == Category::RecycleBin {
                                 (format!("{} items", m.count), pal.text_dim)
                             } else {
@@ -422,7 +471,7 @@ impl App {
                             (format_bytes(m.bytes as f64), sub, col)
                         }
                     } else if locked {
-                        ("\u{2014}".to_string(), "needs administrator".to_string(), st.warn)
+                        ("\u{2014}".to_string(), needs.clone(), st.warn)
                     } else {
                         ("Measuring\u{2026}".to_string(), String::new(), pal.text_dim)
                     };
@@ -464,8 +513,9 @@ impl App {
 
         // Footer: how the safety rules apply, and the action.
         p.hline(foot.x_range(), foot.top(), Stroke::new(1.0_f32, pal.row_rule()));
-        widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, "Everything is checked against the same safety rules as manual deletes", theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
-        let can_go = n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
+        let foot_text = if delete_safe { "Everything is checked against the same safety rules as manual deletes".to_string() } else { super::disk_delete::delete_off_reason() };
+        widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, &foot_text, theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
+        let can_go = delete_safe && n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
         let mut want_clean = false;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left(), foot.top() + 6.0), foot.max)).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(can_go, |ui| {
@@ -499,13 +549,13 @@ impl App {
     /// Opens the confirm dialog for the checked categories.
     fn clean_request(&mut self, rows: &[ProcessRow], elevated: bool, epoch: u64) {
         let c = &self.pro.clean;
-        if c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.vols_dirty || c.vols.is_loading() || c.fixed.is_loading() {
+        if !self.pro.del.delete_safe || c.pending.is_some() || self.pro.del.pending.is_some() || self.pro.del.job.is_loading() || c.measuring(self.caps.volcache) {
             return;
         }
         let mut cats = Vec::new();
         let mut bin_bytes = None;
         for cat in c.visible(elevated) {
-            if !c.is_checked(cat) || (cat.needs_admin() && !elevated) {
+            if !c.is_checked(cat) || CleanupUi::locked(cat, elevated) {
                 continue;
             }
             let Some(m) = c.measured(cat, epoch) else { continue };
@@ -553,25 +603,18 @@ impl App {
                     let id = p.id;
                     let cats: Vec<CatSel> = p.cats.clone();
                     c.assess.start(move || {
-                        let mut bin_ok = true;
-                        let mut bin_capped = true;
-                        let mut roots: Vec<std::path::Component> = Vec::new();
-                        for cs in cats.iter().filter(|cs| cs.cat.mode() == Mode::Recycle) {
-                            for t in &cs.targets {
-                                if let Some(r) = t.path.components().next() {
-                                    if !roots.contains(&r) {
-                                        roots.push(r);
-                                        bin_ok &= diskdelete::has_recycle_bin(&t.path);
-                                        bin_capped &= diskdelete::recycle_limit_known(&t.path);
-                                    }
-                                }
-                            }
-                        }
-                        let counts: Vec<usize> = cats.iter().map(|cs| cs.targets.len()).collect();
+                        let counts: Vec<(usize, Mode)> = cats.iter().map(|cs| (cs.targets.len(), cs.cat.mode())).collect();
                         let flat: Vec<Target> = cats.into_iter().flat_map(|cs| cs.targets).collect();
                         let mut done = diskdelete::assess(flat, &rules).into_iter();
-                        let items = counts.iter().map(|&n| done.by_ref().take(n).collect()).collect();
-                        Ok(CleanAssess { id, items, bin_ok, bin_capped })
+                        let mut items: Vec<Vec<Assessed>> = counts.iter().map(|&(n, _)| done.by_ref().take(n).collect()).collect();
+                        // Bin categories: what has no bin on its volume is skipped with the reason.
+                        let (mut vols, mut bin_capped) = (trash::Volumes::default(), true);
+                        for (list, _) in items.iter_mut().zip(&counts).filter(|(_, (_, m))| *m == Mode::Recycle) {
+                            bin_capped &= diskdelete::block_untrashable(list, &mut vols).1;
+                        }
+                        // Only now: a folder that is skipped must not take the items inside it along.
+                        drop_nested(&mut items);
+                        Ok(CleanAssess { id, items, bin_capped })
                     });
                 }
             }
@@ -586,16 +629,22 @@ impl App {
         let Some(p) = self.pro.clean.pending.as_mut() else { return };
         let st = theme::status(pal);
         let a = p.assessed.as_ref();
-        let bin_ok = a.map(|a| a.bin_ok).unwrap_or(true);
-        let capped = a.map(|a| a.bin_capped).unwrap_or(false);
+        let capped = a.map(|a| a.bin_capped).unwrap_or(!cfg!(windows)); // off Windows the Trash keeps everything
         let vols = p.vols.clone();
         let live = |v: &Verdict| !matches!(v, Verdict::Blocked(_));
         // (category, items, bytes) of what will actually be deleted.
         let mut lines: Vec<(Category, u64, u64)> = Vec::new();
+        // Until the check is done: an estimate that counts every folder once.
+        let est = a.is_none().then(|| {
+            let mut t: Vec<Vec<Target>> = p.cats.iter().map(|cs| cs.targets.clone()).collect();
+            keep_outermost(&mut t, |x| (x.path.as_path(), x.is_dir, true));
+            t
+        });
         for (i, cs) in p.cats.iter().enumerate() {
-            let (n, bytes) = match a {
-                Some(a) => a.items[i].iter().filter(|x| live(&x.verdict)).fold((0u64, 0u64), |(n, b), x| (n + 1, b + x.target.size)),
-                None => (cs.targets.len() as u64, cs.targets.iter().map(|t| t.size).sum()),
+            let (n, bytes) = match (a, &est) {
+                (Some(a), _) => a.items[i].iter().filter(|x| live(&x.verdict)).fold((0u64, 0u64), |(n, b), x| (n + 1, b + x.target.size)),
+                (None, Some(e)) => (e[i].len() as u64, e[i].iter().map(|t| t.size).sum()),
+                (None, None) => (cs.targets.len() as u64, cs.targets.iter().map(|t| t.size).sum()),
             };
             if n > 0 {
                 lines.push((cs.cat, n, bytes));
@@ -628,9 +677,9 @@ impl App {
                 ui.add_space(4.0);
             };
             for (cat, n, bytes) in &lines {
-                let (dest, permanent) = dest_text(*cat, bin_ok, capped);
+                let (dest, permanent) = dest_text(*cat, capped);
                 let count = if *cat == Category::RecycleBin { String::new() } else { format!("{n} item{} \u{2022} ", if *n == 1 { "" } else { "s" }) };
-                line(ui, cat.title(), format!("{count}{}", format_bytes(*bytes as f64)), dest, permanent);
+                line(ui, cat.title(), format!("{count}{}", format_bytes(*bytes as f64)), &dest, permanent);
             }
             for h in &vols {
                 line(ui, h.name.as_str(), format_bytes(h.size as f64), VOL_DEST, true);
@@ -665,6 +714,10 @@ impl App {
 
     /// Hands the deletable items of every category to the worker thread (the manual-delete job slot).
     fn clean_start_job(&mut self) {
+        if !self.pro.del.delete_safe {
+            self.pro.clean.pending = None;
+            return;
+        }
         if self.pro.del.job.is_loading() {
             self.status = "A delete is already running; try again when it has finished".into();
             return;
@@ -676,8 +729,8 @@ impl App {
             .iter()
             .zip(a.items)
             .map(|(cs, items)| {
-                let mode = if cs.cat.mode() == Mode::Recycle && !a.bin_ok { Mode::Permanent } else { cs.cat.mode() };
-                (mode, items.into_iter().filter(|x| !matches!(x.verdict, Verdict::Blocked(_))).map(|x| x.target).collect::<Vec<_>>())
+                // Never downgraded: bin items without a bin were blocked by the assessment.
+                (cs.cat.mode(), items.into_iter().filter(|x| !matches!(x.verdict, Verdict::Blocked(_))).map(|x| x.target).collect::<Vec<_>>())
             })
             .filter(|g| !g.1.is_empty())
             .collect();
@@ -691,27 +744,49 @@ impl App {
         let rules = self.pro.del.rules.ok().cloned();
         let tree = self.pro.disk_tree.as_ref().filter(|_| self.pro.disk_epoch() == epoch).map(|(t, _)| t.clone());
         self.pro.del.job.start(move || {
-            let mut report = Report { mode: Mode::Permanent, ..Default::default() };
-            for (mode, targets) in groups {
-                let r = diskdelete::run(targets, mode, rules.as_deref());
-                report.deleted.extend(r.deleted);
-                report.skipped.extend(r.skipped);
-                report.freed += r.freed;
-            }
-            if let Some(bytes) = bin {
-                let res = cleanup::empty_recycle_bin();
-                log_entry("Recycle Bin", bytes, &res);
-                match res {
-                    Ok(()) => report.freed += bytes,
-                    Err(e) => report.skipped.push((Target { path: PathBuf::from("Recycle Bin"), size: bytes, is_dir: false, node: None, file: None }, e)),
-                }
-            }
-            purge_vols(&vols, &drive, &mut report);
+            let report = clean_job(
+                groups,
+                bin,
+                |bytes| {
+                    let res = trash::empty();
+                    log_entry(trash_word(), bytes, &res);
+                    res
+                },
+                |targets, mode| diskdelete::run(targets, mode, rules.as_deref()),
+                |report| purge_vols(&vols, &drive, report),
+            );
             let tree = tree.map(|t| Arc::new(apply_report(&t, &report)));
             let clean = Some(CleanDone { requery, recycle_bin: cleanup::measure_recycle_bin() });
             Ok(JobOut { report, tree, epoch, clean })
         });
     }
+}
+
+/// The steps of a Clean up job. The bin is emptied (`empty`) and the Windows handlers purged
+/// (`purge`, which may include the Recycle Bin) before any category runs (`del`): emptying
+/// afterwards would destroy for good what the bin categories had just moved there.
+fn clean_job(
+    groups: Vec<(Mode, Vec<Target>)>,
+    bin: Option<u64>,
+    empty: impl FnOnce(u64) -> Result<(), String>,
+    mut del: impl FnMut(Vec<Target>, Mode) -> Report,
+    purge: impl FnOnce(&mut Report),
+) -> Report {
+    let mut report = Report { mode: Mode::Permanent, ..Default::default() };
+    if let Some(bytes) = bin {
+        match empty(bytes) {
+            Ok(()) => report.freed += bytes,
+            Err(e) => report.skipped.push((Target { path: PathBuf::from(trash_word()), size: bytes, is_dir: false, node: None, file: None }, e)),
+        }
+    }
+    purge(&mut report);
+    for (mode, targets) in groups {
+        let r = del(targets, mode);
+        report.deleted.extend(r.deleted);
+        report.skipped.extend(r.skipped);
+        report.freed += r.freed;
+    }
+    report
 }
 
 /// One `deletions.log` line for a purge by Windows (`label` is the Recycle Bin or `cleanmgr:<handler id>`).
@@ -772,6 +847,35 @@ mod tests {
         Measured { cat, bytes: items.iter().map(|i| i.size).sum(), count: items.len() as u64, items, error: None }
     }
 
+    /// "Empty Trash" together with "Old Downloads" (moved to the Trash): the bin is emptied
+    /// first, so what the job itself moves there survives and can still be restored.
+    #[test]
+    fn emptying_the_bin_never_destroys_what_the_same_job_recycles() {
+        use std::cell::RefCell;
+        let bin: RefCell<Vec<PathBuf>> = RefCell::new(vec![PathBuf::from("/old/in-bin.txt")]);
+        let purged = RefCell::new(false);
+        let t = |p: &str| Target { path: PathBuf::from(p), size: 10, is_dir: false, node: None, file: None };
+        let groups = vec![(Mode::Recycle, vec![t("/home/me/Downloads/tax-2019.pdf")]), (Mode::Permanent, vec![t("/home/me/.cache/x")])];
+        let rep = clean_job(
+            groups,
+            Some(5),
+            |_| {
+                bin.borrow_mut().clear();
+                Ok(())
+            },
+            |targets, mode| {
+                assert!(*purged.borrow(), "the Windows handlers (Recycle Bin among them) run before the categories");
+                if mode == Mode::Recycle {
+                    bin.borrow_mut().extend(targets.iter().map(|t| t.path.clone()));
+                }
+                Report { freed: targets.iter().map(|t| t.size).sum(), deleted: targets, ..Default::default() }
+            },
+            |_| *purged.borrow_mut() = true,
+        );
+        assert_eq!(*bin.borrow(), [PathBuf::from("/home/me/Downloads/tax-2019.pdf")]);
+        assert_eq!((rep.freed, rep.deleted.len()), (25, 2));
+    }
+
     #[test]
     fn selectable_skips_admin_items_unless_elevated() {
         let m = measured(Category::CrashDumps, vec![item(10, false), item(100, true)]);
@@ -792,13 +896,75 @@ mod tests {
 
     #[test]
     fn destinations_per_category() {
-        assert_eq!(dest_text(Category::UserTemp, true, true), ("deleted permanently", true));
-        assert_eq!(dest_text(Category::DevArtifacts, true, true), ("moved to the Recycle Bin", false));
-        assert!(dest_text(Category::OldDownloads, false, true).0.contains("no Recycle Bin"));
-        assert!(dest_text(Category::RecycleBin, true, true).1);
+        assert_eq!(dest_text(Category::UserTemp, true), ("deleted permanently".to_string(), true));
+        assert_eq!(dest_text(Category::DevArtifacts, true), (format!("moved to the {}", trash_word()), false));
+        assert!(dest_text(Category::RecycleBin, true).1);
+        if cfg!(windows) {
+            assert_eq!(dest_text(Category::DevArtifacts, true).0, "moved to the Recycle Bin");
+        }
         // No size limit on record for the volume: no promise of a restore.
-        let (t, perm) = dest_text(Category::DevArtifacts, true, false);
+        let (t, perm) = dest_text(Category::DevArtifacts, false);
         assert!(t.contains("large items may be deleted permanently") && perm);
+    }
+
+    #[test]
+    fn bin_items_without_a_bin_are_skipped_not_deleted_permanently() {
+        let mk = |p: &str| Assessed { target: Target { path: PathBuf::from(p), size: 1, is_dir: false, node: None, file: None }, verdict: Verdict::Allowed };
+        // An item that exists (a missing one is not a question of its volume's bin).
+        let x = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let mut items = vec![mk(x), Assessed { verdict: Verdict::Blocked("protected".into()), ..mk("y") }];
+        let mut vols = trash::Volumes::default();
+        let (n, _) = diskdelete::block_untrashable(&mut items, &mut vols);
+        // Whatever this host says about the bin of "x", a missing one blocks it with the reason.
+        match &items[0].verdict {
+            Verdict::Blocked(why) => assert!(n == 1 && why.contains(trash_word()), "{why}"),
+            v => assert!(n == 0 && *v == Verdict::Allowed),
+        }
+        assert_eq!(items[1].verdict, Verdict::Blocked("protected".into()), "already blocked items keep their reason");
+    }
+
+    #[test]
+    fn root_only_rows_are_never_selectable() {
+        for elevated in [false, true] {
+            for cat in [Category::SystemJournal, Category::PackageCache, Category::SystemCaches] {
+                assert!(CleanupUi::locked(cat, elevated), "{cat:?} even as {}", elevation_word());
+            }
+            assert_eq!(CleanupUi::locked(Category::WindowsTemp, elevated), !elevated);
+            assert!(!CleanupUi::locked(Category::UserCache, elevated) && !CleanupUi::locked(Category::UserTemp, elevated));
+        }
+        // Checking one by hand does not change that.
+        let mut c = CleanupUi::default();
+        c.checked.insert(Category::PackageCache, true);
+        assert!(c.is_checked(Category::PackageCache) && CleanupUi::locked(Category::PackageCache, true));
+    }
+
+    #[test]
+    fn nested_targets_are_cleaned_once() {
+        let base = std::env::temp_dir().join("tmop-nested");
+        let t = |rel: &str, is_dir: bool| Target { path: rel.split('/').fold(base.clone(), |p, c| p.join(c)), size: 1, is_dir, node: None, file: None };
+        let ok = |rel: &str, is_dir: bool| Assessed { target: t(rel, is_dir), verdict: Verdict::Allowed };
+        let no = |rel: &str, is_dir: bool| Assessed { target: t(rel, is_dir), verdict: Verdict::Blocked("in use".into()) };
+        let paths = |items: &[Vec<Assessed>]| items.iter().map(|l| l.iter().map(|x| x.target.path.clone()).collect()).collect::<Vec<Vec<PathBuf>>>();
+        let p = |rel: &str| t(rel, true).path;
+        let mut items = vec![
+            vec![ok("cache/tool", true), ok("cache/lock", false)],
+            vec![ok("cache/tool/node_modules", true), ok("proj/node_modules", true), ok("cache/lock", false)],
+            vec![ok("cache/tool/x.zip", false)],
+        ];
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![p("cache/tool"), p("cache/lock")], vec![p("proj/node_modules")], vec![]], "lists stay aligned with their categories");
+        // A skipped folder holds nothing: what is inside it is cleaned by its own category.
+        let mut items = vec![vec![no("tmp/x", true)], vec![ok("tmp/x/node_modules", true)]];
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![p("tmp/x")], vec![p("tmp/x/node_modules")]]);
+        // A live copy of a path wins over a Blocked one (no bin for the Trash category, say).
+        let mut items = vec![vec![no("tmp/x", true)], vec![ok("tmp/x/node_modules", true), ok("tmp/x", true)]];
+        drop_nested(&mut items);
+        assert_eq!(paths(&items), vec![vec![], vec![p("tmp/x")]]);
+        // A file named like a folder prefix is not a parent.
+        let mut items = vec![vec![ok("a", false), ok("ab", true), ok("a/b", false)]];
+        drop_nested(&mut items);
+        assert_eq!(items[0].len(), 3);
     }
 
     #[test]
@@ -830,13 +996,15 @@ mod tests {
         for hidden in [Category::UserTemp, Category::WindowsTemp, Category::RecycleBin, Category::ThumbnailCache] {
             assert!(!vis.contains(&hidden), "{hidden:?}");
         }
-        for kept in [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts, Category::WerReports] {
+        let listed = [Category::BrowserCaches, Category::UpdateDownloads, Category::CrashDumps, Category::OldDownloads, Category::DevArtifacts, Category::WerReports];
+        for kept in listed.into_iter().filter(|c| Category::all().contains(c)) {
             assert!(vis.contains(&kept), "{kept:?}");
         }
         // The helper failed: nothing is hidden.
         let failed = with_vols(Err("timed out".into()));
-        assert_eq!(failed.visible(true), Category::ALL.to_vec());
-        assert_eq!(CleanupUi::default().visible(true), Category::ALL.to_vec());
+        let all: Vec<Category> = Category::all().iter().copied().filter(|c| c.supported()).collect();
+        assert_eq!(failed.visible(true), all);
+        assert_eq!(CleanupUi::default().visible(true), all);
     }
 
     fn done(ids: &[&str], bin: u64) -> CleanDone {
@@ -857,12 +1025,25 @@ mod tests {
         let (a, b) = (CleanItem { path: PathBuf::from("a"), ..item(5, false) }, CleanItem { path: PathBuf::from("b"), ..item(7, false) });
         with_fixed(&mut c, vec![measured(Category::BrowserCaches, vec![a, b]), measured(Category::RecycleBin, vec![])]);
         let gone = Target { path: PathBuf::from("a"), size: 5, is_dir: false, node: None, file: None };
-        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, done(&["Thumbnail Cache", "Recycle Bin"], 42));
+        c.after_clean(&Report { deleted: vec![gone], ..Default::default() }, done(&["Thumbnail Cache", "Recycle Bin"], 42), true);
         let m = c.measured(Category::BrowserCaches, 0).unwrap();
         assert_eq!((m.bytes, m.count), (7, 1));
         assert_eq!(c.measured(Category::RecycleBin, 0).unwrap().bytes, 42);
         assert!(c.started, "fixed locations are not measured again");
         assert!(c.vols_dirty && c.vols_only == Some(vec!["Thumbnail Cache".to_string(), "Recycle Bin".to_string()]));
+        assert!(c.measuring(true), "the next Clean up waits for the handler query");
+    }
+
+    #[test]
+    fn after_clean_without_volcache_does_not_block_the_next_clean_up() {
+        let mut c = CleanupUi::default();
+        with_fixed(&mut c, vec![measured(Category::RecycleBin, vec![])]);
+        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0), false);
+        assert!(!c.vols_dirty && c.vols_only.is_none());
+        assert!(!c.measuring(false));
+        // A stale flag never blocks where no handler query would clear it.
+        c.vols_dirty = true;
+        assert!(!c.measuring(false) && c.measuring(true));
     }
 
     #[test]
@@ -873,7 +1054,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             Ok(Fixed { sys: Default::default(), measured: vec![] })
         });
-        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0));
+        c.after_clean(&Report::default(), done(&["Recycle Bin"], 0), true);
         assert!(!c.started);
     }
 
@@ -903,7 +1084,8 @@ mod tests {
         assert!(!c.visible(true).contains(&Category::UserTemp));
         // A needs-admin handler covers nothing when not elevated.
         let adm = with_vols(Ok(vec![handler("Temporary Files", 10, true)]));
-        assert!(adm.visible(false).contains(&Category::UserTemp));
+        // (User temp is a Windows category.)
+        assert_eq!(adm.visible(false).contains(&Category::UserTemp), Category::all().contains(&Category::UserTemp));
         assert!(!adm.visible(true).contains(&Category::UserTemp));
     }
 

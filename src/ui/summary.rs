@@ -287,7 +287,7 @@ impl App {
         let net_peak = net.max().max(1024.0 * 100.0);
         let frac = |f: f32| (f / 100.0).clamp(0.0, 1.0);
         let temp = s.thermal.max_c().map(|c| self.temp(c));
-        let ghz = s.cpu.current_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0));
+        let ghz = s.cpu.current_mhz.filter(|_| self.caps.clocks).map(|m| format!("{:.2} GHz", m as f32 / 1000.0));
         let cpu_footer = match (ghz, temp) {
             (Some(g), Some(t)) => format!("{g} \u{b7} {t}"),
             (Some(g), None) => g,
@@ -295,7 +295,8 @@ impl App {
             (None, None) => "\u{2014}".to_string(),
         };
         let gpu_footer = if s.gpu.available || s.gpu.dedicated_used > 0 { format!("VRAM {}", format_bytes(s.gpu.dedicated_used as f64)) } else { "No GPU engine counters".to_string() };
-        let (net_value, net_unit) = split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps));
+        let (net_value, net_unit) = if s.net_known() { split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps)) } else { ("\u{2014}".to_string(), String::new()) };
+        let disk_value = if s.disk_known() { (format!("{:.0}", fd.smooth.disk), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
         let gpu_value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
         let st = theme::status(&pal);
         let lc = |base: Color32, l: Level| ring_color(&st, base, l);
@@ -325,7 +326,7 @@ impl App {
                 device: Device::Disk,
                 frac: frac(fd.smooth.disk),
                 color: lc(fd.metric("disk"), v.levels[2]),
-                value: (format!("{:.0}", fd.smooth.disk), "%".into()),
+                value: disk_value,
                 hardware: Hardware::Disk,
                 lines: vec![(&fd.hist.disk, lc(fd.metric("disk"), v.levels[2]), (0.0, 100.0))],
                 footer: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)),
@@ -572,7 +573,7 @@ impl App {
         let parts: Vec<(&str, FontId, Color32)> = sentence.iter().map(|(t, f, c)| (t.as_str(), f.clone(), *c)).collect();
         let big = rich(&p, &parts, text_w, 31.0);
         let second = match v.health.bottleneck {
-            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, Windows may be paging.", fd.smooth.disk)),
+            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, {} may be {}.", fd.smooth.disk, crate::platform::os_subject(), crate::platform::paging_word())),
             None => Some("No resource is under pressure.".to_string()),
             _ => None,
         };
@@ -636,7 +637,7 @@ impl App {
         let parts = [
             (top.map_or("Largest app".to_string(), |g| clip(&g.name, 22)), top.map_or(0, |g| g.memory), top_color, pal.text),
             ("Other apps".to_string(), apps, theme::darken_for(&pal, theme::INDIGO), pal.text),
-            ("Windows".to_string(), windows, theme::darken_for(&pal, theme::PURPLE), pal.text),
+            (crate::process::os_group().to_string(), windows, theme::darken_for(&pal, theme::PURPLE), pal.text),
             ("Cache".to_string(), cached, with_alpha(pal.text, 0.22), pal.text),
             ("Free".to_string(), free, with_alpha(st.ok, 0.4), st.ok),
         ];
@@ -678,7 +679,7 @@ impl App {
         let tiles = [
             ("CPU", Device::Cpu, format!("{:.0}", fd.smooth.cpu), 0usize, String::new()),
             ("Memory", Device::Memory, format!("{:.0}", fd.smooth.memory), 1, format!("{} free", format_bytes(s.memory.available as f64))),
-            ("Disk", Device::Disk, format!("{:.0}", fd.smooth.disk), 2, String::new()),
+            ("Disk", Device::Disk, if s.disk_known() { format!("{:.0}", fd.smooth.disk) } else { "\u{2014}".to_string() }, 2, String::new()),
             ("GPU", Device::Gpu, gpu_value, 3, String::new()),
         ];
         for (i, (label, dev, value, li, free_text)) in tiles.iter().enumerate() {

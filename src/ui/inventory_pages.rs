@@ -9,7 +9,7 @@ use super::theme;
 use super::widgets::{self, Button};
 use super::{App, FrameData, Page};
 use crate::metrics::Series;
-use crate::pro::inventory::{Sections, StartupApp};
+use crate::pro::inventory::{keys, Sections, StartupApp};
 use crate::pro::Loader;
 use crate::process::{format_bytes, format_cpu_time, format_rate, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
@@ -201,11 +201,11 @@ fn report_text(sections: &Sections) -> String {
 
 /// Values that are versions, builds, names or sizes read better in the mono font.
 fn is_mono(section: &str, key: &str) -> bool {
-    if section == "Display adapters" {
+    if section == keys::GPUS {
         return true;
     }
     let k = key.to_lowercase();
-    ["build", "version", "identifier", "speed", "memory", "logical", "computer name", "root", "date", "bios"].iter().any(|w| k.contains(w))
+    ["build", "kernel", "version", "identifier", "speed", "memory", "logical", "computer name", "root", "date", "bios"].iter().any(|w| k.contains(w))
 }
 
 /// Rows of stat tiles that `stat_grid` draws for `n` tiles in `width` (see [`kit::stat_grid`]).
@@ -236,14 +236,14 @@ impl App {
         let pal = fd.pal;
         let inv = &mut self.pro.inv;
         if inv.sysinfo.poll() && inv.sysinfo.ok().is_some() {
-            let (_, _, _, h, m, s) = crate::pro::local_time();
+            let (_, _, _, h, m, s) = crate::platform::local_time();
             inv.sysinfo_read_at = Some((h, m, s));
         }
         let sections = inv.sysinfo.ok().cloned();
         let get = |sec: &str, k: &str| -> String {
             sections.as_ref().and_then(|s| s.iter().find(|x| x.0 == sec)).and_then(|x| x.1.iter().find(|r| r.0 == k)).map(|r| r.1.clone()).unwrap_or_default()
         };
-        let computer = Some(get("Device", "Computer name")).filter(|c| !c.is_empty()).or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_default();
+        let computer = Some(get(keys::DEVICE, keys::COMPUTER)).filter(|c| !c.is_empty()).or_else(crate::platform::hostname).unwrap_or_default();
         let read = inv.sysinfo_read_at.map(|(h, m, s)| format!("read {h:02}:{m:02}:{s:02}")).unwrap_or_default();
         let body = self.page_title(ui, &pal, "System Info", &subtitle(&[computer.clone(), read, Page::SystemInfo.shortcut().into()]));
         let mut refresh = false;
@@ -267,15 +267,18 @@ impl App {
         }
         let s = fd.snap;
         let st = theme::status(&pal);
-        let edition = get("Operating system", "Edition");
-        let version = get("Operating system", "Version");
-        let windows = subtitle_free(&[edition.strip_prefix("Windows ").unwrap_or(&edition).to_string(), version.clone()]);
-        let installed = get("Processor and memory", "Installed memory");
+        let edition = get(keys::OS, keys::EDITION);
+        let version = get(keys::OS, keys::VERSION);
+        // "Windows" over "11 Pro 24H2", "macOS" over "Sequoia 15.1", "Linux" over "Ubuntu 24.04.5 LTS".
+        let os = crate::platform::os_name();
+        let os_value = subtitle_free(&[edition.strip_prefix(&format!("{os} ")).unwrap_or(&edition).to_string(), version.clone()]);
+        let build_word = if crate::platform::OS == crate::platform::Os::Linux { "kernel" } else { "build" };
+        let installed = get(keys::CPU_MEM, keys::INSTALLED_MEM);
         let tiles = [
-            StatTile::new("Windows", windows, format!("build {}", get("Operating system", "OS build"))),
-            StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get("Processor and memory", "Processor") } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
+            StatTile::new(os, os_value, format!("{build_word} {}", get(keys::OS, keys::BUILD))),
+            StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get(keys::CPU_MEM, keys::PROCESSOR) } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
             StatTile::new("Memory", format_bytes(s.memory.total as f64), if installed.is_empty() { String::new() } else { format!("{installed} installed") }).bar(fd.smooth.memory / 100.0, theme::darken_for(&pal, theme::INDIGO)),
-            StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::pro::local_time(), s.uptime))])),
+            StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::platform::local_time(), s.uptime))])),
         ];
 
         // Cards flow into as many columns as fit, each below the shortest so far.
@@ -283,7 +286,7 @@ impl App {
         let cols = (((w + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).clamp(1, 3);
         let card_w = (w - CARD_GAP * (cols - 1) as f32) / cols as f32;
         // Heading row + rows of 22 px; the Device card also has to clear its 96 x 64 drawing.
-        let heights: Vec<f32> = sections.iter().map(|(title, items)| (40.0 + items.len() as f32 * 22.0 + 18.0).max(if *title == "Device" { 96.0 } else { 0.0 })).collect();
+        let heights: Vec<f32> = sections.iter().map(|(title, items)| (40.0 + items.len() as f32 * 22.0 + 18.0).max(if *title == keys::DEVICE { 96.0 } else { 0.0 })).collect();
         let (at, cards_h) = masonry(&heights, cols);
         let total = tiles_height(w, tiles.len(), 190.0) + BLOCK_GAP + cards_h;
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area).id_salt("sysinfo-scroll"), |ui| {
@@ -302,7 +305,7 @@ impl App {
                             (k.clone(), v.clone(), is_mono(title, k), good.then_some(st.ok))
                         })
                         .collect();
-                    if *title == "Device" {
+                    if *title == keys::DEVICE {
                         hardware::draw(&p, Rect::from_min_size(pos2(r.right() - 22.0 - 96.0, r.top() + 14.0), vec2(96.0, 64.0)), Hardware::Mainboard, pal.text_rail());
                         // The first rows sit beside the drawing.
                         let near = rows.len().min(2);
@@ -406,7 +409,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.startup.poll();
         let count = self.pro.inv.startup.ok().map(|l| format!("{} entries", l.len())).unwrap_or_default();
-        let boot = format!("last boot {}", boot_label(crate::pro::local_time(), fd.snap.uptime));
+        let boot = format!("last boot {}", boot_label(crate::platform::local_time(), fd.snap.uptime));
         let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, Page::StartupApps.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {
@@ -422,13 +425,14 @@ impl App {
         let st = theme::status(&pal);
         let list: &[StartupApp] = inv.startup.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let enabled = list.iter().filter(|a| a.enabled).count();
-        let folder = list.iter().filter(|a| a.location.starts_with("Startup folder")).count();
+        let [(pre_a, title_a, sub_a), (pre_b, title_b, sub_b)] = crate::pro::inventory::STARTUP_GROUPS;
+        let count = |prefix: &str| list.iter().filter(|a| a.location.starts_with(prefix)).count();
         let n = list.len().max(1) as f32;
         let tiles = [
             StatTile::new("Enabled", enabled.to_string(), format!("of {} startup entries", list.len())).bar(enabled as f32 / n, st.ok),
-            StatTile::new("Disabled", (list.len() - enabled).to_string(), "Turned off in Windows settings").bar((list.len() - enabled) as f32 / n, st.warn),
-            StatTile::new("Registry", (list.len() - folder).to_string(), "Run keys"),
-            StatTile::new("Startup folders", folder.to_string(), "Shortcuts in Startup"),
+            StatTile::new("Disabled", (list.len() - enabled).to_string(), crate::pro::inventory::STARTUP_DISABLED).bar((list.len() - enabled) as f32 / n, st.warn),
+            StatTile::new(title_a, count(pre_a).to_string(), sub_a),
+            StatTile::new(title_b, count(pre_b).to_string(), sub_b),
         ];
         let used = kit::stat_grid(&p, area, &pal, &tiles, 190.0);
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), area.max);
@@ -478,7 +482,10 @@ impl App {
         let st = theme::status(&pal);
         let full = self.settings.general.show_full_account_name;
         let list = user_rows(fd.rows, full);
-        let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} sessions", list.len()), Page::Users.shortcut().into()]));
+        // Without sign-in sessions (Linux, macOS) every row is one account.
+        let sessions = self.caps.proc.session;
+        let rows_word = if sessions { "sessions" } else { "accounts" };
+        let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} {rows_word}", list.len()), Page::Users.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 100.0, |ui| refresh = Button::new("Refresh").show(ui, &pal).clicked());
         if refresh {
@@ -486,11 +493,11 @@ impl App {
         }
         let area = page_area(body);
         let p = ui.painter().clone();
-        let interactive = list.iter().filter(|u| u.session > 0 && u.apps > 0).count();
+        let interactive = list.iter().filter(|u| u.is_active()).count();
         let top = list.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu));
         let tiles = [
-            StatTile::new("Accounts", list.len().to_string(), "Distinct account / session pairs"),
-            StatTile::new("Signed in", interactive.to_string(), "Sessions with app windows"),
+            StatTile::new("Accounts", list.len().to_string(), if sessions { "Distinct account / session pairs" } else { "Accounts with processes" }),
+            StatTile::new("Signed in", interactive.to_string(), if sessions { "Sessions with app windows" } else { "Accounts with app windows" }),
             StatTile::new("Busiest", top.map(|t| format!("{:.1}%", t.cpu)).unwrap_or_default(), top.map(|t| short_account(&t.user).to_string()).unwrap_or_default()).bar(top.map(|t| t.cpu / 100.0).unwrap_or(0.0), st.danger),
             StatTile::new("Processes", fd.rows.len().to_string(), format!("{} with windows", fd.rows.iter().filter(|r| r.has_window).count())),
         ];
@@ -499,7 +506,9 @@ impl App {
         let stt = &self.pro.inv.users_table;
         let mut order: Vec<usize> = (0..list.len()).filter(|i| table::matches(&stt.filter, &[&list[*i].user])).collect();
         let trends: Vec<Vec<f32>> = list.iter().map(|u| self.pro.inv.history.user_trend(u.session, |raw| if full { raw == u.user } else { short_account(raw) == u.user })).collect();
-        stt.sort(&list, &mut order, |a, b, col| match col {
+        // Table column -> the column of the full layout (the Session column is left out without sessions).
+        let logical = move |col: usize| if sessions || col == 0 { col } else { col + 1 };
+        stt.sort(&list, &mut order, |a, b, col| match logical(col) {
             0 => cmp_str(&a.user, &b.user),
             1 => a.session.cmp(&b.session),
             2 => a.procs.cmp(&b.procs),
@@ -518,15 +527,16 @@ impl App {
         let table_bottom = if shown.is_some() { area.bottom() - card_h - BLOCK_GAP } else { area.bottom() };
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), pos2(area.right(), table_bottom.max(area.top() + used + BLOCK_GAP + 120.0)));
 
-        let cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        let all_cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        let cols: Vec<Col> = all_cols.into_iter().enumerate().filter(|(n, _)| sessions || *n != 1).map(|(_, c)| c).collect();
         let spark_color = pal.accent;
         let cell = |i: usize, col: usize| -> Cell {
             let u = &list[i];
-            match col {
+            match logical(col) {
                 0 => {
                     let name = short_account(&u.user);
                     let cell = Cell::new(name);
-                    let cell = if is_windows_account(name) { cell.badge("WINDOWS") } else { cell };
+                    let cell = if crate::process::is_system_account(Some(name)) { cell.badge(crate::process::os_badge()) } else { cell };
                     if full && name != u.user {
                         cell.sub(&u.user)
                     } else {
@@ -540,7 +550,7 @@ impl App {
                 5 => Cell::new(format_rate(u.io)),
                 6 => Cell::new("").spark(trends[i].clone(), spark_color, true),
                 _ if u.is_active() => Cell::new("Active \u{b7} console").dot(st.ok).color(st.ok),
-                _ if u.session == 0 => Cell::new("Services \u{b7} no window").color(pal.text_dim),
+                _ if u.session == 0 && self.caps.proc.session => Cell::new("Services \u{b7} no window").color(pal.text_dim),
                 _ => Cell::new("Background \u{b7} no window").color(pal.text_dim),
             }
         };
@@ -550,7 +560,8 @@ impl App {
         if let Some(i) = shown {
             let u = &list[i];
             let card = Rect::from_min_max(pos2(area.left(), area.bottom() - card_h), area.max);
-            let content = section_card(&p, card, &pal, &format!("Session {} \u{b7} {} \u{b7} top apps", u.session, short_account(&u.user)), "");
+            let title = if sessions { format!("Session {} \u{b7} {} \u{b7} top apps", u.session, short_account(&u.user)) } else { format!("{} \u{b7} top apps", short_account(&u.user)) };
+            let content = section_card(&p, card, &pal, &title, "");
             if apps.is_empty() {
                 empty_state(&p, content, &pal, "No processes in this session.");
             } else {
@@ -574,7 +585,7 @@ impl App {
         let pal = fd.pal;
         self.pro.inv.services.poll();
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
-        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, "Service Control Manager".into(), Page::Services.shortcut().into()]));
+        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
         let mut refresh = false;
         header_toolbar(ui, body, 320.0, |ui| {
             refresh = Button::new("Refresh").show(ui, &pal).clicked();
@@ -602,11 +613,6 @@ fn clip_name(name: &str) -> String {
     }
 }
 
-/// A built-in Windows account (marked with a WINDOWS badge).
-fn is_windows_account(name: &str) -> bool {
-    ["SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"].iter().any(|a| name.eq_ignore_ascii_case(a))
-}
-
 /// One row of the Users table: an account in one session.
 #[derive(Default, Clone)]
 struct UserRow {
@@ -620,9 +626,9 @@ struct UserRow {
 }
 
 impl UserRow {
-    /// Signed in with app windows.
+    /// Signed in with app windows (in an interactive session, where the OS has sessions).
     fn is_active(&self) -> bool {
-        self.session > 0 && self.apps > 0
+        (self.session > 0 || !crate::process::caps().session) && self.apps > 0
     }
 }
 
@@ -762,6 +768,6 @@ mod tests {
         assert_eq!(tiles_height(1000.0, 4, 190.0), STAT_TILE_H);
         assert_eq!(tiles_height(300.0, 4, 190.0), 4.0 * STAT_TILE_H + 3.0 * STAT_GAP);
         assert_eq!(subtitle(&["a".into(), String::new(), "b".into()]), "a \u{b7} b");
-        assert!(is_windows_account("system") && !is_windows_account("alex"));
+        assert!(crate::process::is_system_account(Some(if cfg!(windows) { "system" } else { "root" })) && !crate::process::is_system_account(Some("alex")));
     }
 }

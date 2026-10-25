@@ -81,13 +81,8 @@ fn is_celsius(unit: &str) -> bool {
 
 /// CPU temperature: package-like labels in priority order, then any `CPU*` temperature in °C.
 pub fn cpu_temp(readings: &[Reading]) -> Option<(String, f32)> {
-    let temps = || readings.iter().filter(|r| r.kind == KIND_TEMP && is_celsius(&r.unit) && r.value.is_finite());
-    const PRIORITY: [&str; 5] = ["CPU Package", "CPU (Tctl/Tdie)", "CPU Tctl/Tdie", "CPU Die (average)", "CPU CCD1 (Tdie)"];
-    let pick = PRIORITY
-        .iter()
-        .find_map(|l| temps().find(|r| r.label.eq_ignore_ascii_case(l)))
-        .or_else(|| temps().find(|r| r.label.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("cpu"))))?;
-    Some((pick.label.clone(), pick.value as f32))
+    let temps: Vec<(&str, f32)> = readings.iter().filter(|r| r.kind == KIND_TEMP && is_celsius(&r.unit) && r.value.is_finite()).map(|r| (r.label.as_str(), r.value as f32)).collect();
+    super::common::pick_cpu_temp(&temps, &super::common::HWINFO_CPU_LABELS).map(|(l, c)| (l.to_string(), c))
 }
 
 #[cfg(windows)]

@@ -5,6 +5,7 @@
 //! is dropped, so it lives exactly as long as the [`Connection`].
 
 use super::context::Endpoint;
+use super::local;
 use bollard::{Docker, API_DEFAULT_VERSION};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -51,6 +52,25 @@ pub fn connect(endpoint: &Endpoint) -> Result<Connection, String> {
     }
 }
 
+/// Text for a failed first request to `endpoint`. A unix socket that is missing, refuses or
+/// denies access gets a plain explanation (see [`local::explain`]); anything else keeps the
+/// engine's message.
+pub fn connect_error(endpoint: &Endpoint, e: &bollard::errors::Error) -> String {
+    match endpoint {
+        Endpoint::Unix(path) => unix_error(path, e),
+        _ => super::backend::err_text(e),
+    }
+}
+
+fn unix_error(path: &str, e: &bollard::errors::Error) -> String {
+    let kind = match e {
+        // bollard checks that the socket exists before it builds a client.
+        bollard::errors::Error::SocketNotFoundError(_) => Some(std::io::ErrorKind::NotFound),
+        other => local::io_kind(other),
+    };
+    kind.and_then(|k| local::explain(path, k)).unwrap_or_else(|| super::backend::err_text(e))
+}
+
 fn plain(docker: Docker) -> Connection {
     Connection { docker, ssh_tunnel: None }
 }
@@ -67,7 +87,7 @@ fn connect_named_pipe(_path: &str) -> Result<Docker, String> {
 
 #[cfg(unix)]
 fn connect_unix(path: &str) -> Result<Docker, String> {
-    Docker::connect_with_unix(path, API_TIMEOUT_SECS, API_DEFAULT_VERSION).map_err(|e| e.to_string())
+    Docker::connect_with_unix(path, API_TIMEOUT_SECS, API_DEFAULT_VERSION).map_err(|e| unix_error(path, &e))
 }
 
 #[cfg(not(unix))]
@@ -80,12 +100,7 @@ fn connect_ssh(host: &str, user: Option<&str>, port: Option<u16>) -> Result<Conn
     let args = ssh_args(host, user, port, local_port);
     let mut command = Command::new(ssh_program());
     command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    crate::platform::hide_console(&mut command);
     let child = command.spawn().map_err(|e| format!("could not start ssh: {e}"))?;
     // Owning the tunnel now means a failed wait below still kills the process.
     let mut tunnel = SshTunnel { child, local_port };
@@ -176,6 +191,39 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("box"));
         assert!(!args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "127.0.0.1:1:/var/run/docker.sock"));
+    }
+
+    /// A real ping over a socket that is missing, then present but closed to this user.
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_failures_are_explained() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tmop-docker-client-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("docker.sock");
+        let path_s = path.to_string_lossy().into_owned();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let ping = |ep: &Endpoint| {
+            let conn = connect(ep)?;
+            rt.block_on(conn.docker.ping()).map(|_| ()).map_err(|e| connect_error(ep, &e))
+        };
+        let ep = Endpoint::Unix(path_s.clone());
+        let err = ping(&ep).unwrap_err();
+        assert_eq!(err, format!("no Docker socket at {path_s}: is Docker running?"));
+        // A socket file nobody listens on (a stopped engine).
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let err = ping(&ep).unwrap_err();
+        assert_eq!(err, format!("nothing answers on {path_s}: is Docker running?"));
+        std::fs::remove_file(&path).unwrap();
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let err = ping(&ep).unwrap_err();
+            assert!(err.starts_with(&format!("permission denied on {path_s}")), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

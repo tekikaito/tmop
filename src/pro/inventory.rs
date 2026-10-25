@@ -1,10 +1,59 @@
-//! Inventory pages: System Info, Services and Startup apps.
-//! All read-only, from the registry, the SCM and the Startup folders.
+//! Inventory pages: System Info, Services and Startup apps. All read-only.
+//!
+//! | | Windows | Linux | macOS |
+//! |---|---|---|---|
+//! | [`system_info`] | registry, firmware APIs | os-release, `uname`, `/proc`, DMI (`/sys/class/dmi/id`), DRM cards | `sysctl`, `system_profiler` |
+//! | [`cpu_details`] | `GetLogicalProcessorInformationEx` | `/sys/devices/system/cpu` topology and caches | `hw.*` sysctls |
+//! | [`startup_apps`] | Run keys, Startup folders | XDG autostart, enabled `systemd --user` units | LaunchAgents, LaunchDaemons |
 
 pub use super::drivers::Service;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+pub mod parse;
+
+#[cfg(target_os = "linux")]
+pub use linux::{cpu_details, startup_apps, system_info};
+#[cfg(target_os = "macos")]
+pub use macos::{cpu_details, startup_apps, system_info};
+
 /// Titled groups of (label, value).
 pub type Sections = Vec<(&'static str, Vec<(String, String)>)>;
+
+/// The section titles and row labels the System Info page looks up (the rest is free-form).
+pub mod keys {
+    pub const OS: &str = "Operating system";
+    pub const EDITION: &str = "Edition";
+    pub const VERSION: &str = "Version";
+    /// The build number; the kernel release on Linux.
+    pub const BUILD: &str = if cfg!(target_os = "linux") { "Kernel" } else { "OS build" };
+    pub const DEVICE: &str = "Device";
+    pub const COMPUTER: &str = "Computer name";
+    pub const CPU_MEM: &str = "Processor and memory";
+    pub const PROCESSOR: &str = "Processor";
+    pub const INSTALLED_MEM: &str = "Installed memory";
+    pub const GPUS: &str = "Display adapters";
+}
+
+/// The startup sources the Startup apps tiles count: (location prefix, tile title, tile sub).
+pub const STARTUP_GROUPS: [(&str, &str, &str); 2] = if cfg!(target_os = "linux") {
+    [("Autostart", "Autostart", "XDG .desktop entries"), ("systemd", "systemd", "Enabled user services")]
+} else if cfg!(target_os = "macos") {
+    [("Launch agent", "Launch agents", "Run when a user logs in"), ("Launch daemon", "Launch daemons", "Run at boot, system-wide")]
+} else {
+    [("Registry", "Registry", "Run keys"), ("Startup folder", "Startup folders", "Shortcuts in Startup")]
+};
+
+/// Where a disabled startup entry was turned off (the Disabled tile's sub line).
+pub const STARTUP_DISABLED: &str = if cfg!(target_os = "linux") {
+    "Hidden or autostart turned off"
+} else if cfg!(target_os = "macos") {
+    "Disabled in launchd"
+} else {
+    "Turned off in Windows settings"
+};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StartupApp {
@@ -15,11 +64,16 @@ pub struct StartupApp {
     pub publisher: String,
 }
 
-/// Executable path at the start of a command line.
+/// Executable path at the start of a command line: the quoted part, else (on Windows) up to the
+/// first executable extension, else the first word.
 pub fn command_path(cmd: &str) -> String {
     let c = super::expand_env(cmd.trim());
     if let Some(rest) = c.strip_prefix('"') {
         return rest.split('"').next().unwrap_or("").to_string();
+    }
+    // Unix paths have no executable extensions to stop at (and `.com` is a common name part).
+    if !cfg!(windows) {
+        return c.split_whitespace().next().unwrap_or("").to_string();
     }
     let lower = c.to_ascii_lowercase();
     for ext in [".exe", ".bat", ".cmd", ".com", ".lnk"] {
@@ -152,9 +206,9 @@ pub fn system_info() -> Result<Sections, String> {
     Ok(out)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn system_info() -> Result<Sections, String> {
-    Err("system information is only implemented on Windows".into())
+    Err(format!("system information is not implemented on {}", crate::platform::os_name()))
 }
 
 /// Processor topology and platform facts shown under the CPU graph.
@@ -236,14 +290,14 @@ pub fn cpu_details() -> CpuDetails {
     // PF_VIRT_FIRMWARE_ENABLED (21)
     d.virtualization = Some(unsafe { IsProcessorFeaturePresent(PROCESSOR_FEATURE_ID(21)) }.as_bool());
     let bios = Key::open(HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS", View::Default);
-    let maker = bios.as_ref().and_then(|k| k.string("SystemManufacturer")).unwrap_or_default().to_lowercase();
-    let model = bios.as_ref().and_then(|k| k.string("SystemProductName")).unwrap_or_default().to_lowercase();
-    d.virtual_machine = ["vmware", "qemu", "innotek", "virtualbox", "xen", "parallels", "kvm"].iter().any(|v| maker.contains(v) || model.contains(v)) || model.contains("virtual machine");
+    let maker = bios.as_ref().and_then(|k| k.string("SystemManufacturer")).unwrap_or_default();
+    let model = bios.as_ref().and_then(|k| k.string("SystemProductName")).unwrap_or_default();
+    d.virtual_machine = parse::looks_virtual(&maker, &model);
     d.fast_startup = Key::open(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Power", View::Default).and_then(|k| k.u32("HiberbootEnabled")).map(|v| v == 1);
     d
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn cpu_details() -> CpuDetails {
     CpuDetails::default()
 }
@@ -324,9 +378,9 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
     Ok(out)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
-    Err("startup apps are only implemented on Windows".into())
+    Err(format!("startup apps are not implemented on {}", crate::platform::os_name()))
 }
 
 #[cfg(test)]

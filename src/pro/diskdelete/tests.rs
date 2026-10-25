@@ -20,6 +20,7 @@ fn sys() -> SystemPaths {
         onedrive: vec![r"d:\onedrive".into()],
         temp: r"d:\users\me\appdata\local\temp".into(),
         local_appdata: r"d:\users\me\appdata\local".into(),
+        unix: UnixPaths::default(),
     }
 }
 
@@ -28,11 +29,11 @@ fn rules() -> Rules {
 }
 
 fn file(p: &str, r: &Rules) -> Verdict {
-    classify(Path::new(p), ItemMeta::default(), r)
+    classify_win(p, ItemMeta::default(), r)
 }
 
 fn dir(p: &str, r: &Rules) -> Verdict {
-    classify(Path::new(p), ItemMeta { is_dir: true, ..Default::default() }, r)
+    classify_win(p, ItemMeta { is_dir: true, ..Default::default() }, r)
 }
 
 fn is_blocked(v: &Verdict) -> bool {
@@ -48,11 +49,11 @@ fn reasons(v: &Verdict) -> Vec<String> {
 
 #[test]
 fn norm_paths() {
-    assert_eq!(norm_path(Path::new(r"\\?\C:\A\B\")), r"c:\a\b");
-    assert_eq!(norm_path(Path::new("C:/x/")), r"c:\x");
-    assert_eq!(norm_path(Path::new(r"C:\")), r"c:\");
-    assert_eq!(norm_path(Path::new("C:")), r"c:\");
-    assert_eq!(norm_path(Path::new(r"\\?\UNC\srv\share\f")), r"\\srv\share\f");
+    assert_eq!(norm_path_win(r"\\?\C:\A\B\"), r"c:\a\b");
+    assert_eq!(norm_path_win("C:/x/"), r"c:\x");
+    assert_eq!(norm_path_win(r"C:\"), r"c:\");
+    assert_eq!(norm_path_win("C:"), r"c:\");
+    assert_eq!(norm_path_win(r"\\?\UNC\srv\share\f"), r"\\srv\share\f");
     assert!(is_drive_root(r"c:\") && is_drive_root(r"\\srv\share") && !is_drive_root(r"c:\x") && !is_drive_root(r"\\srv\share\f"));
     assert!(!under(r"c:\a\bc", r"c:\a\b"));
     assert!(under(r"c:\a\b", r"c:\a\b") && under(r"c:\a\b\c", r"c:\a\b") && under(r"c:\a", r"c:\"));
@@ -179,9 +180,9 @@ fn classify_warn_inventory() {
 fn classify_warn_free() {
     let r = rules();
     let warn = |p: &str, d: bool| {
-        let v = classify(Path::new(p), ItemMeta { is_dir: d, ..Default::default() }, &r);
+        let v = classify_win(p, ItemMeta { is_dir: d, ..Default::default() }, &r);
         assert!(matches!(v, Verdict::Warn(_)), "{p}: {v:?}");
-        let up = classify(Path::new(&p.to_uppercase()), ItemMeta { is_dir: d, ..Default::default() }, &r);
+        let up = classify_win(&p.to_uppercase(), ItemMeta { is_dir: d, ..Default::default() }, &r);
         assert_eq!(v, up, "case: {p}");
     };
     for p in [
@@ -287,6 +288,7 @@ fn permanent_delete_in_temp() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(windows)]
 #[test]
 fn refuse_reason_is_pure() {
     for p in [r"C:\", r"\\srv\share", r"\\?\D:\", "D:", r"d:/", r"\\localhost\c$\"] {
@@ -294,6 +296,17 @@ fn refuse_reason_is_pure() {
     }
     for p in [r"C:\x", r"\\srv\share\f",r"D:\Windows \.."] {
         assert_eq!(refuse_reason(Path::new(p)).is_some(), p.ends_with(".."), "{p}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn refuse_reason_is_pure() {
+    for p in ["/", "//", "/.", "relative/x", "x", "/tmp/..", "/tmp/../etc", ""] {
+        assert!(refuse_reason(Path::new(p)).is_some(), "{p:?}");
+    }
+    for p in ["/tmp/x", "/home/me/a b", "/x/./y"] {
+        assert!(refuse_reason(Path::new(p)).is_none(), "{p}");
     }
 }
 
@@ -305,8 +318,19 @@ fn run_rechecks_rules_before_deleting() {
     let (guarded, plain) = (base.join("guarded"), base.join("plain"));
     std::fs::create_dir_all(&guarded).unwrap();
     std::fs::write(&plain, b"x").unwrap();
-    let mut r = Rules::default();
-    r.sys.system_root = norm_path_long(&guarded);
+    #[cfg(windows)]
+    let r = {
+        let mut r = Rules::default();
+        r.sys.system_root = norm_path_long(&guarded);
+        r
+    };
+    // Off Windows the real rules (temp folders) plus a pretend mount point.
+    #[cfg(not(windows))]
+    let r = {
+        let mut r = Rules { sys: system_paths(), inv: Inventory::default() };
+        r.sys.unix.mounts.push(norm_path(&std::fs::canonicalize(&guarded).unwrap()));
+        r
+    };
     let rep = run_with_log(vec![target(&guarded, 1, true), target(&plain, 1, false)], Mode::Permanent, None, Some(&r));
     assert_eq!(rep.deleted.len(), 1);
     assert_eq!(rep.skipped.len(), 1);
@@ -315,16 +339,34 @@ fn run_rechecks_rules_before_deleting() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// S4: an item that was a file at scan time and is a folder now (or the other way round) is
+/// judged as it is now, and left alone: the old row would skip every folder rule.
+#[cfg(unix)]
+#[test]
+fn run_refuses_an_item_whose_type_changed_since_the_scan() {
+    let base = std::env::temp_dir().join(format!("tmop-del-kind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("stuff").join("inner")).unwrap();
+    std::fs::write(base.join("stuff").join("inner").join("x"), b"x").unwrap();
+    std::fs::write(base.join("file"), b"f").unwrap();
+    let rep = run_with_log(vec![target(&base.join("stuff"), 1, false), target(&base.join("file"), 1, true)], Mode::Permanent, None, None);
+    assert!(rep.deleted.is_empty(), "{:?}", rep.deleted);
+    assert_eq!(rep.skipped.len(), 2);
+    assert!(rep.skipped.iter().all(|(_, why)| why.contains("changed since the scan")), "{:?}", rep.skipped);
+    assert!(base.join("stuff").join("inner").join("x").exists() && base.join("file").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn classify_normalises_tricks() {
     let r = rules();
-    assert_eq!(norm_path(Path::new(r"C:\Windows ")), r"c:\windows");
-    assert_eq!(norm_path(Path::new(r"C:\Windows.\System32 .")), r"c:\windows\system32");
-    assert_eq!(norm_path(Path::new(r"D:\Users\..\Windows\.\System32")), r"d:\windows\system32");
-    assert_eq!(norm_path(Path::new(r"D:\..\..\x")), r"d:\x");
-    assert_eq!(norm_path(Path::new(r"\\localhost\C$\Windows")), r"c:\windows");
-    assert_eq!(norm_path(Path::new(r"\\127.0.0.1\c$")), r"c:\");
-    assert_eq!(norm_path(Path::new(r"\\srv\share\..\..\x")), r"\\srv\share\x");
+    assert_eq!(norm_path_win(r"C:\Windows "), r"c:\windows");
+    assert_eq!(norm_path_win(r"C:\Windows.\System32 ."), r"c:\windows\system32");
+    assert_eq!(norm_path_win(r"D:\Users\..\Windows\.\System32"), r"d:\windows\system32");
+    assert_eq!(norm_path_win(r"D:\..\..\x"), r"d:\x");
+    assert_eq!(norm_path_win(r"\\localhost\C$\Windows"), r"c:\windows");
+    assert_eq!(norm_path_win(r"\\127.0.0.1\c$"), r"c:\");
+    assert_eq!(norm_path_win(r"\\srv\share\..\..\x"), r"\\srv\share\x");
     for p in [r"D:\Windows ", r"D:\Windows .\x", r"D:\Users\..\Windows\System32", r"D:\Users\me\..\..\Windows\x", r"d:\Users\me.\AppData ", r"\\localhost\D$\Windows\System32"] {
         assert!(is_blocked(&file(p, &r)), "{p}");
         assert!(is_blocked(&dir(p, &r)), "{p} (dir)");
@@ -391,6 +433,7 @@ fn classify_resolved_follows_links_in_the_parent_chain() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(windows)]
 #[test]
 fn assess_marks_blocked_and_allowed() {
     let r = rules();
@@ -454,6 +497,8 @@ fn permanent_delete_never_hits_a_trailing_dot_sibling() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// Win32 folding: elsewhere `b.` is its own name, and `C:\a. \c` is one component.
+#[cfg(windows)]
 #[test]
 fn trailing_dot_or_space_names_are_detected() {
     for p in [r"C:\a\b.", r"C:\a\b ", r"C:\a. \c", r"\srv\share\x."] {
@@ -462,4 +507,18 @@ fn trailing_dot_or_space_names_are_detected() {
     for p in [r"C:\a\b", r"C:\a\.git", r"C:\a\b.txt", r"C:\a\..\b", r"C:\"] {
         assert!(!folds_to_sibling(Path::new(p)), "{p}");
     }
+}
+
+// Targets without a classifier (neither Windows, Linux nor macOS) never delete.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[test]
+fn run_deletes_nothing_while_delete_is_off() {
+    assert!(!crate::platform::Caps::get().delete_safe);
+    let f = std::env::temp_dir().join(format!("tmop-del-off-{}.txt", std::process::id()));
+    std::fs::write(&f, b"x").unwrap();
+    let rep = run(vec![target(&f, 1, false)], Mode::Permanent, None);
+    assert!(f.exists());
+    let _ = std::fs::remove_file(&f);
+    assert!(rep.deleted.is_empty());
+    assert_eq!(rep.skipped.len(), 1);
 }

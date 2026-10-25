@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -47,10 +48,13 @@ jobs:
           cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
           cargo clippy --locked --target ${{ matrix.target }} --all-targets --features screensaver -- -D warnings
 
-  docker-linux:
-    name: Docker integration tests (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  # Built on 22.04 for the glibc 2.35 floor of the Linux release. The GUI stack (winit, glutin,
+  # xkbcommon) loads X11, Wayland and GL with dlopen and rfd talks to the XDG portal over D-Bus
+  # in pure Rust, so building needs no -dev packages.
+  linux:
+    name: Build, test and lint (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -60,21 +64,97 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-docker
+          key: linux-x86_64
 
-      - name: Install system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libasound2-dev
+      - name: Build
+        run: cargo build --locked
 
       - name: Docker info
         run: |
           docker version
           docker info --format '{{.ServerVersion}}'
 
-      # The full suite runs in the Windows jobs; here only the tests that need a Docker engine.
+      # A headless X server for the x11rb window-owner test (x11_finds_a_window); xmessage
+      # (x11-utils) opens the window it looks for.
+      - name: Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils
+          Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
+          for _ in $(seq 50); do xdpyinfo -display :99 >/dev/null 2>&1 && break; sleep 0.1; done
+          xdpyinfo -display :99 | grep -q X-Resource
+          echo "TMOP_TEST_X11_DISPLAY=:99" >> "$GITHUB_ENV"
+
+      # The full suite, including the docker_* integration tests against the runner's engine.
       - name: Test
-        run: cargo test --locked --test docker_exec --test docker_files --test docker_logs --test docker_run
+        run: cargo test --locked
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # ShellCheck comes with the runner image.
+      - name: ShellCheck
+        run: shellcheck docs/install.sh packaging/linux/AppRun packaging/linux/package.sh packaging/linux/test-install.sh packaging/macos/package.sh
+
+      # install.sh end to end: this build packaged like a release, installed from file:// URLs
+      # into throwaway home folders (tar.gz, update, AppImage, uninstall, bad checksum).
+      - name: Test install.sh
+        run: |
+          packaging/linux/package.sh v0.0.0-ci x64 target/debug/TMOP "$RUNNER_TEMP/dist"
+          packaging/linux/test-install.sh "$RUNNER_TEMP/dist"
+
+      # The delete and Trash safety tests that need bind mounts and other users' files skip
+      # without root, so they run once more as root here and must not skip.
+      - name: Test delete safety as root
+        run: |
+          bin=$(cargo test --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .target.kind[0] == "lib") | .executable')
+          sudo TMOP_TEST_REQUIRE_MOUNT=1 "$bin" pro::trash pro::diskdelete
+
+  linux-arm64:
+    name: Build and test (aarch64-unknown-linux-gnu)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-aarch64
+
+      - name: Build
+        run: cargo build --locked
+
+      # The Docker suites run in the x86_64 job only.
+      - name: Test
+        run: cargo test --locked --lib --bins
+
+  macos:
+    name: Build, test and lint (macOS)
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - name: Build (aarch64)
+        run: cargo build --locked --target aarch64-apple-darwin
+
+      # The runner has no Docker engine; the docker_* suites run in the Linux job.
+      - name: Test (aarch64)
+        run: cargo test --locked --target aarch64-apple-darwin --lib --bins
+
+      - name: Clippy (aarch64)
+        run: cargo clippy --locked --target aarch64-apple-darwin --all-targets -- -D warnings
+
+      - name: Build (x86_64)
+        run: cargo build --locked --target x86_64-apple-darwin

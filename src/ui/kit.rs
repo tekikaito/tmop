@@ -106,16 +106,8 @@ pub fn kv_list(p: &egui::Painter, rect: Rect, pal: &Palette, items: &[(String, S
     y
 }
 
-/// Opens a folder (or selects a file) in Explorer.
-pub fn reveal(path: &std::path::Path) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("explorer.exe");
-    if path.is_file() {
-        cmd.arg(format!("/select,{}", path.display()));
-    } else {
-        cmd.arg(path);
-    }
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
-}
+/// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
+pub use crate::platform::reveal;
 
 /// What a [`file_dialog`] asks for.
 #[derive(Clone, Debug)]
@@ -128,7 +120,7 @@ pub struct FileDialog {
     /// Suggested file name (save only).
     pub file_name: String,
     /// HWND of the window that owns the dialog (0 for none). The dialog opens above it and is
-    /// modal to it.
+    /// modal to it. Windows only; elsewhere the portal or panel picks the app's window.
     pub owner: isize,
 }
 
@@ -178,9 +170,40 @@ fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
     }
 }
 
+/// rfd's dialog: the XDG desktop portal on Linux, NSOpenPanel / NSSavePanel on macOS. The async
+/// dialog is used because macOS shows panels only from the main thread: rfd hands it there (to
+/// the running event loop) and this worker thread waits for the answer.
 #[cfg(not(windows))]
-fn run_file_dialog(_: &FileDialog) -> Option<std::path::PathBuf> {
-    None
+fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
+    let dialog = rfd::AsyncFileDialog::new().set_title(&d.title).add_filter(&d.filter.0, &[d.filter.1.as_str()]);
+    let file = if d.save { block_on(dialog.set_file_name(&d.file_name).save_file()) } else { block_on(dialog.pick_file()) }?;
+    let mut path = file.path().to_path_buf();
+    // Portals and panels may hand back a save name without the type's extension.
+    if d.save && path.extension().is_none() {
+        path.set_extension(&d.filter.1);
+    }
+    Some(path)
+}
+
+/// Runs `fut` to completion on this thread, parking it between wake-ups.
+#[cfg(not(windows))]
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+            return out;
+        }
+        std::thread::park();
+    }
 }
 
 /// The categorical colours of treemap cells, share bars and legends, in the design's order.
@@ -557,6 +580,26 @@ mod tests {
                 });
             });
         }
+    }
+
+    /// The file dialog's executor finishes a future woken from another thread.
+    #[cfg(not(windows))]
+    #[test]
+    fn block_on_waits_for_a_wake() {
+        let (tx, rx) = std::sync::mpsc::channel::<std::task::Waker>();
+        let mut polls = 0;
+        let fut = std::future::poll_fn(|cx| {
+            polls += 1;
+            if polls == 1 {
+                let _ = tx.send(cx.waker().clone());
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(polls)
+            }
+        });
+        let waker = std::thread::spawn(move || rx.recv().map(|w| w.wake()));
+        assert_eq!(block_on(fut), 2);
+        assert!(waker.join().unwrap().is_ok());
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod detail;
 pub mod dialogs;
 pub mod engine_tab;
 pub mod engine_wizard;
+pub mod local_tab;
 pub mod tables;
 pub mod terminal_tab;
 pub mod wizards;
@@ -26,6 +27,7 @@ use super::widgets::{self, Button, Icon};
 use super::{App, FrameData, STATUS_H};
 use crate::docker::backend::{Backend, Command, EngineEvent, NoticeKind, Shared};
 use crate::docker::context::{docker_dir, Context};
+use crate::docker::local;
 use crate::docker::model::{Container, EngineInfo, EngineStatus, Image, Network, Stack, StatsSample, Totals, Volume};
 use crate::docker::notify;
 use crate::engine::manager::{self, EngineManager, Phase};
@@ -115,6 +117,8 @@ pub struct DockerUi {
     pub dialogs: dialogs::DialogState,
     pub engine_tab: engine_tab::EngineTabState,
     pub engine_wizard: engine_wizard::EngineWizard,
+    /// The Local Docker tab (Linux, macOS) in the Engine tab's place.
+    pub local_tab: local_tab::LocalTabState,
     pub last_list_seq: u64,
     pub last_stats_seq: u64,
     pub snap: Snap,
@@ -136,6 +140,8 @@ pub struct DockerState {
     pub ui: DockerUi,
     /// The Docker CLI configuration folder exists.
     pub installed: bool,
+    /// Off Windows: one of the usual engine sockets exists (checked once at start).
+    pub local_found: bool,
     /// Engine status as of the last [`DockerState::poll`].
     pub last_status: EngineStatus,
     /// Desktop notifications for alerts, from the active context's setting.
@@ -152,6 +158,7 @@ impl DockerState {
     pub fn new(ctx: &egui::Context, settings: &Settings) -> Self {
         let contexts = wizards::merged_contexts(settings);
         let installed = docker_dir().map(|d| d.exists()).unwrap_or(false);
+        let local_found = !cfg!(windows) && local::first_present(&local::this_machine()).is_some();
         let active = settings.docker.active_context.clone();
         let resolved = resolve_name(&contexts, &active);
         let read_only = settings.docker.contexts.get(&resolved).map(|c| c.read_only).unwrap_or(false);
@@ -169,6 +176,7 @@ impl DockerState {
             contexts,
             ui: DockerUi::default(),
             installed,
+            local_found,
             last_status: EngineStatus::Unknown,
             notify_enabled,
             engine,
@@ -188,11 +196,12 @@ impl DockerState {
         self.notify_enabled = settings.docker.contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
     }
 
-    /// Whether the Docker page is listed in the navigation.
-    pub fn visible(&self, settings: &Settings) -> bool {
-        // The engine is offered wherever it can run, so it can be set up from here.
-        let engine_supported = cfg!(windows);
-        !settings.docker.hide_page && (self.installed || self.last_status == EngineStatus::Connected || engine_supported)
+    /// Whether the Docker page is listed in the navigation. `engine`: TMOP's own engine is
+    /// offered on this OS, so the page is listed to set it up from even without Docker. Off
+    /// Windows an engine socket on this machine lists it too, so a denied or stopped engine is
+    /// explained on the Local Docker tab.
+    pub fn visible(&self, settings: &Settings, engine: bool) -> bool {
+        !settings.docker.hide_page && (self.installed || self.local_found || self.last_status == EngineStatus::Connected || engine)
     }
 
     /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as
@@ -217,6 +226,10 @@ impl DockerState {
                     let _ = notify::send(&title, &body);
                 });
             }
+        }
+        // Off Windows a missing notify-send (or a blocked osascript) is said once.
+        if let Some(e) = notify::take_first_failure().filter(|_| !cfg!(windows)) {
+            self.ui.toast(NoticeKind::Error, format!("No desktop notification: {e}"));
         }
         let excess = self.ui.toasts.len().saturating_sub(MAX_TOASTS);
         self.ui.toasts.drain(..excess);
@@ -306,7 +319,7 @@ pub fn tab_from_id(id: &str) -> Option<Tab> {
         "images" => Some(Tab::Images),
         "volumes" => Some(Tab::Volumes),
         "networks" => Some(Tab::Networks),
-        "engine" => Some(Tab::Engine),
+        "engine" | "local" => Some(Tab::Engine),
         _ => None,
     }
 }
@@ -421,9 +434,14 @@ impl App {
         self.tab_strip(ui, tabs, &pal, &active, stacked);
         let content = Rect::from_min_max(pos2(area.left(), tabs.bottom() + if stacked { SWITCH_ROW_H } else { 0.0 } + 14.0), area.max);
         if self.docker.ui.tab == Tab::Engine {
-            // The engine tab has no detail aside, so its content takes the whole width.
+            // The engine tab has no detail aside, so its content takes the whole width. Off
+            // Windows the read-only Local Docker panel takes its place.
             self.docker.ui.detail.terminals.set_visible(None);
-            engine_tab::show(self, ui, content, fd);
+            if self.caps.engine {
+                engine_tab::show(self, ui, content, fd);
+            } else {
+                local_tab::show(self, ui, content, fd);
+            }
         } else if area.width() >= 1100.0 {
             let cols = kit::hsplit(content, &[3.0, 1.4], 14.0);
             tables::show(self, ui, cols[0], fd);
@@ -593,7 +611,8 @@ impl App {
             ("Images", Some(snap.images.len())),
             ("Volumes", Some(snap.volumes.len())),
             ("Networks", Some(snap.networks.len())),
-            ("Engine", None),
+            // TMOP's engine (WSL) exists on Windows only; elsewhere the slot is the Local Docker panel.
+            (if self.caps.engine { "Engine" } else { "Local Docker" }, None),
         ];
         const ORDER: [Tab; 6] = [Tab::Containers, Tab::Stacks, Tab::Images, Tab::Volumes, Tab::Networks, Tab::Engine];
         let current = self.docker.ui.tab;

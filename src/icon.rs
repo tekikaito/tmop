@@ -1,6 +1,7 @@
 //! The program icon: the line-drawn CPU chip of [`crate::ui::hardware`] in the accent colour on
-//! a dark rounded square. `assets/icon/` holds it as PNGs and a multi-size `.ico` (the exe's
-//! resource, see `build.rs`); regenerate them with
+//! a dark rounded square. `assets/icon/` holds it as PNGs (64 to 1024 px, for the Linux and
+//! macOS packages) and a multi-size `.ico` (the exe's resource, see `build.rs`); regenerate
+//! them with
 //! `cargo test --locked --lib icon::tests::write_assets -- --ignored`.
 
 /// The window icon (title bar, taskbar, Alt+Tab), 64 px.
@@ -77,6 +78,11 @@ mod art {
 
     /// The icon at `size` px as RGBA.
     pub fn rgba(size: u32) -> Vec<u8> {
+        rows(size, 0..size)
+    }
+
+    /// Rows `ys` of the icon at `size` px as RGBA, one after the other.
+    pub fn rows(size: u32, ys: impl Iterator<Item = u32>) -> Vec<u8> {
         let s = size as f32;
         // The chip of `Hardware::Cpu`: its isometric surface (x - y, x + y) * (1.04, 0.6), fitted
         // to the icon. Local units span 10..54 with the pins; small sizes drop the pins and let
@@ -103,8 +109,8 @@ mod art {
             (Mark::Stroke(outline(&quad(14.0, 14.0, 50.0, 50.0)), w), ACCENT, 1.0),
             (Mark::Stroke(outline(&quad(22.0, 22.0, 42.0, 42.0)), w), ACCENT, 1.0),
         ];
-        let mut out = vec![0u8; (size * size * 4) as usize];
-        for py in 0..size {
+        let mut out = Vec::new();
+        for py in ys {
             for px in 0..size {
                 // Premultiplied accumulation over the 16 samples.
                 let mut acc = [0.0_f32; 4];
@@ -125,12 +131,9 @@ mod art {
                         }
                     }
                 }
-                let i = ((py * size + px) * 4) as usize;
                 let a = acc[3];
-                for k in 0..3 {
-                    out[i + k] = if a > 0.0 { (acc[k] / a * 255.0).round() as u8 } else { 0 };
-                }
-                out[i + 3] = (a * 255.0).round() as u8;
+                out.extend(acc[..3].iter().map(|c| if a > 0.0 { (c / a * 255.0).round() as u8 } else { 0 }));
+                out.push((a * 255.0).round() as u8);
             }
         }
         out
@@ -197,14 +200,35 @@ mod tests {
         }
     }
 
+    /// The committed standalone PNGs (Linux hicolor icons, the macOS .icns source) are the
+    /// drawing at their size.
+    #[test]
+    fn pngs_match_art() {
+        for s in PNG_SIZES {
+            let path = format!("{}/assets/icon/tmop-{s}.png", env!("CARGO_MANIFEST_DIR"));
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}; run the write_assets test"));
+            let (rgba, size) = decode(&bytes).expect("png decodes");
+            assert_eq!(size, s, "{path} has the wrong size: run the write_assets test");
+            // Every 8th row of the large ones keeps the debug-build test fast.
+            let ys = (0..s).step_by(if s > 256 { 8 } else { 1 });
+            let row = |y: u32| &rgba[(y * s * 4) as usize..((y + 1) * s * 4) as usize];
+            let committed: Vec<u8> = ys.clone().flat_map(row).copied().collect();
+            assert!(committed == art::rows(s, ys), "{path} is stale: run the write_assets test");
+        }
+    }
+
+    /// Sizes written as `tmop-<size>.png`.
+    const PNG_SIZES: [u32; 4] = [64, 256, 512, 1024];
+
     /// Writes `assets/icon/` from the drawing.
     #[test]
     #[ignore]
     fn write_assets() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("tmop-64.png"), art::png(64)).unwrap();
-        std::fs::write(dir.join("tmop-256.png"), art::png(256)).unwrap();
+        for s in PNG_SIZES {
+            std::fs::write(dir.join(format!("tmop-{s}.png")), art::png(s)).unwrap();
+        }
         std::fs::write(dir.join("tmop.ico"), art::ico(&ICO_SIZES)).unwrap();
     }
 }

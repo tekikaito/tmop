@@ -4,11 +4,27 @@
 //! `PowerRead{AC,DC}ValueIndex` for the processor policy, `GetSystemPowerStatus` and
 //! `CallNtPowerInformation(SystemBatteryState)` for the battery. Per-core clocks come
 //! from the sampler (`CallNtPowerInformation(ProcessorInformation)`).
+//!
+//! Linux reads `/sys/class/power_supply`, power-profiles-daemon (else the ACPI platform
+//! profile) as the schemes and the cpufreq policies (no AC/DC split); macOS reads `pmset`
+//! (settings per power source, Low Power Mode as the scheme) and `ioreg` for the charge rate.
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+pub mod parse;
+
+#[cfg(target_os = "linux")]
+pub use linux::read;
+#[cfg(target_os = "macos")]
+pub use macos::read;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PolicyRow {
     pub name: &'static str,
     pub ac: String,
+    /// Empty when the OS has one value for both sources (Linux).
     pub dc: String,
 }
 
@@ -27,11 +43,28 @@ pub struct Battery {
 pub struct PowerInfo {
     pub scheme_name: String,
     pub scheme_guid: String,
-    /// (guid, name, active)
+    /// (guid or profile id, name, active); may be empty.
     pub schemes: Vec<(String, String, bool)>,
     pub policy: Vec<PolicyRow>,
     pub ac_online: Option<bool>,
     pub battery: Option<Battery>,
+    /// Where this was read and where to change it (the page's footer).
+    pub note: String,
+}
+
+/// The page footer before the first read: the Windows source (elsewhere the back end's note).
+pub const DEFAULT_NOTE: &str = if cfg!(windows) { "The active plan is read from powercfg; switch plans in Windows settings." } else { "" };
+
+/// What the OS calls a power scheme, singular and plural: "Power plan" on Windows,
+/// "Power profile" on Linux, "Energy mode" on macOS.
+pub const fn scheme_words() -> (&'static str, &'static str) {
+    if cfg!(target_os = "linux") {
+        ("Power profile", "profiles")
+    } else if cfg!(target_os = "macos") {
+        ("Energy mode", "modes")
+    } else {
+        ("Power plan", "plans")
+    }
 }
 
 /// Human text for a processor policy value.
@@ -104,7 +137,7 @@ pub fn read() -> Result<PowerInfo, String> {
         }
     }
 
-    let mut info = PowerInfo::default();
+    let mut info = PowerInfo { note: DEFAULT_NOTE.into(), ..Default::default() };
     // SAFETY: PowerGetActiveScheme allocates a GUID that we free with LocalFree.
     let active: Option<GUID> = unsafe {
         let mut p: *mut GUID = std::ptr::null_mut();
@@ -175,9 +208,9 @@ pub fn read() -> Result<PowerInfo, String> {
     Ok(info)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn read() -> Result<PowerInfo, String> {
-    Err("power information is only implemented on Windows".into())
+    Err(format!("power information is not implemented on {}", crate::platform::os_name()))
 }
 
 #[cfg(test)]

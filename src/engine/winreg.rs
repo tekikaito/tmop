@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAS
 
 use crate::pro::winutil::{from_wide, wide};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::platform::CREATE_NO_WINDOW;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// `SE_ERR_ACCESSDENIED`: what ShellExecuteW returns when the UAC prompt is declined.
 const SE_ERR_ACCESSDENIED: isize = 5;

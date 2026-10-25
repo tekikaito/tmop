@@ -498,19 +498,11 @@ impl Skin {
         self.header.as_ref().and_then(|h| h.title.clone()).unwrap_or_else(|| self.name.clone())
     }
 
-    /// Absolute path to the header logo, for directory skins.
+    /// Absolute path to the header logo, for directory skins (see [`skin_file`]).
     pub fn logo_path(&self) -> Option<PathBuf> {
         let logo = self.header.as_ref()?.logo.as_ref()?;
         match &self.source {
-            SkinSource::Directory(dir) => {
-                let p = dir.join(&logo.file);
-                // Refuse to escape the skin directory.
-                if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                    None
-                } else {
-                    Some(p)
-                }
-            }
+            SkinSource::Directory(dir) => skin_file(dir, &logo.file),
             _ => None,
         }
     }
@@ -548,22 +540,47 @@ impl SkinCatalog {
     }
 }
 
-/// Default directories searched for skins, highest priority first.
+/// Default directories searched for skins, highest priority first (see [`crate::platform::skin_dirs`]).
 pub fn default_skin_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        dirs.push(local.join(crate::APP_DIR).join("Skins"));
-        dirs.push(local.join("TMOG").join("Skins"));
+    crate::platform::skin_dirs()
+}
+
+/// The file `rel` names inside the skin folder `dir`. Skins are written on Windows, so a backslash
+/// separates folders as well as `/`, and when the name as written does not exist a file whose name differs
+/// only in case is used (Linux file systems are case-sensitive). `None` for a name that leaves
+/// the folder: `..`, a root or a drive. A name that matches nothing is returned as written.
+pub fn skin_file(dir: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.trim();
+    if rel.starts_with(['/', '\\']) || rel.as_bytes().get(1) == Some(&b':') {
+        return None;
     }
-    for base in ["ProgramW6432", "ProgramFiles"] {
-        if let Some(pf) = std::env::var_os(base).map(PathBuf::from) {
-            let d = pf.join("Task Manager TMOG").join("Skins");
-            if !dirs.contains(&d) {
-                dirs.push(d);
+    let parts: Vec<&str> = rel.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".").collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return None;
+    }
+    let literal = parts.iter().fold(dir.to_path_buf(), |p, part| p.join(part));
+    if literal.exists() {
+        return Some(literal);
+    }
+    let mut found = dir.to_path_buf();
+    for part in &parts {
+        let exact = found.join(part);
+        found = if exact.exists() {
+            exact
+        } else {
+            let lower = part.to_lowercase();
+            let entry = std::fs::read_dir(&found).ok().and_then(|rd| {
+                let mut names: Vec<std::ffi::OsString> = rd.filter_map(|e| e.ok().map(|e| e.file_name())).filter(|n| n.to_string_lossy().to_lowercase() == lower).collect();
+                names.sort();
+                names.into_iter().next()
+            });
+            match entry {
+                Some(name) => found.join(name),
+                None => return Some(literal),
             }
-        }
+        };
     }
-    dirs
+    Some(found)
 }
 
 fn is_skin_entry(path: &Path) -> bool {
@@ -757,6 +774,34 @@ mod tests {
         let cat = scan(std::slice::from_ref(&dir));
         assert_eq!(cat.get("com.tmop.graph").unwrap().name, "Mine");
         assert_eq!(cat.skins.iter().filter(|s| s.id == "com.tmop.graph").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Logo names written on Windows (backslashes, other case) resolve inside the skin folder and
+    /// never outside it.
+    #[test]
+    fn skin_file_lookup() {
+        // The exact name on case-sensitive file systems; Windows and macOS find the name as typed.
+        let same_file = |got: &Path, want: &Path| got.is_file() && if cfg!(target_os = "linux") { got == want } else { got.to_string_lossy().eq_ignore_ascii_case(&want.to_string_lossy()) };
+        let dir = std::env::temp_dir().join(format!("tmop-test-skinfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Images")).unwrap();
+        std::fs::write(dir.join("Images").join("Logo.PNG"), b"png").unwrap();
+        std::fs::write(dir.join("top.png"), b"png").unwrap();
+        let want = dir.join("Images").join("Logo.PNG");
+        for rel in ["Images/Logo.PNG", "Images\\Logo.PNG", "./Images//Logo.PNG", "images\\logo.png", "IMAGES/logo.PNG"] {
+            assert!(skin_file(&dir, rel).is_some_and(|p| same_file(&p, &want)), "{rel}");
+        }
+        assert_eq!(skin_file(&dir, " top.png "), Some(dir.join("top.png")));
+        assert_eq!(skin_file(&dir, "Images/missing.png"), Some(dir.join("Images").join("missing.png")), "kept as written");
+        assert_eq!(skin_file(&dir, "nope\\x.png"), Some(dir.join("nope").join("x.png")));
+        for bad in ["../x.png", "Images\\..\\..\\x.png", "/etc/passwd", "\\\\server\\x.png", "C:\\x.png", "c:x.png", "", " . "] {
+            assert_eq!(skin_file(&dir, bad), None, "{bad}");
+        }
+        let mut skin = Skin::from_json(r#"{"format":1,"id":"t","name":"T","header":{"logo":{"file":"images\\LOGO.png"}}}"#).unwrap();
+        assert_eq!(skin.logo_path(), None, "a file skin has no folder");
+        skin.source = SkinSource::Directory(dir.clone());
+        assert!(skin.logo_path().is_some_and(|p| same_file(&p, &want)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -226,11 +226,7 @@ fn run_helper(what: &str, limit: Duration) -> (Vec<Handler>, Option<String>) {
     };
     let mut cmd = Command::new(exe);
     cmd.arg(format!("{ARG}{what}")).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    crate::platform::hide_console(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (Vec::new(), Some(format!("cannot start the Windows Disk Cleanup helper: {e}"))),

@@ -1,8 +1,8 @@
 [package]
 name = "tmop"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
-description = "TMOP (Task Manager OverPowered): a skinnable Windows system monitor in Rust, compatible with TMOG skins and settings"
+description = "TMOP (Task Manager OverPowered): a skinnable system monitor for Windows, Linux and macOS in Rust, compatible with TMOG skins and settings"
 publish = false
 license = "GPL-3.0-only"
 repository = "https://github.com/tekikaito/tmop"
@@ -79,6 +79,31 @@ features = [
     "UI_Notifications",
     "Win32_UI_LegacyWindowsEnvironmentFeatures",
 ]
+
+# localtime_r, gethostname and geteuid for src/platform.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The x11 and wayland features of egui-winit (eframe's own x11/wayland features would add ~46 never-built
+# wgpu crates to Cargo.lock through weak `egui-wgpu?/...` features, cargo#10801). They make
+# `with_app_id` reach Wayland and X11 window types work; winit itself already has both backends.
+[target.'cfg(target_os = "linux")'.dependencies]
+egui-winit = { version = "0.29.1", default-features = false, features = ["x11", "wayland"] }
+# Which processes own a window on X11 (_NET_CLIENT_LIST + _NET_WM_PID, X-Resource for clients
+# without a pid) for the Processes page; the pure-Rust connection, already in the tree through
+# winit, so Cargo.lock gains no crate.
+x11rb = { version = "0.13", default-features = false, features = ["res"] }
+# One registry round trip before the window opens: does the compositor offer server-side
+# decorations (zxdg_decoration_manager_v1)? If not (GNOME), TMOP draws its own title bar.
+# Already in Cargo.lock through winit, and loaded with winit's dlopen of libwayland-client.
+wayland-client = { version = "0.31", default-features = false }
+
+# The Trash with Put Back (NSFileManager trashItemAtURL) for Disk Space deletes; a plain rename into
+# ~/.Trash would lose Put Back. Both crates are already in Cargo.lock through winit/rfd, and these
+# features add no crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [dev-dependencies]
 

@@ -6,9 +6,17 @@
 //! `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` on Windows, `read_dir` elsewhere) and
 //! then appends the results under the lock, so a child's node index is always above its
 //! parent's. Reparse points (symlinks, junctions, mount points) are never followed.
+//!
+//! Off Windows the walk stays on the scan root's file system (like `du -x`): folders and files on
+//! another device are skipped, and so are the kernel's pseudo trees (`/proc`, `/sys`, `/dev`,
+//! `/run`; macOS `/dev`, `/Volumes`, `/System/Volumes`) even when they share it. Scanning `/` on
+//! macOS also admits the APFS Data volume, where the firmlinks (`/Users`, `/Applications`...)
+//! lead; on Linux the other mounted subvolumes of a btrfs file system below the root count too,
+//! while a mount showing a folder the scan reaches anyway (a bind mount) is skipped.
+//! Sizes are allocated blocks, and a file with several hard links counts once.
 
 use super::diskspace::{ext_of, FileRec, Names, Node, Publisher, ScanMethod, F_HIDDEN, NO_PARENT};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -21,6 +29,62 @@ struct Entry {
     size: u64,
     mtime: u64,
     flags: u8,
+    /// (device, inode) of a file with more than one hard link: its bytes count once per scan.
+    link: Option<(u64, u64)>,
+}
+
+/// Where the walk may go off Windows: the devices of the scan, and pseudo trees to skip.
+#[derive(Default)]
+struct Bounds {
+    #[cfg(unix)]
+    devs: Vec<u64>,
+    #[cfg(unix)]
+    skip: Vec<PathBuf>,
+}
+
+impl Bounds {
+    #[cfg(unix)]
+    fn of(root: &Path) -> Bounds {
+        use std::os::unix::fs::MetadataExt;
+        let dev = |p: &str| std::fs::metadata(p).ok().map(|m| m.dev());
+        let mut devs: Vec<u64> = std::fs::metadata(root).ok().map(|m| m.dev()).into_iter().collect();
+        let pseudo: &[&str] = if cfg!(target_os = "macos") { &["/dev", "/Volumes", "/System/Volumes", "/.vol", "/net", "/home"] } else { &["/proc", "/sys", "/dev", "/run"] };
+        #[allow(unused_mut)] // only Linux adds to it
+        let mut skip: Vec<PathBuf> = pseudo.iter().map(PathBuf::from).filter(|p| p.as_path() != root).collect();
+        if cfg!(target_os = "macos") && root == Path::new("/") {
+            devs.extend(dev("/System/Volumes/Data"));
+        }
+        // The other mounted subvolumes of a btrfs file system (Fedora's `/home` below `/`), but
+        // not the mounts showing a folder the scan reaches anyway (bind mounts): counted once.
+        #[cfg(target_os = "linux")]
+        if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
+            let (mounts, at) = (super::mounts::parse_mountinfo(&text), root.to_string_lossy());
+            for p in super::mounts::same_fs_points(&mounts, &at) {
+                if let Some(d) = dev(&p).filter(|d| !devs.contains(d)) {
+                    devs.push(d);
+                }
+            }
+            skip.extend(super::mounts::duplicate_points(&mounts, &at).into_iter().map(PathBuf::from));
+        }
+        Bounds { devs, skip }
+    }
+
+    #[cfg(not(unix))]
+    fn of(_root: &Path) -> Bounds {
+        Bounds::default()
+    }
+
+    /// False for an entry on another file system (unknown device: allowed).
+    #[cfg(unix)]
+    fn same_fs(&self, md: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.devs.is_empty() || self.devs.contains(&md.dev())
+    }
+
+    #[cfg(unix)]
+    fn skipped(&self, dir: &Path, name: &str) -> bool {
+        self.skip.iter().any(|s| s.parent() == Some(dir) && s.file_name().is_some_and(|n| n == name))
+    }
 }
 
 #[derive(Default)]
@@ -38,6 +102,8 @@ struct Shared {
     bytes: u64,
     denied: u64,
     current: String,
+    /// Hard-linked files already counted.
+    links: HashSet<(u64, u64)>,
 }
 
 impl Shared {
@@ -68,17 +134,18 @@ pub fn scan(root: PathBuf, cancel: &AtomicBool, publish: &Publisher) {
         stack: vec![(0, root.clone())],
         ..Default::default()
     });
+    let bounds = Bounds::of(&root);
     let (work, idle) = (Condvar::new(), Condvar::new());
     publish.progress(|p| p.method = ScanMethod::Walker);
     std::thread::scope(|s| {
         let mut spawned = 0;
         for n in 0..workers {
-            if std::thread::Builder::new().name(format!("tmop-walk-{n}")).spawn_scoped(s, || worker(&sh, &work, &idle, cancel, workers)).is_ok() {
+            if std::thread::Builder::new().name(format!("tmop-walk-{n}")).spawn_scoped(s, || worker(&sh, &work, &idle, cancel, &bounds, workers)).is_ok() {
                 spawned += 1;
             }
         }
         if spawned == 0 {
-            worker(&sh, &work, &idle, cancel, 1);
+            worker(&sh, &work, &idle, cancel, &bounds, 1);
         }
         // This thread publishes progress and partial trees until the workers run dry.
         let mut g = lock(&sh);
@@ -112,7 +179,7 @@ pub fn scan(root: PathBuf, cancel: &AtomicBool, publish: &Publisher) {
     publish.finish(Some(tree), cancelled, ScanMethod::Walker);
 }
 
-fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBool, workers: usize) {
+fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBool, bounds: &Bounds, workers: usize) {
     let mut buf = vec![0u64; 8192]; // 64 KiB, 8-byte aligned
     loop {
         let batch: Vec<(u32, PathBuf)> = {
@@ -138,7 +205,7 @@ fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBoo
                 break;
             }
             entries.clear();
-            if !enumerate(dir, &mut buf, &mut entries) {
+            if !enumerate(dir, &mut buf, &mut entries, bounds) {
                 found.denied.push(*idx);
                 continue;
             }
@@ -148,9 +215,12 @@ fn worker(sh: &Mutex<Shared>, work: &Condvar, idle: &Condvar, cancel: &AtomicBoo
                     let path = dir.join(&e.name);
                     found.dirs.push((*idx, e.name, path));
                 } else {
-                    let x = found.exts.entry(ext_of(&e.name)).or_default();
-                    x.0 += e.size;
-                    x.1 += 1;
+                    if e.link.is_none() {
+                        // Hard-linked files are tallied in append(), once.
+                        let x = found.exts.entry(ext_of(&e.name)).or_default();
+                        x.0 += e.size;
+                        x.1 += 1;
+                    }
                     found.files.push((*idx, e));
                 }
             }
@@ -203,7 +273,16 @@ fn append(g: &mut Shared, f: Found) {
         g.nodes[parent as usize].children.push(child);
         g.stack.push((child, path));
     }
-    for (dir, e) in f.files {
+    for (dir, mut e) in f.files {
+        if let Some(key) = e.link {
+            // Another link to a file already counted: listed, but its bytes count once.
+            if !g.links.insert(key) {
+                e.size = 0;
+            }
+            let x = g.exts.entry(ext_of(&e.name)).or_default();
+            x.0 += e.size;
+            x.1 += 1;
+        }
         let (name_off, name_len) = g.names.push(&e.name);
         g.files.push(FileRec { size: e.size, mtime: e.mtime, dir, name_off, name_len, flags: e.flags });
         let n = &mut g.nodes[dir as usize];
@@ -223,14 +302,14 @@ fn append(g: &mut Shared, f: Found) {
 }
 
 /// Lists `dir` into `out`. False when the folder cannot be read.
-fn enumerate(dir: &Path, buf: &mut [u64], out: &mut Vec<Entry>) -> bool {
+fn enumerate(dir: &Path, buf: &mut [u64], out: &mut Vec<Entry>, bounds: &Bounds) -> bool {
     #[cfg(windows)]
     if enumerate_win(dir, buf, out) {
         return true;
     }
     let _ = buf;
     out.clear();
-    enumerate_std(dir, out)
+    enumerate_std(dir, out, bounds)
 }
 
 #[cfg(windows)]
@@ -244,7 +323,19 @@ fn reparse_flag(_: &std::fs::Metadata) -> u8 {
     0
 }
 
-fn enumerate_std(dir: &Path, out: &mut Vec<Entry>) -> bool {
+/// (device, inode) of a file that has other hard links.
+#[cfg(unix)]
+fn link_key(md: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (md.nlink() > 1).then(|| (md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn link_key(_: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+fn enumerate_std(dir: &Path, out: &mut Vec<Entry>, bounds: &Bounds) -> bool {
     let Ok(rd) = std::fs::read_dir(dir) else { return false };
     for entry in rd.flatten() {
         let Ok(ft) = entry.file_type() else { continue };
@@ -252,14 +343,30 @@ fn enumerate_std(dir: &Path, out: &mut Vec<Entry>) -> bool {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // A pseudo tree, or a mount showing what the scan counts elsewhere.
+        #[cfg(unix)]
+        if bounds.skipped(dir, &name) {
+            continue;
+        }
         if ft.is_dir() {
-            out.push(Entry { name, dir: true, size: 0, mtime: 0, flags: 0 });
+            // A mount point (another device) is not descended. When its metadata cannot be read
+            // the folder is listed and later counts as unreadable.
+            #[cfg(unix)]
+            if entry.metadata().is_ok_and(|md| !bounds.same_fs(&md)) {
+                continue;
+            }
+            out.push(Entry { name, dir: true, size: 0, mtime: 0, flags: 0, link: None });
         } else if let Ok(md) = entry.metadata() {
+            #[cfg(unix)]
+            if !bounds.same_fs(&md) {
+                continue; // a file bind-mounted from elsewhere
+            }
             let flags = if super::diskspace::is_hidden(&md, &name) { F_HIDDEN } else { 0 } | reparse_flag(&md);
             let mtime = md.modified().map(super::diskspace::system_to_filetime).unwrap_or(0);
-            out.push(Entry { name, dir: false, size: md.len(), mtime, flags });
+            out.push(Entry { name, dir: false, size: super::diskspace::allocated(&md), mtime, flags, link: link_key(&md) });
         }
     }
+    let _ = bounds;
     true
 }
 
@@ -312,7 +419,7 @@ fn enumerate_win(dir: &Path, buf: &mut [u64], out: &mut Vec<Entry>) -> bool {
                     if reparse {
                         flags |= super::diskspace::F_REPARSE;
                     }
-                    out.push(Entry { name: String::from_utf16_lossy(name16), dir: is_dir, size: if is_dir { 0 } else { e.EndOfFile.max(0) as u64 }, mtime: e.LastWriteTime.max(0) as u64, flags });
+                    out.push(Entry { name: String::from_utf16_lossy(name16), dir: is_dir, size: if is_dir { 0 } else { e.EndOfFile.max(0) as u64 }, mtime: e.LastWriteTime.max(0) as u64, flags, link: None });
                 }
             }
             if e.NextEntryOffset == 0 {
@@ -425,6 +532,69 @@ mod tests {
         assert!(t.nodes[1].denied && t.nodes[1].size == 0);
     }
 
+    /// Two links to one file count its blocks once (both names stay listed); sizes are blocks.
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_count_once() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = temp("hardlinks");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a/data.bin"), vec![7u8; 100_000]).unwrap();
+        std::fs::hard_link(dir.join("a/data.bin"), dir.join("b/same.bin")).unwrap();
+        std::fs::write(dir.join("b/other.txt"), b"x").unwrap();
+        let blocks = |p: &str| std::fs::metadata(dir.join(p)).unwrap().blocks() * 512;
+        let (data, other) = (blocks("a/data.bin"), blocks("b/other.txt"));
+        assert!(data >= 100_000);
+        let t = run(&dir);
+        assert_eq!(t.files.len(), 3, "every name is listed");
+        assert_eq!(t.nodes[0].size, data + other, "the linked file counts once");
+        assert_eq!(t.files.iter().map(|f| f.size).sum::<u64>(), data + other);
+        let bin = t.extensions.iter().find(|e| e.0 == "bin").unwrap();
+        assert_eq!((bin.1, bin.2), (data, 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Entries on a device outside the scan are neither listed nor descended; pseudo trees are
+    /// skipped by name below `/`.
+    #[cfg(unix)]
+    #[test]
+    fn stays_on_the_scanned_file_system() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = temp("bounds");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+        let here = Bounds::of(&dir);
+        assert_eq!(here.devs, vec![std::fs::metadata(&dir).unwrap().dev()]);
+        let mut out = Vec::new();
+        assert!(enumerate_std(&dir, &mut out, &here));
+        assert_eq!(out.len(), 2);
+        let elsewhere = Bounds { devs: vec![here.devs[0].wrapping_add(1)], skip: Vec::new() };
+        out.clear();
+        assert!(enumerate_std(&dir, &mut out, &elsewhere));
+        assert!(out.is_empty(), "nothing of another device is taken");
+        let skip_sub = Bounds { devs: here.devs.clone(), skip: vec![dir.join("sub")] };
+        out.clear();
+        assert!(enumerate_std(&dir, &mut out, &skip_sub));
+        assert_eq!(out.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["f.txt"]);
+        let root = Bounds::of(Path::new("/"));
+        let pseudo = if cfg!(target_os = "macos") { "/System/Volumes" } else { "/proc" };
+        assert!(root.skip.iter().any(|p| p == Path::new(pseudo)));
+        assert!(!Bounds::of(Path::new(pseudo)).skip.iter().any(|p| p == Path::new(pseudo)), "an explicit scan of it is allowed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/proc` is its own file system: a scan of `/` must not count `/proc/kcore` (~128 TiB).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_scan_bounds_exclude_proc() {
+        let root = Bounds::of(Path::new("/"));
+        let proc = std::fs::metadata("/proc").unwrap();
+        assert!(!root.same_fs(&proc) || root.skipped(Path::new("/"), "proc"));
+        assert!(root.skipped(Path::new("/"), "sys") && root.skipped(Path::new("/"), "dev") && root.skipped(Path::new("/"), "run"));
+        assert!(!root.skipped(Path::new("/"), "home") && !root.skipped(Path::new("/x"), "proc"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn win_enumeration_matches_std() {
@@ -435,7 +605,7 @@ mod tests {
         let mut buf = vec![0u64; 8192];
         let (mut w, mut s) = (Vec::new(), Vec::new());
         assert!(enumerate_win(&dir, &mut buf, &mut w), "FileIdExtdDirectoryInfo must work on the temp volume");
-        assert!(enumerate_std(&dir, &mut s));
+        assert!(enumerate_std(&dir, &mut s, &Bounds::default()));
         let key = |e: &Entry| (e.name.clone(), e.dir, e.size);
         w.sort_by_key(key);
         s.sort_by_key(key);
