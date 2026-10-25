@@ -1320,24 +1320,74 @@ pub fn set_spark_smooth(on: bool) {
     SPARK_SMOOTH.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it,
-/// round-capped.
+/// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it.
+/// The arc and its round ends are one mesh with one feathered edge, so the caps never show as
+/// separate dots. Arcs shorter than `width` also get thinner, shrinking as a pill to nothing.
 pub fn ring(p: &egui::Painter, center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, track: Color32) {
     p.circle_stroke(center, radius, Stroke::new(width, track));
     let frac = frac.clamp(0.0, 1.0);
-    if frac <= 0.0 {
+    if frac >= 0.999 {
+        p.circle_stroke(center, radius, Stroke::new(width, color));
         return;
     }
-    let n = ((frac * 72.0).ceil() as usize).max(2);
-    let pts: Vec<Pos2> = (0..=n)
-        .map(|i| {
-            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * i as f32 / n as f32;
-            center + vec2(a.cos(), a.sin()) * radius
-        })
-        .collect();
-    p.add(Shape::line(pts.clone(), Stroke::new(width, color)));
-    p.circle_filled(pts[0], width / 2.0, color);
-    p.circle_filled(pts[n], width / 2.0, color);
+    let len = frac * std::f32::consts::TAU * radius;
+    let w = width * (len / width).min(1.0);
+    if len <= 0.0 || w < 0.3 {
+        return;
+    }
+    p.add(Shape::mesh(capped_arc(center, radius, w, frac, color, 1.0 / p.ctx().pixels_per_point())));
+}
+
+/// Mesh of an arc from 12 o'clock over `frac` of the circle, `width` thick with round ends:
+/// an opaque core and a `feather` wide fade to transparent along the whole outline.
+fn capped_arc(center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, feather: f32) -> Mesh {
+    let mut m = Mesh::default();
+    let (ri, ro) = ((width - feather).max(0.0) / 2.0, (width + feather) / 2.0);
+    let clear = Color32::TRANSPARENT;
+    let n = ((frac * 96.0).ceil() as u32).max(2);
+    let angle = |i: u32| -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * i as f32 / n as f32;
+    // Body: per step feather-out, core-out, core-in, feather-in.
+    for i in 0..=n {
+        let d = vec2(angle(i).cos(), angle(i).sin());
+        for (r, c) in [(radius + ro, clear), (radius + ri, color), (radius - ri, color), (radius - ro, clear)] {
+            m.colored_vertex(center + d * r, c);
+        }
+        if i > 0 {
+            let (a, b) = (4 * (i - 1), 4 * i);
+            for k in 0..3 {
+                m.add_triangle(a + k, a + k + 1, b + k);
+                m.add_triangle(a + k + 1, b + k + 1, b + k);
+            }
+        }
+    }
+    // Caps: half discs around each end, sharing the body's end vertices.
+    for (i, sign) in [(n, 1.0_f32), (0, -1.0)] {
+        let d = vec2(angle(i).cos(), angle(i).sin());
+        let t = vec2(-d.y, d.x) * sign;
+        let e = center + d * radius;
+        let base = 4 * i;
+        let hub = m.vertices.len() as u32;
+        m.colored_vertex(e, color);
+        let steps = 12;
+        let mut prev = (base + 1, base);
+        for k in 1..=steps {
+            let next = if k == steps {
+                (base + 2, base + 3)
+            } else {
+                let phi = std::f32::consts::PI * k as f32 / steps as f32;
+                let u = d * phi.cos() + t * phi.sin();
+                let idx = m.vertices.len() as u32;
+                m.colored_vertex(e + u * ri, color);
+                m.colored_vertex(e + u * ro, clear);
+                (idx, idx + 1)
+            };
+            m.add_triangle(hub, prev.0, next.0);
+            m.add_triangle(prev.0, prev.1, next.0);
+            m.add_triangle(prev.1, next.1, next.0);
+            prev = next;
+        }
+    }
+    m
 }
 
 /// Concentric rings (the Summary hero): ring `i` has radius `radii[i]` and shows `fracs[i]`.
@@ -2068,6 +2118,8 @@ mod tests {
             baseline(p, r, 0.5, pal.text_faint);
             ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.7, pal.accent, pal.raise(0.08));
             ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.0, pal.accent, pal.raise(0.08));
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 0.001, pal.accent, pal.raise(0.08));
+            ring(p, pos2(100.0, 100.0), 26.0, 4.0, 1.0, pal.accent, pal.raise(0.08));
             rings(p, pos2(200.0, 100.0), &[52.0, 44.0], 5.0, &[(0.5, pal.accent), (1.0, pal.ok)], pal.raise(0.08));
             bar(p, Rect::from_min_size(pos2(20.0, 150.0), vec2(100.0, 3.0)), 0.4, pal.accent);
             share_bar(p, Rect::from_min_size(pos2(20.0, 170.0), vec2(200.0, 12.0)), &[(1.0, pal.accent), (0.0, pal.ok), (2.0, pal.warn)], 3.0);
