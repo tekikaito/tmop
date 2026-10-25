@@ -1,7 +1,7 @@
 //! Mounted file systems off Windows: the Disk Space volume cards and the size of a file system.
 //!
 //! Linux reads `/proc/self/mountinfo` (octal-escaped fields, one line per mount, bind mounts and
-//! btrfs subvolumes included) and keeps one entry per real device (per subvolume on btrfs); labels come from the
+//! btrfs subvolumes included) and keeps one entry per real device (plus a btrfs `/home`); labels come from the
 //! `/dev/disk/by-label` links and the removable flag from sysfs. macOS asks `getfsstat` and folds
 //! the APFS helper volumes under `/System/Volumes` into the boot volume `/`. The parsers and the
 //! filters are pure and tested on every host; only the I/O shells are cfg-gated.
@@ -116,20 +116,23 @@ fn subvolume(m: &Mount) -> Option<&str> {
     (m.fs == "btrfs" && !m.subvol.is_empty()).then_some(m.subvol.as_str())
 }
 
-/// The mounts worth a volume card, with their kind: one per device, and on btrfs one per mounted
-/// subvolume (Fedora's `/` and `/home` are two subvolumes of one partition). Bind mounts of a
-/// sub-folder are dropped when their file system (or subvolume) already has a card; among the
+/// The mounts worth a volume card, with their kind: one per device, so one per btrfs file system
+/// however many of its subvolumes are mounted (openSUSE and Arch mount five to ten, all with the
+/// same totals). The exception is home: a btrfs subvolume mounted at `/home` or at `home` (the
+/// mount holding the user's home folder) keeps a card of its own, so Fedora's `/home` still shows.
+/// Bind mounts of a sub-folder are dropped when their file system already has a card; among the
 /// rest the shortest mount point wins. Sorted by mount point so `/` comes first.
-pub fn pick_linux(mut mounts: Vec<Mount>) -> Vec<(Mount, &'static str)> {
+pub fn pick_linux(mut mounts: Vec<Mount>, home: Option<&str>) -> Vec<(Mount, &'static str)> {
     let bind = |m: &Mount| m.root != subvolume(m).unwrap_or("/");
     mounts.sort_by(|a, b| bind(a).cmp(&bind(b)).then_with(|| a.point.len().cmp(&b.point.len())).then_with(|| a.point.cmp(&b.point)));
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in mounts {
         let Some(kind) = linux_kind(&m.fs, &m.point) else { continue };
-        let key = match (m.source.starts_with("/dev/"), subvolume(&m)) {
-            (true, Some(sub)) => format!("{}\0{sub}", m.source),
-            (true, None) => m.source.clone(),
+        let homes = subvolume(&m).is_some() && !bind(&m) && (m.point == "/home" || home == Some(m.point.as_str()));
+        let key = match (m.source.starts_with("/dev/"), homes) {
+            (true, true) => format!("{}\0{}", m.source, m.point),
+            (true, false) => m.source.clone(),
             (false, _) => format!("{}:{}", m.dev.0, m.dev.1),
         };
         if seen.insert(key) {
@@ -304,7 +307,10 @@ pub fn space(path: &Path) -> Option<(u64, u64)> {
 pub fn volumes() -> Vec<Volume> {
     let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else { return Vec::new() };
     let labels = linux_labels();
-    pick_linux(parse_mountinfo(&text))
+    let mounts = parse_mountinfo(&text);
+    let points: Vec<String> = mounts.iter().map(|m| m.point.clone()).collect();
+    let home = std::env::var("HOME").ok().and_then(|h| mount_of(&h, &points).map(str::to_string));
+    pick_linux(mounts, home.as_deref())
         .into_iter()
         .filter_map(|(m, kind)| {
             // statvfs of a hard-mounted share whose server is gone never returns: such a share
@@ -417,7 +423,7 @@ garbage line
 
     #[test]
     fn one_card_per_real_device() {
-        let v = pick_linux(parse_mountinfo(MOUNTINFO));
+        let v = pick_linux(parse_mountinfo(MOUNTINFO), None);
         let got: Vec<(&str, &str)> = v.iter().map(|(m, k)| (m.point.as_str(), *k)).collect();
         assert_eq!(got, [("/", "Fixed"), ("/boot/efi", "Fixed"), ("/home", "Fixed"), ("/media/cdrom", "Optical"), ("/mnt/c", "Network"), ("/mnt/nas", "Network"), ("/run/media/alex/My Stick", "Removable"), ("/srv/data", "Fixed")]);
     }
@@ -433,10 +439,36 @@ garbage line
 ";
 
     #[test]
-    fn btrfs_subvolumes_get_their_own_cards() {
-        let v = pick_linux(parse_mountinfo(FEDORA));
+    fn a_btrfs_home_keeps_its_own_card() {
+        let v = pick_linux(parse_mountinfo(FEDORA), Some("/home"));
         let got: Vec<&str> = v.iter().map(|(m, _)| m.point.as_str()).collect();
         assert_eq!(got, ["/", "/boot", "/data", "/home"], "the bind mount at /w is not a card although its point is shorter");
+    }
+
+    /// openSUSE's default layout: `/` is a snapshot and seven more subvolumes of the same btrfs
+    /// partition are mounted, plus a nested data subvolume.
+    const OPENSUSE: &str = "\
+70 1 0:40 /@/.snapshots/1/snapshot / rw,relatime shared:1 - btrfs /dev/vda2 rw,subvolid=266,subvol=/@/.snapshots/1/snapshot
+71 70 0:40 /@/boot/grub2/x86_64-efi /boot/grub2/x86_64-efi rw,relatime shared:2 - btrfs /dev/vda2 rw,subvolid=264,subvol=/@/boot/grub2/x86_64-efi
+72 70 0:40 /@/home /home rw,relatime shared:3 - btrfs /dev/vda2 rw,subvolid=263,subvol=/@/home
+73 70 0:40 /@/opt /opt rw,relatime shared:4 - btrfs /dev/vda2 rw,subvolid=262,subvol=/@/opt
+74 70 0:40 /@/root /root rw,relatime shared:5 - btrfs /dev/vda2 rw,subvolid=261,subvol=/@/root
+75 70 0:40 /@/srv /srv rw,relatime shared:6 - btrfs /dev/vda2 rw,subvolid=260,subvol=/@/srv
+76 70 0:40 /@/usr/local /usr/local rw,relatime shared:7 - btrfs /dev/vda2 rw,subvolid=259,subvol=/@/usr/local
+77 70 0:40 /@/var /var rw,relatime shared:8 - btrfs /dev/vda2 rw,subvolid=258,subvol=/@/var
+78 70 254:1 / /boot/efi rw,relatime shared:9 - vfat /dev/vda1 rw
+";
+
+    #[test]
+    fn one_card_per_btrfs_file_system_plus_home() {
+        let v = pick_linux(parse_mountinfo(OPENSUSE), Some("/home"));
+        let got: Vec<&str> = v.iter().map(|(m, _)| m.point.as_str()).collect();
+        assert_eq!(got, ["/", "/boot/efi", "/home"]);
+        // Silverblue-style homes under /var/home: the mount holding the home folder gets the card.
+        let v = pick_linux(parse_mountinfo(OPENSUSE), Some("/var"));
+        let got: Vec<&str> = v.iter().map(|(m, _)| m.point.as_str()).collect();
+        assert_eq!(got, ["/", "/boot/efi", "/home", "/var"]);
+        assert!(same_fs_points(&parse_mountinfo(OPENSUSE), "/").len() == 7, "the scan of / still walks every subvolume");
     }
 
     #[test]
