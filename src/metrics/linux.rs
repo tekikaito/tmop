@@ -234,8 +234,9 @@ impl Collector {
     }
 
     /// amdgpu cards from sysfs, then NVIDIA GPUs from NVML (loaded on first use). A hybrid
-    /// laptop's discrete GPU must be able to power down: it is not touched while suspended and
-    /// read only every [`procfs::SLEEPY_GPU_PERIOD`] while awake, and NVML is not kept open for it.
+    /// laptop's discrete GPU must be able to power down: it is not touched while suspended, read
+    /// every tick while at work, and read only every [`procfs::SLEEPY_GPU_PERIOD`] while awake but
+    /// idle (each read restarts its idle timer), when NVML is not kept open for it either.
     fn gpus(&mut self) -> Vec<GpuDev> {
         let now = Instant::now();
         let idle = || GpuDev { engines: vec![("Graphics".into(), 0.0)], vram_used: None };
@@ -248,7 +249,8 @@ impl Collector {
                 continue;
             }
             let since = self.sleepy.get(&card).map(|c| now.saturating_duration_since(c.0));
-            match procfs::gpu_poll(power_of(&d), since) {
+            let busy = self.sleepy.get(&card).is_some_and(|c| procfs::gpu_busy(&c.1));
+            match procfs::gpu_poll(power_of(&d), since, busy) {
                 procfs::GpuPoll::Idle => devs.push(idle()),
                 procfs::GpuPoll::Keep => devs.extend(self.sleepy.get(&card).map(|c| c.1.clone())),
                 procfs::GpuPoll::Read => {
@@ -262,16 +264,22 @@ impl Collector {
         let nvidia = self.nvidia_pci.get_or_insert_with(nvidia_pci_devices);
         let powers: Vec<procfs::GpuPower> = nvidia.iter().map(|d| power_of(d)).collect();
         if powers.iter().any(|p| p.may_sleep) {
-            // Hybrid laptop: an open NVML keeps the GPU powered, so it is opened only for a read.
-            self.nvml = NvmlState::Untried;
+            // Hybrid laptop: an open NVML keeps the GPU powered, so it stays open only while the
+            // GPU is at work anyway (and is read every tick); an idle one is read seldom.
             let since = self.nvidia_last.as_ref().map(|c| now.saturating_duration_since(c.0));
+            let busy = self.nvidia_last.as_ref().is_some_and(|c| c.1.iter().any(procfs::gpu_busy));
             let awake = procfs::GpuPower { suspended: powers.iter().all(|p| p.suspended), may_sleep: true };
-            match procfs::gpu_poll(awake, since) {
+            let open = std::mem::replace(&mut self.nvml, NvmlState::Untried);
+            match procfs::gpu_poll(awake, since, busy) {
                 procfs::GpuPoll::Idle => devs.extend(powers.iter().map(|_| idle())),
                 procfs::GpuPoll::Keep => devs.extend(self.nvidia_last.iter().flat_map(|c| c.1.iter().cloned())),
                 procfs::GpuPoll::Read => {
+                    let nvml = if let NvmlState::Loaded(n) = open { Some(n) } else { Nvml::load() };
+                    let read = nvml.as_ref().map(|n| n.read()).unwrap_or_default();
                     // Dropping the Nvml shuts it down again.
-                    let read = Nvml::load().map(|n| n.read()).unwrap_or_default();
+                    if let Some(n) = nvml.filter(|_| read.iter().any(procfs::gpu_busy)) {
+                        self.nvml = NvmlState::Loaded(n);
+                    }
                     devs.extend(read.iter().cloned());
                     self.nvidia_last = Some((now, read));
                 }
@@ -300,7 +308,7 @@ impl Collector {
             // Only a GPU is read seldom; a CPU sensor's PCI function may be `auto` under TLP.
             power.may_sleep &= gpu;
             let since = self.sleepy_temps.get(&h).map(|c| now.saturating_duration_since(c.0));
-            let temps = match procfs::gpu_poll(power, since) {
+            let temps = match procfs::gpu_poll(power, since, false) {
                 procfs::GpuPoll::Idle => Vec::new(),
                 procfs::GpuPoll::Keep => self.sleepy_temps.get(&h).map(|c| c.1.clone()).unwrap_or_default(),
                 procfs::GpuPoll::Read => {

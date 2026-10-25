@@ -319,10 +319,15 @@ pub fn gpu_power(status: Option<&str>, control: Option<&str>, boot_vga: Option<&
     }
 }
 
-/// How often a GPU that may sleep is read while it is awake. Each read (NVML, amdgpu's
-/// `gpu_busy_percent`, its hwmon) wakes it or restarts its idle timer, so the gaps must be long
-/// enough for it to power down.
+/// How often a GPU that may sleep is read while it is awake but idle. Each read (NVML, amdgpu's
+/// `gpu_busy_percent`, its hwmon) restarts its idle timer, so the gaps must be long enough for it
+/// to power down. While it is at work it cannot power down anyway and is read every tick.
 pub const SLEEPY_GPU_PERIOD: Duration = Duration::from_secs(10);
+
+/// The device was at work when last read (any engine above 0 %).
+pub fn gpu_busy(d: &GpuDev) -> bool {
+    d.engines.iter().any(|e| e.1 > 0.0)
+}
 
 /// What the sampler does with a GPU (or its sensors) this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,11 +340,12 @@ pub enum GpuPoll {
     Keep,
 }
 
-/// The poll of a GPU with power state `p`, `since` its last read (`None`: never read).
-pub fn gpu_poll(p: GpuPower, since: Option<Duration>) -> GpuPoll {
+/// The poll of a GPU with power state `p`, `since` its last read (`None`: never read), `busy`
+/// when that read found it at work: then it is read every tick until a read finds it idle.
+pub fn gpu_poll(p: GpuPower, since: Option<Duration>, busy: bool) -> GpuPoll {
     if p.suspended {
         GpuPoll::Idle
-    } else if p.may_sleep && since.is_some_and(|d| d < SLEEPY_GPU_PERIOD) {
+    } else if p.may_sleep && !busy && since.is_some_and(|d| d < SLEEPY_GPU_PERIOD) {
         GpuPoll::Keep
     } else {
         GpuPoll::Read
@@ -372,16 +378,20 @@ mod tests {
     fn sleeping_gpus_are_left_alone() {
         let dgpu = gpu_power(Some("suspended\n"), Some("auto\n"), None);
         assert_eq!(dgpu, GpuPower { suspended: true, may_sleep: true });
-        assert_eq!(gpu_poll(dgpu, None), GpuPoll::Idle, "a powered-down GPU is never read");
+        assert_eq!(gpu_poll(dgpu, None, false), GpuPoll::Idle, "a powered-down GPU is never read");
+        assert_eq!(gpu_poll(dgpu, Some(Duration::from_secs(1)), true), GpuPoll::Idle);
         let awake = gpu_power(Some("active\n"), Some("auto\n"), Some("0\n"));
-        assert_eq!(gpu_poll(awake, None), GpuPoll::Read);
-        assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1))), GpuPoll::Keep, "read seldom so it can power down");
-        assert_eq!(gpu_poll(awake, Some(SLEEPY_GPU_PERIOD)), GpuPoll::Read);
+        assert_eq!(gpu_poll(awake, None, false), GpuPoll::Read);
+        assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1)), false), GpuPoll::Keep, "idle: read seldom so it can power down");
+        assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1)), true), GpuPoll::Read, "at work: read every tick");
+        assert_eq!(gpu_poll(awake, Some(SLEEPY_GPU_PERIOD), false), GpuPoll::Read);
+        let dev = |pct: f32| GpuDev { engines: vec![("Graphics".into(), pct)], vram_used: None };
+        assert!(gpu_busy(&dev(3.0)) && !gpu_busy(&dev(0.0)) && !gpu_busy(&GpuDev::default()));
         // The boot display GPU, a GPU whose power management is off, and one without the files
         // are read every tick as before.
         for p in [gpu_power(Some("active"), Some("auto"), Some("1")), gpu_power(Some("active"), Some("on"), Some("0")), gpu_power(None, None, None)] {
             assert!(!p.may_sleep && !p.suspended, "{p:?}");
-            assert_eq!(gpu_poll(p, Some(Duration::from_millis(500))), GpuPoll::Read);
+            assert_eq!(gpu_poll(p, Some(Duration::from_millis(500)), false), GpuPoll::Read);
         }
     }
 
