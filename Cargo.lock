@@ -2520,6 +2520,8 @@ dependencies = [
  "flate2",
  "futures-util",
  "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "png",
  "raw-window-handle",
  "rfd",

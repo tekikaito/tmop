@@ -98,6 +98,13 @@ x11rb = { version = "0.13", default-features = false, features = ["res"] }
 # Already in Cargo.lock through winit, and loaded with winit's dlopen of libwayland-client.
 wayland-client = { version = "0.31", default-features = false }
 
+# The Trash with Put Back (NSFileManager trashItemAtURL) for Disk Space deletes; a plain rename into
+# ~/.Trash would lose Put Back. Both crates are already in Cargo.lock through winit/rfd, and these
+# features add no crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
+
 [dev-dependencies]
 
 [profile.release]

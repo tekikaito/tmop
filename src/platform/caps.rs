@@ -59,9 +59,9 @@ pub struct Caps {
     /// Committed memory and its limit.
     pub commit_mem: bool,
     pub proc: ProcCaps,
-    /// Deleted items can go to a Recycle Bin / Trash. Until the Trash backends land off Windows
-    /// this is false there and only permanent deletes would exist (which [`Caps::delete_safe`]
-    /// keeps off anyway).
+    /// Deleted items can go to a Recycle Bin / Trash (`pro::trash`: the shell, the FreeDesktop
+    /// Trash, NSFileManager). Whether a volume has one is asked per item, and an item without
+    /// one is never deleted permanently instead.
     pub trash: bool,
     /// Disk Space may delete: the protected-paths classifier, the Trash and the clean up
     /// categories of this OS are in place. Analysis is available either way.
@@ -102,7 +102,7 @@ impl Caps {
         gpu_engines: true,
         commit_mem: true,
         proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
-        trash: false,
+        trash: true,
         delete_safe: false,
         window_levels: true,
     };
@@ -121,7 +121,7 @@ impl Caps {
         gpu_engines: false,
         commit_mem: false,
         proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
-        trash: false,
+        trash: true,
         delete_safe: false,
         window_levels: true,
     };
@@ -203,6 +203,7 @@ mod tests {
             assert!(!c.delete_safe);
         }
         assert_eq!([Caps::LINUX.inventory, Caps::MACOS.inventory, Caps::OTHER.inventory], [true, true, false]);
+        assert_eq!([Caps::LINUX.trash, Caps::MACOS.trash, Caps::OTHER.trash], [true, true, false]);
     }
 
     #[test]

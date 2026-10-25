@@ -50,7 +50,8 @@ impl Category {
             Category::ThumbnailCache => "Thumbnail cache",
             Category::UpdateDownloads => "Windows Update downloads",
             Category::DeliveryOptimization => "Delivery Optimization cache",
-            Category::RecycleBin => "Empty Recycle Bin",
+            Category::RecycleBin if cfg!(windows) => "Empty Recycle Bin",
+            Category::RecycleBin => "Empty Trash",
             Category::OldDownloads => "Downloads older than 90 days",
             Category::DevArtifacts => "Developer artifacts",
         }
@@ -66,10 +67,18 @@ impl Category {
             Category::ThumbnailCache => "Explorer thumbnail and icon caches; files Explorer is using are skipped",
             Category::UpdateDownloads => "Downloaded update files Windows can fetch again; locked files are skipped",
             Category::DeliveryOptimization => "Update files cached for sharing with other PCs; Windows fetches them again",
-            Category::RecycleBin => "Permanently removes everything in the Recycle Bin (handled by Windows)",
-            Category::OldDownloads => "Goes to the Recycle Bin; needs a scan that covers your Downloads folder",
-            Category::DevArtifacts => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Recycle Bin; needs a scan",
+            Category::RecycleBin if cfg!(windows) => "Permanently removes everything in the Recycle Bin (handled by Windows)",
+            Category::RecycleBin => "Permanently removes everything in your Trash; Trash folders on other drives are left alone",
+            Category::OldDownloads if cfg!(windows) => "Goes to the Recycle Bin; needs a scan that covers your Downloads folder",
+            Category::OldDownloads => "Goes to the Trash; needs a scan that covers your Downloads folder",
+            Category::DevArtifacts if cfg!(windows) => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Recycle Bin; needs a scan",
+            Category::DevArtifacts => "node_modules, Rust target, Gradle/npm/pip/Yarn caches; goes to the Trash; needs a scan",
         }
+    }
+
+    /// Offered on this OS. Emptying the bin is not on macOS (see [`super::trash::can_empty`]).
+    pub fn supported(self) -> bool {
+        self != Category::RecycleBin || super::trash::can_empty()
     }
 
     pub fn preselected(self) -> bool {
@@ -349,42 +358,12 @@ pub fn measure_fixed(sys: &SystemPaths, now: SystemTime) -> Vec<Measured> {
     out
 }
 
-/// Recycle Bin size and item count (read-only).
+/// Recycle Bin / Trash size and item count (read-only, see [`super::trash::size`]).
 pub fn measure_recycle_bin() -> Measured {
-    match recycle_bin_size() {
+    match super::trash::size() {
         Some((bytes, count)) => Measured { bytes, count, ..Measured::new(Category::RecycleBin) },
-        None => Measured::failed(Category::RecycleBin, "could not read the Recycle Bin"),
+        None => Measured::failed(Category::RecycleBin, &format!("could not read the {}", crate::platform::trash_word())),
     }
-}
-
-#[cfg(windows)]
-pub fn recycle_bin_size() -> Option<(u64, u64)> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
-    // SAFETY: a null root queries all drives; the info struct has cbSize set.
-    unsafe { SHQueryRecycleBinW(PCWSTR::null(), &mut info) }.ok()?;
-    Some((info.i64Size.max(0) as u64, info.i64NumItems.max(0) as u64))
-}
-
-#[cfg(not(windows))]
-pub fn recycle_bin_size() -> Option<(u64, u64)> {
-    None
-}
-
-/// Empties the Recycle Bin of every drive without any Windows UI.
-#[cfg(windows)]
-pub fn empty_recycle_bin() -> Result<(), String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
-    // SAFETY: no window, no root path (all drives); flags are plain constants.
-    unsafe { SHEmptyRecycleBinW(HWND::default(), PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }.map_err(|e| e.message())
-}
-
-#[cfg(not(windows))]
-pub fn empty_recycle_bin() -> Result<(), String> {
-    Err("the Recycle Bin is only available on Windows".into())
 }
 
 // ---------------------------------------------------------------- measuring from the scan tree
@@ -672,6 +651,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn recycle_bin_size_reads() {
-        assert!(recycle_bin_size().is_some());
+        assert!(crate::pro::trash::size().is_some());
+    }
+
+    #[test]
+    fn trash_category_per_os() {
+        assert_eq!(Category::RecycleBin.supported(), cfg!(any(windows, target_os = "linux")));
+        assert!(Category::ALL.iter().filter(|c| **c != Category::RecycleBin).all(|c| c.supported()));
+        let word = crate::platform::trash_word();
+        assert!(Category::RecycleBin.title().ends_with(word) && Category::DevArtifacts.detail().contains(word));
     }
 }

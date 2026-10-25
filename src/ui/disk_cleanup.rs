@@ -13,7 +13,8 @@ use crate::pro::cleanup::{self, Category, Measured};
 use crate::pro::diskdelete::{self, Assessed, Mode, Report, SystemPaths, Target, Verdict};
 use crate::pro::diskspace::Tree;
 use crate::pro::volcache::{self, Handler};
-use crate::pro::Loader;
+use crate::pro::{trash, Loader};
+use crate::platform::{os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
 use std::collections::{HashMap, HashSet};
@@ -49,11 +50,11 @@ pub struct CatSel {
 #[derive(Clone)]
 pub struct CleanAssess {
     pub id: u64,
-    /// Assessed items per `CleanPending::cats` entry, same order.
+    /// Assessed items per `CleanPending::cats` entry, same order. Items of the Recycle Bin / Trash
+    /// categories on a volume without one are Blocked with the reason (skipped, never deleted
+    /// permanently instead).
     pub items: Vec<Vec<Assessed>>,
-    /// Every drive of the Recycle Bin categories has a Recycle Bin.
-    pub bin_ok: bool,
-    /// Every such drive has a Recycle Bin size limit on record (else large items may be deleted for good).
+    /// Every bin those items go to has a size limit on record (else large items may be deleted for good).
     pub bin_capped: bool,
 }
 
@@ -165,7 +166,7 @@ impl CleanupUi {
     /// (or has not answered yet) nothing is hidden, so nothing is lost.
     pub fn visible(&self, elevated: bool) -> Vec<Category> {
         let hidden = self.vols.ok().map(|v| volcache::hidden_categories(v, elevated)).unwrap_or_default();
-        Category::ALL.into_iter().filter(|c| !hidden.contains(c)).collect()
+        Category::ALL.into_iter().filter(|c| c.supported() && !hidden.contains(c)).collect()
     }
 
     /// Handlers shown in the "Windows Disk Cleanup" group.
@@ -204,13 +205,14 @@ pub const VOL_DEST: &str = "removed by Windows Disk Cleanup (not recoverable)";
 
 /// (destination text, permanent) of a category in the confirm dialog. `capped`: the Recycle Bin has a size
 /// limit on record, otherwise Windows may delete large items for good and the text must not promise a restore.
-pub fn dest_text(cat: Category, bin_ok: bool, capped: bool) -> (&'static str, bool) {
+/// Items without a bin are not counted here: they are skipped (see [`CleanAssess::items`]).
+pub fn dest_text(cat: Category, capped: bool) -> (String, bool) {
     match (cat, cat.mode()) {
-        (Category::RecycleBin, _) => ("emptied by Windows, permanent", true),
-        (_, Mode::Recycle) if bin_ok && !capped => ("moved to the Recycle Bin; large items may be deleted permanently by Windows", true),
-        (_, Mode::Recycle) if bin_ok => ("moved to the Recycle Bin", false),
-        (_, Mode::Recycle) => ("deleted permanently (no Recycle Bin on this volume)", true),
-        _ => ("deleted permanently", true),
+        (Category::RecycleBin, _) if cfg!(windows) => ("emptied by Windows, permanent".into(), true),
+        (Category::RecycleBin, _) => ("emptied, permanent".into(), true),
+        (_, Mode::Recycle) if !capped => (format!("moved to the {}; large items may be deleted permanently by {}", trash_word(), os_name()), true),
+        (_, Mode::Recycle) => (format!("moved to the {}", trash_word()), false),
+        _ => ("deleted permanently".into(), true),
     }
 }
 
@@ -564,25 +566,16 @@ impl App {
                     let id = p.id;
                     let cats: Vec<CatSel> = p.cats.clone();
                     c.assess.start(move || {
-                        let mut bin_ok = true;
-                        let mut bin_capped = true;
-                        let mut roots: Vec<std::path::Component> = Vec::new();
-                        for cs in cats.iter().filter(|cs| cs.cat.mode() == Mode::Recycle) {
-                            for t in &cs.targets {
-                                if let Some(r) = t.path.components().next() {
-                                    if !roots.contains(&r) {
-                                        roots.push(r);
-                                        bin_ok &= diskdelete::has_recycle_bin(&t.path);
-                                        bin_capped &= diskdelete::recycle_limit_known(&t.path);
-                                    }
-                                }
-                            }
-                        }
-                        let counts: Vec<usize> = cats.iter().map(|cs| cs.targets.len()).collect();
+                        let counts: Vec<(usize, Mode)> = cats.iter().map(|cs| (cs.targets.len(), cs.cat.mode())).collect();
                         let flat: Vec<Target> = cats.into_iter().flat_map(|cs| cs.targets).collect();
                         let mut done = diskdelete::assess(flat, &rules).into_iter();
-                        let items = counts.iter().map(|&n| done.by_ref().take(n).collect()).collect();
-                        Ok(CleanAssess { id, items, bin_ok, bin_capped })
+                        let mut items: Vec<Vec<Assessed>> = counts.iter().map(|&(n, _)| done.by_ref().take(n).collect()).collect();
+                        // Bin categories: what has no bin on its volume is skipped with the reason.
+                        let (mut vols, mut bin_capped) = (trash::Volumes::default(), true);
+                        for (list, _) in items.iter_mut().zip(&counts).filter(|(_, (_, m))| *m == Mode::Recycle) {
+                            bin_capped &= diskdelete::block_untrashable(list, &mut vols).1;
+                        }
+                        Ok(CleanAssess { id, items, bin_capped })
                     });
                 }
             }
@@ -597,7 +590,6 @@ impl App {
         let Some(p) = self.pro.clean.pending.as_mut() else { return };
         let st = theme::status(pal);
         let a = p.assessed.as_ref();
-        let bin_ok = a.map(|a| a.bin_ok).unwrap_or(true);
         let capped = a.map(|a| a.bin_capped).unwrap_or(false);
         let vols = p.vols.clone();
         let live = |v: &Verdict| !matches!(v, Verdict::Blocked(_));
@@ -639,9 +631,9 @@ impl App {
                 ui.add_space(4.0);
             };
             for (cat, n, bytes) in &lines {
-                let (dest, permanent) = dest_text(*cat, bin_ok, capped);
+                let (dest, permanent) = dest_text(*cat, capped);
                 let count = if *cat == Category::RecycleBin { String::new() } else { format!("{n} item{} \u{2022} ", if *n == 1 { "" } else { "s" }) };
-                line(ui, cat.title(), format!("{count}{}", format_bytes(*bytes as f64)), dest, permanent);
+                line(ui, cat.title(), format!("{count}{}", format_bytes(*bytes as f64)), &dest, permanent);
             }
             for h in &vols {
                 line(ui, h.name.as_str(), format_bytes(h.size as f64), VOL_DEST, true);
@@ -691,8 +683,8 @@ impl App {
             .iter()
             .zip(a.items)
             .map(|(cs, items)| {
-                let mode = if cs.cat.mode() == Mode::Recycle && !a.bin_ok { Mode::Permanent } else { cs.cat.mode() };
-                (mode, items.into_iter().filter(|x| !matches!(x.verdict, Verdict::Blocked(_))).map(|x| x.target).collect::<Vec<_>>())
+                // Never downgraded: bin items without a bin were blocked by the assessment.
+                (cs.cat.mode(), items.into_iter().filter(|x| !matches!(x.verdict, Verdict::Blocked(_))).map(|x| x.target).collect::<Vec<_>>())
             })
             .filter(|g| !g.1.is_empty())
             .collect();
@@ -714,11 +706,11 @@ impl App {
                 report.freed += r.freed;
             }
             if let Some(bytes) = bin {
-                let res = cleanup::empty_recycle_bin();
-                log_entry("Recycle Bin", bytes, &res);
+                let res = trash::empty();
+                log_entry(trash_word(), bytes, &res);
                 match res {
                     Ok(()) => report.freed += bytes,
-                    Err(e) => report.skipped.push((Target { path: PathBuf::from("Recycle Bin"), size: bytes, is_dir: false, node: None, file: None }, e)),
+                    Err(e) => report.skipped.push((Target { path: PathBuf::from(trash_word()), size: bytes, is_dir: false, node: None, file: None }, e)),
                 }
             }
             purge_vols(&vols, &drive, &mut report);
@@ -807,13 +799,29 @@ mod tests {
 
     #[test]
     fn destinations_per_category() {
-        assert_eq!(dest_text(Category::UserTemp, true, true), ("deleted permanently", true));
-        assert_eq!(dest_text(Category::DevArtifacts, true, true), ("moved to the Recycle Bin", false));
-        assert!(dest_text(Category::OldDownloads, false, true).0.contains("no Recycle Bin"));
-        assert!(dest_text(Category::RecycleBin, true, true).1);
+        assert_eq!(dest_text(Category::UserTemp, true), ("deleted permanently".to_string(), true));
+        assert_eq!(dest_text(Category::DevArtifacts, true), (format!("moved to the {}", trash_word()), false));
+        assert!(dest_text(Category::RecycleBin, true).1);
+        if cfg!(windows) {
+            assert_eq!(dest_text(Category::DevArtifacts, true).0, "moved to the Recycle Bin");
+        }
         // No size limit on record for the volume: no promise of a restore.
-        let (t, perm) = dest_text(Category::DevArtifacts, true, false);
+        let (t, perm) = dest_text(Category::DevArtifacts, false);
         assert!(t.contains("large items may be deleted permanently") && perm);
+    }
+
+    #[test]
+    fn bin_items_without_a_bin_are_skipped_not_deleted_permanently() {
+        let mk = |p: &str| Assessed { target: Target { path: PathBuf::from(p), size: 1, is_dir: false, node: None, file: None }, verdict: Verdict::Allowed };
+        let mut items = vec![mk("x"), Assessed { verdict: Verdict::Blocked("protected".into()), ..mk("y") }];
+        let mut vols = trash::Volumes::default();
+        let (n, _) = diskdelete::block_untrashable(&mut items, &mut vols);
+        // Whatever this host says about the bin of "x", a missing one blocks it with the reason.
+        match &items[0].verdict {
+            Verdict::Blocked(why) => assert!(n == 1 && why.contains(trash_word()), "{why}"),
+            v => assert!(n == 0 && *v == Verdict::Allowed),
+        }
+        assert_eq!(items[1].verdict, Verdict::Blocked("protected".into()), "already blocked items keep their reason");
     }
 
     #[test]
@@ -850,8 +858,9 @@ mod tests {
         }
         // The helper failed: nothing is hidden.
         let failed = with_vols(Err("timed out".into()));
-        assert_eq!(failed.visible(true), Category::ALL.to_vec());
-        assert_eq!(CleanupUi::default().visible(true), Category::ALL.to_vec());
+        let all: Vec<Category> = Category::ALL.into_iter().filter(|c| c.supported()).collect();
+        assert_eq!(failed.visible(true), all);
+        assert_eq!(CleanupUi::default().visible(true), all);
     }
 
     fn done(ids: &[&str], bin: u64) -> CleanDone {
