@@ -504,11 +504,8 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         let tf = title_font(skin, typo.title.as_ref());
         let tracking = typo.title_tracking.unwrap_or(0.0);
         if tracking > 0.05 {
-            let mut cx = x;
-            for ch in title.chars() {
-                let r = painter.text(pos2(cx, hc), Align2::LEFT_CENTER, ch, tf.clone(), p.title);
-                cx += r.width() + tracking * PT;
-            }
+            let em = tracking * PT / tf.size;
+            widgets::tracked_text(&painter, pos2(x, hc), Align2::LEFT_CENTER, &title, tf, p.title, em);
         } else {
             painter.text(pos2(x, hc), Align2::LEFT_CENTER, title, tf, p.title);
         }

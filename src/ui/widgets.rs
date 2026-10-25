@@ -1274,7 +1274,8 @@ pub fn tab_bar(ui: &mut Ui, rect: Rect, pal: &Palette, tabs: &[(&str, Option<usi
     for (i, (label, count)) in tabs.iter().enumerate() {
         let on = i == selected;
         let font = if on { theme::semibold(13.0) } else { theme::ui(13.0) };
-        let lw = text_width(&p, label, font.clone());
+        // Sized for the Medium weight so selecting a tab never moves the ones after it.
+        let lw = text_width(&p, label, theme::semibold(13.0));
         let cw = count.map(|c| text_width(&p, &c.to_string(), theme::mono(11.0)) + 6.0).unwrap_or(0.0);
         let r = Rect::from_min_size(pos2(x, band.top()), vec2(lw + cw + 28.0, band.height()));
         let resp = ui.interact(r, ui.id().with(("tab", band.min.x as i32, band.min.y as i32, i)), Sense::click());
@@ -1505,25 +1506,22 @@ pub fn baseline(p: &egui::Painter, rect: Rect, y_frac: f32, color: Color32) {
 // Chips, badges, text with tracking
 // ---------------------------------------------------------------------------
 
-/// Text laid out glyph by glyph with `em` of letter-spacing (in multiples of the font size;
-/// negative values are ignored, egui cannot tighten). Returns the rect used.
+/// Text with `em` of letter-spacing (in multiples of the font size; negative values are
+/// ignored, egui cannot tighten). Returns the rect used.
 pub fn tracked_text(p: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, font: FontId, color: Color32, em: f32) -> Rect {
     let space = em.max(0.0) * font.size;
     if space < 0.05 {
         return p.text(pos, anchor, text, font, color);
     }
-    let glyphs: Vec<(String, f32)> = text.chars().map(|c| (c.to_string(), text_width(p, &c.to_string(), font.clone()))).collect();
-    let total = glyphs.iter().map(|(_, w)| *w).sum::<f32>() + space * glyphs.len().saturating_sub(1) as f32;
-    let height = p.layout_no_wrap("Ag".into(), font.clone(), color).size().y;
-    let rect = anchor.anchor_size(pos, vec2(total, height));
-    let mut x = rect.left();
-    for (g, w) in glyphs {
-        if g != " " {
-            p.text(pos2(x, rect.top()), Align2::LEFT_TOP, g, font.clone(), color);
-        }
-        x += w + space;
-    }
-    rect
+    // One kerned galley at a pixel-snapped origin: glyphs painted one by one were each snapped on
+    // their own, so the gaps came out uneven and shifted with the fractional start (hover, weight).
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
+    job.wrap.max_width = f32::INFINITY;
+    let galley = p.layout_job(job);
+    let rect = anchor.anchor_size(pos, galley.size());
+    let min = p.round_pos_to_pixels(rect.min);
+    p.galley(min, galley, color);
+    Rect::from_min_size(min, rect.size())
 }
 
 /// Width of a [`chip`] with `text` (and an icon).
