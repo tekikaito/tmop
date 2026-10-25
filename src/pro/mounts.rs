@@ -160,6 +160,52 @@ pub fn same_fs_points(mounts: &[Mount], path: &str) -> Vec<String> {
     out
 }
 
+/// The mount points below `path` whose contents a scan of `path` already reaches through another
+/// mount of the same file system: a bind mount of a folder that is visible elsewhere in the scan,
+/// or a second mount of the same subvolume. Walking them would count those files twice. A mount
+/// that hides its own source folder (a nested btrfs subvolume mounted where it sits) is no
+/// duplicate, and of two mounts showing the same folder the shorter point stays.
+pub fn duplicate_points(mounts: &[Mount], path: &str) -> Vec<String> {
+    use std::path::{Path, PathBuf};
+    let points: Vec<String> = mounts.iter().map(|m| m.point.clone()).collect();
+    let Some(at) = mount_of(path, &points) else { return Vec::new() };
+    let scan = Path::new(path);
+    // (where the walk sees it, device, the file system folder shown there, below the scan root);
+    // the last mount at a point is the one on top.
+    let mut shown: Vec<(PathBuf, (u32, u32), PathBuf, bool)> = Vec::new();
+    let mut taken: Vec<&str> = Vec::new();
+    for m in mounts.iter().rev() {
+        if taken.contains(&m.point.as_str()) {
+            continue;
+        }
+        taken.push(&m.point);
+        if m.point == at {
+            let rest = scan.strip_prefix(at).unwrap_or(Path::new(""));
+            shown.push((scan.to_path_buf(), m.dev, Path::new(&m.root).join(rest), false));
+        } else if Path::new(&m.point).starts_with(scan) && Path::new(&m.point) != scan {
+            shown.push((PathBuf::from(&m.point), m.dev, PathBuf::from(&m.root), true));
+        }
+    }
+    let order = |p: &Path| (p.as_os_str().len(), p.to_path_buf());
+    let reached_elsewhere = |point: &PathBuf, dev: &(u32, u32), root: &PathBuf| {
+        shown.iter().any(|(np, nd, nr, _)| {
+            if np == point || nd != dev || np.starts_with(point) {
+                return false;
+            }
+            let Ok(rel) = root.strip_prefix(nr) else { return false };
+            if nr == root && order(np) > order(point) {
+                return false;
+            }
+            // Where the other mount shows the folder, unless a mount on the way hides it there.
+            let there = np.join(rel);
+            !points.iter().map(Path::new).any(|q| q.starts_with(np) && q != np && there.starts_with(q))
+        })
+    };
+    let mut out: Vec<String> = shown.iter().filter(|(point, dev, root, below)| *below && reached_elsewhere(point, dev, root)).map(|(p, ..)| p.to_string_lossy().into_owned()).collect();
+    out.sort();
+    out
+}
+
 /// The kind and label of a macOS mount, or `None` when it gets no card: the APFS helper volumes
 /// under `/System/Volumes` (Data shares its container with `/`, which stands for both), hidden
 /// (`MNT_DONTBROWSE`) mounts and pseudo file systems.
@@ -469,6 +515,25 @@ garbage line
         let got: Vec<&str> = v.iter().map(|(m, _)| m.point.as_str()).collect();
         assert_eq!(got, ["/", "/boot/efi", "/home", "/var"]);
         assert!(same_fs_points(&parse_mountinfo(OPENSUSE), "/").len() == 7, "the scan of / still walks every subvolume");
+    }
+
+    #[test]
+    fn mounts_showing_a_folder_the_scan_reaches_anyway_are_duplicates() {
+        let fedora = parse_mountinfo(FEDORA);
+        assert_eq!(duplicate_points(&fedora, "/"), ["/w"], "the bind of /home/alex/www");
+        assert!(duplicate_points(&fedora, "/home").is_empty(), "/w is not below /home");
+        assert!(duplicate_points(&fedora, "/w").is_empty(), "an explicit scan of the bind mount");
+        assert_eq!(duplicate_points(&parse_mountinfo(MOUNTINFO), "/"), ["/srv/www"], "an ext4 bind of /var/www");
+        assert!(duplicate_points(&parse_mountinfo(MOUNTINFO), "/srv").is_empty(), "/var/www is outside the scan");
+        assert!(duplicate_points(&parse_mountinfo(OPENSUSE), "/").is_empty(), "sibling subvolumes are no duplicates");
+        // A nested subvolume mounted where it sits hides its own folder: no duplicate.
+        let nested = parse_mountinfo(
+            "1 0 0:30 /@ / rw - btrfs /dev/sda2 rw,subvol=/@\n2 1 0:30 /@/home /home rw - btrfs /dev/sda2 rw,subvol=/@/home\n3 1 0:30 /@/home /mnt/h rw - btrfs /dev/sda2 rw,subvol=/@/home\n",
+        );
+        assert_eq!(duplicate_points(&nested, "/"), ["/mnt/h"], "the second mount of the same subvolume");
+        // A folder hidden under another mount is not reached through it.
+        let hidden = parse_mountinfo("1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 0:20 / /var/www rw - tmpfs tmpfs rw\n3 1 8:1 /var/www /srv/www rw - ext4 /dev/sda1 rw\n");
+        assert!(duplicate_points(&hidden, "/").is_empty());
     }
 
     #[test]

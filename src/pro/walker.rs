@@ -11,7 +11,8 @@
 //! another device are skipped, and so are the kernel's pseudo trees (`/proc`, `/sys`, `/dev`,
 //! `/run`; macOS `/dev`, `/Volumes`, `/System/Volumes`) even when they share it. Scanning `/` on
 //! macOS also admits the APFS Data volume, where the firmlinks (`/Users`, `/Applications`...)
-//! lead; on Linux the other mounted subvolumes of a btrfs file system below the root count too.
+//! lead; on Linux the other mounted subvolumes of a btrfs file system below the root count too,
+//! while a mount showing a folder the scan reaches anyway (a bind mount) is skipped.
 //! Sizes are allocated blocks, and a file with several hard links counts once.
 
 use super::diskspace::{ext_of, FileRec, Names, Node, Publisher, ScanMethod, F_HIDDEN, NO_PARENT};
@@ -47,20 +48,25 @@ impl Bounds {
         use std::os::unix::fs::MetadataExt;
         let dev = |p: &str| std::fs::metadata(p).ok().map(|m| m.dev());
         let mut devs: Vec<u64> = std::fs::metadata(root).ok().map(|m| m.dev()).into_iter().collect();
-        let skip: &[&str] = if cfg!(target_os = "macos") { &["/dev", "/Volumes", "/System/Volumes", "/.vol", "/net", "/home"] } else { &["/proc", "/sys", "/dev", "/run"] };
+        let pseudo: &[&str] = if cfg!(target_os = "macos") { &["/dev", "/Volumes", "/System/Volumes", "/.vol", "/net", "/home"] } else { &["/proc", "/sys", "/dev", "/run"] };
+        #[allow(unused_mut)] // only Linux adds to it
+        let mut skip: Vec<PathBuf> = pseudo.iter().map(PathBuf::from).filter(|p| p.as_path() != root).collect();
         if cfg!(target_os = "macos") && root == Path::new("/") {
             devs.extend(dev("/System/Volumes/Data"));
         }
-        // The other mounted subvolumes of a btrfs file system (Fedora's `/home` below `/`).
+        // The other mounted subvolumes of a btrfs file system (Fedora's `/home` below `/`), but
+        // not the mounts showing a folder the scan reaches anyway (bind mounts): counted once.
         #[cfg(target_os = "linux")]
         if let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") {
-            for p in super::mounts::same_fs_points(&super::mounts::parse_mountinfo(&text), &root.to_string_lossy()) {
+            let (mounts, at) = (super::mounts::parse_mountinfo(&text), root.to_string_lossy());
+            for p in super::mounts::same_fs_points(&mounts, &at) {
                 if let Some(d) = dev(&p).filter(|d| !devs.contains(d)) {
                     devs.push(d);
                 }
             }
+            skip.extend(super::mounts::duplicate_points(&mounts, &at).into_iter().map(PathBuf::from));
         }
-        Bounds { devs, skip: skip.iter().map(PathBuf::from).filter(|p| p.as_path() != root).collect() }
+        Bounds { devs, skip }
     }
 
     #[cfg(not(unix))]
@@ -337,11 +343,16 @@ fn enumerate_std(dir: &Path, out: &mut Vec<Entry>, bounds: &Bounds) -> bool {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // A pseudo tree, or a mount showing what the scan counts elsewhere.
+        #[cfg(unix)]
+        if bounds.skipped(dir, &name) {
+            continue;
+        }
         if ft.is_dir() {
-            // A mount point (another device) or a pseudo tree is not descended. When its metadata
-            // cannot be read the folder is listed and later counts as unreadable.
+            // A mount point (another device) is not descended. When its metadata cannot be read
+            // the folder is listed and later counts as unreadable.
             #[cfg(unix)]
-            if bounds.skipped(dir, &name) || entry.metadata().is_ok_and(|md| !bounds.same_fs(&md)) {
+            if entry.metadata().is_ok_and(|md| !bounds.same_fs(&md)) {
                 continue;
             }
             out.push(Entry { name, dir: true, size: 0, mtime: 0, flags: 0, link: None });
