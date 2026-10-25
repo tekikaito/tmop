@@ -46,3 +46,10 @@ pub fn reveal(path: &Path) -> Result<(), String> {
 pub fn open_path(path: &Path) -> Result<(), String> {
     spawn_reaped(Command::new("open").arg(path))
 }
+
+/// Shows a notification through `osascript` (macOS lists it under Script Editor). Blocks for a
+/// moment; call it off the UI thread.
+pub fn notify(title: &str, body: &str) -> Result<(), String> {
+    let args = super::xdg::osascript_notify_args(title, body);
+    super::run_capture("osascript", &args.iter().map(String::as_str).collect::<Vec<_>>(), std::time::Duration::from_secs(10)).map(|_| ())
+}

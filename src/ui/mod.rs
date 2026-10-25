@@ -554,7 +554,7 @@ impl App {
         if let Some((container, command)) = launch.docker_terminal {
             app.docker.ui.detail.terminals.request(container, command);
         }
-        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id).filter(|t| app.caps.engine || *t != docker::Tab::Engine) {
+        if let Some(tab) = launch.docker_tab.as_deref().and_then(docker::tab_from_id) {
             app.docker.ui.tab = tab;
         }
         match launch.engine_test.as_deref().filter(|_| app.caps.engine) {
