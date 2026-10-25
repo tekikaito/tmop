@@ -203,11 +203,13 @@ fn list_contexts_with(dir: &Path, docker_host: Option<&str>, env_context: Option
     out
 }
 
+/// Where `default` points without `DOCKER_HOST`: Docker Desktop's pipe on Windows, else the first
+/// socket found among the usual installs (see [`super::local`]), else `/var/run/docker.sock`.
 fn platform_default_endpoint() -> Endpoint {
     if cfg!(windows) {
         Endpoint::NamedPipe("//./pipe/docker_engine".into())
     } else {
-        Endpoint::Unix("/var/run/docker.sock".into())
+        Endpoint::Unix(super::local::default_socket())
     }
 }
 

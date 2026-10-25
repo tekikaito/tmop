@@ -6,7 +6,7 @@
 //!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
 //!   TMOP --docker-terminal=<container>[;<command>]
 //!                         open a terminal session in a container on the Docker page
-//!   TMOP --docker-tab=<tab>    open the Docker page on engine|containers|stacks|images|volumes|networks (test-only)
+//!   TMOP --docker-tab=<tab>    open the Docker page on engine (local)|containers|stacks|images|volumes|networks (test-only)
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
 //!   TMOP --popout         only the skinned popout window

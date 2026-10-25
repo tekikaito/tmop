@@ -92,6 +92,46 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// App id of the toast notifications, registered per user so the toasts carry the app name.
+const TOAST_APP_ID: &str = "TMOP";
+
+/// Shows a WinRT toast notification. Blocks for a moment; call it off the UI thread.
+pub fn notify(title: &str, body: &str) -> Result<(), String> {
+    use std::sync::OnceLock;
+    use windows::core::HSTRING;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(register_toast_app_id);
+
+    let xml = format!(
+        r#"<toast><visual><binding template="ToastText02"><text id="1">{}</text><text id="2">{}</text></binding></visual></toast>"#,
+        xml_escape(title),
+        xml_escape(body)
+    );
+    let doc = XmlDocument::new().map_err(|e| e.to_string())?;
+    doc.LoadXml(&HSTRING::from(xml)).map_err(|e| e.to_string())?;
+    let toast = ToastNotification::CreateToastNotification(&doc).map_err(|e| e.to_string())?;
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(TOAST_APP_ID)).map_err(|e| e.to_string())?;
+    notifier.Show(&toast).map_err(|e| e.to_string())
+}
+
+/// Writes `DisplayName = TMOP` under `HKCU\Software\Classes\AppUserModelId\TMOP`. Errors are
+/// ignored: toasts still work without the registration, only the app name may be missing.
+fn register_toast_app_id() {
+    use std::process::Stdio;
+    let key = format!(r"HKCU\Software\Classes\AppUserModelId\{TOAST_APP_ID}");
+    let mut cmd = Command::new("reg");
+    cmd.args(["add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", TOAST_APP_ID, "/f"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let _ = cmd.status();
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

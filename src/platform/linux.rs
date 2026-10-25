@@ -72,3 +72,16 @@ pub fn reveal(path: &Path) -> Result<(), String> {
 pub fn open_path(path: &Path) -> Result<(), String> {
     spawn_reaped(Command::new("xdg-open").arg(path))
 }
+
+/// Shows a desktop notification with `notify-send`, else through `gdbus` (the same D-Bus call).
+/// Blocks for a moment; call it off the UI thread.
+pub fn notify(title: &str, body: &str) -> Result<(), String> {
+    let wait = std::time::Duration::from_secs(5);
+    let run = |cmd: &str, args: Vec<String>| super::run_capture(cmd, &args.iter().map(String::as_str).collect::<Vec<_>>(), wait).map(|_| ());
+    match run("notify-send", xdg::notify_send_args(title, body)) {
+        Err(e) if e.starts_with("could not start") => {
+            run("gdbus", xdg::gdbus_notify_args(title, body)).map_err(|e| format!("desktop notifications need notify-send (libnotify) or gdbus: {e}"))
+        }
+        other => other,
+    }
+}

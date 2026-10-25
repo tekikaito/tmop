@@ -52,3 +52,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
 pub fn open_path(path: &Path) -> Result<(), String> {
     Err(format!("cannot open {} on this platform", path.display()))
 }
+
+pub fn notify(_title: &str, _body: &str) -> Result<(), String> {
+    Err("Desktop notifications are not supported on this platform".into())
+}

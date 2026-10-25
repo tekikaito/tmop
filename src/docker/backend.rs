@@ -583,7 +583,7 @@ async fn connect_engine(inner: &Inner, name: &str) -> Result<Box<Connected>, Str
     time::timeout(PING_TIMEOUT, docker.ping())
         .await
         .map_err(|_| "the engine did not answer within 5 seconds".to_string())?
-        .map_err(|e| err_text(&e))?;
+        .map_err(|e| client::connect_error(&context.endpoint, &e))?;
     let version = docker.version().await.map_err(|e| err_text(&e))?;
     let info = docker.info().await.map_err(|e| err_text(&e))?;
     Ok(Box::new(Connected {

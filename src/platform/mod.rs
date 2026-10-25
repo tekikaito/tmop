@@ -12,6 +12,7 @@
 //! | [`skin_dirs`] | `TMOP\Skins`, `TMOG\Skins`, `Program Files\Task Manager TMOG\Skins` | `<data>/skins`, `$XDG_DATA_DIRS/tmop/skins` | `<data>/Skins` |
 //! | [`reveal`] | `explorer /select,` | FileManager1 `ShowItems` over D-Bus, else `xdg-open` of the parent | `open -R` |
 //! | [`is_elevated`] | administrator token | `geteuid() == 0` | `geteuid() == 0` |
+//! | [`notify`] | WinRT toast | `notify-send`, else `gdbus` | `osascript` |
 
 use std::io::Read;
 use std::process::{Command, Stdio};

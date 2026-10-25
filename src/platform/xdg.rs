@@ -1,6 +1,6 @@
 //! Pure helpers behind the Linux (and stub) backends: XDG base directories resolved from an
-//! environment lookup, `file://` URIs and the FileManager1 call. No I/O, so the tests run on
-//! every host.
+//! environment lookup, `file://` URIs, the FileManager1 call and the notification commands
+//! (notify-send, gdbus, osascript). No I/O, so the tests run on every host.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -89,6 +89,47 @@ pub fn show_items_args(uri: &str) -> Vec<String> {
     .collect()
 }
 
+/// A GVariant text-format string literal: single quotes, with `\` and `'` escaped.
+pub fn gvariant_str(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// `notify-send` arguments for a notification from TMOP.
+pub fn notify_send_args(title: &str, body: &str) -> Vec<String> {
+    // `--` keeps a title that starts with '-' from being read as an option.
+    ["--app-name=TMOP", "--", title, body].into_iter().map(String::from).collect()
+}
+
+/// `gdbus` arguments for the same notification through `org.freedesktop.Notifications`, for
+/// desktops without notify-send. Title and body are quoted GVariant strings.
+pub fn gdbus_notify_args(title: &str, body: &str) -> Vec<String> {
+    [
+        "call",
+        "--session",
+        "--timeout",
+        "5",
+        "--dest",
+        "org.freedesktop.Notifications",
+        "--object-path",
+        "/org/freedesktop/Notifications",
+        "--method",
+        "org.freedesktop.Notifications.Notify",
+        "TMOP",
+        "0",
+        "''",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([gvariant_str(title), gvariant_str(body), "[]".into(), "{}".into(), "-1".into()])
+    .collect()
+}
+
+/// `osascript` arguments that show a notification; title and body are passed as `argv`, so
+/// nothing in them is ever read as AppleScript.
+pub fn osascript_notify_args(title: &str, body: &str) -> Vec<String> {
+    ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, body].into_iter().map(String::from).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +205,15 @@ mod tests {
         let args = show_items_args("file:///tmp/x");
         assert_eq!(args[0], "call");
         assert_eq!(&args[args.len() - 2..], ["['file:///tmp/x']", "''"]);
+    }
+
+    #[test]
+    fn notification_arguments() {
+        assert_eq!(gvariant_str(r"it's a\b"), r"'it\'s a\\b'");
+        assert_eq!(notify_send_args("-t", "b"), ["--app-name=TMOP", "--", "-t", "b"]);
+        let g = gdbus_notify_args("Title", "web's gone");
+        assert_eq!(&g[g.len() - 5..], ["'Title'", r"'web\'s gone'", "[]", "{}", "-1"]);
+        let o = osascript_notify_args("T", "\"; do shell script \"x");
+        assert_eq!(&o[o.len() - 2..], ["T", "\"; do shell script \"x"]);
     }
 }
