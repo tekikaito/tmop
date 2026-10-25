@@ -186,8 +186,15 @@ mod tests {
     /// The committed .ico is the drawing at every size.
     #[test]
     fn ico_matches_art() {
+        // Compared by size and decoded pixels, so a different PNG encoder output still passes.
         let ico = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon/tmop.ico")).unwrap();
-        assert_eq!(ico, art::ico(&ICO_SIZES), "assets/icon is stale: run the write_assets test");
+        assert_eq!(u16::from_le_bytes([ico[4], ico[5]]) as usize, ICO_SIZES.len(), "assets/icon is stale: run the write_assets test");
+        for (i, &s) in ICO_SIZES.iter().enumerate() {
+            let e = &ico[6 + 16 * i..6 + 16 * (i + 1)];
+            let (len, at) = (u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize, u32::from_le_bytes(e[12..16].try_into().unwrap()) as usize);
+            let (rgba, size) = decode(&ico[at..at + len]).expect("ico image decodes");
+            assert_eq!((size, rgba), (s, art::rgba(s)), "assets/icon is stale at {s} px: run the write_assets test");
+        }
     }
 
     /// Writes `assets/icon/` from the drawing.

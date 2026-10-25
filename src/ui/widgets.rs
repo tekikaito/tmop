@@ -1341,6 +1341,9 @@ pub fn spark_glide() -> (f32, bool) {
 /// separate dots. Arcs shorter than `width` also get thinner, shrinking as a pill to nothing.
 pub fn ring(p: &egui::Painter, center: Pos2, radius: f32, width: f32, frac: f32, color: Color32, track: Color32) {
     p.circle_stroke(center, radius, Stroke::new(width, track));
+    if !frac.is_finite() {
+        return;
+    }
     let frac = frac.clamp(0.0, 1.0);
     if frac >= 0.999 {
         p.circle_stroke(center, radius, Stroke::new(width, color));

@@ -985,8 +985,16 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
 /// Legend of the plot's lines at the left and the hover readout at the right.
 #[allow(clippy::too_many_arguments)]
 fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str, Color32, bool)], readout: Option<&str>, right: f32) {
+    // The readout box, if any; legend items it would cover give way while it shows.
+    let boxed = readout.map(|t| {
+        let w = widgets::text_width(p, t, theme::mono(12.0)) + 16.0;
+        (t, Rect::from_min_size(pos2(right - w, cy - 12.0), vec2(w, 24.0)))
+    });
     let mut lx = x;
     for (label, color, dashed) in items {
+        if boxed.is_some_and(|(_, r)| lx + 22.0 + widgets::text_width(p, label, theme::ui(12.0)) > r.left() - 12.0) {
+            break;
+        }
         let a = pos2(lx, cy);
         let b = pos2(lx + 14.0, cy);
         if *dashed {
@@ -997,9 +1005,7 @@ fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str,
         let r = p.text(pos2(lx + 22.0, cy), Align2::LEFT_CENTER, label, theme::ui(12.0), pal.text_dim);
         lx = r.right() + 18.0;
     }
-    if let Some(t) = readout {
-        let w = widgets::text_width(p, t, theme::mono(12.0)) + 16.0;
-        let r = Rect::from_min_size(pos2(right - w, cy - 12.0), vec2(w, 24.0));
+    if let Some((t, r)) = boxed {
         p.rect_filled(r, 4.0, pal.raise(0.06));
         p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)));
         p.text(r.center(), Align2::CENTER_CENTER, t, theme::mono(12.0), pal.text);
@@ -1087,7 +1093,6 @@ fn split_unit(s: &str) -> (String, String) {
     }
 }
 
-/// "19.0 / 31.1 GB": both in the unit of the total.
 /// The exploded device right of a graph ending at `gx` (top `y`, `h` tall): a divider, the
 /// drawing fitted to `h - 20` and its layer labels, which keep their column whatever `h` is.
 #[allow(clippy::too_many_arguments)]
@@ -1104,6 +1109,7 @@ fn dash_or(s: Option<String>) -> String {
     s.unwrap_or_else(|| "\u{2014}".to_string())
 }
 
+/// "19.0 / 31.1 GB": both in the unit of the total.
 fn bytes_pair(used: u64, total: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let (mut i, mut t) = (0, total as f64);
