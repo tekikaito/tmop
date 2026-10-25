@@ -740,8 +740,13 @@ pub fn pw_home(uid: u32) -> Option<String> {
 /// enumerate are included). Capped, a huge directory is not read to the end.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn pw_all() -> Vec<(u32, String)> {
+    // The enumeration has one process-wide cursor and a static result buffer: two classifiers
+    // built at once on different threads would interleave it.
+    static ENUM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = ENUM.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
-    // SAFETY: setpwent/getpwent/endpwent on this worker thread only; each entry is copied before the next call.
+    // SAFETY: setpwent/getpwent/endpwent run only under ENUM (nothing else in TMOP enumerates the
+    // user database); each entry is copied before the next call.
     unsafe {
         libc::setpwent();
         while out.len() < 20_000 {
