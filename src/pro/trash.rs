@@ -1075,7 +1075,10 @@ mod tests {
         let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
         let (a, b) = (c(from), c(to));
         // SAFETY: two NUL-terminated paths; no file system type or data for a bind mount.
-        unsafe { libc::mount(a.as_ptr(), b.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) == 0 }
+        let ok = unsafe { libc::mount(a.as_ptr(), b.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) == 0 };
+        // CI runs these tests in a mount namespace and sets this, so a skip there is a failure.
+        assert!(ok || std::env::var_os("TMOP_TEST_REQUIRE_MOUNT").is_none(), "bind mount failed: {}", std::io::Error::last_os_error());
+        ok
     }
 
     #[cfg(target_os = "linux")]

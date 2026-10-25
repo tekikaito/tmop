@@ -103,6 +103,13 @@ jobs:
           packaging/linux/package.sh v0.0.0-ci x64 target/debug/TMOP "$RUNNER_TEMP/dist"
           packaging/linux/test-install.sh "$RUNNER_TEMP/dist"
 
+      # The delete and Trash safety tests that need bind mounts and other users' files skip
+      # without root, so they run once more as root here and must not skip.
+      - name: Test delete safety as root
+        run: |
+          bin=$(cargo test --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .target.kind[0] == "lib") | .executable')
+          sudo TMOP_TEST_REQUIRE_MOUNT=1 "$bin" pro::trash pro::diskdelete
+
   linux-arm64:
     name: Build and test (aarch64-unknown-linux-gnu)
     runs-on: ubuntu-22.04-arm
