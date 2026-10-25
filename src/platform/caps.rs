@@ -166,10 +166,18 @@ impl Caps {
         c
     }
 
+    /// Narrowed by what the metrics backend finds: no clock meters without clocks, no Thermals
+    /// without a temperature source.
+    pub const fn with_metrics(mut self, probe: crate::metrics::Probe) -> Caps {
+        self.clocks &= probe.clocks;
+        self.thermal &= probe.thermal;
+        self
+    }
+
     /// This build on this machine, probed once.
     pub fn get() -> Caps {
         static CAPS: OnceLock<Caps> = OnceLock::new();
-        *CAPS.get_or_init(|| Self::probed(OS, super::is_wayland()))
+        *CAPS.get_or_init(|| Self::probed(OS, super::is_wayland()).with_metrics(crate::metrics::probe()))
     }
 }
 
@@ -206,10 +214,26 @@ mod tests {
     }
 
     #[test]
+    fn metrics_probe_only_narrows() {
+        use crate::metrics::Probe;
+        let none = Probe { clocks: false, thermal: false };
+        let all = Probe { clocks: true, thermal: true };
+        let c = Caps::WINDOWS.with_metrics(none);
+        assert!(!c.clocks && !c.thermal);
+        assert_eq!(Caps { clocks: true, thermal: true, ..c }, Caps::WINDOWS);
+        assert_eq!(Caps::WINDOWS.with_metrics(all), Caps::WINDOWS);
+        assert!(!Caps::MACOS.with_metrics(all).thermal);
+        assert!(Caps::LINUX.with_metrics(Probe { clocks: true, thermal: false }).clocks);
+    }
+
+    #[test]
     fn get_matches_this_target() {
         let c = Caps::get();
         assert_eq!(c.engine, cfg!(windows));
         assert_eq!(c.delete_safe, cfg!(windows));
+        if cfg!(windows) {
+            assert_eq!(c, Caps::WINDOWS);
+        }
         assert_eq!(c, Caps::get());
     }
 }

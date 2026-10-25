@@ -56,16 +56,20 @@ impl App {
             }
             None => tiles.push(StatTile::new("Power source", if ac == Some(false) { "Battery" } else { "AC" }, "No battery reported")),
         }
-        let mut clock = StatTile::new("Clock", if cur > 0.0 { ghz(cur) } else { "N/A".into() }, "Average of all logical processors");
-        if max > 0.0 && cur > 0.0 {
-            clock = clock.bar((cur / max).min(1.0), pal.accent);
+        // No clock tiles or cards where the OS reports no clocks (Apple Silicon).
+        let clocks = self.caps.clocks;
+        if clocks {
+            let mut clock = StatTile::new("Clock", if cur > 0.0 { ghz(cur) } else { "N/A".into() }, "Average of all logical processors");
+            if max > 0.0 && cur > 0.0 {
+                clock = clock.bar((cur / max).min(1.0), pal.accent);
+            }
+            tiles.push(clock);
+            let mut core = StatTile::new("Fastest core", ghz(fastest_mhz), format!("Base {}{}", ghz(base), fastest.map(|f| format!(" \u{b7} core {}", f.0)).unwrap_or_default()));
+            if max > 0.0 && fastest_mhz > 0.0 {
+                core = core.bar((fastest_mhz / max).min(1.0), st.warn);
+            }
+            tiles.push(core);
         }
-        tiles.push(clock);
-        let mut core = StatTile::new("Fastest core", ghz(fastest_mhz), format!("Base {}{}", ghz(base), fastest.map(|f| format!(" \u{b7} core {}", f.0)).unwrap_or_default()));
-        if max > 0.0 && fastest_mhz > 0.0 {
-            core = core.bar((fastest_mhz / max).min(1.0), st.warn);
-        }
-        tiles.push(core);
         tiles.push(StatTile::new(
             "Power plan",
             info.as_ref().map(|i| i.scheme_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "\u{2014}".into()),
@@ -90,19 +94,24 @@ impl App {
         // Clock history and per-core clocks, then policy and plans.
         let rest = Rect::from_min_max(pos2(area.left(), area.top() + tiles_h + 14.0), area.max);
         let low_h = (rest.height() * 0.45).clamp(190.0, 270.0);
-        let rows = vsplit(rest, &[-1.0, low_h], 14.0);
-        let mid = hsplit(rows[0], &[3.0, 2.0], 14.0);
-        self.clock_history(ui, mid[0], fd, base);
-        let n = fd.smooth.per_core_mhz.len();
-        let right = if n > 0 && max > 0.0 { format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0) } else { format!("{n} cores") };
-        let content = section_card(&p, mid[1], &pal, "Per-core clock", &right);
-        if n == 0 || max <= 0.0 {
-            empty_state(&p, content, &pal, "Per-core clocks are not reported");
+        let low_row = if clocks {
+            let rows = vsplit(rest, &[-1.0, low_h], 14.0);
+            let mid = hsplit(rows[0], &[3.0, 2.0], 14.0);
+            self.clock_history(ui, mid[0], fd, base);
+            let n = fd.smooth.per_core_mhz.len();
+            let right = if n > 0 && max > 0.0 { format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0) } else { format!("{n} cores") };
+            let content = section_card(&p, mid[1], &pal, "Per-core clock", &right);
+            if n == 0 || max <= 0.0 {
+                empty_state(&p, content, &pal, "Per-core clocks are not reported");
+            } else {
+                self.core_bars(ui, content, fd, max);
+            }
+            rows[1]
         } else {
-            self.core_bars(ui, content, fd, max);
-        }
+            Rect::from_min_size(rest.min, vec2(rest.width(), low_h))
+        };
 
-        let low = hsplit(rows[1], &[3.0, 2.0], 14.0);
+        let low = hsplit(low_row, &[3.0, 2.0], 14.0);
         let content = section_card(&p, low[0], &pal, "Processor power policy", info.as_ref().map(|i| i.scheme_name.as_str()).unwrap_or(""));
         match &info {
             Some(i) if !i.policy.is_empty() => {
