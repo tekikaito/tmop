@@ -573,7 +573,7 @@ impl App {
         let parts: Vec<(&str, FontId, Color32)> = sentence.iter().map(|(t, f, c)| (t.as_str(), f.clone(), *c)).collect();
         let big = rich(&p, &parts, text_w, 31.0);
         let second = match v.health.bottleneck {
-            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, Windows may be paging.", fd.smooth.disk)),
+            Some(Bottleneck::Memory) if v.levels[2] != Level::Good => Some(format!("Disk activity is also high ({:.0}%); with memory this full, {} may be {}.", fd.smooth.disk, crate::platform::os_subject(), crate::platform::paging_word())),
             None => Some("No resource is under pressure.".to_string()),
             _ => None,
         };
@@ -637,7 +637,7 @@ impl App {
         let parts = [
             (top.map_or("Largest app".to_string(), |g| clip(&g.name, 22)), top.map_or(0, |g| g.memory), top_color, pal.text),
             ("Other apps".to_string(), apps, theme::darken_for(&pal, theme::INDIGO), pal.text),
-            ("Windows".to_string(), windows, theme::darken_for(&pal, theme::PURPLE), pal.text),
+            (crate::process::os_group().to_string(), windows, theme::darken_for(&pal, theme::PURPLE), pal.text),
             ("Cache".to_string(), cached, with_alpha(pal.text, 0.22), pal.text),
             ("Free".to_string(), free, with_alpha(st.ok, 0.4), st.ok),
         ];

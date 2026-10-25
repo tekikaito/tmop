@@ -99,6 +99,22 @@ pub const fn elevation_word() -> &'static str {
     }
 }
 
+/// The OS as the subject of a sentence, as in "{} moves data to disk": "Windows" or "the system".
+pub const fn os_subject() -> &'static str {
+    match OS {
+        Os::Windows => "Windows",
+        _ => "the system",
+    }
+}
+
+/// What the OS does when memory runs out: "paging" or "swapping".
+pub const fn paging_word() -> &'static str {
+    match OS {
+        Os::Windows => "paging",
+        _ => "swapping",
+    }
+}
+
 /// True when the session is a Wayland one (winit then picks its Wayland backend): no window
 /// levels, no taskbar hiding and possibly no server-side decorations.
 pub fn is_wayland() -> bool {

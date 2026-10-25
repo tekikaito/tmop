@@ -757,10 +757,10 @@ impl App {
             let spark = Rect::from_min_size(pos2(row.right() - pct_w - 12.0 - 84.0, cy - 10.0), vec2(84.0, 20.0));
             let mut name_w = spark.left() - row.left() - 12.0;
             if g.system {
-                let bw = widgets::badge_width(&p, "WINDOWS");
+                let bw = widgets::badge_width(&p, crate::process::os_badge());
                 name_w -= bw + 8.0;
                 let nr = widgets::text_fit(&p, pos2(row.left(), cy), Align2::LEFT_CENTER, &g.name, theme::ui(13.0), pal.text_table(), name_w);
-                widgets::badge(&p, pos2(nr.right() + 8.0, cy), "WINDOWS", &pal);
+                widgets::badge(&p, pos2(nr.right() + 8.0, cy), crate::process::os_badge(), &pal);
             } else {
                 widgets::text_fit(&p, pos2(row.left(), cy), Align2::LEFT_CENTER, &g.name, theme::ui(13.0), pal.text_table(), name_w);
             }

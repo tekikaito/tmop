@@ -118,7 +118,7 @@ pub struct AppGroup {
     pub gpu: f32,
     /// Some member owns a window.
     pub has_window: bool,
-    /// The image lives under %SystemRoot%.
+    /// The image lives under %SystemRoot% (off Windows: [`crate::process::is_os_process`]).
     pub system: bool,
     /// Index (into the rows the groups were built from) of the member using the most CPU.
     pub top: usize,
@@ -153,7 +153,7 @@ pub fn app_groups(rows: &[ProcessRow], show_self: bool) -> Vec<AppGroup> {
                 io_bps: 0.0,
                 gpu: 0.0,
                 has_window: false,
-                system: r.path.as_deref().is_some_and(|p| p.to_lowercase().starts_with(&system_root)),
+                system: if cfg!(windows) { r.path.as_deref().is_some_and(|p| p.to_lowercase().starts_with(&system_root)) } else { crate::process::is_os_process(r) },
                 top: i,
                 root: i,
                 icon: None,
@@ -298,7 +298,7 @@ pub fn health_with(snap: &Snapshot, busiest: Option<(String, f32)>, since: Optio
         (Level::Critical, 0) => (
             "Memory is almost full.".into(),
             "almost full",
-            format!("{mem:.0}% of memory is in use, so Windows moves data to disk to free some, which makes apps feel slow.{}", lasted(since)),
+            format!("{mem:.0}% of memory is in use, so {} moves data to disk to free some, which makes apps feel slow.{}", crate::platform::os_subject(), lasted(since)),
         ),
         (Level::Elevated, 1) => ("CPU is busy.".into(), "busy", format!("The processor is at {cpu:.0}%. {}", busy.unwrap_or_default()).trim().to_string()),
         (Level::Critical, 1) => ("CPU is under heavy load.".into(), "under heavy load", format!("The processor is at {cpu:.0}%. {}{}", busy.unwrap_or_default(), lasted(since)).trim().to_string()),
@@ -395,6 +395,27 @@ mod tests {
         assert_eq!((g.name.as_str(), g.count, g.cpu, g.memory, g.has_window), ("The App", 2, 8.0, 400, true));
         // The heaviest member is the child, but the one to end is its parent (the root).
         assert_eq!((rows[g.top].pid, rows[g.root].pid), (11, 10));
+    }
+
+    #[test]
+    fn system_groups_and_wording_follow_the_os() {
+        let full = health(&snap(95.0, 10.0, 10.0), &[], None, LONG);
+        let mut daemon = row(5, "daemon", 0.0, None);
+        let mut app = row(6, "app", 0.0, None);
+        if cfg!(windows) {
+            assert!(full.detail.contains("so Windows moves data to disk"), "{}", full.detail);
+            daemon.path = Some(format!(r"{}\System32\svchost.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())));
+            app.path = Some(r"C:\Program Files\App\app.exe".into());
+        } else {
+            assert!(!full.detail.contains("Windows") && full.detail.contains("so the system moves data to disk"), "{}", full.detail);
+            assert_ne!(crate::process::os_group(), "Windows");
+            assert_eq!(crate::platform::paging_word(), "swapping");
+            daemon.path = Some("/usr/sbin/daemon".into());
+            app.path = Some("/home/me/bin/app".into());
+        }
+        let groups = app_groups(&[daemon, app], true);
+        let system = |key: &str| groups.iter().find(|g| g.key == key).expect("group").system;
+        assert!(system("daemon") && !system("app"));
     }
 
     #[test]
