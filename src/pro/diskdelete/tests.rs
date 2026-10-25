@@ -454,6 +454,8 @@ fn permanent_delete_never_hits_a_trailing_dot_sibling() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// Win32 folding: elsewhere `b.` is its own name, and `C:\a. \c` is one component.
+#[cfg(windows)]
 #[test]
 fn trailing_dot_or_space_names_are_detected() {
     for p in [r"C:\a\b.", r"C:\a\b ", r"C:\a. \c", r"\srv\share\x."] {

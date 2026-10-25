@@ -557,10 +557,13 @@ mod win {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
     }
 
+    // Task Manager paths and `Debugger` values are Win32 paths; elsewhere `\` is not a separator.
+    #[cfg(windows)]
     #[test]
     fn recognises_taskmgr_launches() {
         assert_eq!(taskmgr_launch(&args(&[r"C:\WINDOWS\system32\taskmgr.exe", "/7"])), Some(TaskmgrLaunch { page: None }));
@@ -587,6 +590,7 @@ mod tests {
         assert_eq!(debugger_path(r"C:\Program Files\Proc\procexp64.exe /e"), Path::new(r"C:\Program Files\Proc\procexp64.exe"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn classifies_values() {
         let cur = Path::new(r"C:\Users\me\Desktop\TMOP.exe");

@@ -764,6 +764,11 @@ mod tests {
         }
     }
 
+    /// The hand tree's root, absolute as this OS spells it.
+    fn hand_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"X:\r" } else { "/x/r" })
+    }
+
     fn hand_tree() -> Tree {
         let mut names = Names::default();
         let mut files = Vec::new();
@@ -773,7 +778,7 @@ mod tests {
         }
         let mk = |name: &str, parent: u32, size: u64, own: u64, files: u64, children: Vec<u32>| Node { name: name.into(), parent, size, own, files, children, ..Default::default() };
         let nodes = vec![mk("r", NO_PARENT, 1111, 1, 4, vec![1]), mk("a", 0, 1110, 10, 3, vec![2]), mk("b", 1, 1100, 1100, 2, vec![])];
-        let mut t = Tree { root: PathBuf::from("X:\\r"), nodes, files, names, extensions: vec![], method: ScanMethod::Walker };
+        let mut t = Tree { root: hand_root(), nodes, files, names, extensions: vec![], method: ScanMethod::Walker };
         t.rebuild_extensions();
         t
     }
@@ -781,6 +786,9 @@ mod tests {
     #[test]
     fn tree_remove_updates_ancestry() {
         let mut t = hand_tree();
+        assert_eq!(t.find_node(&hand_root().join("a").join("b")), Some(2));
+        // Windows paths are case-insensitive.
+        #[cfg(windows)]
         assert_eq!(t.find_node(Path::new("x:\\r\\A\\b")), Some(2));
         assert_eq!(t.remove(&[2], &[]), 1100);
         assert!(t.nodes[2].removed && t.nodes[2].parent == NO_PARENT);
@@ -789,7 +797,7 @@ mod tests {
         assert!(t.files.iter().all(|f| f.dir != 2));
         assert_eq!(t.largest_under(0, 10).len(), 2);
         assert!(t.extensions.iter().all(|e| e.0 != "txt" || e.2 == 1));
-        assert_eq!(t.find_node(Path::new("x:\\r\\a\\b")), None);
+        assert_eq!(t.find_node(&hand_root().join("a").join("b")), None);
         let idx = (0..t.files.len()).find(|&i| t.files[i].size == 10).unwrap();
         assert_eq!(t.remove(&[], &[idx]), 10);
         assert_eq!((t.nodes[1].size, t.nodes[1].own, t.nodes[0].size), (0, 0, 1));
