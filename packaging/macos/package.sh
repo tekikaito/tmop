@@ -113,7 +113,12 @@ stage=$work/dmg
 mkdir -p "$stage"
 ditto "$app" "$stage/TMOP.app"
 ln -s /Applications "$stage/Applications"
-hdiutil create -volname TMOP -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$out/$name.dmg"
+# hdiutil now and then fails with "Resource busy" on CI runners, so it gets three tries.
+for try in 1 2 3; do
+    hdiutil create -volname TMOP -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$out/$name.dmg" && break
+    [ "$try" -lt 3 ] || exit 1
+    sleep 5
+done
 if [ -n "$identity" ]; then
     codesign --force --timestamp -s "$identity" "$out/$name.dmg"
 fi
