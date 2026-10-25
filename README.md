@@ -180,7 +180,8 @@ TMOP doesn't update itself. Your settings are kept when you update.
 - The Docker page appears when Docker is installed or TMOP's own engine can run on this computer; you can hide it in *Settings*.
 - Run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
   owners, protected folders) need root or, on macOS, *Full Disk Access*; TMOP says so where it
-  matters.
+  matters. After updating TMOP on macOS, remove it from *Full Disk Access* and add it again:
+  macOS ties the permission to the exact build, so the switch can stay on but no longer apply.
 - TMOP is an independent project. It is inspired by *Task Manager TMOG* but is not connected to
   TMOG or its makers.
 - Free and open source under the [GPL-3.0](LICENSE) license. To build it yourself, install

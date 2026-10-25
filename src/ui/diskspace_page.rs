@@ -743,7 +743,7 @@ fn volume_card(p: &egui::Painter, r: Rect, pal: &Palette, v: &Volume, active: bo
 fn denied_hint() -> Option<&'static str> {
     match crate::platform::OS {
         crate::platform::Os::Windows => None,
-        crate::platform::Os::MacOs => Some("macOS protects some folders (Mail, Messages, Safari, Trash). Give TMOP Full Disk Access in System Settings \u{203a} Privacy & Security to include them."),
+        crate::platform::Os::MacOs => Some("macOS protects some folders (Mail, Messages, Safari, Trash). Give TMOP Full Disk Access in System Settings \u{203a} Privacy & Security to include them (after an update, remove TMOP there and add it again)."),
         _ => Some("Folders of other users and of the system need root. Run TMOP as root (sudo) to include them."),
     }
 }

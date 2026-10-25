@@ -109,4 +109,14 @@ fi
 grep -q 'could not download' "$work/err7" || fail "no download message"
 ok "errors"
 
+# 8. A ~/.local/bin/tmop this script did not install is left alone (and so never uninstalled).
+home=$work/home8
+mkdir -p "$home/.local/bin"
+echo 'mine' > "$home/.local/bin/tmop"
+if run "$home" 2> "$work/err8"; then fail "an existing foreign tmop should stop the install"; fi
+grep -q 'was not installed by this script' "$work/err8" || fail "no message about the existing file"
+[ "$(cat "$home/.local/bin/tmop")" = mine ] || fail "the existing tmop was replaced"
+[ ! -e "$home/.local/share/tmop/installed-files" ] || fail "a refused install wrote a manifest"
+ok "existing file kept"
+
 echo "all install.sh tests passed"

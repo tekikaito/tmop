@@ -123,6 +123,14 @@ linux_install() {
     linux_paths
     existed=
     [ ! -f "$manifest" ] || existed=1
+    # Never replace (and later uninstall) a file this script did not put there.
+    if [ -z "$existed" ]; then
+        for f in "$bin" "$desktop"; do
+            if [ -e "$f" ] || [ -L "$f" ]; then
+                fail "$f already exists and was not installed by this script. Move it away (or delete it) and run this again."
+            fi
+        done
+    fi
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/tmop-install.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT
     trap 'exit 1' HUP INT TERM
