@@ -293,13 +293,17 @@ impl App {
             widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, d.title(), theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
             widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + 19.0), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
             let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 34.0), vec2(r.width() - 24.0, 32.0));
-            widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            if d == Device::Docker {
+                widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
+            } else {
+                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            }
             if resp.clicked() {
                 *act = Some(Act::Device(d));
             }
             y += DEVICE_CARD_H + 6.0;
         }
-        let span = span_text(fd.hist.cpu.values.len(), self.settings.update_speed().interval());
+        let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.settings.update_speed().interval());
         p.text(pos2(list.left() + 2.0, y + 4.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
         let button = Rect::from_min_size(pos2(list.left(), y + 26.0), vec2(120.0, 28.0));
         if kit::row_ui(ui, button, |ui| Button::ghost("Refresh").size(ButtonSize::Compact).icon(Icon::Refresh).show(ui, &pal).clicked()) {
@@ -321,7 +325,7 @@ impl App {
         let mut cy = y + 20.0;
         let iv = self.settings.update_speed().interval();
         let gs = &self.settings.graphs;
-        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv };
+        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv, phase: fd.phase, glide: fd.glide };
         let s = fd.snap;
         match self.device {
             Device::Cpu => {
@@ -535,7 +539,9 @@ impl App {
                 let mem_max = snap.info.as_ref().map(|i| i.mem_total as f32).filter(|m| *m > 0.0).unwrap_or(self.perf_docker.totals_mem.max()).max(1.0);
                 let lines = [PlotLine::new(&self.perf_docker.totals_cpu, c, (0.0, 100.0)), PlotLine::new(&self.perf_docker.totals_mem, mem_c, (0.0, mem_max))];
                 let readout = |age: usize| format!("{} \u{b7} {:.1}% \u{b7} {}", ago(iv, age), at(&self.perf_docker.totals_cpu, age), format_bytes(at(&self.perf_docker.totals_mem, age) as f64));
-                let (ph, hover) = plot(ui, &pc, "docker", ix, cy, gw, 160.0, 36.0, &percent_labels(), &lines, &readout);
+                // Docker stats arrive on their own clock, so the plot does not glide on the sampler's.
+                let still = PlotCtx { phase: 0.0, glide: false, ..pc };
+                let (ph, hover) = plot(ui, &still, "docker", ix, cy, gw, 160.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let known = |v: &str| dash_or((v != "N/A").then(|| v.to_string()));
                     let labels = [
@@ -599,7 +605,12 @@ impl App {
             let view = self.dev_view(*d, fd);
             widgets::tracked_text(&p, pos2(t.left() + 14.0, t.top() + 10.0), Align2::LEFT_TOP, &d.title().to_uppercase(), theme::ui(11.0), pal.text_faint, 0.14);
             widgets::text_fit(&p, pos2(t.right() - 14.0, t.top() + 9.0), Align2::RIGHT_TOP, &view.value, theme::mono(12.0), pal.text, t.width() * 0.6);
-            widgets::sparkline(&p, Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0)), &view.lines, 0.12, view.dashed_second);
+            let spark = Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0));
+            if *d == Device::Docker {
+                widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
+            } else {
+                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+            }
             if resp.clicked() {
                 *act = Some(Act::Device(*d));
             }
@@ -646,7 +657,9 @@ impl App {
         let h = if wide { left_h.max(right_natural) } else { left_h };
 
         let left = Rect::from_min_size(pos2(x, y), vec2(lw, h));
-        let span = span_text(fd.hist.per_core.first().map_or(0, |s| s.values.len()), iv);
+        // What a core's sparkline (the cell less its 1 px inset) shows of the history.
+        let spark_w = (c_w - 6.0 * (cols - 1) as f32) / cols as f32 - 2.0;
+        let span = span_text(fd.hist.per_core.first().map_or(0, |s| widgets::spark_visible(spark_w, s.values.len(), s.capacity)), iv);
         let c = kit::section_card(&p, left, &pal, &format!("Logical processors \u{b7} last {span}"), "");
         // View toggle and fold button at the right of the heading.
         let mut tx = left.right() - 22.0;
@@ -846,7 +859,7 @@ impl App {
                     widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 38.0), Align2::LEFT_CENTER, &line, theme::mono(11.0), pal.text_faint, cw - 24.0);
                     if let (true, Some(s)) = (running, *series) {
                         let gr = Rect::from_min_max(pos2(r.left() + 12.0, r.top() + 54.0), pos2(r.right() - 12.0, r.bottom() - 12.0));
-                        widgets::sparkline(&p, gr, &[(s, blue, (0.0, 100.0))], 0.12, false);
+                        widgets::sparkline_unsynced(&p, gr, &[(s, blue, (0.0, 100.0))], 0.12);
                     }
                 }
             });
@@ -890,6 +903,9 @@ struct PlotCtx<'a> {
     px_per_update: f32,
     /// The update interval, for the time labels.
     interval: Option<Duration>,
+    /// The newest sample scrolls in over the update interval (`FrameData::phase`, `glide`).
+    phase: f32,
+    glide: bool,
 }
 
 /// A history graph with y labels, time labels and a readout on hover. `gutter` is the width
@@ -922,6 +938,8 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
         g.line_width = l.width;
         g.fill = l.fill;
         g.dashed = l.dashed;
+        g.phase = cx.phase;
+        g.glide = cx.glide;
         draw_graph(&p, gr, &g);
     }
     // Time labels from the history length and the update interval.
@@ -944,9 +962,11 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
     let mut text = None;
     if let (Some(pos), Some(first)) = (resp.hover_pos(), lines.first()) {
         let n = first.series.values.len();
-        let age = axis.age_at(gr.right() - pos.x).round().max(0.0) as usize;
+        // The samples sit where draw_graph put them this frame (shifted by the glide).
+        let offset = if cx.glide && n >= 2 { cx.phase.clamp(0.0, 1.0) - 1.0 } else { cx.phase.clamp(0.0, 1.0) };
+        let age = (axis.age_at(gr.right() - pos.x) - offset).round().max(0.0) as usize;
         if age < n {
-            let cx = axis.x_of(age as f32);
+            let cx = axis.x_of(age as f32 + offset).min(gr.right());
             p.line_segment([pos2(cx, gr.top()), pos2(cx, gr.bottom())], Stroke::new(1.0_f32, pal.raise(0.3)));
             for l in lines {
                 if let Some(v) = l.series.values.len().checked_sub(1 + age).and_then(|i| l.series.values.get(i)) {
@@ -1017,6 +1037,7 @@ fn spark_fixed(p: &egui::Painter, rect: Rect, s: &Series, color: Color32, range:
     g.smooth = smooth;
     g.line_width = 1.4;
     g.fill = fill;
+    (g.phase, g.glide) = widgets::spark_glide();
     draw_graph(p, rect, &g);
 }
 
@@ -1140,7 +1161,7 @@ mod tests {
             let p = ui.painter().clone();
             let head = Head { title: "Intel(R) Core(TM) Ultra 9 285K Processor", sub: "8 cores".into(), value: ("23".into(), "%".into()), side: "8% kernel".into() };
             assert_eq!(super::head(&p, &pal, 20.0, 20.0, 600.0, &head), 48.0);
-            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)) };
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false };
             let lines = [PlotLine::new(&a, pal.accent, (0.0, 100.0)), PlotLine::new(&b, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
             let (h, text) = plot(ui, &cx, "t", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| ago(cx.interval, age));
             assert_eq!(h, 220.0);
@@ -1158,7 +1179,7 @@ mod tests {
         let pal = theme::LIGHT;
         let empty = Series::new(4);
         frames(|ui| {
-            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None };
+            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None, phase: 0.0, glide: false };
             let lines = [PlotLine::new(&empty, pal.accent, (0.0, 100.0))];
             let (_, text) = plot(ui, &cx, "empty", 20.0, 20.0, 300.0, 100.0, 36.0, &percent_labels(), &lines, &|_| String::new());
             assert!(text.is_none());

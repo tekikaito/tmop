@@ -313,7 +313,7 @@ impl App {
             }
             let (lo, hi) = values.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
             let pad = ((hi - lo) * 0.15).max(hi.abs() * 0.02).max(1e-3);
-            widgets::sparkline(&clip, Rect::from_min_size(pos2(x, r.bottom() - 14.0 - 24.0), vec2(w, 24.0)), &[(&s, c, (lo - pad, hi + pad))], 0.0, false);
+            widgets::sparkline_static(&clip, Rect::from_min_size(pos2(x, r.bottom() - 14.0 - 24.0), vec2(w, 24.0)), &[(&s, c, (lo - pad, hi + pad))], 0.0);
         }
 
         // Run link next to the value.
