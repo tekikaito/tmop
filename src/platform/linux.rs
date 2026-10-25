@@ -1,7 +1,7 @@
 //! Linux backend of [`crate::platform`]: XDG folders, the desktop's file manager over D-Bus.
 
 use super::unix::spawn_reaped;
-pub use super::unix::{hide_console, hostname, is_elevated, local_time};
+pub use super::unix::{hide_console, home, hostname, is_elevated, local_time};
 use super::xdg;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};

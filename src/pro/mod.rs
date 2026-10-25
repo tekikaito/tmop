@@ -17,6 +17,7 @@
 //! * [`walker`]       parallel directory walker (scan method otherwise)
 //! * [`mounts`]       mounted file systems off Windows (mountinfo, getfsstat)
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
+//! * [`inuse`]        which processes hold a file open (Restart Manager, /proc, libproc)
 //! * [`inventory`]    system info, services, startup apps
 //! * [`sysfmt`]       pure parsers for os-release, `.desktop` files and XML property lists
 
@@ -28,6 +29,7 @@ pub mod diskdelete;
 pub mod diskspace;
 pub mod drivers;
 pub mod icons;
+pub mod inuse;
 pub mod inventory;
 pub mod mft;
 pub mod mounts;
