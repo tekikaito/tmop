@@ -300,6 +300,52 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
     g
 }
 
+/// Runtime power management of a GPU's PCI device, from sysfs attributes of the PM core and PCI
+/// (`power/runtime_status`, `power/control`, `boot_vga`) that never wake it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuPower {
+    /// Powered down (`suspended`, or on its way there).
+    pub suspended: bool,
+    /// A GPU that is not the boot display device and that its driver may power down
+    /// (`power/control` is `auto`): the discrete GPU of a hybrid laptop.
+    pub may_sleep: bool,
+}
+
+/// [`GpuPower`] from the attribute texts (`None`: the file is missing).
+pub fn gpu_power(status: Option<&str>, control: Option<&str>, boot_vga: Option<&str>) -> GpuPower {
+    GpuPower {
+        suspended: status.is_some_and(|s| matches!(s.trim(), "suspended" | "suspending")),
+        may_sleep: control.is_some_and(|c| c.trim() == "auto") && !boot_vga.is_some_and(|b| b.trim() == "1"),
+    }
+}
+
+/// How often a GPU that may sleep is read while it is awake. Each read (NVML, amdgpu's
+/// `gpu_busy_percent`, its hwmon) wakes it or restarts its idle timer, so the gaps must be long
+/// enough for it to power down.
+pub const SLEEPY_GPU_PERIOD: Duration = Duration::from_secs(10);
+
+/// What the sampler does with a GPU (or its sensors) this tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuPoll {
+    /// Read it now.
+    Read,
+    /// It is powered down: report it idle without touching it.
+    Idle,
+    /// Reuse the last reading.
+    Keep,
+}
+
+/// The poll of a GPU with power state `p`, `since` its last read (`None`: never read).
+pub fn gpu_poll(p: GpuPower, since: Option<Duration>) -> GpuPoll {
+    if p.suspended {
+        GpuPoll::Idle
+    } else if p.may_sleep && since.is_some_and(|d| d < SLEEPY_GPU_PERIOD) {
+        GpuPoll::Keep
+    } else {
+        GpuPoll::Read
+    }
+}
+
 /// `/proc/uptime`: seconds since boot (first field).
 pub fn parse_uptime(text: &str) -> Option<Duration> {
     let s = text.split_ascii_whitespace().next()?.parse::<f64>().ok()?;
@@ -321,6 +367,23 @@ pub fn parse_loadavg_threads(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleeping_gpus_are_left_alone() {
+        let dgpu = gpu_power(Some("suspended\n"), Some("auto\n"), None);
+        assert_eq!(dgpu, GpuPower { suspended: true, may_sleep: true });
+        assert_eq!(gpu_poll(dgpu, None), GpuPoll::Idle, "a powered-down GPU is never read");
+        let awake = gpu_power(Some("active\n"), Some("auto\n"), Some("0\n"));
+        assert_eq!(gpu_poll(awake, None), GpuPoll::Read);
+        assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1))), GpuPoll::Keep, "read seldom so it can power down");
+        assert_eq!(gpu_poll(awake, Some(SLEEPY_GPU_PERIOD)), GpuPoll::Read);
+        // The boot display GPU, a GPU whose power management is off, and one without the files
+        // are read every tick as before.
+        for p in [gpu_power(Some("active"), Some("auto"), Some("1")), gpu_power(Some("active"), Some("on"), Some("0")), gpu_power(None, None, None)] {
+            assert!(!p.may_sleep && !p.suspended, "{p:?}");
+            assert_eq!(gpu_poll(p, Some(Duration::from_millis(500))), GpuPoll::Read);
+        }
+    }
 
     const STAT: &str = "cpu  1183823 92 471691 34746123 37962 0 55759 0 0 0
 cpu0 72012 54 32251 2161026 3036 0 25891 0 0 0

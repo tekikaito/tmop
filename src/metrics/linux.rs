@@ -83,6 +83,13 @@ pub struct Collector {
     freq_base: Option<u64>,
     name: String,
     nvml: NvmlState,
+    /// The NVIDIA display devices on the PCI bus (looked up once).
+    nvidia_pci: Option<Vec<PathBuf>>,
+    /// Last reading of each GPU that may sleep (amdgpu card dir or hwmon dir -> when, reading),
+    /// and of the NVIDIA GPUs read through a short-lived NVML.
+    sleepy: HashMap<PathBuf, (Instant, GpuDev)>,
+    sleepy_temps: HashMap<PathBuf, (Instant, Vec<(String, f32)>)>,
+    nvidia_last: Option<(Instant, Vec<GpuDev>)>,
     procs: Enumerator,
 }
 
@@ -106,6 +113,10 @@ impl Collector {
             freq_base: read_u64(cpu0.join("base_frequency")).or_else(|| read_u64(cpu0.join("amd_pstate_nominal_freq"))),
             name,
             nvml: NvmlState::Untried,
+            nvidia_pci: None,
+            sleepy: HashMap::new(),
+            sleepy_temps: HashMap::new(),
+            nvidia_last: None,
             procs: Enumerator::new(),
         }
     }
@@ -122,7 +133,7 @@ impl Collector {
         self.disk(&mut snap);
         self.network(&mut snap);
         snap.gpu = procfs::fold_gpus(&self.gpus());
-        snap.thermal = thermal();
+        snap.thermal = self.thermal();
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));
         snap.thread_count = read("/proc/loadavg").and_then(|l| procfs::parse_loadavg_threads(&l)).unwrap_or(0);
         snap.process_count = fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).count()).unwrap_or(0);
@@ -222,17 +233,51 @@ impl Collector {
         self.prev_net = Some((now, rx, tx));
     }
 
-    /// amdgpu cards from sysfs, then NVIDIA GPUs from NVML (loaded on first use).
+    /// amdgpu cards from sysfs, then NVIDIA GPUs from NVML (loaded on first use). A hybrid
+    /// laptop's discrete GPU must be able to power down: it is not touched while suspended and
+    /// read only every [`procfs::SLEEPY_GPU_PERIOD`] while awake, and NVML is not kept open for it.
     fn gpus(&mut self) -> Vec<GpuDev> {
-        let mut devs: Vec<GpuDev> = entries("/sys/class/drm", "card")
-            .into_iter()
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n[4..].bytes().all(|b| b.is_ascii_digit())))
-            .filter_map(|p| {
-                let d = p.join("device");
-                let busy = read_u64(d.join("gpu_busy_percent"))?;
-                Some(GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")) })
-            })
-            .collect();
+        let now = Instant::now();
+        let idle = || GpuDev { engines: vec![("Graphics".into(), 0.0)], vram_used: None };
+        let mut devs = Vec::new();
+        let cards = entries("/sys/class/drm", "card").into_iter().filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n[4..].bytes().all(|b| b.is_ascii_digit())));
+        for card in cards {
+            let d = card.join("device");
+            // A stat of the attribute does not run the driver (and so does not wake the GPU).
+            if !d.join("gpu_busy_percent").exists() {
+                continue;
+            }
+            let since = self.sleepy.get(&card).map(|c| now.saturating_duration_since(c.0));
+            match procfs::gpu_poll(power_of(&d), since) {
+                procfs::GpuPoll::Idle => devs.push(idle()),
+                procfs::GpuPoll::Keep => devs.extend(self.sleepy.get(&card).map(|c| c.1.clone())),
+                procfs::GpuPoll::Read => {
+                    let Some(busy) = read_u64(d.join("gpu_busy_percent")) else { continue };
+                    let dev = GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")) };
+                    self.sleepy.insert(card, (now, dev.clone()));
+                    devs.push(dev);
+                }
+            }
+        }
+        let nvidia = self.nvidia_pci.get_or_insert_with(nvidia_pci_devices);
+        let powers: Vec<procfs::GpuPower> = nvidia.iter().map(|d| power_of(d)).collect();
+        if powers.iter().any(|p| p.may_sleep) {
+            // Hybrid laptop: an open NVML keeps the GPU powered, so it is opened only for a read.
+            self.nvml = NvmlState::Untried;
+            let since = self.nvidia_last.as_ref().map(|c| now.saturating_duration_since(c.0));
+            let awake = procfs::GpuPower { suspended: powers.iter().all(|p| p.suspended), may_sleep: true };
+            match procfs::gpu_poll(awake, since) {
+                procfs::GpuPoll::Idle => devs.extend(powers.iter().map(|_| idle())),
+                procfs::GpuPoll::Keep => devs.extend(self.nvidia_last.iter().flat_map(|c| c.1.iter().cloned())),
+                procfs::GpuPoll::Read => {
+                    // Dropping the Nvml shuts it down again.
+                    let read = Nvml::load().map(|n| n.read()).unwrap_or_default();
+                    devs.extend(read.iter().cloned());
+                    self.nvidia_last = Some((now, read));
+                }
+            }
+            return devs;
+        }
         if matches!(self.nvml, NvmlState::Untried) {
             self.nvml = Nvml::load().map_or(NvmlState::Absent, NvmlState::Loaded);
         }
@@ -241,29 +286,69 @@ impl Collector {
         }
         devs
     }
+
+    /// hwmon chips and thermal zones, folded by [`procfs::fold_thermal`]. A chip of a powered-down
+    /// device is not read (that would wake it); one of a GPU that may sleep is read seldom.
+    fn thermal(&mut self) -> super::ThermalSample {
+        let now = Instant::now();
+        let mut chips = Vec::new();
+        for h in entries("/sys/class/hwmon", "hwmon") {
+            let Some(name) = read(h.join("name")).map(|n| n.trim().to_string()) else { continue };
+            let dev = h.join("device");
+            let gpu = read(dev.join("class")).is_some_and(|c| c.trim().starts_with("0x03"));
+            let mut power = power_of(&dev);
+            // Only a GPU is read seldom; a CPU sensor's PCI function may be `auto` under TLP.
+            power.may_sleep &= gpu;
+            let since = self.sleepy_temps.get(&h).map(|c| now.saturating_duration_since(c.0));
+            let temps = match procfs::gpu_poll(power, since) {
+                procfs::GpuPoll::Idle => Vec::new(),
+                procfs::GpuPoll::Keep => self.sleepy_temps.get(&h).map(|c| c.1.clone()).unwrap_or_default(),
+                procfs::GpuPoll::Read => {
+                    let temps = hwmon_temps(&h);
+                    if power.may_sleep {
+                        self.sleepy_temps.insert(h.clone(), (now, temps.clone()));
+                    }
+                    temps
+                }
+            };
+            chips.push(HwmonChip { name, temps });
+        }
+        thermal_fold(&chips)
+    }
 }
 
-/// hwmon chips and thermal zones, folded by [`procfs::fold_thermal`].
-fn thermal() -> super::ThermalSample {
-    let chips: Vec<HwmonChip> = entries("/sys/class/hwmon", "hwmon")
+/// Runtime power state of a (PCI) device.
+fn power_of(dev: &Path) -> procfs::GpuPower {
+    procfs::gpu_power(read(dev.join("power/runtime_status")).as_deref(), read(dev.join("power/control")).as_deref(), read(dev.join("boot_vga")).as_deref())
+}
+
+/// The NVIDIA display controllers (VGA or 3D) on the PCI bus.
+fn nvidia_pci_devices() -> Vec<PathBuf> {
+    entries("/sys/bus/pci/devices", "")
+        .into_iter()
+        .filter(|d| read(d.join("vendor")).is_some_and(|v| v.trim() == "0x10de") && read(d.join("class")).is_some_and(|c| c.trim().starts_with("0x03")))
+        .collect()
+}
+
+/// (label, °C) of each temperature input of a hwmon chip.
+fn hwmon_temps(h: &Path) -> Vec<(String, f32)> {
+    let Ok(rd) = fs::read_dir(h) else { return Vec::new() };
+    let mut inputs: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| is_temp_input(n)).collect();
+    // temp2 before temp10.
+    inputs.sort_by_key(|n| n.trim_start_matches("temp").trim_end_matches("_input").parse::<u32>().unwrap_or(u32::MAX));
+    inputs
         .iter()
-        .filter_map(|h| {
-            let name = read(h.join("name"))?.trim().to_string();
-            let mut inputs: Vec<String> = fs::read_dir(h).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| is_temp_input(n)).collect();
-            // temp2 before temp10.
-            inputs.sort_by_key(|n| n.trim_start_matches("temp").trim_end_matches("_input").parse::<u32>().unwrap_or(u32::MAX));
-            let temps = inputs
-                .iter()
-                .filter_map(|i| {
-                    let v = procfs::millideg(&read(h.join(i))?)?;
-                    let stem = i.trim_end_matches("_input");
-                    let label = read(h.join(format!("{stem}_label"))).map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).unwrap_or_else(|| stem.to_string());
-                    Some((label, v))
-                })
-                .collect();
-            Some(HwmonChip { name, temps })
+        .filter_map(|i| {
+            let v = procfs::millideg(&read(h.join(i))?)?;
+            let stem = i.trim_end_matches("_input");
+            let label = read(h.join(format!("{stem}_label"))).map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).unwrap_or_else(|| stem.to_string());
+            Some((label, v))
         })
-        .collect();
+        .collect()
+}
+
+/// The thermal zones with the hwmon `chips`, folded by [`procfs::fold_thermal`].
+fn thermal_fold(chips: &[HwmonChip]) -> super::ThermalSample {
     let zones = entries("/sys/class/thermal", "thermal_zone")
         .iter()
         .filter_map(|z| {
@@ -272,5 +357,5 @@ fn thermal() -> super::ThermalSample {
             Some((kind.unwrap_or_else(|| z.file_name().unwrap_or_default().to_string_lossy().into_owned()), v))
         })
         .collect();
-    procfs::fold_thermal(&chips, zones)
+    procfs::fold_thermal(chips, zones)
 }
