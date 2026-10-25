@@ -4,11 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TMOP – Task Manager OverPowered</title>
-<meta name="description" content="TMOP shows what your Windows PC is doing: processor, memory, disk, network, graphics, running programs and more. Free, open source, no installer needed.">
+<meta name="description" content="TMOP shows what your computer is doing: processor, memory, disk, network, graphics, running programs and more. For Windows, Linux and macOS. Free, open source, no installer needed.">
 <meta property="og:title" content="TMOP – Task Manager OverPowered">
-<meta property="og:description" content="A free, open-source system monitor for Windows 10 and 11.">
+<meta property="og:description" content="A free, open-source system monitor for Windows, Linux and macOS.">
 <meta property="og:image" content="https://tekikaito.github.io/tmop/screenshots/summary.png">
 <meta name="color-scheme" content="dark">
+<script>
+// The visitor's operating system (or ?os=windows|linux|macos), set before the page paints so
+// only its instructions show.
+(function () {
+  var ua = navigator.userAgent || '';
+  var os = 'windows';
+  if (/Android|iPhone|iPad|iPod/i.test(ua)) os = 'windows';
+  else if (/Mac OS X|Macintosh/i.test(ua)) os = 'macos';
+  else if (/Linux|X11|CrOS/i.test(ua)) os = 'linux';
+  var m = /[?&]os=(windows|linux|macos)\b/.exec(location.search);
+  if (m) os = m[1];
+  document.documentElement.setAttribute('data-os', os);
+})();
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230b0d12'/><polyline points='4,22 10,22 13,10 18,26 21,16 28,16' fill='none' stroke='%2333e07a' stroke-width='3' stroke-linejoin='round' stroke-linecap='round'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -81,6 +95,25 @@
     background: none; border: 0; padding: 0; color: var(--cyan); font: inherit; cursor: pointer; text-decoration: underline;
   }
   .warn { display: none; color: var(--amber); font-size: 14px; }
+
+  /* Operating system picker under the download button */
+  .os-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+  .os-switch button {
+    background: none; border: 0; border-left: 1px solid var(--line); color: var(--muted);
+    font: 500 14px var(--body); padding: 7px 16px; cursor: pointer;
+  }
+  .os-switch button:first-child { border-left: 0; }
+  .os-switch button:hover { color: var(--text); }
+  .os-switch button[aria-pressed="true"] { background: var(--panel-2); color: var(--green); }
+
+  /* Content for one operating system: html[data-os] (set by the script) hides the others.
+     Without the script every block shows. */
+  html[data-os="windows"] [data-only]:not([data-only~="windows"]),
+  html[data-os="linux"] [data-only]:not([data-only~="linux"]),
+  html[data-os="macos"] [data-only]:not([data-only~="macos"]) { display: none !important; }
+  .os-tag { display: none; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--green); margin-bottom: 6px; }
+  html:not([data-os]) .os-tag { display: block; }
+  code.inline { font-family: var(--mono); font-size: 13.5px; color: var(--text); background: #05070a; padding: 2px 6px; border-radius: 4px; }
 
   .shot {
     margin: 56px auto 0; max-width: min(1040px, 100%); border-radius: 12px; overflow: hidden;
@@ -194,17 +227,23 @@
 <main>
   <div class="hero">
     <div class="wrap">
-      <h1>See what your PC is <em>really</em> doing</h1>
-      <p class="lead">TMOP is a free task manager and system monitor for Windows. Processor, memory, disk, network, graphics card, running programs and much more, live. No installer needed.</p>
+      <h1>See what your computer is <em>really</em> doing</h1>
+      <p class="lead">TMOP is a free task manager and system monitor for Windows, Linux and macOS. Processor, memory, disk, network, graphics card, running programs and much more, live. No installer needed.</p>
 
       <div class="get">
         <a class="btn" id="dl" href="https://github.com/tekikaito/tmop/releases/latest">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-          <span>Download for Windows</span>
+          <span id="dl-label">Download TMOP</span>
         </a>
-        <div class="meta" id="dl-meta">Windows 10 and 11 · free and open source</div>
+        <div class="meta" id="dl-meta">Windows 10 and 11 · Linux · macOS 11 or newer · free and open source</div>
+        <div class="meta" id="dl-alt" hidden></div>
         <div class="meta" id="arch-switch" hidden></div>
-        <div class="warn" id="not-windows">TMOP runs on Windows 10 and 11. Versions for Linux and Mac are planned.</div>
+        <div class="os-switch" id="os-switch" role="group" aria-label="Operating system" hidden>
+          <button type="button" data-os="windows">Windows</button>
+          <button type="button" data-os="linux">Linux</button>
+          <button type="button" data-os="macos">macOS</button>
+        </div>
+        <div class="warn" id="mobile">TMOP is a desktop app for Windows, Linux and macOS. Open this page on your computer to download it.</div>
       </div>
 
       <img class="shot" src="screenshots/summary.png" width="1584" height="877" alt="TMOP's summary page with live CPU, memory, network, disk and GPU monitors">
@@ -214,34 +253,95 @@
   <section id="install">
     <div class="wrap">
       <h2>Up and running in a minute</h2>
-      <p class="sub">There's nothing to set up. TMOP is a single program file you start with a double-click.</p>
+      <p class="sub">There's nothing to set up. TMOP is a single program you start with a double-click.</p>
 
-      <div class="steps">
-        <div class="step">
-          <h3>Download</h3>
-          <p>Click <b>Download for Windows</b> above. The right version for your PC is picked for you.</p>
+      <!-- Windows -->
+      <div data-only="windows">
+        <div class="os-tag">Windows</div>
+        <div class="steps">
+          <div class="step">
+            <h3>Download</h3>
+            <p>Click <b>Download for Windows</b> above. The right version for your PC is picked for you.</p>
+          </div>
+          <div class="step">
+            <h3 id="step2-title">Open it</h3>
+            <p id="step2-text">Double-click the downloaded file in your browser's download list or your <i>Downloads</i> folder.</p>
+          </div>
+          <div class="step">
+            <h3>Keep it handy</h3>
+            <p>Move the file somewhere you like, such as your desktop, or pin TMOP to the taskbar while it runs.</p>
+          </div>
         </div>
-        <div class="step">
-          <h3 id="step2-title">Open it</h3>
-          <p id="step2-text">Double-click the downloaded file in your browser's download list or your <i>Downloads</i> folder.</p>
-        </div>
-        <div class="step">
-          <h3>Keep it handy</h3>
-          <p>Move the file somewhere you like, such as your desktop, or pin TMOP to the taskbar while it runs.</p>
+
+        <div class="smartscreen">
+          <span class="i">i</span>
+          <div><b>Windows shows "Windows protected your PC"?</b> That happens with programs Windows doesn't know yet. Click <kbd>More info</kbd>, then <kbd>Run anyway</kbd>. You only have to do this once.</div>
         </div>
       </div>
 
-      <div class="smartscreen">
-        <span class="i">i</span>
-        <div><b>Windows shows "Windows protected your PC"?</b> That happens with programs Windows doesn't know yet. Click <kbd>More info</kbd>, then <kbd>Run anyway</kbd>. You only have to do this once.</div>
+      <!-- Linux -->
+      <div data-only="linux">
+        <div class="os-tag">Linux</div>
+        <div class="steps">
+          <div class="step">
+            <h3>Download</h3>
+            <p>Click <b>Download for Linux</b> above to get the <b>AppImage</b>, one file that runs on most distributions (Ubuntu 22.04, Debian 12, Fedora 36 or newer).</p>
+          </div>
+          <div class="step">
+            <h3>Allow it to run</h3>
+            <p>Right-click the file, choose <i>Properties</i> and turn on <i>Allow executing file as program</i>. Or in a terminal: <code class="inline">chmod +x TMOP-linux-*.AppImage</code></p>
+          </div>
+          <div class="step">
+            <h3>Open it</h3>
+            <p>Double-click the AppImage. For a menu entry and a <code class="inline">tmop</code> command, use the install command below instead.</p>
+          </div>
+        </div>
+
+        <div class="smartscreen">
+          <span class="i">i</span>
+          <div><b>The AppImage doesn't start?</b> AppImages need FUSE, which some systems lack. The install command below needs none, or start it once with <code class="inline">./TMOP-linux-*.AppImage --appimage-extract-and-run</code>. Run TMOP as your normal user; some details (other users' processes and connections) need root.</div>
+        </div>
+      </div>
+
+      <!-- macOS -->
+      <div data-only="macos">
+        <div class="os-tag">macOS</div>
+        <div class="steps">
+          <div class="step">
+            <h3>Download</h3>
+            <p>Click <b>Download for Mac</b> above. One app runs on both Apple Silicon and Intel Macs with macOS 11 or newer.</p>
+          </div>
+          <div class="step">
+            <h3>Drag it to Applications</h3>
+            <p>Open the downloaded <i>TMOP-macos-universal.dmg</i> and drag <b>TMOP</b> onto the <i>Applications</i> folder next to it.</p>
+          </div>
+          <div class="step">
+            <h3>Open it once</h3>
+            <p>Double-click TMOP in <i>Applications</i>. macOS asks you to confirm the first start; see below.</p>
+          </div>
+        </div>
+
+        <div class="smartscreen" id="gatekeeper">
+          <span class="i">i</span>
+          <div>
+            <b>macOS says "Apple could not verify TMOP is free of malware"?</b> TMOP isn't notarized by Apple, so macOS asks before the first start. You only have to do this once:
+            <ol style="margin:8px 0 0; padding-left:20px;">
+              <li>Click <kbd>Done</kbd> in that message.</li>
+              <li>Open <i>System Settings → Privacy &amp; Security</i> and scroll down to <i>Security</i>.</li>
+              <li>Next to <i>"TMOP" was blocked to protect your Mac</i>, click <kbd>Open Anyway</kbd>, confirm with your password, then click <kbd>Open Anyway</kbd> once more.</li>
+            </ol>
+            <p style="margin:8px 0 0;">On macOS 14 Sonoma and older you can instead Control-click TMOP in <i>Applications</i>, choose <i>Open</i> and confirm with <kbd>Open</kbd>. The install command below skips this step entirely.</p>
+          </div>
+        </div>
       </div>
 
       <div class="two" style="margin-top: 40px;">
-        <div class="cmd-card">
+        <div class="cmd-card" data-only="windows">
+          <div class="os-tag">Windows</div>
           <h3 style="margin:0 0 4px; font-size:17px;">Or install with one command</h3>
           <p style="margin:0; color:var(--muted); font-size:15px;">Open <b>PowerShell</b> (right-click Start → <i>Terminal</i>) and paste:</p>
           <div class="cmd">
-            <code id="cmd-text"><span class="p">PS&gt; </span>irm https://tekikaito.github.io/tmop/install.ps1 | iex</code>
+            <code><span class="p">PS&gt; </span>irm https://tekikaito.github.io/tmop/install.ps1 | iex</code>
             <button class="copy" data-copy="irm https://tekikaito.github.io/tmop/install.ps1 | iex">Copy</button>
           </div>
           <ul>
@@ -251,7 +351,36 @@
             <li>Remove it in <i>Settings → Apps</i> like any other app</li>
           </ul>
         </div>
-        <div class="cmd-card">
+        <div class="cmd-card" data-only="linux macos">
+          <div class="os-tag">Linux and macOS</div>
+          <h3 style="margin:0 0 4px; font-size:17px;">Or install with one command</h3>
+          <p style="margin:0; color:var(--muted); font-size:15px;">Open a <b>Terminal</b> and paste:</p>
+          <div class="cmd">
+            <code><span class="p">$ </span>curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh</code>
+            <button class="copy" data-copy="curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh">Copy</button>
+          </div>
+          <ul>
+            <li data-only="linux">Puts <code class="inline">tmop</code> in <i>~/.local/bin</i> and adds TMOP to your applications menu</li>
+            <li data-only="linux">Prefer the AppImage? Add <code class="inline">-s -- --appimage</code> after <code class="inline">sh</code></li>
+            <li data-only="macos">Puts TMOP.app in <i>Applications</i> in your home folder, with no "could not verify" prompt</li>
+            <li>Checks the download's SHA-256, needs no root or admin password</li>
+            <li>Run it again any time to update</li>
+            <li>Remove it with <code class="inline">curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall</code></li>
+          </ul>
+        </div>
+        <div class="cmd-card" data-only="linux macos">
+          <div class="os-tag">Linux and macOS</div>
+          <h3 style="margin:0 0 4px; font-size:17px;">Good to know</h3>
+          <ul style="margin-top:10px;">
+            <li>Everything that makes sense outside Windows is there: performance, processes, services, startup apps, installed apps, connections, Disk Space and Docker.</li>
+            <li>Windows-only parts are hidden: replacing Task Manager, TMOP's own Docker engine and the Windows Disk Cleanup handlers.</li>
+            <li data-only="macos">Temperatures and per-engine graphics load aren't available on macOS; Apple Silicon Macs report no clock speeds.</li>
+            <li data-only="linux">On Wayland, "always on top" for the popout isn't available; on X11 it is.</li>
+            <li>The <a href="https://github.com/tekikaito/tmop#platforms">README</a> lists exactly what works where.</li>
+          </ul>
+        </div>
+        <div class="cmd-card" data-only="windows">
+          <div class="os-tag">Windows</div>
           <h3 style="margin:0 0 4px; font-size:17px;">Replace Windows Task Manager</h3>
           <p style="margin:0 0 12px; color:var(--muted); font-size:15px;">In TMOP's <i>Settings</i>, under <i>Task Manager</i>, turn on <b>Open TMOP instead of Windows Task Manager</b>.</p>
           <p style="margin:0 0 12px; color:var(--muted); font-size:15px;">From then on <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Esc</kbd>, <i>Task Manager</i> in the taskbar menu and <code style="font-family:var(--mono); color:var(--text)">taskmgr</code> all open TMOP. The real Task Manager stays one click away under <i>File</i>.</p>
@@ -302,25 +431,37 @@
       <details>
         <summary>Which download do I need?</summary>
         <div class="a">
-          <p>Almost every Windows PC needs <b>x64</b>, and that's what the button gives you. Only PCs with an ARM processor, such as Snapdragon laptops, need <b>ARM64</b>. The page tries to detect this; if you're not sure, take x64.</p>
+          <p data-only="windows"><b>Windows:</b> almost every PC needs <b>x64</b>, and that's what the button gives you. Only PCs with an ARM processor, such as Snapdragon laptops, need <b>ARM64</b>. The page tries to detect this; if you're not sure, take x64.</p>
+          <p data-only="linux"><b>Linux:</b> the <b>AppImage</b> is one file you can run right away. The <b>tar.gz</b> holds the plain <code>tmop</code> program with its menu entry and icons, for unpacking yourself; the install command uses it. Most PCs need <b>x64</b>; Raspberry Pi and other ARM computers with a 64-bit system need <b>ARM64</b>. Both need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later).</p>
+          <p data-only="macos"><b>macOS:</b> there is one download for Apple Silicon and Intel Macs, as a <b>.dmg</b> or the same app in a <b>.zip</b>. It needs macOS 11 Big Sur or newer.</p>
           <p>All files are also on the <a href="https://github.com/tekikaito/tmop/releases/latest">GitHub release page</a>.</p>
         </div>
       </details>
       <details>
         <summary>How do I update TMOP?</summary>
         <div class="a">
-          <p>If you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it. Your settings are kept either way.</p>
+          <p data-only="windows"><b>Windows:</b> if you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it.</p>
+          <p data-only="linux macos"><b>Linux and macOS:</b> if you used the install command, run it again. Otherwise download the newest version here and replace the old <span data-only="linux">AppImage</span><span data-only="macos">TMOP in <i>Applications</i></span> with it.</p>
+          <p>Your settings are kept either way. TMOP doesn't check for updates by itself.</p>
         </div>
       </details>
       <details>
         <summary>How do I remove TMOP?</summary>
         <div class="a">
-          <p>Installed with the PowerShell command: remove it in <i>Settings → Apps → Installed apps</i>. It also gives Ctrl+Shift+Esc back to Windows Task Manager.</p>
-          <p>Downloaded by hand: if TMOP opens instead of Task Manager, turn that off in TMOP's <i>Settings</i> first. Then delete TMOP.exe.</p>
-          <p>To also remove your settings, delete the folder <code>%LOCALAPPDATA%\TMOP</code> (paste it into File Explorer's address bar).</p>
+          <div data-only="windows">
+            <p><b>Windows</b>, installed with the PowerShell command: remove it in <i>Settings → Apps → Installed apps</i>. It also gives Ctrl+Shift+Esc back to Windows Task Manager.</p>
+            <p>Downloaded by hand: if TMOP opens instead of Task Manager, turn that off in TMOP's <i>Settings</i> first. Then delete TMOP.exe.</p>
+            <p>To also remove your settings, delete the folder <code>%LOCALAPPDATA%\TMOP</code> (paste it into File Explorer's address bar).</p>
+          </div>
+          <div data-only="linux macos">
+            <p><b>Linux and macOS</b>, installed with the command: run <code>curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall</code>. It removes exactly the files it installed.</p>
+            <p>Downloaded by hand: delete the <span data-only="linux">AppImage</span><span data-only="macos">TMOP app from <i>Applications</i></span>.</p>
+            <p data-only="linux">To also remove your settings and recordings, delete <code>~/.config/tmop</code> and <code>~/.local/share/tmop</code>.</p>
+            <p data-only="macos">To also remove your settings and recordings, delete <code>~/Library/Application Support/TMOP</code>.</p>
+          </div>
         </div>
       </details>
-      <details>
+      <details data-only="windows">
         <summary>Ctrl+Shift+Esc opens nothing after I deleted TMOP</summary>
         <div class="a">
           <p>Windows still points Task Manager at the deleted file. Open <i>Command Prompt</i> as administrator and run:</p>
@@ -330,13 +471,14 @@
       <details>
         <summary>Does TMOP send my data anywhere?</summary>
         <div class="a">
-          <p>No. Its only internet requests go to GitHub: downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab).</p>
+          <p>No. On Linux and macOS TMOP itself makes no internet requests at all. On Windows its only requests go to GitHub: downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab).</p>
         </div>
       </details>
       <details>
         <summary>Is the download safe?</summary>
         <div class="a">
-          <p>TMOP is open source, and every download is built by GitHub Actions straight from the <a href="https://github.com/tekikaito/tmop">public code</a>. Each file on the release page comes with a <code>.sha256</code> checksum; the PowerShell command checks it for you.</p>
+          <p>TMOP is open source, and every download is built by GitHub Actions straight from the <a href="https://github.com/tekikaito/tmop">public code</a>. Each file on the release page comes with a <code>.sha256</code> checksum; the install commands check it for you.</p>
+          <p data-only="macos">The Mac app isn't notarized by Apple, which is why macOS asks you to confirm the first start (see <a href="#gatekeeper">above</a>).</p>
         </div>
       </details>
     </div>
@@ -353,55 +495,128 @@
 <script>
 (function () {
   var REPO = 'tekikaito/tmop';
+  var LATEST = 'https://github.com/' + REPO + '/releases/latest';
+  var root = document.documentElement;
   var btn = document.getElementById('dl');
+  var label = document.getElementById('dl-label');
   var meta = document.getElementById('dl-meta');
+  var alt = document.getElementById('dl-alt');
   var archSwitch = document.getElementById('arch-switch');
+  var osSwitch = document.getElementById('os-switch');
   var release = null;
+  var os = root.getAttribute('data-os') || 'windows';
   var arch = 'x64';
 
+  // What each system downloads. The version-less names under releases/latest/download work
+  // without the API; the API adds the version and size, and tells when a file is missing.
+  var OS = {
+    windows: {
+      name: 'Windows',
+      button: 'Download for Windows',
+      about: 'Windows 10 and 11',
+      arm: ['PC with an ARM processor? ', 'Not an ARM PC? '],
+      main: function (a) { return 'TMOP-windows-' + a + '.exe'; },
+      // Releases before the bare exe only carry the zip.
+      old: function (a) { return new RegExp('^TMOP-v.+-windows-' + a + '\\.zip$'); },
+      alt: null
+    },
+    linux: {
+      name: 'Linux',
+      button: 'Download for Linux',
+      about: 'AppImage · glibc 2.35 or newer',
+      arm: ['ARM computer, such as a Raspberry Pi? ', 'Not an ARM computer? '],
+      main: function (a) { return 'TMOP-linux-' + a + '.AppImage'; },
+      alt: function (a) { return { name: 'TMOP-linux-' + a + '.tar.gz', text: 'the tar.gz' }; }
+    },
+    macos: {
+      name: 'Mac',
+      button: 'Download for Mac',
+      about: 'macOS 11 or newer · Apple Silicon and Intel',
+      arm: null,
+      main: function () { return 'TMOP-macos-universal.dmg'; },
+      alt: function () { return { name: 'TMOP-macos-universal.zip', text: 'the .zip' }; }
+    }
+  };
+
   var ua = navigator.userAgent || '';
-  if (!/Windows/i.test(ua)) document.getElementById('not-windows').style.display = 'block';
+  if (/Android|iPhone|iPad|iPod/i.test(ua)) document.getElementById('mobile').style.display = 'block';
+  if (/aarch64|arm64|armv8/i.test(ua)) arch = 'arm64';
 
   function mb(bytes) { return (bytes / 1048576).toFixed(1) + ' MB'; }
 
-  // Releases since this page carry a bare TMOP-windows-<arch>.exe; older ones only the zip.
-  function pick(a) {
-    var assets = release.assets;
-    var exe = assets.filter(function (x) { return x.name === 'TMOP-windows-' + a + '.exe'; })[0];
-    if (exe) return exe;
-    var re = new RegExp('^TMOP-v.+-windows-' + a + '\\.zip$');
-    return assets.filter(function (x) { return re.test(x.name); })[0];
+  // The asset called `name` (or matching `old`): from the API when it answered, else a direct
+  // link. null when the API's release has no such file.
+  function find(name, old) {
+    if (!release) return { name: name, url: LATEST + '/download/' + name };
+    var hit = release.assets.filter(function (x) { return x.name === name; })[0];
+    if (!hit && old) hit = release.assets.filter(function (x) { return old.test(x.name); })[0];
+    return hit ? { name: hit.name, url: hit.browser_download_url, size: hit.size } : null;
   }
 
   function render() {
-    if (!release) return;
-    var asset = pick(arch);
-    if (!asset) return;
-    btn.href = asset.browser_download_url;
-    var label = arch === 'arm64' ? 'ARM64' : 'x64';
-    meta.textContent = 'Version ' + release.tag_name.replace(/^v/, '') + ' · Windows 10 and 11 · ' + label + ' · ' + mb(asset.size);
-    var other = arch === 'arm64' ? 'x64' : 'arm64';
-    if (pick(other)) {
+    var o = OS[os];
+    root.setAttribute('data-os', os);
+    osSwitch.hidden = false;
+    osSwitch.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-os') === os ? 'true' : 'false');
+    });
+    label.textContent = o.button;
+    var a = o.arm ? arch : null;
+    var asset = find(o.main(a), o.old && o.old(a));
+    var version = release ? 'Version ' + release.tag_name.replace(/^v/, '') + ' · ' : '';
+    if (!asset) {
+      btn.href = LATEST;
+      meta.textContent = version + 'No ' + o.name + ' download in this release yet; the release page has all files.';
+    } else {
+      btn.href = asset.url;
+      var parts = [o.about];
+      if (a) parts.push(a === 'arm64' ? 'ARM64' : 'x64');
+      if (asset.size) parts.push(mb(asset.size));
+      meta.textContent = version + parts.join(' · ');
+    }
+
+    alt.hidden = true;
+    var other = o.alt && asset && find(o.alt(a).name);
+    if (other) {
+      alt.hidden = false;
+      alt.innerHTML = '';
+      alt.appendChild(document.createTextNode('Or download '));
+      var link = document.createElement('a');
+      link.href = other.url;
+      link.textContent = o.alt(a).text;
+      alt.appendChild(link);
+      if (other.size) alt.appendChild(document.createTextNode(' (' + mb(other.size) + ')'));
+    }
+
+    archSwitch.hidden = true;
+    var flip = arch === 'arm64' ? 'x64' : 'arm64';
+    if (o.arm && find(o.main(flip), o.old && o.old(flip))) {
       archSwitch.hidden = false;
       archSwitch.innerHTML = '';
-      archSwitch.appendChild(document.createTextNode(arch === 'arm64' ? 'Not an ARM PC? ' : 'PC with an ARM processor? '));
+      archSwitch.appendChild(document.createTextNode(o.arm[arch === 'arm64' ? 1 : 0]));
       var b = document.createElement('button');
       b.type = 'button';
-      b.textContent = 'Get the ' + (other === 'arm64' ? 'ARM64' : 'x64') + ' version';
-      b.onclick = function () { arch = other; render(); };
+      b.textContent = 'Get the ' + (flip === 'arm64' ? 'ARM64' : 'x64') + ' version';
+      b.onclick = function () { arch = flip; render(); };
       archSwitch.appendChild(b);
     }
-    if (/\.zip$/.test(asset.name)) {
-      document.getElementById('step2-title').textContent = 'Unzip and open';
-      document.getElementById('step2-text').innerHTML = 'Open the downloaded zip file, drag <b>TMOP.exe</b> out of it to your desktop, and double-click it.';
-    }
+
+    var zip = os === 'windows' && asset && /\.zip$/.test(asset.name);
+    document.getElementById('step2-title').textContent = zip ? 'Unzip and open' : 'Open it';
+    document.getElementById('step2-text').innerHTML = zip
+      ? 'Open the downloaded zip file, drag <b>TMOP.exe</b> out of it to your desktop, and double-click it.'
+      : 'Double-click the downloaded file in your browser\'s download list or your <i>Downloads</i> folder.';
   }
+
+  osSwitch.querySelectorAll('button').forEach(function (b) {
+    b.addEventListener('click', function () { os = b.getAttribute('data-os'); render(); });
+  });
 
   function detectArch() {
     var d = navigator.userAgentData;
     if (d && d.getHighEntropyValues) {
       return d.getHighEntropyValues(['architecture', 'bitness']).then(function (v) {
-        if (v.architecture === 'arm') arch = 'arm64';
+        if (v.architecture === 'arm' && v.bitness !== '32') arch = 'arm64';
       }).catch(function () {});
     }
     return Promise.resolve();
@@ -410,8 +625,9 @@
   var fetched = fetch('https://api.github.com/repos/' + REPO + '/releases/latest')
     .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function (j) { release = j; })
-    .catch(function () { /* keep the link to the release page */ });
+    .catch(function () { /* keep the direct links */ });
 
+  render();
   Promise.all([detectArch(), fetched]).then(render);
 
   document.querySelectorAll('.copy').forEach(function (b) {
@@ -422,12 +638,15 @@
         b.classList.add('done');
         setTimeout(function () { b.textContent = 'Copy'; b.classList.remove('done'); }, 1800);
       };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, function () {});
-      } else {
+      var select = function () {
         var r = document.createRange();
-        r.selectNodeContents(document.getElementById('cmd-text'));
+        r.selectNodeContents(b.previousElementSibling);
         var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, select);
+      } else {
+        select();
       }
     });
   });
@@ -435,3 +654,4 @@
 </script>
 </body>
 </html>
+
