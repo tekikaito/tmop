@@ -5,8 +5,9 @@
 //! suspend, resume, set_priority, set_efficiency, open_location}`): `win.rs`
 //! (`NtQuerySystemInformation`, `TerminateProcess`, `NtSuspendProcess`/`NtResumeProcess`,
 //! `SetPriorityClass`, EcoQoS via `SetProcessInformation`), `linux.rs` (`/proc`, signals through
-//! pidfd, nice and `SCHED_IDLE`; its pure parsers in `procfs.rs`) and `stub.rs` for targets
-//! without a backend yet. A macOS backend plugs in beside them with the same API.
+//! pidfd, nice and `SCHED_IDLE`; its pure parsers in `procfs.rs`), `macos.rs` (libproc, `sysctl`,
+//! signals, `setpriority`, `PRIO_DARWIN_BG`; its pure parts in `darwin.rs`) and `stub.rs` for
+//! targets without a backend yet.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -17,7 +18,13 @@ mod procfs;
 mod win;
 #[cfg(windows)]
 use win as imp;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(any(target_os = "macos", test))]
+mod darwin;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as imp;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[path = "stub.rs"]
 mod imp;
 
