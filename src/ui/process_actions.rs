@@ -15,7 +15,7 @@ pub(super) enum Confirm {
     EndTask,
     Efficiency,
     Realtime,
-    /// The OS refused the action (the question holds why); offer it again as administrator.
+    /// The OS refused the action (the question holds why); offer it again as root (pkexec).
     Elevate,
 }
 
@@ -98,7 +98,7 @@ impl App {
         match spawned {
             Ok(_) => {
                 self.elevated_job = Some(rx);
-                self.status = "Waiting for administrator authorization\u{2026}".into();
+                self.status = format!("Waiting for {} authorization\u{2026}", crate::platform::elevation_word());
             }
             Err(e) => self.status = format!("could not start the elevated action: {e}"),
         }
@@ -174,14 +174,15 @@ impl App {
                     };
                 }
                 Confirm::Elevate => {
+                    let retry = format!("Retry as {}", crate::platform::elevation_word());
                     kit::dialog_header(
                         ui,
                         pal,
                         Some((Icon::Shield, st.warn)),
-                        &format!("**{}** needs administrator rights", row.name),
-                        &format!("{}. Retry as administrator asks for an administrator password and runs only this one action.", p.question),
+                        &format!("**{}** needs {} rights", row.name, crate::platform::elevation_word()),
+                        &format!("{}. {retry} asks for a password (pkexec) and runs only this one action.", p.question),
                     );
-                    answer = match kit::dialog_buttons(ui, pal, &[DialogButton::Secondary("Cancel"), DialogButton::Primary("Retry as administrator")]) {
+                    answer = match kit::dialog_buttons(ui, pal, &[DialogButton::Secondary("Cancel"), DialogButton::Primary(&retry)]) {
                         Some(0) => Some(Answer::Cancel),
                         Some(_) => Some(Answer::Confirm),
                         None => None,

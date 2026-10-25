@@ -350,7 +350,7 @@ pub fn elevated_argv(t: &Tools, op: Elevated, ids: &[u32]) -> Option<Vec<String>
 /// authenticate (no polkit agent).
 pub fn pkexec_error(code: Option<i32>, stderr_line: &str) -> String {
     match code {
-        Some(126) => "the administrator authorization was dismissed or refused".into(),
+        Some(126) => "the authorization prompt was dismissed or refused".into(),
         Some(127) => "pkexec could not ask for authorization (no polkit agent is running)".into(),
         _ if !stderr_line.is_empty() => stderr_line.to_string(),
         Some(c) => format!("the elevated command failed with exit code {c}"),

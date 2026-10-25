@@ -632,7 +632,7 @@ pub(super) mod elevated {
     /// password). Only processes that are still the ones in the table are named; the authorization
     /// prompt itself can take a while, which leaves a small window for pid reuse.
     pub fn run(action: Action, row: &ProcessRow, rows: &[ProcessRow]) -> Result<String, String> {
-        let op = op(action).ok_or_else(|| format!("{action:?} has no administrator retry"))?;
+        let op = op(action).ok_or_else(|| format!("{action:?} has no retry as root"))?;
         let t = tools().ok_or("pkexec is not installed")?;
         let me = std::process::id();
         let targets: Vec<(u32, i64)> = match action {
@@ -662,14 +662,14 @@ pub(super) mod elevated {
             return Err(procfs::pkexec_error(out.status.code(), stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")));
         }
         Ok(match action {
-            Action::EndTree => format!("Ended {} process(es) as administrator", live.len()),
-            Action::EndTask => format!("Ended {} ({}) as administrator", row.name, row.pid),
-            Action::Suspend => format!("Suspended {} as administrator", row.name),
-            Action::Resume => format!("Resumed {} as administrator", row.name),
-            Action::SetPriority(p) => format!("{} priority: {} (as administrator)", row.name, p.label()),
+            Action::EndTree => format!("Ended {} process(es) as root", live.len()),
+            Action::EndTask => format!("Ended {} ({}) as root", row.name, row.pid),
+            Action::Suspend => format!("Suspended {} as root", row.name),
+            Action::Resume => format!("Resumed {} as root", row.name),
+            Action::SetPriority(p) => format!("{} priority: {} (as root)", row.name, p.label()),
             _ => {
                 super::super::mark_efficiency((row.pid, row.create_time), false);
-                format!("{} off for {} (as administrator)", super::super::efficiency_word(), row.name)
+                format!("{} off for {} (as root)", super::super::efficiency_word(), row.name)
             }
         })
     }
