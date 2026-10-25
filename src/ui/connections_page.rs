@@ -48,9 +48,12 @@ impl App {
         let names: HashMap<u32, &str> = fd.rows.iter().map(|r| (r.pid, r.name.as_str())).collect();
         let paths: HashMap<u32, &str> = fd.rows.iter().filter_map(|r| r.path.as_deref().map(|p| (r.pid, p))).collect();
         let name_of = |pid: u32| -> String {
+            let windows = crate::platform::OS == crate::platform::Os::Windows;
             match pid {
-                0 => "System Idle".into(),
-                4 => "System".into(),
+                0 if windows => "System Idle".into(),
+                4 if windows => "System".into(),
+                // Elsewhere 0 means the owner is not visible (another user's socket, or none).
+                0 => "Unknown".into(),
                 _ => names.get(&pid).map(|s| s.to_string()).unwrap_or_else(|| format!("PID {pid}")),
             }
         };

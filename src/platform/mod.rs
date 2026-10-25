@@ -111,6 +111,24 @@ const READER_GRACE: Duration = Duration::from_secs(2);
 /// Fails with a short text when it cannot start, exits non-zero (the first stderr line) or
 /// runs longer than `timeout` (it is killed). Blocks; call it off the UI thread.
 pub fn run_capture(cmd: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+    let (status, stdout, stderr) = run_output(cmd, args, timeout)?;
+    if status.success() {
+        return Ok(stdout);
+    }
+    let why = stderr.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(": {l}")).unwrap_or_default();
+    Err(match status.code() {
+        Some(code) => format!("{cmd} failed with exit code {code}{why}"),
+        None => format!("{cmd} was terminated{why}"),
+    })
+}
+
+/// [`run_capture`] for tools whose exit code is not a verdict (`lsof` exits 1 when it could not
+/// see some files): (exit code, stdout, stderr) of a run that finished, else why it did not.
+pub fn run_capture_any(cmd: &str, args: &[&str], timeout: Duration) -> Result<(Option<i32>, String, String), String> {
+    run_output(cmd, args, timeout).map(|(status, out, err)| (status.code(), out, err))
+}
+
+fn run_output(cmd: &str, args: &[&str], timeout: Duration) -> Result<(std::process::ExitStatus, String, String), String> {
     let mut command = Command::new(cmd);
     command.args(args).env("LC_ALL", "C").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     hide_console(&mut command);
@@ -147,15 +165,7 @@ pub fn run_capture(cmd: &str, args: &[&str], timeout: Duration) -> Result<String
     };
     let grace = Instant::now() + READER_GRACE;
     let collect = |rx: mpsc::Receiver<Vec<u8>>| String::from_utf8_lossy(&rx.recv_timeout(grace.saturating_duration_since(Instant::now())).unwrap_or_default()).into_owned();
-    let (stdout, stderr) = (collect(out), collect(err));
-    if status.success() {
-        return Ok(stdout);
-    }
-    let why = stderr.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(": {l}")).unwrap_or_default();
-    Err(match status.code() {
-        Some(code) => format!("{cmd} failed with exit code {code}{why}"),
-        None => format!("{cmd} was terminated{why}"),
-    })
+    Ok((status, collect(out), collect(err)))
 }
 
 #[cfg(test)]
@@ -217,6 +227,9 @@ mod tests {
     fn run_capture_reports_failures() {
         let err = run("echo nope 1>&2 && exit 3", Duration::from_secs(20)).unwrap_err();
         assert!(err.contains("exit code 3") && err.contains("nope"), "{err}");
+        let (cmd, args) = shell("echo out && echo nope 1>&2 && exit 3");
+        let (code, out, err) = run_capture_any(cmd, &args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(20)).unwrap();
+        assert_eq!((code, out.trim(), err.trim()), (Some(3), "out", "nope"));
         let err = run_capture("tmop-no-such-program", &[], Duration::from_secs(5)).unwrap_err();
         assert!(err.starts_with("could not start tmop-no-such-program"), "{err}");
     }
