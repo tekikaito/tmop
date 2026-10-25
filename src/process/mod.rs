@@ -4,14 +4,21 @@
 //! backend per target supplies the [`Enumerator`] and the action primitives (`sys::{terminate,
 //! suspend, resume, set_priority, set_efficiency, open_location}`): `win.rs`
 //! (`NtQuerySystemInformation`, `TerminateProcess`, `NtSuspendProcess`/`NtResumeProcess`,
-//! `SetPriorityClass`, EcoQoS via `SetProcessInformation`) and `stub.rs` for targets without a
-//! backend yet. A Linux or macOS backend plugs in beside `win.rs` with the same API.
+//! `SetPriorityClass`, EcoQoS via `SetProcessInformation`), `macos.rs` (libproc, `sysctl`,
+//! signals, `setpriority`, `PRIO_DARWIN_BG`; its pure parts in `darwin.rs`) and `stub.rs` for
+//! targets without a backend yet.
 
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
 use win as imp;
-#[cfg(not(windows))]
+#[cfg(any(target_os = "macos", test))]
+mod darwin;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as imp;
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "stub.rs"]
 mod imp;
 
