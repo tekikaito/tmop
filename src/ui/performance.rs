@@ -2,7 +2,7 @@
 //! facts, the other resources as a strip and, for the CPU, the logical processors and the apps
 //! using the most.
 
-use super::health::{app_groups, cpu_text, AppGroup, Steady};
+use super::health::{app_groups, cpu_text, AppGroup};
 use super::hardware::{self, Exploded};
 use super::kit;
 use super::theme::{self, lighten, mix, with_alpha, Palette};
@@ -41,8 +41,6 @@ pub struct PerfState {
     pub top_spark: HashMap<String, Series>,
     /// Sampler generation the sparklines were last extended at.
     spark_seq: u64,
-    /// "Top CPU consumers" averaged and in a calm order, like the Summary's top consumers.
-    steady: Steady,
 }
 
 /// Docker series copied from the backend for the Performance page.
@@ -172,9 +170,9 @@ impl App {
                 self.pro.power.start(crate::pro::power::read);
             }
         }
-        let groups = app_groups(fd.rows, fd.show_self);
+        // Averaged and in the calm order the Summary's top consumers use, sparklines included.
+        let groups = self.summary.steady.update(fd.snap.seq, app_groups(fd.rows, fd.show_self));
         self.update_top_spark(&groups, fd.snap.seq);
-        let groups = self.perf.steady.update(fd.snap.seq, groups);
         let area = ui.max_rect();
         let list = Rect::from_min_size(area.min, vec2(LIST_W, area.height()));
         let detail = Rect::from_min_max(pos2(list.right() + GAP, area.top()), area.max);

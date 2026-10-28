@@ -707,11 +707,20 @@ impl App {
                             }
                             changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                             changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
+                            // One switch per case; each one clears the other, so the page is
+                            // never hidden by a switch that is not on screen.
                             if docker_found || !caps.engine {
-                                changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
-                            } else if toggle_row_hint(ui, &pal, &mut s.docker.show_page, "Show the Docker page", "No Docker was found. The page sets up TMOP's own Docker engine.") {
-                                s.docker.hide_page &= !s.docker.show_page;
-                                changed = true;
+                                if toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page") {
+                                    s.docker.show_page &= !s.docker.hide_page;
+                                    changed = true;
+                                }
+                            } else {
+                                let mut shown = s.docker.show_page && !s.docker.hide_page;
+                                if toggle_row_hint(ui, &pal, &mut shown, "Show the Docker page", "No Docker was found. The page sets up TMOP's own Docker engine.") {
+                                    s.docker.show_page = shown;
+                                    s.docker.hide_page = false;
+                                    changed = true;
+                                }
                             }
                         });
                         if caps.taskmgr_replace {

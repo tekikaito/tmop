@@ -249,7 +249,8 @@ fn sticky_order(prev: &[String], groups: &[AppGroup]) -> Vec<String> {
     let mut new: Vec<&AppGroup> = groups.iter().filter(|g| !known.contains(g.key.as_str())).collect();
     new.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)));
     order.extend(new.into_iter().map(|g| g.key.clone()));
-    let lead = |a: f32| 1.0 + 0.25 * a;
+    // Grows with the load but stays reachable: a busy app can still be overtaken.
+    let lead = |a: f32| (0.5 + 0.2 * a).min(5.0);
     for _ in 0..order.len() {
         let mut swapped = false;
         for i in 1..order.len() {
@@ -269,7 +270,8 @@ fn sticky_order(prev: &[String], groups: &[AppGroup]) -> Vec<String> {
 /// An app's CPU share for lists that refresh every sample: one decimal below 10%, whole
 /// percents above, so the busy rows don't flicker in the last digit.
 pub fn cpu_text(pct: f32) -> String {
-    if pct < 10.0 {
+    // Rounded first, so 9.97% reads "10%" and not "10.0%".
+    if (pct * 10.0).round() < 100.0 {
         format!("{pct:.1}%")
     } else {
         format!("{pct:.0}%")
@@ -375,9 +377,23 @@ mod tests {
             s.update(seq, groups(1.0, 8.0));
         }
         assert_eq!(keys(&s.update(10, groups(1.0, 8.0))), ["b.exe", "a.exe"]);
+        // An app gone quiet is overtaken by a slightly busier one; a busy app can still be passed.
+        let prev = ["a.exe".to_string(), "b.exe".to_string()];
+        let order = |a: f32, b: f32| sticky_order(&prev, &groups(a, b));
+        assert_eq!(order(0.1, 1.0), ["b.exe", "a.exe"]);
+        assert_eq!(order(90.0, 96.0), ["b.exe", "a.exe"]);
+        assert_eq!(order(90.0, 94.0), ["a.exe", "b.exe"]);
         // After a gap (seq jumps) the raw values count again.
         let g = s.update(20, groups(5.0, 1.0));
         assert_eq!((g[0].key.as_str(), g[0].cpu), ("a.exe", 5.0));
+    }
+
+    #[test]
+    fn cpu_text_rounds_before_choosing_decimals() {
+        assert_eq!(cpu_text(0.34), "0.3%");
+        assert_eq!(cpu_text(9.94), "9.9%");
+        assert_eq!(cpu_text(9.97), "10%");
+        assert_eq!(cpu_text(42.6), "43%");
     }
 
     #[test]
