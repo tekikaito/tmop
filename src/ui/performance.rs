@@ -2,7 +2,7 @@
 //! facts, the other resources as a strip and, for the CPU, the logical processors and the apps
 //! using the most.
 
-use super::health::{app_groups, AppGroup};
+use super::health::{app_groups, cpu_text, AppGroup, Steady};
 use super::hardware::{self, Exploded};
 use super::kit;
 use super::theme::{self, lighten, mix, with_alpha, Palette};
@@ -41,6 +41,8 @@ pub struct PerfState {
     pub top_spark: HashMap<String, Series>,
     /// Sampler generation the sparklines were last extended at.
     spark_seq: u64,
+    /// "Top CPU consumers" averaged and in a calm order, like the Summary's top consumers.
+    steady: Steady,
 }
 
 /// Docker series copied from the backend for the Performance page.
@@ -172,6 +174,7 @@ impl App {
         }
         let groups = app_groups(fd.rows, fd.show_self);
         self.update_top_spark(&groups, fd.snap.seq);
+        let groups = self.perf.steady.update(fd.snap.seq, groups);
         let area = ui.max_rect();
         let list = Rect::from_min_size(area.min, vec2(LIST_W, area.height()));
         let detail = Rect::from_min_max(pos2(list.right() + GAP, area.top()), area.max);
@@ -366,7 +369,7 @@ impl App {
                     let ghz_of = |m: Option<u32>| m.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "\u{2014}".to_string());
                     let substrate = format!("base {} \u{b7} boost {}", ghz_of(s.cpu.base_mhz), ghz_of(s.cpu.boost_mhz));
                     let socket = format!("{} socket{}", det.sockets.max(1), if det.sockets.max(1) == 1 { "" } else { "s" });
-                    figure_at(&p, &pal, Exploded::Cpu, ix + gw, cy, 200.0, &[("Heat spreader", temp), ("Die", die), ("Substrate", substrate), ("Socket", socket)]);
+                    figure_at(&p, &pal, Exploded::Cpu, ix + gw, cy, 200.0, &[("Temperature", temp), ("Cores", die), ("Clock speed", substrate), ("Sockets", socket)]);
                 }
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Total", accent, false), ("Kernel time", pal.text_faint, true)], hover.as_deref(), ix + gw);
@@ -383,7 +386,7 @@ impl App {
                 if figure {
                     let m = &s.memory;
                     let pair = |a: u64, b: u64| format!("{} / {}", format_bytes(a as f64), format_bytes(b as f64));
-                    let labels = [("Heat spreader", pair(used, m.total)), ("DRAM chips", format!("{:.0}% in use", m.used_pct)), ("PCB", format!("{} cached", format_bytes(m.cached as f64))), ("Slot", dash_or(m.commit_used.zip(m.commit_limit).map(|(u, l)| format!("commit {}", pair(u, l)))))];
+                    let labels = [("In use", pair(used, m.total)), ("Usage", format!("{:.0}%", m.used_pct)), ("Cached", format_bytes(m.cached as f64)), ("Committed", dash_or(m.commit_used.zip(m.commit_limit).map(|(u, l)| pair(u, l))))];
                     figure_at(&p, &pal, Exploded::Memory, ix + gw, cy, 200.0, &labels);
                 }
                 cy += ph + 10.0;
@@ -429,10 +432,10 @@ impl App {
                     let on = |v: String| dash_or(g.available.then_some(v));
                     let top = g.engines.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, v)| format!("{e} \u{b7} {v:.0}%"));
                     let labels = [
-                        ("Shroud", on(format!("{:.0}% busiest engine", g.utilization_pct))),
-                        ("Die", dash_or(top.filter(|_| g.available))),
-                        ("VRAM", on(format!("{} dedicated in use", format_bytes(g.dedicated_used as f64)))),
-                        ("PCB \u{b7} bus", on(format!("{} engines reported", g.engines.len()))),
+                        ("Utilization", on(format!("{:.0}%", g.utilization_pct))),
+                        ("Busiest engine", dash_or(top.filter(|_| g.available))),
+                        ("Dedicated memory", on(format!("{} in use", format_bytes(g.dedicated_used as f64)))),
+                        ("Engines", on(format!("{} reported", g.engines.len()))),
                     ];
                     figure_at(&p, &pal, Exploded::Gpu, ix + gw, cy, 200.0, &labels);
                 }
@@ -466,7 +469,7 @@ impl App {
                 let (ph, hover) = plot(ui, &pc, "disk", ix, cy, gw, 150.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let d = &s.disk;
-                    let labels = [("Casing", "all physical disks".to_string()), ("NAND", format!("read {}", format_rate(d.read_bps))), ("Controller", format!("write {}", format_rate(d.write_bps))), ("Interface", format!("{:.1}% active", d.active_pct))];
+                    let labels = [("Disks", "all physical disks".to_string()), ("Read", format_rate(d.read_bps)), ("Write", format_rate(d.write_bps)), ("Active time", format!("{:.1}%", d.active_pct))];
                     figure_at(&p, &pal, Exploded::Disk, ix + gw, cy, 194.0, &labels);
                 }
                 cy += ph + 10.0;
@@ -493,8 +496,8 @@ impl App {
                 let (ph, hover) = plot(ui, &pc, "network", ix, cy, gw, 200.0, 64.0, &rate_labels(m), &lines, &readout);
                 if figure {
                     let n = &s.network;
-                    let link = dash_or((n.link_bps > 0.0).then(|| format!("{:.1} Gb/s link", n.link_bps / 1e9)));
-                    let labels = [("Shield", format!("\u{2193} {}", format_rate(n.rx_bps))), ("Controller", format!("\u{2191} {}", format_rate(n.tx_bps))), ("PHY", format!("{:.2}% of link", n.utilization_pct)), ("Link", link)];
+                    let link = dash_or((n.link_bps > 0.0).then(|| format!("{:.1} Gb/s", n.link_bps / 1e9)));
+                    let labels = [("Receive", format!("\u{2193} {}", format_rate(n.rx_bps))), ("Send", format!("\u{2191} {}", format_rate(n.tx_bps))), ("Utilization", format!("{:.2}% of link", n.utilization_pct)), ("Link speed", link)];
                     figure_at(&p, &pal, Exploded::Network, ix + gw, cy, 200.0, &labels);
                 }
                 cy += ph + 10.0;
@@ -525,10 +528,10 @@ impl App {
                     let th = &s.thermal;
                     let zones = th.zones.len();
                     let labels = [
-                        ("Fins", dash_or(th.max_c().map(|t| format!("hottest {}", self.temp(t))))),
-                        ("Heat pipes", dash_or(th.zones.first().map(|(z, c)| format!("{z} {}", self.temp(*c))))),
-                        ("Sensor", dash_or(th.cpu.as_ref().map(|(l, c)| format!("{l} {}", self.temp(*c))))),
-                        ("Base", dash_or((zones > 0).then(|| format!("{zones} thermal zone{}", if zones == 1 { "" } else { "s" })))),
+                        ("Hottest", dash_or(th.max_c().map(|t| self.temp(t)))),
+                        ("Thermal zone", dash_or(th.zones.first().map(|(z, c)| format!("{z} {}", self.temp(*c))))),
+                        ("CPU", dash_or(th.cpu.as_ref().map(|(l, c)| format!("{l} {}", self.temp(*c))))),
+                        ("Zones", dash_or((zones > 0).then(|| format!("{zones} thermal zone{}", if zones == 1 { "" } else { "s" })))),
                     ];
                     figure_at(&p, &pal, Exploded::Thermal, ix + gw, cy, 200.0, &labels);
                 }
@@ -668,9 +671,8 @@ impl App {
         let dl_h = 14.0 + facts.len().div_ceil(dl_cols) as f32 * 48.0 - 12.0;
         let left_h = 40.0 + cells_h + dl_h + 18.0;
 
-        // The busiest apps.
+        // The busiest apps, already in the calm order of `Steady`.
         let mut order: Vec<&AppGroup> = groups.iter().collect();
-        order.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)));
         order.truncate(5);
         let right_natural = 40.0 + order.len().max(1) as f32 * 32.0 + 14.0 + 18.0 + 18.0;
         let h = if wide { left_h.max(right_natural) } else { left_h };
@@ -767,7 +769,7 @@ impl App {
             if let Some(series) = self.perf.top_spark.get(&g.key) {
                 spark_fixed(&p, spark, series, pal.accent, (0.0, hi), cap, 0.0, self.settings.graphs.smooth_curves);
             }
-            p.text(pos2(row.right(), cy), Align2::RIGHT_CENTER, format!("{:.1}%", g.cpu), theme::mono(12.0), pal.text_table());
+            p.text(pos2(row.right(), cy), Align2::RIGHT_CENTER, cpu_text(g.cpu), theme::mono(12.0), pal.text_table());
             if resp.clicked() {
                 if let Some(r) = fd.rows.get(g.top) {
                     *act = Some(Act::Select(r.pid, r.create_time));

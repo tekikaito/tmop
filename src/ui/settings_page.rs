@@ -568,6 +568,7 @@ impl App {
         let current_palette = self.palette_id();
         let base_accent = self.palettes.get(&current_palette).map(|p| p.palette.accent).unwrap_or(pal.accent);
         let font_missing = self.display_font.1;
+        let docker_found = self.docker.found();
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
         let nav_id = egui::Id::new("settings-nav");
         let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))), ..Default::default() };
@@ -706,7 +707,12 @@ impl App {
                             }
                             changed |= toggle_row(ui, &pal, &mut s.general.disk_space_suppress_stop_confirm, "Stop Disk Space scans without asking");
                             changed |= toggle_row(ui, &pal, &mut s.general.show_full_account_name, "Show full account name");
-                            changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
+                            if docker_found || !caps.engine {
+                                changed |= toggle_row(ui, &pal, &mut s.docker.hide_page, "Hide the Docker page");
+                            } else if toggle_row_hint(ui, &pal, &mut s.docker.show_page, "Show the Docker page", "No Docker was found. The page sets up TMOP's own Docker engine.") {
+                                s.docker.hide_page &= !s.docker.show_page;
+                                changed = true;
+                            }
                         });
                         if caps.taskmgr_replace {
                             section(ui, &pal, &mut sections, TASK_MANAGER, |ui| self.replace_section(ui, &pal));

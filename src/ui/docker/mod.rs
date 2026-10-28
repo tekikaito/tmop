@@ -196,12 +196,17 @@ impl DockerState {
         self.notify_enabled = settings.docker.contexts.get(&resolved).map(|c| c.notifications).unwrap_or(true);
     }
 
-    /// Whether the Docker page is listed in the navigation. `engine`: TMOP's own engine is
-    /// offered on this OS, so the page is listed to set it up from even without Docker. Off
-    /// Windows an engine socket on this machine lists it too, so a denied or stopped engine is
-    /// explained on the Local Docker tab.
+    /// Docker was found: its CLI configuration, an engine connection, or off Windows an engine
+    /// socket on this machine (so a denied or stopped engine is explained on the Local Docker tab).
+    pub fn found(&self) -> bool {
+        self.installed || self.local_found || self.last_status == EngineStatus::Connected
+    }
+
+    /// Whether the Docker page is listed in the navigation: when Docker was found, or when
+    /// `engine` (TMOP's own engine is offered on this OS) and the user asked for the page to set
+    /// that engine up. Setting it up creates the Docker configuration, so the page then stays.
     pub fn visible(&self, settings: &Settings, engine: bool) -> bool {
-        !settings.docker.hide_page && (self.installed || self.local_found || self.last_status == EngineStatus::Connected || engine)
+        !settings.docker.hide_page && (self.found() || (engine && settings.docker.show_page))
     }
 
     /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as

@@ -125,6 +125,8 @@ pub struct Popout {
 pub struct Docker {
     /// Hides the Docker page in the navigation.
     pub hide_page: bool,
+    /// Lists the Docker page even when no Docker is found, to set up TMOP's own engine.
+    pub show_page: bool,
     /// Docker context in use; empty means the context selected in the Docker CLI.
     pub active_context: String,
     /// Per-context Docker options, keyed by context name.
@@ -142,6 +144,7 @@ impl Default for Docker {
     fn default() -> Self {
         Self {
             hide_page: false,
+            show_page: false,
             active_context: String::new(),
             contexts: BTreeMap::new(),
             hosts: Vec::new(),
@@ -814,6 +817,7 @@ mod tests {
     fn docker_settings_roundtrip() {
         let mut s = Settings::default();
         s.docker.hide_page = true;
+        s.docker.show_page = true;
         s.docker.active_context = "work".into();
         s.docker.hosts.push(DockerHost {
             name: "tmop-test-host".into(),

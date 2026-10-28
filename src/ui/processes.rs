@@ -166,6 +166,8 @@ fn sort_idx(v: &mut [usize], rows: &[ProcessRow], col: Column, desc: bool) {
 struct Groups {
     apps: Vec<usize>,
     bg: Vec<usize>,
+    /// Background processes, the ones nested under `bg` entries included.
+    bg_procs: usize,
     children: HashMap<usize, Vec<usize>>,
 }
 
@@ -197,8 +199,9 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
     let mut apps: Vec<usize> = visible.iter().copied().filter(|i| rows[*i].has_window && !is_child[*i]).collect();
     let mut bg: Vec<usize> = visible.iter().copied().filter(|i| !in_app[*i] && !is_child[*i]).collect();
     sort_idx(&mut apps, rows, col, desc);
+    let bg_procs = visible.iter().filter(|i| !in_app[**i]).count();
     sort_idx(&mut bg, rows, col, desc);
-    Groups { apps, bg, children }
+    Groups { apps, bg, bg_procs, children }
 }
 
 /// The list rows and what they aggregate.
@@ -537,10 +540,12 @@ impl App {
         let tree = tree_on && f.is_empty();
         let all = group_rows(rows, &visible, tree, col, desc);
         let view = self.proc.view.min(VIEWS.len() - 1);
+        // Apps count as apps, background processes one by one (as Task Manager counts them), not
+        // the entries their tree folds them into.
         let counts: [Option<usize>; 6] = [
-            None,
+            Some(visible.len()),
             Some(all.apps.len()),
-            Some(all.bg.len()),
+            Some(all.bg_procs),
             Some(visible.iter().filter(|i| in_view(3, &rows[**i])).count()),
             Some(visible.iter().filter(|i| in_view(4, &rows[**i])).count()),
             Some(visible.iter().filter(|i| in_view(5, &rows[**i])).count()),
@@ -563,7 +568,7 @@ impl App {
                 for i in &groups.apps {
                     push_root(*i, &tctx, &mut built);
                 }
-                built.entries.push(Entry::Group("Background processes", groups.bg.len()));
+                built.entries.push(Entry::Group("Background processes", groups.bg_procs));
                 for i in &groups.bg {
                     push_root(*i, &tctx, &mut built);
                 }
@@ -1712,12 +1717,15 @@ mod tests {
         assert_eq!(g.children[&1], vec![2]);
         assert_eq!(g.bg, vec![0]);
         assert_eq!(g.children[&0], vec![4]);
+        // One background entry, two background processes.
+        assert_eq!(g.bg_procs, 2);
         let mut members = Vec::new();
         members_of(1, &g.children, &mut members, 0);
         assert_eq!(members, vec![1, 2, 3]);
         let flat = group_rows(&rows, &visible, false, Column::Pid, false);
         assert_eq!(flat.apps, vec![1]);
         assert_eq!(flat.bg.len(), 4);
+        assert_eq!(flat.bg_procs, 4);
     }
 
     #[test]

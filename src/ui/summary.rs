@@ -475,7 +475,7 @@ impl App {
             p.text(pos2(name.right() + 8.0, cy), Align2::LEFT_CENTER, sub, theme::ui(12.0), pal.text_faint);
             for (ci, ((title, _), e)) in cols.iter().zip(&edges).enumerate() {
                 let (text, dim) = match *title {
-                    "CPU" => (format!("{:.1}%", g.cpu), false),
+                    "CPU" => (health::cpu_text(g.cpu), false),
                     "Memory" => (format_bytes(g.memory as f64), false),
                     "Disk" if g.io_bps >= 1.0 => (format_rate(g.io_bps), false),
                     "GPU" if g.gpu >= 0.05 => (format!("{:.0}%", g.gpu), false),
