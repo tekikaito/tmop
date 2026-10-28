@@ -1,6 +1,6 @@
 [package]
 name = "tmop"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "TMOP (Task Manager OverPowered): a skinnable system monitor for Windows, Linux and macOS in Rust, compatible with TMOG skins and settings"
 publish = false
