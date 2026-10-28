@@ -98,7 +98,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.
-- **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
+- **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
 
 ## Platforms
 
@@ -177,7 +177,7 @@ TMOP doesn't update itself. Your settings are kept when you update.
 
 ## Good to know
 
-- The Docker page appears when Docker is installed or TMOP's own engine can run on this computer; you can hide it in *Settings*.
+- The Docker page appears when Docker is installed; you can hide it in *Settings*. On Windows without Docker, *Settings → Other options → Show the Docker page* lists it to set up TMOP's own engine.
 - Run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
   owners, protected folders) need root or, on macOS, *Full Disk Access*; TMOP says so where it
   matters. After updating TMOP on macOS, remove it from *Full Disk Access* and add it again:

@@ -194,7 +194,7 @@ pub fn app_groups(rows: &[ProcessRow], show_self: bool) -> Vec<AppGroup> {
 /// The app group with the most CPU: processes are grouped by lowercase image name, a group is
 /// named after its description (else its image name).
 /// How fast [`Steady`] follows a new sample (share of the difference per sample).
-const STEADY_K: f32 = 0.35;
+const STEADY_K: f32 = 0.25;
 
 /// App groups averaged over the last few samples, in an order that changes only when an app
 /// clearly overtakes another, so lists and "the busiest app" don't reshuffle on every refresh.
@@ -249,7 +249,8 @@ fn sticky_order(prev: &[String], groups: &[AppGroup]) -> Vec<String> {
     let mut new: Vec<&AppGroup> = groups.iter().filter(|g| !known.contains(g.key.as_str())).collect();
     new.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory)));
     order.extend(new.into_iter().map(|g| g.key.clone()));
-    let lead = |a: f32| 0.3 + 0.15 * a;
+    // Grows with the load but stays reachable: a busy app can still be overtaken.
+    let lead = |a: f32| (0.5 + 0.2 * a).min(5.0);
     for _ in 0..order.len() {
         let mut swapped = false;
         for i in 1..order.len() {
@@ -264,6 +265,17 @@ fn sticky_order(prev: &[String], groups: &[AppGroup]) -> Vec<String> {
         }
     }
     order
+}
+
+/// An app's CPU share for lists that refresh every sample: one decimal below 10%, whole
+/// percents above, so the busy rows don't flicker in the last digit.
+pub fn cpu_text(pct: f32) -> String {
+    // Rounded first, so 9.97% reads "10%" and not "10.0%".
+    if (pct * 10.0).round() < 100.0 {
+        format!("{pct:.1}%")
+    } else {
+        format!("{pct:.0}%")
+    }
 }
 
 pub fn busiest_app(rows: &[ProcessRow]) -> Option<(String, f32)> {
@@ -357,7 +369,7 @@ mod tests {
         // A small lead does not reorder; the values are averaged.
         let g = s.update(2, groups(1.0, 2.2));
         assert_eq!(keys(&g), ["a.exe", "b.exe"]);
-        assert!((g[0].cpu - 1.65).abs() < 1e-4);
+        assert!((g[0].cpu - 1.75).abs() < 1e-4);
         // The same sample drawn again changes nothing.
         assert_eq!(s.update(2, groups(1.0, 2.2))[0].cpu, g[0].cpu);
         // A clear, lasting lead does.
@@ -365,9 +377,23 @@ mod tests {
             s.update(seq, groups(1.0, 8.0));
         }
         assert_eq!(keys(&s.update(10, groups(1.0, 8.0))), ["b.exe", "a.exe"]);
+        // An app gone quiet is overtaken by a slightly busier one; a busy app can still be passed.
+        let prev = ["a.exe".to_string(), "b.exe".to_string()];
+        let order = |a: f32, b: f32| sticky_order(&prev, &groups(a, b));
+        assert_eq!(order(0.1, 1.0), ["b.exe", "a.exe"]);
+        assert_eq!(order(90.0, 96.0), ["b.exe", "a.exe"]);
+        assert_eq!(order(90.0, 94.0), ["a.exe", "b.exe"]);
         // After a gap (seq jumps) the raw values count again.
         let g = s.update(20, groups(5.0, 1.0));
         assert_eq!((g[0].key.as_str(), g[0].cpu), ("a.exe", 5.0));
+    }
+
+    #[test]
+    fn cpu_text_rounds_before_choosing_decimals() {
+        assert_eq!(cpu_text(0.34), "0.3%");
+        assert_eq!(cpu_text(9.94), "9.9%");
+        assert_eq!(cpu_text(9.97), "10%");
+        assert_eq!(cpu_text(42.6), "43%");
     }
 
     #[test]
