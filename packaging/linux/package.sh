@@ -9,7 +9,8 @@
 #   TMOP-<tag>-linux-<arch>.AppImage  and the version-less TMOP-linux-<arch>.AppImage
 # The version-less names let install.sh and the download page use releases/latest/download/...
 # appimagetool and the AppImage runtime are pinned below by release and sha256 and cached in
-# $TMOP_TOOLS_DIR (default ~/.cache/tmop-packaging). Needs bash, curl, tar, gzip and sha256sum.
+# $TMOP_TOOLS_DIR (default ~/.cache/tmop-packaging). Needs bash, curl, tar, gzip and sha256sum,
+# and libxkbcommon-x11 installed (Debian/Ubuntu: libxkbcommon-x11-0), which the AppImage bundles.
 set -euo pipefail
 
 APPIMAGETOOL_VERSION=1.9.1
@@ -33,11 +34,13 @@ esac
 case "$arch" in
     x64)
         machine=x86_64
+        ldconfig_arch=x86-64
         tool_sha=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
         runtime_sha=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
         ;;
     arm64)
         machine=aarch64
+        ldconfig_arch=AArch64
         tool_sha=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
         runtime_sha=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
         ;;
@@ -109,6 +112,19 @@ install -Dm644 "$root/packaging/linux/tmop.desktop" "$appdir/usr/share/applicati
 icons "$appdir/usr/share/icons"
 install -Dm644 "$root/assets/icon/tmop-256.png" "$appdir/tmop.png"
 ln -s tmop.png "$appdir/.DirIcon"
+# winit loads libxkbcommon-x11 with dlopen on X11 and panics without it, and plenty of systems
+# lack it (the AppImage catalog's test machine among them). So the AppImage brings it and the
+# libraries it needs that aren't on the AppImage excludelist; AppRun puts usr/lib on the path.
+for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1; do
+    path=$(/sbin/ldconfig -p | awk -v lib="$lib" -v arch="$ldconfig_arch" '$1 == lib && index($0, arch) { print $NF; exit }')
+    [ -n "$path" ] || { echo "no $lib for $machine; install libxkbcommon-x11-0" >&2; exit 1; }
+    install -Dm644 "$(readlink -f "$path")" "$appdir/usr/lib/$lib"
+done
+for pkg in libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1; do
+    if [ -f "/usr/share/doc/$pkg/copyright" ]; then
+        install -Dm644 "/usr/share/doc/$pkg/copyright" "$appdir/usr/share/doc/$pkg/copyright"
+    fi
+done
 install -Dm644 "$root/README.md" "$root/LICENSE" "$root/assets/fonts/Michroma-OFL.txt" -t "$appdir/usr/share/doc/tmop"
 image=$name.AppImage
 # Extract-and-run: CI runners and containers have no FUSE to mount appimagetool's own image.

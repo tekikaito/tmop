@@ -1,4 +1,10 @@
 #!/bin/sh
 # Entry point of the TMOP AppImage: runs the bundled binary with the caller's arguments.
+# usr/lib holds the X11 keyboard libraries winit loads with dlopen (see package.sh). The loader
+# reads LD_LIBRARY_PATH once at start, so TMOP hands the caller's own value, kept in
+# TMOP_HOST_LD_LIBRARY_PATH, to the programs it starts.
 here=$(dirname "$(readlink -f "$0")")
+TMOP_HOST_LD_LIBRARY_PATH=${LD_LIBRARY_PATH-}
+LD_LIBRARY_PATH=$here/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export TMOP_HOST_LD_LIBRARY_PATH LD_LIBRARY_PATH
 exec "$here/usr/bin/tmop" "$@"

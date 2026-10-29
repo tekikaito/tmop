@@ -187,6 +187,18 @@ fn engine_relay_stop() -> i32 {
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // The AppImage's AppRun puts its bundled libraries first on LD_LIBRARY_PATH. The loader has
+    // read it already, so the programs TMOP starts (xdg-open, gdbus, ...) get the caller's back.
+    #[cfg(target_os = "linux")]
+    if let Some(host) = std::env::var_os("TMOP_HOST_LD_LIBRARY_PATH") {
+        if host.is_empty() {
+            std::env::remove_var("LD_LIBRARY_PATH");
+        } else {
+            std::env::set_var("LD_LIBRARY_PATH", host);
+        }
+        std::env::remove_var("TMOP_HOST_LD_LIBRARY_PATH");
+    }
+
     // Task Manager replacement: the elevated helper and restore switches run without a window.
     if let Some(code) = tmop::taskmgr::run_switches(&args) {
         std::process::exit(code);
