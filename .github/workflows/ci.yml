@@ -75,11 +75,11 @@ jobs:
           docker info --format '{{.ServerVersion}}'
 
       # A headless X server for the x11rb window-owner test (x11_finds_a_window); xmessage
-      # (x11-utils) opens the window it looks for.
+      # (x11-utils) opens the window it looks for. libxkbcommon-x11 is what the AppImage bundles.
       - name: Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb x11-utils
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils libxkbcommon-x11-0
           Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
           for _ in $(seq 50); do xdpyinfo -display :99 >/dev/null 2>&1 && break; sleep 0.1; done
           xdpyinfo -display :99 | grep -q X-Resource

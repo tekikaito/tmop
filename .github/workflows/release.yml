@@ -103,7 +103,7 @@ jobs:
           if-no-files-found: error
 
   # Built on 22.04 for a glibc 2.35 floor. The GUI stack loads X11, Wayland and GL with dlopen,
-  # so neither the build nor the AppImage needs -dev packages or bundled libraries.
+  # so the build needs no -dev packages. The AppImage bundles libxkbcommon-x11 (package.sh).
   linux:
     name: Build ${{ matrix.name }}
     needs: meta
@@ -137,6 +137,12 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      # The libxkbcommon-x11 the AppImage bundles.
+      - name: Libraries for the AppImage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0
+
       - name: Package
         run: packaging/linux/package.sh "${{ needs.meta.outputs.tag }}" ${{ matrix.arch }} target/release/TMOP dist
 
@@ -146,6 +152,7 @@ jobs:
           "$GITHUB_WORKSPACE/dist/TMOP-linux-${{ matrix.arch }}.AppImage" --appimage-extract >/dev/null
           test -x squashfs-root/AppRun
           test -x squashfs-root/usr/bin/tmop
+          for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1; do test -f "squashfs-root/usr/lib/$lib"; done
           grep -qx 'StartupWMClass=tmop' squashfs-root/tmop.desktop
           test -f squashfs-root/usr/share/icons/hicolor/1024x1024/apps/tmop.png
 
