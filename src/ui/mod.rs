@@ -575,13 +575,13 @@ impl App {
     }
 
     /// Id of the palette in use: `appearance.theme`, or built-in Dark or Light (following the
-    /// system) for `system` and for an id that isn't installed.
+    /// system, Light when it is unknown) for `system` and for an id that isn't installed.
     pub fn palette_id(&self) -> String {
         let id = &self.settings.appearance.theme;
         if id != palette::SYSTEM && self.palettes.get(id).is_some() {
             return id.clone();
         }
-        if matches!(dark_light_system(self.system_theme), Some(false)) { "light" } else { "dark" }.into()
+        if matches!(dark_light_system(self.system_theme), Some(true)) { "dark" } else { "light" }.into()
     }
 
     /// The palette in use, with `appearance.accent` applied.
