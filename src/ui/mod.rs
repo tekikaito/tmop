@@ -1052,6 +1052,7 @@ impl App {
 
         // Apply cadence changes and persist.
         self.sampler.set_interval(self.settings.update_speed().interval());
+        crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature);
         self.poll_palette_dialog();
         self.save_palette_edits(false);
         if self.settings_dirty {

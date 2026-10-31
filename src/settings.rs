@@ -60,6 +60,9 @@ pub struct General {
     pub confirm_efficiency_mode: bool,
     pub disk_space_suppress_stop_confirm: bool,
     pub show_full_account_name: bool,
+    /// Windows: read the CPU temperature through the PawnIO driver (opt-in; needs PawnIO
+    /// installed and TMOP running as administrator).
+    pub pawnio_cpu_temperature: bool,
     /// Empty means the default recordings folder.
     pub recording_folder: String,
     /// Empty means the temporary folder.
@@ -206,6 +209,7 @@ impl Default for General {
             confirm_efficiency_mode: true,
             disk_space_suppress_stop_confirm: false,
             show_full_account_name: false,
+            pawnio_cpu_temperature: false,
             recording_folder: String::new(),
             benchmark_folder: String::new(),
         }

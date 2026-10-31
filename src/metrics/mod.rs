@@ -17,11 +17,14 @@
 //! * Disk: PDH `\PhysicalDisk(_Total)\...` (aggregated over all disks).
 //! * Network: `GetIfTable2` octet deltas.
 //! * GPU: PDH `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage`.
-//! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin).
+//! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin); CPU
+//!   temperature from the PawnIO driver when switched on in Settings ([`pawnio`]), else from
+//!   HWiNFO's shared memory ([`hwinfo`]).
 //! * Processes: `NtQuerySystemInformation(SystemProcessInformation)`.
 
 pub mod common;
 pub mod hwinfo;
+pub mod pawnio;
 pub mod procfs;
 #[cfg(target_os = "linux")]
 mod nvml;
@@ -128,7 +131,7 @@ pub struct GpuSample {
 pub struct ThermalSample {
     /// (zone name, °C)
     pub zones: Vec<(String, f32)>,
-    /// CPU temperature (HWiNFO shared memory on Windows, hwmon on Linux): (reading label, °C).
+    /// CPU temperature (PawnIO or HWiNFO shared memory on Windows, hwmon on Linux): (reading label, °C).
     pub cpu: Option<(String, f32)>,
     /// Which sources were checked, e.g. "ACPI: no zones · HWiNFO: not running".
     pub sources: String,
@@ -141,7 +144,8 @@ impl ThermalSample {
 }
 
 /// Windows' hint where no temperature source is available (see [`Sources::thermal_hint`]).
-pub const HWINFO_HINT: &str = "Enable Shared Memory Support in HWiNFO (Settings \u{2192} Main) for CPU temperature";
+pub const WINDOWS_THERMAL_HINT: &str =
+    "For CPU temperature, install PawnIO (pawnio.eu) and switch on Settings \u{2192} General \u{2192} CPU temperature through PawnIO, or enable Shared Memory Support in HWiNFO (Settings \u{2192} Main)";
 
 /// How the UI names a backend's sources and gaps; each backend exports one as `SOURCES`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

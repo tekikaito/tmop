@@ -178,6 +178,12 @@ TMOP doesn't update itself. Your settings are kept when you update.
 ## Good to know
 
 - The Docker page appears when Docker is installed; you can hide it in *Settings*. On Windows without Docker, *Settings → Other options → Show the Docker page* lists it to set up TMOP's own engine.
+- **CPU temperature on Windows:** Windows itself only reports the firmware's ACPI zones. For the
+  CPU's own sensor (AMD Ryzen Tctl/Tdie or the Intel package), install the free
+  [PawnIO](https://pawnio.eu) driver, switch on *Settings → General → CPU temperature through
+  PawnIO* and run TMOP as administrator. It is off by default: some anti-cheat software refuses
+  to run beside PawnIO. TMOP also reads HWiNFO's sensors when *Shared Memory Support* is on there.
+  The PawnIO modules TMOP carries are LGPL-2.1 (see `assets/pawnio`).
 - Run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
   owners, protected folders) need root or, on macOS, *Full Disk Access*; TMOP says so where it
   matters. After updating TMOP on macOS, remove it from *Full Disk Access* and add it again:

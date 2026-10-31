@@ -692,6 +692,15 @@ impl App {
                             });
                             changed |= toggle_row(ui, &pal, &mut s.general.show_self_in_reports, "Show TMOP in reports");
                             changed |= toggle_row(ui, &pal, &mut s.general.per_core_cpu_statistics, "Per core CPU statistics");
+                            if caps.pawnio {
+                                changed |= toggle_row_hint(
+                                    ui,
+                                    &pal,
+                                    &mut s.general.pawnio_cpu_temperature,
+                                    "CPU temperature through PawnIO",
+                                    "AMD Ryzen and Intel. Needs the PawnIO driver (pawnio.eu) and TMOP running as administrator. Some anti-cheat software blocks PawnIO: leave this off while such a game runs.",
+                                );
+                            }
                             let mut never = false;
                             ui.add_enabled_ui(false, |ui| toggle_row_hint(ui, &pal, &mut never, "Check for updates on app start", "Disabled: TMOP never contacts the network."));
                         });
