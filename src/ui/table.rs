@@ -167,6 +167,18 @@ pub fn show(
     show_with_menu(ui, rect, id, pal, cols, order, state, key, cell, icons, None)
 }
 
+/// Initial column widths: the widths asked for, shrunk in proportion (not below 36) when they
+/// and the minimum of the last column do not fit into `avail`.
+fn fit_widths(cols: &[Col], avail: f32) -> Vec<f32> {
+    let Some((last, rest)) = cols.split_last() else { return Vec::new() };
+    let wanted: f32 = rest.iter().map(|c| c.width).sum();
+    let room = (avail - last.width.min(120.0)).max(0.0);
+    let scale = if wanted > room && wanted > 0.0 { room / wanted } else { 1.0 };
+    let mut w: Vec<f32> = rest.iter().map(|c| (c.width * scale).max(36.0)).collect();
+    w.push(last.width);
+    w
+}
+
 /// Like [`show`], and `menu(item, ui)` fills the context menu of each row. A right click
 /// selects the row before the menu opens.
 #[allow(clippy::too_many_arguments)]
@@ -192,7 +204,11 @@ pub fn show_with_menu(
     let row_h = if !cols.is_empty() && order.iter().any(|i| cell(*i, 0).sub.is_some()) { TALL_ROW_H } else { ROW_H };
     // The table sits in a rounded box with a faint wash and a hairline.
     ui.painter().rect_filled(rect, 8.0, with_alpha(pal.text, 0.03));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink(1.0)).id_salt(id), |ui| {
+    let inner = rect.shrink(1.0);
+    let widths = fit_widths(cols, inner.width());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner).id_salt(id), |ui| {
+        // Columns wider than the box must not paint over what sits beside it (the Services panel).
+        ui.set_clip_rect(inner.intersect(ui.clip_rect()));
         ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
         let mut table = egui_extras::TableBuilder::new(ui)
             .id_salt(id)
@@ -202,7 +218,7 @@ pub fn show_with_menu(
             .cell_layout(Layout::left_to_right(Align::Center))
             .auto_shrink([false, false]);
         for (i, c) in cols.iter().enumerate() {
-            let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(c.width).at_least(36.0) };
+            let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(widths[i]).at_least(36.0) };
             table = table.column(col.clip(true));
         }
         let last = cols.len().saturating_sub(1);
@@ -371,6 +387,16 @@ mod tests {
         assert!(matches("", &["x"]));
         assert!(matches("mic word", &["Microsoft Word", "16.0"]));
         assert!(!matches("excel", &["Microsoft Word"]));
+    }
+
+    /// Columns that do not fit shrink so the last one still starts inside the box.
+    #[test]
+    fn widths_fit_the_box() {
+        let cols = [Col::text("a", 400.0), Col::text("b", 400.0), Col::text("c", 300.0)];
+        assert_eq!(fit_widths(&cols, 2000.0), vec![400.0, 400.0, 300.0]);
+        let w = fit_widths(&cols, 520.0);
+        assert!((w[0] + w[1] + 120.0 - 520.0).abs() < 0.01);
+        assert!(fit_widths(&[], 100.0).is_empty());
     }
 
     /// Cells with every decoration draw in a table, and a second line makes the rows taller.
