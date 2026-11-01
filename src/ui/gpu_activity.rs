@@ -201,8 +201,6 @@ mod tests {
     }
 
     #[test]
-
-    #[test]
     fn unknown_memory_sorts_below_known() {
         let (a, b) = (GpuProcessUsage { dedicated: None, ..Default::default() }, GpuProcessUsage { dedicated: Some(0), ..Default::default() });
         let line = |u| Line { usage: u, name: String::new(), gpu: String::new(), created: None };
