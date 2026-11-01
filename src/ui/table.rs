@@ -167,14 +167,18 @@ pub fn show(
     show_with_menu(ui, rect, id, pal, cols, order, state, key, cell, icons, None)
 }
 
-/// Initial column widths: the widths asked for, shrunk in proportion (not below 36) when they
-/// and the minimum of the last column do not fit into `avail`.
+/// Share of its asked-for width a column keeps at least when the table is narrow; what still
+/// does not fit is reached by scrolling sideways.
+const MIN_COL_SHARE: f32 = 0.6;
+
+/// Initial column widths: the widths asked for, shrunk in proportion when they and the minimum
+/// of the last column do not fit into `avail`, but not below [`MIN_COL_SHARE`] of each (nor 36).
 fn fit_widths(cols: &[Col], avail: f32) -> Vec<f32> {
     let Some((last, rest)) = cols.split_last() else { return Vec::new() };
     let wanted: f32 = rest.iter().map(|c| c.width).sum();
     let room = (avail - last.width.min(120.0)).max(0.0);
     let scale = if wanted > room && wanted > 0.0 { room / wanted } else { 1.0 };
-    let mut w: Vec<f32> = rest.iter().map(|c| (c.width * scale).max(36.0)).collect();
+    let mut w: Vec<f32> = rest.iter().map(|c| (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0)).collect();
     w.push(last.width);
     w
 }
@@ -210,141 +214,149 @@ pub fn show_with_menu(
         // Columns wider than the box must not paint over what sits beside it (the Services panel).
         ui.set_clip_rect(inner.intersect(ui.clip_rect()));
         ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
-        let mut table = egui_extras::TableBuilder::new(ui)
-            .id_salt(id)
-            .striped(false)
-            .resizable(true)
-            .sense(Sense::click())
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .auto_shrink([false, false]);
-        for (i, c) in cols.iter().enumerate() {
-            let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(widths[i]).at_least(36.0) };
-            table = table.column(col.clip(true));
-        }
-        let last = cols.len().saturating_sub(1);
-        table
-            .header(HEADER_H, |mut header| {
-                for (i, c) in cols.iter().enumerate() {
-                    header.col(|ui| {
-                        let r = ui.max_rect();
-                        let p = ui.painter();
-                        let rounding = egui::Rounding { nw: if i == 0 { 7.0 } else { 0.0 }, ne: if i == last { 7.0 } else { 0.0 }, ..Default::default() };
-                        p.rect_filled(r, rounding, pal.panel);
-                        p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
-                        let sorted = sort_col == i;
-                        let arrow = if !sorted { "" } else if desc { " \u{2193}" } else { " \u{2191}" };
-                        let label = format!("{}{arrow}", c.title.to_uppercase());
-                        let (font, color) = if sorted { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
-                        if c.numeric {
-                            widgets::tracked_text(p, pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, &label, font, color, 0.08);
-                        } else {
-                            widgets::tracked_text(p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
-                        }
-                        let resp = ui.interact(r, ui.id().with(("hdr", i)), Sense::click());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(r, rounding, pal.raise(0.04));
-                        }
-                        if resp.clicked() {
-                            sort_click = Some(i);
-                        }
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(row_h, order.len(), |mut row| {
-                    let item = order[row.index()];
-                    let k = key(item);
-                    let is_sel = selected.as_deref() == Some(k.as_str());
-                    for (ci, c) in cols.iter().enumerate() {
-                        row.col(|ui| {
+        // Columns that cannot shrink any further are reached by scrolling sideways.
+        egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
+            let mut table = egui_extras::TableBuilder::new(ui)
+                .id_salt(id)
+                .striped(false)
+                .resizable(true)
+                .sense(Sense::click())
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .auto_shrink([false, false]);
+            for (i, c) in cols.iter().enumerate() {
+                let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(widths[i]).at_least(36.0) };
+                table = table.column(col.clip(true));
+            }
+            let last = cols.len().saturating_sub(1);
+            table
+                .header(HEADER_H, |mut header| {
+                    for (i, c) in cols.iter().enumerate() {
+                        header.col(|ui| {
                             let r = ui.max_rect();
-                            let content = cell(item, ci);
                             let p = ui.painter();
-                            if is_sel {
-                                p.rect_filled(r, 0.0, pal.selected_row());
-                                p.line_segment([pos2(r.left(), r.top() + 0.5), pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0_f32, pal.accent));
-                                p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.accent));
-                                if ci == 0 {
-                                    p.line_segment([pos2(r.left() + 0.5, r.top()), pos2(r.left() + 0.5, r.bottom())], Stroke::new(1.0_f32, pal.accent));
-                                }
-                                if ci == last {
-                                    p.line_segment([pos2(r.right() - 0.5, r.top()), pos2(r.right() - 0.5, r.bottom())], Stroke::new(1.0_f32, pal.accent));
-                                }
-                            } else {
-                                if content.heat > 0.01 {
-                                    p.rect_filled(r, 0.0, with_alpha(pal.accent, content.heat * 0.18));
-                                }
-                                p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
-                            }
-                            let mono = content.mono || c.numeric;
-                            let color = content.color.unwrap_or(if mono { pal.text_table() } else { pal.text });
-                            let font = if mono { theme::mono(12.0) } else { theme::ui(13.0) };
-                            let mid = r.center().y;
-                            // Second line: the text moves up.
-                            let ty = if content.sub.is_some() { mid - 7.0 } else { mid };
-                            let mut x = r.left() + 10.0;
-                            if let Some(s) = &content.spark {
-                                let area = Rect::from_min_size(pos2(x, mid - 12.0), vec2(84.0, 24.0));
-                                let mut series = Series::new(s.values.len().max(2));
-                                for v in &s.values {
-                                    series.push(*v);
-                                }
-                                let hi = s.values.iter().cloned().fold(1.0_f32, f32::max);
-                                widgets::sparkline_static(&p.with_clip_rect(r), area, &[(&series, s.color, (0.0, hi))], if s.fill { 0.15 } else { 0.0 });
-                                return;
-                            }
-                            if let Some(d) = content.dot {
-                                p.circle_filled(pos2(x + 4.0, mid), 4.0, d);
-                                x += 14.0;
-                            }
-                            if let Some(path) = &content.icon {
-                                let ic = Rect::from_min_size(pos2(x, mid - 8.0), vec2(16.0, 16.0));
-                                match icons.get(Some(path.as_str())) {
-                                    Some(t) => {
-                                        p.image(t, ic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                                    }
-                                    None => super::summary::proc_icon(p, ic.shrink(2.0), false),
-                                }
-                                x += 22.0;
-                            }
-                            if let Some(c) = content.chip {
-                                widgets::chip(&p.with_clip_rect(r), pos2(x - 2.0, mid), &content.text, c, None);
-                                return;
-                            }
-                            let clip = p.with_clip_rect(r);
+                            let rounding = egui::Rounding { nw: if i == 0 { 7.0 } else { 0.0 }, ne: if i == last { 7.0 } else { 0.0 }, ..Default::default() };
+                            p.rect_filled(r, rounding, pal.panel);
+                            p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
+                            let sorted = sort_col == i;
+                            let arrow = if !sorted { "" } else if desc { " \u{2193}" } else { " \u{2191}" };
+                            let label = format!("{}{arrow}", c.title.to_uppercase());
+                            let (font, color) = if sorted { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
                             if c.numeric {
-                                let text_r = clip.text(pos2(r.right() - 10.0, ty), Align2::RIGHT_CENTER, &content.text, font, color);
-                                if let Some((frac, bc)) = content.bar {
-                                    widgets::bar(&clip, Rect::from_min_size(pos2(text_r.left() - 8.0 - 60.0, mid - 1.5), vec2(60.0, 3.0)), frac, bc);
-                                }
+                                widgets::tracked_text(p, pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, &label, font, color, 0.08);
                             } else {
-                                if let Some((frac, bc)) = content.bar {
-                                    widgets::bar(&clip, Rect::from_min_size(pos2(x, mid - 1.5), vec2(60.0, 3.0)), frac, bc);
-                                    x += 68.0;
-                                }
-                                let max_w = r.right() - x - 8.0 - content.badge.map(|b| widgets::badge_width(p, b) + 6.0).unwrap_or(0.0);
-                                let text_r = widgets::text_fit(&clip, pos2(x, ty), Align2::LEFT_CENTER, &content.text, font, color, max_w);
-                                if let Some(b) = content.badge {
-                                    widgets::badge(&clip, pos2(text_r.right() + 6.0, ty), b, pal);
-                                }
+                                widgets::tracked_text(p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                             }
-                            if let Some(sub) = &content.sub {
-                                widgets::text_fit(&clip, pos2(x, mid + 9.0), Align2::LEFT_CENTER, sub, theme::mono(11.0), pal.text_faint, r.right() - x - 8.0);
+                            let resp = ui.interact(r, ui.id().with(("hdr", i)), Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(r, rounding, pal.raise(0.04));
+                            }
+                            if resp.clicked() {
+                                sort_click = Some(i);
                             }
                         });
                     }
-                    let resp = row.response();
-                    if resp.clicked() || resp.secondary_clicked() {
-                        clicked = Some(k.clone());
-                    }
-                    if let Some(menu) = menu {
-                        resp.context_menu(|ui| menu(item, ui));
-                    }
-                    if resp.double_clicked() {
-                        activated = Some(item);
-                    }
+                })
+                .body(|body| {
+                    body.rows(row_h, order.len(), |mut row| {
+                        let item = order[row.index()];
+                        let k = key(item);
+                        let is_sel = selected.as_deref() == Some(k.as_str());
+                        for (ci, c) in cols.iter().enumerate() {
+                            row.col(|ui| {
+                                let r = ui.max_rect();
+                                let content = cell(item, ci);
+                                let p = ui.painter();
+                                if is_sel {
+                                    p.rect_filled(r, 0.0, pal.selected_row());
+                                    p.line_segment([pos2(r.left(), r.top() + 0.5), pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0_f32, pal.accent));
+                                    p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.accent));
+                                    if ci == 0 {
+                                        p.line_segment([pos2(r.left() + 0.5, r.top()), pos2(r.left() + 0.5, r.bottom())], Stroke::new(1.0_f32, pal.accent));
+                                    }
+                                    if ci == last {
+                                        p.line_segment([pos2(r.right() - 0.5, r.top()), pos2(r.right() - 0.5, r.bottom())], Stroke::new(1.0_f32, pal.accent));
+                                    }
+                                } else {
+                                    if content.heat > 0.01 {
+                                        p.rect_filled(r, 0.0, with_alpha(pal.accent, content.heat * 0.18));
+                                    }
+                                    p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
+                                }
+                                let mono = content.mono || c.numeric;
+                                let color = content.color.unwrap_or(if mono { pal.text_table() } else { pal.text });
+                                let font = if mono { theme::mono(12.0) } else { theme::ui(13.0) };
+                                let mid = r.center().y;
+                                // Second line: the text moves up.
+                                let ty = if content.sub.is_some() { mid - 7.0 } else { mid };
+                                let mut x = r.left() + 10.0;
+                                if let Some(s) = &content.spark {
+                                    let area = Rect::from_min_size(pos2(x, mid - 12.0), vec2(84.0, 24.0));
+                                    let mut series = Series::new(s.values.len().max(2));
+                                    for v in &s.values {
+                                        series.push(*v);
+                                    }
+                                    let hi = s.values.iter().cloned().fold(1.0_f32, f32::max);
+                                    widgets::sparkline_static(&p.with_clip_rect(r), area, &[(&series, s.color, (0.0, hi))], if s.fill { 0.15 } else { 0.0 });
+                                    return;
+                                }
+                                if let Some(d) = content.dot {
+                                    p.circle_filled(pos2(x + 4.0, mid), 4.0, d);
+                                    x += 14.0;
+                                }
+                                if let Some(path) = &content.icon {
+                                    let ic = Rect::from_min_size(pos2(x, mid - 8.0), vec2(16.0, 16.0));
+                                    match icons.get(Some(path.as_str())) {
+                                        Some(t) => {
+                                            p.image(t, ic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                                        }
+                                        None => super::summary::proc_icon(p, ic.shrink(2.0), false),
+                                    }
+                                    x += 22.0;
+                                }
+                                if let Some(c) = content.chip {
+                                    widgets::chip(&p.with_clip_rect(r), pos2(x - 2.0, mid), &content.text, c, None);
+                                    return;
+                                }
+                                let clip = p.with_clip_rect(r);
+                                if c.numeric {
+                                    let text_r = clip.text(pos2(r.right() - 10.0, ty), Align2::RIGHT_CENTER, &content.text, font, color);
+                                    if let Some((frac, bc)) = content.bar {
+                                        widgets::bar(&clip, Rect::from_min_size(pos2(text_r.left() - 8.0 - 60.0, mid - 1.5), vec2(60.0, 3.0)), frac, bc);
+                                    }
+                                } else {
+                                    if let Some((frac, bc)) = content.bar {
+                                        widgets::bar(&clip, Rect::from_min_size(pos2(x, mid - 1.5), vec2(60.0, 3.0)), frac, bc);
+                                        x += 68.0;
+                                    }
+                                    let max_w = r.right() - x - 8.0 - content.badge.map(|b| widgets::badge_width(p, b) + 6.0).unwrap_or(0.0);
+                                    let cut = widgets::text_width(p, &content.text, font.clone()) > max_w.max(8.0);
+                                    let text_r = widgets::text_fit(&clip, pos2(x, ty), Align2::LEFT_CENTER, &content.text, font, color, max_w);
+                                    // A shortened value shows in full on hover.
+                                    if cut {
+                                        ui.interact(text_r.intersect(r), ui.id().with(("cut", ci)), Sense::hover()).on_hover_text(&content.text);
+                                    }
+                                    if let Some(b) = content.badge {
+                                        widgets::badge(&clip, pos2(text_r.right() + 6.0, ty), b, pal);
+                                    }
+                                }
+                                if let Some(sub) = &content.sub {
+                                    widgets::text_fit(&clip, pos2(x, mid + 9.0), Align2::LEFT_CENTER, sub, theme::mono(11.0), pal.text_faint, r.right() - x - 8.0);
+                                }
+                            });
+                        }
+                        let resp = row.response();
+                        if resp.clicked() || resp.secondary_clicked() {
+                            clicked = Some(k.clone());
+                        }
+                        if let Some(menu) = menu {
+                            resp.context_menu(|ui| menu(item, ui));
+                        }
+                        if resp.double_clicked() {
+                            activated = Some(item);
+                        }
+                    });
                 });
-            });
+        });
     });
     ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.grid));
     if let Some(c) = sort_click {
@@ -394,8 +406,11 @@ mod tests {
     fn widths_fit_the_box() {
         let cols = [Col::text("a", 400.0), Col::text("b", 400.0), Col::text("c", 300.0)];
         assert_eq!(fit_widths(&cols, 2000.0), vec![400.0, 400.0, 300.0]);
-        let w = fit_widths(&cols, 520.0);
-        assert!((w[0] + w[1] + 120.0 - 520.0).abs() < 0.01);
+        let w = fit_widths(&cols, 720.0);
+        assert!((w[0] + w[1] + 120.0 - 720.0).abs() < 0.01);
+        // Narrower than that, columns keep 60 % and the rest is scrolled to.
+        let w = fit_widths(&cols, 300.0);
+        assert!((w[0] - 240.0).abs() < 0.01 && (w[1] - 240.0).abs() < 0.01 && w[2] == 300.0);
         assert!(fit_widths(&[], 100.0).is_empty());
     }
 
