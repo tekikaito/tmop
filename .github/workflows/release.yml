@@ -82,6 +82,8 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\TMOP.exe" $dir
           Copy-Item README.md, LICENSE, assets\fonts\Michroma-OFL.txt $dir
+          # The PawnIO modules embedded in TMOP.exe are LGPL-2.1-or-later (assets/pawnio).
+          Copy-Item assets\pawnio\COPYING "$dir\PawnIO-Modules-LGPL-2.1.txt"
           Compress-Archive -Path "$dir\*" -DestinationPath "dist\$name.zip"
           $hash = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "dist\$name.zip.sha256"

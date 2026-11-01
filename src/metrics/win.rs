@@ -39,12 +39,12 @@ pub const SOURCES: Sources = Sources {
     gpu: "Busiest engine of the busiest adapter (PDH GPU Engine counters)",
     no_gpu: "No GPU Engine performance counters were reported.",
     thermal: "ACPI thermal zones (firmware sensors, not the CPU package)",
-    thermal_hint: HWINFO_HINT,
+    thermal_hint: WINDOWS_THERMAL_HINT,
     sensor: "ACPI zone",
     handles: "Handles",
 };
 
-/// Windows reports clocks, and the thermal card always has ACPI zones or the HWiNFO hint.
+/// Windows reports clocks, and the thermal card always has ACPI zones or the PawnIO/HWiNFO hint.
 pub fn probe() -> Probe {
     Probe { clocks: true, thermal: true }
 }
@@ -196,6 +196,8 @@ pub struct Collector {
     /// Only while [`gpu_detail`] is on; the inner `None` means it could not be opened.
     gpu_detail_pdh: Option<Option<Pdh>>,
     nvml: Option<Option<Nvml>>,
+    /// Opt-in PawnIO CPU temperature (closed while the Settings switch is off).
+    pawnio: super::pawnio::Source,
 }
 
 /// How often the GPU list is taken again.
@@ -250,6 +252,7 @@ impl Collector {
             dxgi: None,
             gpu_detail_pdh: None,
             nvml: None,
+            pawnio: super::pawnio::Source::default(),
         }
     }
 
@@ -429,7 +432,8 @@ impl Collector {
         snap.cpu.name = cpu_brand();
     }
 
-    /// Adds HWiNFO's CPU temperature (when its shared memory is up) and the source summary.
+    /// Adds the CPU temperature (PawnIO when switched on and working, else HWiNFO's shared
+    /// memory when it is up) and the source summary.
     fn thermal(&mut self, snap: &mut Snapshot) {
         let wait = Duration::from_secs(if self.hwinfo.running { 2 } else { 30 });
         if self.hwinfo.at.is_none_or(|t| t.elapsed() >= wait) {
@@ -451,13 +455,15 @@ impl Collector {
                 Err(super::hwinfo::Error::Parse(e)) => self.hwinfo.status = format!("unreadable ({e})"),
             }
         }
-        snap.thermal.cpu = self.hwinfo.cpu.clone();
+        let (pawnio_cpu, pawnio) = self.pawnio.sample(super::pawnio::enabled());
+        snap.thermal.cpu = pawnio_cpu.or_else(|| self.hwinfo.cpu.clone());
         let acpi = match snap.thermal.zones.len() {
             0 => "no zones".to_string(),
             1 => "1 zone".to_string(),
             n => format!("{n} zones"),
         };
-        snap.thermal.sources = format!("ACPI: {acpi} \u{b7} HWiNFO: {}", self.hwinfo.status);
+        let pawnio = pawnio.map(|s| format!(" \u{b7} PawnIO: {s}")).unwrap_or_default();
+        snap.thermal.sources = format!("ACPI: {acpi}{pawnio} \u{b7} HWiNFO: {}", self.hwinfo.status);
     }
 
     fn memory(&mut self, snap: &mut Snapshot) {

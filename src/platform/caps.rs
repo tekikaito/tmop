@@ -52,6 +52,8 @@ pub struct Caps {
     pub screensaver: bool,
     /// Temperatures.
     pub thermal: bool,
+    /// The opt-in CPU temperature through the PawnIO driver (its Settings switch).
+    pub pawnio: bool,
     /// Clock speeds (none on Apple Silicon).
     pub clocks: bool,
     /// GPU engines (3D, copy, video ...) beside the total.
@@ -80,6 +82,7 @@ impl Caps {
         elevate_relaunch: true,
         screensaver: true,
         thermal: true,
+        pawnio: true,
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
@@ -98,6 +101,7 @@ impl Caps {
         elevate_relaunch: false,
         screensaver: false,
         thermal: true,
+        pawnio: false,
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
@@ -116,6 +120,7 @@ impl Caps {
         elevate_relaunch: false,
         screensaver: false,
         thermal: false,
+        pawnio: false,
         // Apple Silicon reports no clock speeds.
         clocks: cfg!(target_arch = "x86_64"),
         gpu_engines: false,
@@ -136,6 +141,7 @@ impl Caps {
         elevate_relaunch: false,
         screensaver: false,
         thermal: false,
+        pawnio: false,
         clocks: false,
         gpu_engines: false,
         commit_mem: false,
@@ -189,7 +195,7 @@ mod tests {
     fn windows_has_everything() {
         let w = Caps::WINDOWS;
         let p = w.proc;
-        let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
+        let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.pawnio, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
         let procs = [p.efficiency, p.realtime, p.suspend, p.not_responding, p.handles, p.session, p.arch, p.gpu, p.window_owner];
         assert!(all.iter().chain(&procs).all(|b| *b));
         assert_eq!(Caps::probed(Os::Windows, false), Caps::WINDOWS);
@@ -198,7 +204,7 @@ mod tests {
     #[test]
     fn windows_only_features_are_off_elsewhere_and_delete_needs_a_classifier() {
         for c in [Caps::LINUX, Caps::MACOS, Caps::OTHER] {
-            assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver));
+            assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver || c.pawnio));
         }
         // Disk Space deletes where the protected-paths classifier, the Trash and the clean up
         // categories exist (Windows, Linux, macOS); never on a target without them.
