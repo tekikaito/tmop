@@ -195,7 +195,7 @@ impl ThermalSample {
 
 /// Windows' hint where no temperature source is available (see [`Sources::thermal_hint`]).
 pub const WINDOWS_THERMAL_HINT: &str =
-    "For CPU temperature, install PawnIO (pawnio.eu) and switch on Settings \u{2192} General \u{2192} CPU temperature through PawnIO, or enable Shared Memory Support in HWiNFO (Settings \u{2192} Main)";
+    "For CPU temperature, see PawnIO in Settings \u{2192} General, or HWiNFO's Shared Memory Support";
 
 /// How the UI names a backend's sources and gaps; each backend exports one as `SOURCES`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

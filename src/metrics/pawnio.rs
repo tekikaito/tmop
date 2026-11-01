@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The Settings switch, read by the sampler thread on every collect.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+/// Sets the switch; true when that changed it.
+pub fn set_enabled(on: bool) -> bool {
+    ENABLED.swap(on, Ordering::Relaxed) != on
 }
 
 pub fn enabled() -> bool {
@@ -134,7 +135,7 @@ pub fn intel_package(status: u64, tjmax: f32) -> f32 {
     tjmax - ((status >> 16) & 0x7F) as f32
 }
 
-/// A reading worth showing (the registers read 0 or all ones when something is off).
+/// A reading worth showing (the registers read all ones when something is off).
 pub fn plausible(c: f32) -> bool {
     c.is_finite() && (-20.0..=150.0).contains(&c)
 }
@@ -303,7 +304,12 @@ mod sys {
                             }
                         }
                     }
-                    amd_reading(reg? as u32, &self.brand)
+                    let reg = reg? as u32;
+                    // What k10temp treats as a failed read; it would show as 0 °C.
+                    if reg == 0 {
+                        return Err(Error::Failed("sensor register reads 0".into()));
+                    }
+                    amd_reading(reg, &self.brand)
                 }
                 Cpu::IntelPackage => ("CPU Package".into(), intel_package(self.execute1("ioctl_read_msr", MSR_IA32_PACKAGE_THERM_STATUS as u64)?, self.tjmax)),
             };
@@ -320,13 +326,17 @@ mod sys {
     pub struct Source {
         session: Option<Session>,
         last_try: Option<Instant>,
+        last_read: Option<Instant>,
         cpu: Option<(String, f32)>,
         status: String,
     }
 
+    /// How long a reading stands while another monitor holds the PCI mutex.
+    const STALE_AFTER: Duration = Duration::from_secs(5);
+
     impl Default for Source {
         fn default() -> Self {
-            Source { session: None, last_try: None, cpu: None, status: "off".into() }
+            Source { session: None, last_try: None, last_read: None, cpu: None, status: "off".into() }
         }
     }
 
@@ -349,8 +359,15 @@ mod sys {
                     Ok(Some(r)) => {
                         self.status = r.0.clone();
                         self.cpu = Some(r);
+                        self.last_read = Some(Instant::now());
                     }
-                    Ok(None) => {} // PCI bus busy: keep the last reading
+                    // PCI bus busy: the last reading stands, but not for long.
+                    Ok(None) => {
+                        self.status = "PCI bus busy".into();
+                        if self.last_read.is_none_or(|t| t.elapsed() >= STALE_AFTER) {
+                            self.cpu = None;
+                        }
+                    }
                     Err(e) => {
                         self.status = e.status();
                         self.cpu = None;

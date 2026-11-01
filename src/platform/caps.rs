@@ -82,7 +82,8 @@ impl Caps {
         elevate_relaunch: true,
         screensaver: true,
         thermal: true,
-        pawnio: true,
+        // The modules refuse every other architecture.
+        pawnio: cfg!(target_arch = "x86_64"),
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
@@ -195,7 +196,7 @@ mod tests {
     fn windows_has_everything() {
         let w = Caps::WINDOWS;
         let p = w.proc;
-        let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.pawnio, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
+        let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
         let procs = [p.efficiency, p.realtime, p.suspend, p.not_responding, p.handles, p.session, p.arch, p.gpu, p.window_owner];
         assert!(all.iter().chain(&procs).all(|b| *b));
         assert_eq!(Caps::probed(Os::Windows, false), Caps::WINDOWS);

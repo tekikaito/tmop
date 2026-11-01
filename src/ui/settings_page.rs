@@ -698,7 +698,7 @@ impl App {
                                     &pal,
                                     &mut s.general.pawnio_cpu_temperature,
                                     "CPU temperature through PawnIO",
-                                    "AMD Ryzen and Intel. Needs the PawnIO driver (pawnio.eu) and TMOP running as administrator. Some anti-cheat software blocks PawnIO: leave this off while such a game runs.",
+                                    "AMD Ryzen and Intel. Needs the PawnIO driver (pawnio.eu) and TMOP running as administrator. Some anti-cheat software objects to PawnIO; if a game does, switching this off may not be enough, as the driver stays installed.",
                                 );
                             }
                             let mut never = false;
@@ -759,13 +759,17 @@ impl App {
                             ui.add_space(8.0);
                         });
                         section(ui, &pal, &mut sections, "", |ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), if caps.pawnio { 72.0 } else { 56.0 }), Sense::hover());
                             let p = ui.painter();
                             widgets::logo(p, pos2(r.left() + 20.0, r.center().y), 40.0, pal.accent);
                             let title = p.text(pos2(r.left() + 56.0, r.center().y - 17.0), Align2::LEFT_CENTER, format!("{} \u{2014} {}", crate::APP_NAME, crate::APP_LONG_NAME), theme::semibold(16.0), pal.text);
                             p.text(pos2(title.right() + 10.0, title.center().y), Align2::LEFT_CENTER, format!("{} \u{b7} {}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH), theme::mono(12.0), pal.text_faint);
                             let text = "Free and open source \u{b7} GPL-3.0 \u{b7} sends no data \u{b7} fonts: Inter, JetBrains Mono, Michroma (SIL OFL)";
                             widgets::text_fit(p, pos2(r.left() + 56.0, r.center().y + 10.0), Align2::LEFT_CENTER, text, theme::ui(12.0), pal.text_faint, r.width() - 56.0);
+                            if caps.pawnio {
+                                let notice = "PawnIO modules: LGPL-2.1-or-later, licence and source in assets/pawnio at github.com/tekikaito/tmop";
+                                widgets::text_fit(p, pos2(r.left() + 56.0, r.center().y + 26.0), Align2::LEFT_CENTER, notice, theme::ui(12.0), pal.text_faint, r.width() - 56.0);
+                            }
                         });
                     })
             })

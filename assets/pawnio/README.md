@@ -9,6 +9,9 @@ Signed, unmodified modules from the official PawnIO.Modules repository, release 
 | `AMDFamily17.bin` | `dae74615761b78bdf064dfb3e136252ddcc6fc727d88f14738d0e5800d427a91` | AMD Ryzen (family 17h to 1Ah) Tctl/Tdie, `ioctl_read_smn` |
 | `IntelMSR.bin` | `d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f` | Intel package temperature, `ioctl_read_msr` |
 
+`source/` holds their unmodified source from the same tag (`AMDFamily17.p`, `IntelMSR.p`,
+`include/`).
+
 Copyright (C) namazso. The modules are licensed under the GNU Lesser General Public License,
 version 2.1 or (at your option) any later version (`COPYING`), which allows them in TMOP
 (GPL-3.0). The PawnIO driver only loads modules signed with its key, so these files can't be
