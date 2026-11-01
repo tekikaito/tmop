@@ -13,6 +13,8 @@ const DASH: &str = "\u{2014}";
 const PROCESS_TABLE_H: f32 = 320.0;
 const OVERVIEW_COLS: [Col; 6] = [Col::text("GPU", 300.0), Col::num("Utilization", 112.0), Col::num("Dedicated memory", 170.0), Col::num("Temperature", 100.0), Col::num("Power", 80.0), Col::num("Clock", 90.0)];
 const PROCESS_COLS: [Col; 7] = [Col::text("Process", 190.0), Col::num("PID", 70.0), Col::text("GPU", 190.0), Col::num("Utilization", 112.0), Col::text("Engines", 170.0), Col::num("Dedicated", 90.0), Col::num("Shared", 90.0)];
+/// Below this the wide columns would have to scroll sideways; above it the table fits them.
+const NARROW_BELOW: f32 = 700.0;
 /// For a detail area too small for the above (down to the minimum window): short titles, and the
 /// figures that must stay readable keep their room.
 const OVERVIEW_NARROW: [Col; 6] = [Col::text("GPU", 150.0), Col::num("Util.", 52.0), Col::num("Memory", 80.0), Col::num("Temp", 56.0), Col::num("Power", 52.0), Col::num("Clock", 72.0)];
@@ -116,7 +118,7 @@ impl App {
             self.perf.gpu_activity = false;
         }
 
-        let narrow = c.width() < PROCESS_COLS.iter().map(|c| c.width).sum::<f32>();
+        let narrow = c.width() < NARROW_BELOW;
         let index: HashMap<&str, usize> = s.adapters.iter().enumerate().map(|(i, a)| (a.id.as_str(), i)).collect();
         let mut order: Vec<usize> = (0..s.adapters.len()).collect();
         self.perf.gpu_overview_table.sort(&s.adapters, &mut order, |a, b, col| match col {

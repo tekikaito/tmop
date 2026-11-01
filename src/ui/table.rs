@@ -171,14 +171,16 @@ pub fn show(
 /// does not fit is reached by scrolling sideways.
 const MIN_COL_SHARE: f32 = 0.6;
 
-/// Initial column widths: the widths asked for, shrunk in proportion when they and the minimum
-/// of the last column do not fit into `avail`, but not below [`MIN_COL_SHARE`] of each (nor 36).
+/// Initial column widths: the widths asked for, with text columns shrunk in proportion when they
+/// and the minimum of the last column do not fit into `avail`, but not below [`MIN_COL_SHARE`] of
+/// each (nor 36). Numeric columns keep their width: a number cut off on the left reads as another.
 fn fit_widths(cols: &[Col], avail: f32) -> Vec<f32> {
     let Some((last, rest)) = cols.split_last() else { return Vec::new() };
-    let wanted: f32 = rest.iter().map(|c| c.width).sum();
-    let room = (avail - last.width.min(120.0)).max(0.0);
+    let numeric: f32 = rest.iter().filter(|c| c.numeric).map(|c| c.width).sum();
+    let wanted: f32 = rest.iter().filter(|c| !c.numeric).map(|c| c.width).sum();
+    let room = (avail - last.width.min(120.0) - numeric).max(0.0);
     let scale = if wanted > room && wanted > 0.0 { room / wanted } else { 1.0 };
-    let mut w: Vec<f32> = rest.iter().map(|c| (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0)).collect();
+    let mut w: Vec<f32> = rest.iter().map(|c| if c.numeric { c.width } else { (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0) }).collect();
     w.push(last.width);
     w
 }
@@ -222,6 +224,7 @@ pub fn show_with_menu(
                 .resizable(true)
                 .sense(Sense::click())
                 .cell_layout(Layout::left_to_right(Align::Center))
+                .min_scrolled_height(0.0)
                 .auto_shrink([false, false]);
             for (i, c) in cols.iter().enumerate() {
                 let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(widths[i]).at_least(36.0) };
@@ -412,6 +415,9 @@ mod tests {
         let w = fit_widths(&cols, 300.0);
         assert!((w[0] - 240.0).abs() < 0.01 && (w[1] - 240.0).abs() < 0.01 && w[2] == 300.0);
         assert!(fit_widths(&[], 100.0).is_empty());
+        // Numbers stay whole; the text columns give up the room.
+        let w = fit_widths(&[Col::text("a", 400.0), Col::num("b", 90.0), Col::text("c", 100.0)], 390.0);
+        assert!((w[0] - 240.0).abs() < 0.01 && w[1] == 90.0);
     }
 
     /// Cells with every decoration draw in a table, and a second line makes the rows taller.

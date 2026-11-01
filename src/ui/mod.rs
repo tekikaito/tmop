@@ -1058,6 +1058,10 @@ impl App {
 
         // Apply cadence changes and persist.
         self.sampler.set_interval(self.settings.update_speed().interval());
+        // Sampled at once, so that switching off closes the device even while updates are paused.
+        if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
+            self.sampler.refresh();
+        }
         self.poll_palette_dialog();
         self.save_palette_edits(false);
         if self.settings_dirty {
