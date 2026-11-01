@@ -3,7 +3,7 @@
 //! `kern.boottime`. No FFI here, so it compiles and its tests run on every host and CI.
 
 use super::common::Ticks;
-use super::GpuSample;
+use super::{GpuAdapter, GpuSample};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -174,6 +174,19 @@ pub fn fold_accel(stats: &[AccelStats]) -> GpuSample {
         utilization_pct: util.unwrap_or(0).clamp(0, 100) as f32,
         dedicated_used: stats.iter().filter_map(|s| s.vram_used.or(s.system_used)).map(|b| b.max(0) as u64).sum(),
         engines: Vec::new(),
+        adapters: stats
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.utilization.map(|u| (i, u, s)))
+            .map(|(i, u, s)| GpuAdapter {
+                id: format!("gpu{i}"),
+                name: "GPU".into(),
+                utilization_pct: u.clamp(0, 100) as f32,
+                dedicated_used: s.vram_used.or(s.system_used).map(|b| b.max(0) as u64),
+                ..Default::default()
+            })
+            .collect(),
+        processes: Vec::new(),
     }
 }
 

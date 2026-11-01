@@ -25,6 +25,7 @@ use tmop::settings;
 use tmop::ui::{App, Launch, Page};
 
 fn dump() {
+    tmop::metrics::set_gpu_detail(true);
     let mut c = Collector::new();
     let _ = c.collect();
     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -46,6 +47,10 @@ fn dump() {
     println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
     println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
     println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
+    for (i, a) in s.gpu.adapters.iter().enumerate() {
+        println!("GPU {i}    {a:?}");
+    }
+    println!("GPU      {} processes", s.gpu.processes.len());
     println!("Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources);
     let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
     println!("Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count);

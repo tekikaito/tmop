@@ -9,6 +9,7 @@ pub mod disk_cleanup;
 pub mod disk_delete;
 pub mod diskspace_page;
 pub mod docker;
+pub mod gpu_activity;
 pub mod drivers_page;
 pub mod hardware;
 pub mod health;
@@ -348,6 +349,8 @@ pub struct FrameData<'a> {
     pub show_self: bool,
     /// How long CPU and disk have been critical (see [`health::health`]).
     pub lasting: health::Lasting,
+    /// Show each GPU on its own: asked for, and there are at least two.
+    pub gpus_separated: bool,
 }
 
 impl FrameData<'_> {
@@ -1003,7 +1006,10 @@ impl App {
         }
         let smooth = self.smooth.clone();
         let lasting = self.pressure.update(&snap, now);
-        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting };
+        let gpus_separated = self.settings.window.gpus_separated && snap.gpu.adapters.len() >= 2;
+        // Only where it is shown: elsewhere a hybrid laptop's discrete GPU stays free to power down.
+        crate::metrics::set_gpu_detail((gpus_separated || self.perf.gpu_activity) && self.page == Page::Performance && self.device == Device::Gpu);
+        let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting, gpus_separated };
 
         if self.popout_only {
             if self.popout_ui(ctx, &fd) {

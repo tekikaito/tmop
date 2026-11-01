@@ -3,7 +3,7 @@
 //! every host.
 
 use super::common::{pick_cpu_temp, Ticks, HWMON_CPU_LABELS};
-use super::{DiskSample, GpuSample, MemorySample, ThermalSample};
+use super::{DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
 use std::time::Duration;
 
 /// One `cpu`/`cpuN` line of `/proc/stat` as [`Ticks`]: idle = idle + iowait; kernel = system + irq
@@ -285,6 +285,13 @@ pub struct GpuDev {
     pub engines: Vec<(String, f32)>,
     /// Dedicated memory in use (bytes), when known.
     pub vram_used: Option<u64>,
+    pub vram_total: Option<u64>,
+    /// Stable across samples, even when another GPU's reading fails.
+    pub id: String,
+    pub name: String,
+    pub temperature_c: Option<f32>,
+    pub power_w: Option<f32>,
+    pub clock_mhz: Option<u32>,
 }
 
 /// Utilisation and engines of the busiest device; dedicated memory summed over all (as Windows
@@ -297,6 +304,22 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
         g.utilization_pct = busy(d).clamp(0.0, 100.0);
         g.engines = d.engines.iter().map(|(e, v)| (e.clone(), v.clamp(0.0, 100.0))).collect();
     }
+    g.adapters = devs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| GpuAdapter {
+            id: if d.id.is_empty() { format!("gpu{i}") } else { d.id.clone() },
+            name: d.name.clone(),
+            utilization_pct: busy(d).clamp(0.0, 100.0),
+            engines: d.engines.iter().map(|(e, v)| (e.clone(), v.clamp(0.0, 100.0))).collect(),
+            dedicated_used: d.vram_used,
+            dedicated_total: d.vram_total,
+            temperature_c: d.temperature_c,
+            power_w: d.power_w,
+            clock_mhz: d.clock_mhz,
+            ..Default::default()
+        })
+        .collect();
     g
 }
 
@@ -385,7 +408,7 @@ mod tests {
         assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1)), false), GpuPoll::Keep, "idle: read seldom so it can power down");
         assert_eq!(gpu_poll(awake, Some(Duration::from_secs(1)), true), GpuPoll::Read, "at work: read every tick");
         assert_eq!(gpu_poll(awake, Some(SLEEPY_GPU_PERIOD), false), GpuPoll::Read);
-        let dev = |pct: f32| GpuDev { engines: vec![("Graphics".into(), pct)], vram_used: None };
+        let dev = |pct: f32| GpuDev { engines: vec![("Graphics".into(), pct)], ..Default::default() };
         assert!(gpu_busy(&dev(3.0)) && !gpu_busy(&dev(0.0)) && !gpu_busy(&GpuDev::default()));
         // The boot display GPU, a GPU whose power management is off, and one without the files
         // are read every tick as before.
@@ -572,14 +595,16 @@ HugePages_Total:       0
 
     #[test]
     fn gpus_fold_to_the_busiest_device() {
-        let amd = GpuDev { engines: vec![("Graphics".into(), 30.0)], vram_used: Some(512 << 20) };
-        let nv = GpuDev { engines: vec![("Graphics".into(), 70.0), ("Encode".into(), 10.0), ("Decode".into(), 120.0)], vram_used: Some(1 << 30) };
+        let amd = GpuDev { engines: vec![("Graphics".into(), 30.0)], vram_used: Some(512 << 20), name: "AMD".into(), ..Default::default() };
+        let nv = GpuDev { engines: vec![("Graphics".into(), 70.0), ("Encode".into(), 10.0), ("Decode".into(), 120.0)], vram_used: Some(1 << 30), temperature_c: Some(60.0), ..Default::default() };
         let g = fold_gpus(&[amd.clone(), nv]);
+        assert_eq!(g.adapters.iter().map(|a| (a.id.as_str(), a.utilization_pct)).collect::<Vec<_>>(), [("gpu0", 30.0), ("gpu1", 100.0)]);
+        assert_eq!((g.adapters[0].name.as_str(), g.adapters[1].temperature_c), ("AMD", Some(60.0)));
         assert!(g.available);
         assert_eq!(g.utilization_pct, 100.0);
         assert_eq!(g.engines.len(), 3);
         assert_eq!(g.dedicated_used, (512 << 20) + (1 << 30));
-        let vram_only = GpuDev { engines: vec![], vram_used: Some(100) };
+        let vram_only = GpuDev { vram_used: Some(100), ..Default::default() };
         let g = fold_gpus(&[vram_only]);
         assert!(!g.available && g.dedicated_used == 100);
         assert_eq!(fold_gpus(&[amd]).utilization_pct, 30.0);
