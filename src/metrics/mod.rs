@@ -23,7 +23,7 @@
 pub mod common;
 pub mod hwinfo;
 pub mod procfs;
-#[cfg(target_os = "linux")]
+#[cfg(any(windows, target_os = "linux"))]
 mod nvml;
 pub mod mac_parse;
 
@@ -122,6 +122,56 @@ pub struct GpuSample {
     pub dedicated_used: u64,
     /// (engine type, %) for the busiest adapter.
     pub engines: Vec<(String, f32)>,
+    /// Each GPU on its own; the fields above stay the grouped view.
+    pub adapters: Vec<GpuAdapter>,
+    /// What each process uses of each GPU (Windows, while [`gpu_detail`] is on); a process on two
+    /// GPUs has an entry for each.
+    pub processes: Vec<GpuProcessUsage>,
+}
+
+/// One GPU. A figure its source does not report is `None`, never 0.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuAdapter {
+    /// Stable across samples (Windows: the LUID).
+    pub id: String,
+    pub name: String,
+    /// Busiest engine type.
+    pub utilization_pct: f32,
+    /// (engine type, %).
+    pub engines: Vec<(String, f32)>,
+    pub dedicated_used: Option<u64>,
+    pub dedicated_total: Option<u64>,
+    pub shared_used: Option<u64>,
+    pub temperature_c: Option<f32>,
+    pub power_w: Option<f32>,
+    pub clock_mhz: Option<u32>,
+}
+
+/// One process on one GPU.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuProcessUsage {
+    pub pid: u32,
+    /// [`GpuAdapter::id`].
+    pub gpu_id: String,
+    /// Busiest engine type: engines run side by side, so they are not added up.
+    pub utilization_pct: f32,
+    /// (engine type, %), busiest first.
+    pub engines: Vec<(String, f32)>,
+    pub dedicated: Option<u64>,
+    pub shared: Option<u64>,
+}
+
+static GPU_DETAIL: AtomicBool = AtomicBool::new(false);
+
+/// Asks the sampler for what only the separated GPUs and the activity view show: per-process
+/// memory counters and NVIDIA sensors. Off by default, as opening NVML keeps a hybrid laptop's
+/// discrete GPU powered.
+pub fn set_gpu_detail(on: bool) {
+    GPU_DETAIL.store(on, Ordering::Relaxed);
+}
+
+pub fn gpu_detail() -> bool {
+    GPU_DETAIL.load(Ordering::Relaxed)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -293,6 +343,8 @@ pub struct History {
     pub net_rx: Series,
     pub net_tx: Series,
     pub gpu: Series,
+    /// Utilisation of each GPU, keyed by [`GpuAdapter::id`].
+    pub gpu_adapters: Vec<(String, Series)>,
     pub thermal: Series,
     /// Average core clock in MHz.
     pub clock: Series,
@@ -315,6 +367,7 @@ impl History {
             net_rx: s(),
             net_tx: s(),
             gpu: s(),
+            gpu_adapters: Vec::new(),
             thermal: s(),
             clock: s(),
             memory_bytes: s(),
@@ -348,6 +401,15 @@ impl History {
         self.net_rx.push(snap.network.rx_bps as f32);
         self.net_tx.push(snap.network.tx_bps as f32);
         self.gpu.push(snap.gpu.utilization_pct);
+        // A GPU that vanishes (eGPU, driver reset) keeps its history, reading 0, for when it returns.
+        for a in &snap.gpu.adapters {
+            if !self.gpu_adapters.iter().any(|(id, _)| *id == a.id) {
+                self.gpu_adapters.push((a.id.clone(), Series::new(cap)));
+            }
+        }
+        for (id, s) in &mut self.gpu_adapters {
+            s.push(snap.gpu.adapters.iter().find(|a| a.id == *id).map_or(0.0, |a| a.utilization_pct));
+        }
         self.thermal.push(snap.thermal.max_c().unwrap_or(0.0));
         self.clock.push(snap.cpu.current_mhz.unwrap_or(0) as f32);
         self.memory_bytes.push(snap.memory.total.saturating_sub(snap.memory.available) as f32);
@@ -370,9 +432,14 @@ impl History {
         ] {
             s.resize(capacity);
         }
-        for s in self.per_core.iter_mut().chain(self.per_core_kernel.iter_mut()) {
+        for s in self.per_core.iter_mut().chain(self.per_core_kernel.iter_mut()).chain(self.gpu_adapters.iter_mut().map(|(_, s)| s)) {
             s.resize(capacity);
         }
+    }
+
+    /// The utilisation history of GPU `id`.
+    pub fn gpu_adapter(&self, id: &str) -> Option<&Series> {
+        self.gpu_adapters.iter().find(|(i, _)| i == id).map(|(_, s)| s)
     }
 }
 
@@ -474,6 +541,22 @@ mod tests {
         s.resize(2);
         assert_eq!(s.last(), 4.0);
         assert_eq!(s.values.len(), 2);
+    }
+
+    #[test]
+    fn history_tracks_each_gpu_by_id() {
+        let snap = |ids: &[(&str, f32)]| {
+            let adapters = ids.iter().map(|(id, u)| GpuAdapter { id: id.to_string(), utilization_pct: *u, ..Default::default() }).collect();
+            Snapshot { gpu: GpuSample { adapters, ..Default::default() }, ..Default::default() }
+        };
+        let mut h = History::new(8);
+        h.push(&snap(&[("a", 10.0), ("b", 20.0)]));
+        h.push(&snap(&[("b", 30.0)]));
+        assert_eq!(h.gpu_adapter("a").unwrap().last(), 0.0);
+        assert_eq!(h.gpu_adapter("b").unwrap().last(), 30.0);
+        assert!(h.gpu_adapter("c").is_none());
+        h.resize(1);
+        assert_eq!(h.gpu_adapter("b").unwrap().capacity, 2);
     }
 
     #[test]

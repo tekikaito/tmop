@@ -60,7 +60,14 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
         Quadrant::Gpu => Reading {
             quadrant: q,
             fraction: if s.gpu.available { pct(sm.gpu) } else { None },
-            text: if s.gpu.available { format!("{:.0}%", s.gpu.utilization_pct) } else { "N/A".into() },
+            // Separated GPUs share the tile, so a skin's layout never changes: "85% / 12%".
+            text: if !s.gpu.available {
+                "N/A".into()
+            } else if fd.gpus_separated {
+                s.gpu.adapters.iter().map(|a| format!("{:.0}%", a.utilization_pct)).collect::<Vec<_>>().join(" / ")
+            } else {
+                format!("{:.0}%", s.gpu.utilization_pct)
+            },
             aux: if s.gpu.dedicated_used > 0 { format!("{:.1} GB", s.gpu.dedicated_used as f64 / 1073741824.0) } else { String::new() },
         },
         Quadrant::Disk if !s.disk_known() => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
@@ -1072,7 +1079,7 @@ mod tests {
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default() };
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default(), gpus_separated: false };
                     let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
                     assert!(!ev.close && !ev.menu);
                 });

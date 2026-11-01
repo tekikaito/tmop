@@ -1,7 +1,8 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, fold_gpu, net_delta, tick_delta_pct, NetMark, Ticks};
+use super::common::{cpu_brand, fold_adapters, fold_gpu, merge_sensors, net_delta, tick_delta_pct, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
+use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
 use std::collections::HashMap;
@@ -190,7 +191,15 @@ pub struct Collector {
     /// Registry `~MHz` of CPU 0 (read once).
     reg_mhz: Option<u32>,
     hwinfo: HwinfoCache,
+    /// The GPUs DXGI listed, and when.
+    dxgi: Option<(Instant, Vec<KnownAdapter>)>,
+    /// Only while [`gpu_detail`] is on; the inner `None` means it could not be opened.
+    gpu_detail_pdh: Option<Option<Pdh>>,
+    nvml: Option<Option<Nvml>>,
 }
+
+/// How often the GPU list is taken again.
+const DXGI_PERIOD: Duration = Duration::from_secs(30);
 
 /// Last HWiNFO read; the mapping is polled at most every 2 s (30 s while not running).
 struct HwinfoCache {
@@ -238,7 +247,62 @@ impl Collector {
             procs: Enumerator::new(),
             reg_mhz: registry_base_mhz(),
             hwinfo: HwinfoCache { at: None, cpu: None, status: "not running".into(), running: false },
+            dxgi: None,
+            gpu_detail_pdh: None,
+            nvml: None,
         }
+    }
+
+    /// Each GPU and, while [`gpu_detail`] is on, its processes and sensors. WDDM's counters are the
+    /// base for every vendor; NVML only adds what they lack.
+    fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)]) {
+        // Re-listed now and then: LUIDs change with a driver reset or an eGPU.
+        if self.dxgi.as_ref().is_none_or(|d| d.0.elapsed() >= DXGI_PERIOD) {
+            self.dxgi = Some((Instant::now(), dxgi_adapters()));
+        }
+        let detail = gpu_detail();
+        if !detail {
+            self.gpu_detail_pdh = None;
+            self.nvml = None;
+        } else if self.gpu_detail_pdh.is_none() {
+            self.gpu_detail_pdh = Some(Pdh::new(&[
+                ("adapter_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
+                ("process_dedicated", r"\GPU Process Memory(*)\Dedicated Usage"),
+                ("process_shared", r"\GPU Process Memory(*)\Shared Usage"),
+            ]));
+        }
+        let mut mem = GpuMemory { adapter_dedicated: adapter_memory(gpu_mem), ..Default::default() };
+        if let Some(Some(pdh)) = &self.gpu_detail_pdh {
+            pdh.collect();
+            if pdh.counters.contains_key("adapter_shared") {
+                mem.adapter_shared = Some(adapter_memory(&pdh.array("adapter_shared")));
+            }
+            if pdh.counters.contains_key("process_dedicated") {
+                mem.process = Some(process_memory(&pdh.array("process_dedicated"), &pdh.array("process_shared")));
+            }
+        }
+        let uses: Vec<EngineUse> = engines.iter().filter_map(|(name, v)| parse_gpu_instance(name).map(|(pid, luid, eng)| (pid, luid.to_ascii_lowercase(), eng, *v))).collect();
+        let listed = self.dxgi.as_ref().map(|d| d.1.as_slice()).unwrap_or_default();
+        // Without DXGI the counters still say which GPUs exist, unnamed.
+        let fallback: Vec<KnownAdapter>;
+        let known = if listed.is_empty() {
+            let mut ids: Vec<&String> = uses.iter().map(|u| &u.1).collect();
+            ids.sort();
+            ids.dedup();
+            fallback = ids.into_iter().map(|id| (id.clone(), "GPU".to_string(), None)).collect();
+            &fallback
+        } else {
+            listed
+        };
+        let (mut adapters, processes) = fold_adapters(known, &uses, &mem, detail);
+        if detail {
+            let nvml = self.nvml.get_or_insert_with(Nvml::load);
+            if let Some(n) = nvml {
+                merge_sensors(&mut adapters, &n.read());
+            }
+        }
+        snap.gpu.adapters = adapters;
+        snap.gpu.processes = processes;
     }
 
     pub fn collect(&mut self) -> (Snapshot, Vec<ProcessRow>) {
@@ -249,6 +313,7 @@ impl Collector {
         self.memory(&mut snap);
         self.network(&mut snap);
         let mut gpu_by_pid = HashMap::new();
+        let mut gpu_counters = None;
         // Windows always shows the disk readouts (0% when PDH or its PhysicalDisk counter is
         // missing), as before 0.6; the PDH error below says why they stay at zero.
         snap.disk.available = true;
@@ -269,7 +334,9 @@ impl Collector {
                 snap.gpu = gpu;
                 gpu_by_pid = by_pid;
             }
-            snap.gpu.dedicated_used = pdh.array("gpu_mem").iter().map(|(_, v)| *v as u64).sum();
+            let gpu_mem = pdh.array("gpu_mem");
+            snap.gpu.dedicated_used = gpu_mem.iter().map(|(_, v)| *v as u64).sum();
+            gpu_counters = Some((engines, gpu_mem));
             // Thermal (Kelvin -> Celsius); zones read 0 when the sensor is not implemented.
             snap.thermal.zones = pdh
                 .array("thermal")
@@ -298,6 +365,9 @@ impl Collector {
             snap.cpu.current_mhz = snap.cpu.base_mhz.or(snap.cpu.current_mhz);
         }
         self.thermal(&mut snap);
+        if let Some((engines, gpu_mem)) = gpu_counters {
+            self.gpu_adapters(&mut snap, &engines, &gpu_mem);
+        }
         let rows = match self.procs.collect(self.logical, &gpu_by_pid) {
             Ok((rows, t)) => {
                 snap.process_count = t.processes;
@@ -472,6 +542,63 @@ pub(crate) fn parse_gpu_instance(name: &str) -> Option<(u32, String, String)> {
     Some((pid, luid, engtype))
 }
 
+/// Pid (when the name has one) and lowercase LUID of a `GPU Process Memory` (`pid_1_luid_...`) or
+/// `GPU Adapter Memory` (`luid_...`) instance, as [`dxgi_adapters`] writes the LUID.
+fn parse_gpu_memory_instance(name: &str) -> Option<(Option<u32>, String)> {
+    let pid = name.strip_prefix("pid_").and_then(|n| n.split('_').next()?.parse().ok());
+    let luid_start = name.find("luid_")? + 5;
+    let luid = name[luid_start..].split('_').take(2).collect::<Vec<_>>().join("_").to_ascii_lowercase();
+    Some((pid, luid))
+}
+
+/// A memory counter's values summed by adapter (physical GPUs of a linked adapter count as one).
+fn adapter_memory(items: &[(String, f64)]) -> HashMap<String, u64> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for (name, v) in items {
+        if let Some((None, luid)) = parse_gpu_memory_instance(name) {
+            *out.entry(luid).or_default() += *v as u64;
+        }
+    }
+    out
+}
+
+/// `GPU Process Memory` dedicated and shared values as (pid, adapter) -> (dedicated, shared).
+fn process_memory(dedicated: &[(String, f64)], shared: &[(String, f64)]) -> HashMap<(u32, String), (u64, u64)> {
+    let mut out: HashMap<(u32, String), (u64, u64)> = HashMap::new();
+    for (items, is_shared) in [(dedicated, false), (shared, true)] {
+        for (name, v) in items {
+            if let Some((Some(pid), luid)) = parse_gpu_memory_instance(name) {
+                let e = out.entry((pid, luid)).or_default();
+                *(if is_shared { &mut e.1 } else { &mut e.0 }) += *v as u64;
+            }
+        }
+    }
+    out
+}
+
+/// The hardware GPUs DXGI lists, in its order. Its software rasteriser (WARP) and Microsoft's
+/// virtual adapters are not GPUs a user would look for.
+fn dxgi_adapters() -> Vec<KnownAdapter> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
+    const VENDOR_MICROSOFT: u32 = 0x1414;
+    // SAFETY: plain COM creation and queries; the adapter description is a value.
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return Vec::new() };
+        let mut out = Vec::new();
+        for i in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(i) else { break };
+            let Ok(d) = adapter.GetDesc1() else { continue };
+            if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 || d.VendorId == VENDOR_MICROSOFT {
+                continue;
+            }
+            let len = d.Description.iter().position(|c| *c == 0).unwrap_or(d.Description.len());
+            let id = format!("0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart);
+            out.push((id, String::from_utf16_lossy(&d.Description[..len]).trim().to_string(), Some(d.DedicatedVideoMemory as u64)));
+        }
+        out
+    }
+}
+
 /// The PDH `GPU Engine(*)` instances folded by [`fold_gpu`] (unparsable names are skipped).
 pub(crate) fn aggregate_gpu(items: &[(String, f64)]) -> (GpuSample, HashMap<u32, f32>) {
     fold_gpu(items.iter().filter_map(|(name, v)| parse_gpu_instance(name).map(|(pid, luid, eng)| (pid, luid, eng, *v))))
@@ -494,6 +621,18 @@ mod tests {
         assert!((g.utilization_pct - 55.0).abs() < 0.01);
         assert_eq!(per[&1], 40.0);
         assert_eq!(per[&1234], 30.0);
+    }
+
+    #[test]
+    fn gpu_memory_instances_fold_by_lowercase_luid() {
+        let adapter = [("luid_0x00000000_0x0000D1B5_phys_0".to_string(), 10.0), ("luid_0x00000000_0x0000D1B5_phys_1".to_string(), 5.0), ("pid_7_luid_0x00000000_0x0000D1B5_phys_0".to_string(), 99.0)];
+        assert_eq!(adapter_memory(&adapter)["0x00000000_0x0000d1b5"], 15);
+        let dedicated = [("pid_7_luid_0x00000000_0x0000D1B5_phys_0".to_string(), 3.0), ("luid_0x00000000_0x0000D1B5_phys_0".to_string(), 99.0), ("nonsense".to_string(), 1.0)];
+        let shared = [("pid_7_luid_0x00000000_0x0000D1B5_phys_0".to_string(), 4.0), ("pid_8_luid_0x00000000_0x0000AAAA_phys_0".to_string(), 2.0)];
+        let m = process_memory(&dedicated, &shared);
+        assert_eq!(m[&(7, "0x00000000_0x0000d1b5".to_string())], (3, 4));
+        assert_eq!(m[&(8, "0x00000000_0x0000aaaa".to_string())], (0, 2));
+        assert_eq!(m.len(), 2);
     }
 
     #[test]

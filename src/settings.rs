@@ -75,6 +75,8 @@ pub struct Window {
     pub process_table_hidden_columns: Vec<String>,
     pub process_table_column_widths: BTreeMap<String, u32>,
     pub performance_cpus_expanded: bool,
+    /// Show each GPU on its own instead of the grouped view.
+    pub gpus_separated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -221,6 +223,7 @@ impl Default for Window {
             process_table_hidden_columns: Vec::new(),
             process_table_column_widths: BTreeMap::new(),
             performance_cpus_expanded: true,
+            gpus_separated: false,
         }
     }
 }

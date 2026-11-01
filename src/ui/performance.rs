@@ -2,14 +2,16 @@
 //! facts, the other resources as a strip and, for the CPU, the logical processors and the apps
 //! using the most.
 
+use super::gpu_activity::{adapter_title, gpu_menu, GpuMenu};
 use super::health::{app_groups, cpu_text, AppGroup};
+use super::table::TableState;
 use super::hardware::{self, Exploded};
 use super::kit;
 use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
 use super::{App, Device, FrameData};
 use crate::docker::model::{Container, EngineStatus};
-use crate::metrics::{Series, SOURCES};
+use crate::metrics::{GpuAdapter, Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
 use std::collections::{HashMap, HashSet};
@@ -41,6 +43,12 @@ pub struct PerfState {
     pub top_spark: HashMap<String, Series>,
     /// Sampler generation the sparklines were last extended at.
     spark_seq: u64,
+    /// The GPU shown while they are separated; the first one when this one is gone.
+    pub gpu_selected: Option<String>,
+    /// The GPU activity section is open.
+    pub gpu_activity: bool,
+    pub gpu_overview_table: TableState,
+    pub gpu_table: Option<TableState>,
 }
 
 /// Docker series copied from the backend for the Performance page.
@@ -105,6 +113,8 @@ struct Head<'a> {
 /// What a click on the page asks for, applied after drawing.
 enum Act {
     Device(Device),
+    Gpu(String),
+    GpuMenu(GpuMenu),
     Refresh,
     Cores(bool),
     View(CoreView),
@@ -185,7 +195,14 @@ impl App {
                 let top = ui.cursor().min;
                 let w = ui.available_width();
                 let mut y = top.y;
-                y += self.detail(ui, fd, top.x, y, w, area.width() >= 1100.0) + GAP;
+                y += self.detail(ui, fd, top.x, y, w, area.width() >= 1100.0, &mut act) + GAP;
+                if self.device == Device::Gpu && self.perf.gpu_activity {
+                    let (h, opened) = self.gpu_activity(ui, fd, top.x, y, w);
+                    y += h + GAP;
+                    if let Some((pid, created)) = opened {
+                        act = Some(Act::Select(pid, created));
+                    }
+                }
                 y += self.other_resources(ui, fd, top.x, y, w, &mut act) + GAP;
                 if self.device == Device::Cpu {
                     y += self.cpu_bottom(ui, fd, top.x, y, w, &groups, &mut act) + GAP;
@@ -196,6 +213,11 @@ impl App {
         });
         match act {
             Some(Act::Device(d)) => self.device = d,
+            Some(Act::Gpu(id)) => {
+                self.device = Device::Gpu;
+                self.perf.gpu_selected = Some(id);
+            }
+            Some(Act::GpuMenu(m)) => self.apply_gpu_menu(m),
             Some(Act::Refresh) => self.sampler.refresh(),
             Some(Act::Cores(on)) => {
                 self.settings.window.performance_cpus_expanded = on;
@@ -281,19 +303,45 @@ impl App {
         }
     }
 
+    /// The GPU the page shows on its own, when they are separated: with its position in the list.
+    fn selected_adapter<'a>(&self, fd: &FrameData<'a>) -> Option<(usize, &'a GpuAdapter)> {
+        if !fd.gpus_separated {
+            return None;
+        }
+        let adapters = &fd.snap.gpu.adapters;
+        let chosen = self.perf.gpu_selected.as_ref().and_then(|id| adapters.iter().position(|a| a.id == *id));
+        let i = chosen.unwrap_or(0);
+        adapters.get(i).map(|a| (i, a))
+    }
+
     /// The device cards, the preview span and the Refresh button.
     fn device_list(&self, ui: &mut egui::Ui, list: Rect, fd: &FrameData<'_>, act: &mut Option<Act>) {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let top = ui.cursor().min;
         let mut y = top.y;
-        for d in Device::ALL {
-            if !self.device_listed(d) {
-                continue;
+        // One card per entry: a separated GPU is a device of its own here.
+        let mut entries: Vec<(Device, Option<usize>)> = Vec::new();
+        for d in Device::ALL.into_iter().filter(|d| self.device_listed(*d)) {
+            if d == Device::Gpu && fd.gpus_separated {
+                entries.extend((0..fd.snap.gpu.adapters.len()).map(|i| (d, Some(i))));
+            } else {
+                entries.push((d, None));
             }
+        }
+        let selected = self.selected_adapter(fd).map(|(i, _)| i);
+        for (d, gpu) in entries {
+            let adapter = gpu.map(|i| &fd.snap.gpu.adapters[i]);
             let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), DEVICE_CARD_H));
-            let resp = ui.interact(r, ui.id().with(("dev", d.key())), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let active = self.device == d;
+            let resp = ui.interact(r, ui.id().with(("dev", d.key(), gpu)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if d == Device::Gpu {
+                resp.context_menu(|ui| {
+                    if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
+                        *act = Some(Act::GpuMenu(m));
+                    }
+                });
+            }
+            let active = self.device == d && (gpu.is_none() || gpu == selected);
             if active {
                 p.rect_filled(r, 8.0, with_alpha(pal.accent, 0.1));
                 p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.5)));
@@ -303,10 +351,14 @@ impl App {
                 p.rect_filled(r, 8.0, pal.raise(if resp.hovered() { 0.06 } else { 0.04 }));
                 p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.raise(0.08)));
             }
-            let view = self.dev_view(d, fd);
+            let view = match adapter.and_then(|a| Some((a, fd.hist.gpu_adapter(&a.id)?))) {
+                Some((a, series)) => DevView { value: format!("{:.0}%", a.utilization_pct), lines: vec![(series, fd.metric("gpu"), (0.0, 100.0))], dashed_second: false },
+                None => self.dev_view(d, fd),
+            };
+            let title = gpu.zip(adapter).map_or_else(|| d.title().to_string(), |(i, a)| adapter_title(i, a));
             let value_w = widgets::text_width(&p, &view.value, theme::mono(12.0));
             let name_w = r.width() - 24.0 - value_w - 8.0;
-            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, d.title(), theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
+            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, &title, theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
             widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + 19.0), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
             let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 34.0), vec2(r.width() - 24.0, 32.0));
             if d == Device::Docker {
@@ -315,7 +367,10 @@ impl App {
                 widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
             }
             if resp.clicked() {
-                *act = Some(Act::Device(d));
+                *act = Some(match adapter {
+                    Some(a) => Act::Gpu(a.id.clone()),
+                    None => Act::Device(d),
+                });
             }
             y += DEVICE_CARD_H + 6.0;
         }
@@ -332,7 +387,7 @@ impl App {
 
     /// The selected device's card. Returns its height.
     #[allow(clippy::too_many_arguments)]
-    fn detail(&self, ui: &mut egui::Ui, fd: &FrameData<'_>, x: f32, y: f32, w: f32, figure: bool) -> f32 {
+    fn detail(&self, ui: &mut egui::Ui, fd: &FrameData<'_>, x: f32, y: f32, w: f32, figure: bool, act: &mut Option<Act>) -> f32 {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let slot = p.add(Shape::Noop);
@@ -419,21 +474,37 @@ impl App {
             }
             Device::Gpu => {
                 let c = fd.metric("gpu");
-                let value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
-                let hd = Head { title: "GPU", sub: SOURCES.gpu.into(), value, side: String::new() };
+                // Under the card's content, so the plot keeps its hover readout: right-click only.
+                let section = Rect::from_min_size(pos2(x, y), vec2(w, 300.0));
+                ui.interact(section, ui.id().with("gpu-section"), Sense::click()).context_menu(|ui| {
+                    if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
+                        *act = Some(Act::GpuMenu(m));
+                    }
+                });
+                // The grouped figures, or those of the GPU shown on its own.
+                let one = self.selected_adapter(fd);
+                let title = one.map_or_else(|| "GPU".to_string(), |(i, a)| adapter_title(i, a));
+                let series = one.and_then(|(_, a)| fd.hist.gpu_adapter(&a.id)).unwrap_or(&fd.hist.gpu);
+                let (util, shown_util, engines, dedicated) = match one {
+                    Some((_, a)) => (a.utilization_pct, a.utilization_pct, &a.engines, a.dedicated_used),
+                    None => (s.gpu.utilization_pct, fd.smooth.gpu, &s.gpu.engines, Some(s.gpu.dedicated_used)),
+                };
+                let value = if s.gpu.available { (format!("{shown_util:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
+                let sub = if one.is_some() { "Busiest engine of this GPU" } else { SOURCES.gpu };
+                let hd = Head { title: &title, sub: sub.into(), value, side: String::new() };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
-                let lines = [PlotLine::new(&fd.hist.gpu, c, (0.0, 100.0))];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.gpu, age));
+                let lines = [PlotLine::new(series, c, (0.0, 100.0))];
+                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(series, age));
                 let (ph, hover) = plot(ui, &pc, "gpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let g = &s.gpu;
                     let on = |v: String| dash_or(g.available.then_some(v));
-                    let top = g.engines.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, v)| format!("{e} \u{b7} {v:.0}%"));
+                    let top = engines.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, v)| format!("{e} \u{b7} {v:.0}%"));
                     let labels = [
-                        ("Utilization", on(format!("{:.0}%", g.utilization_pct))),
+                        ("Utilization", on(format!("{util:.0}%"))),
                         ("Busiest engine", dash_or(top.filter(|_| g.available))),
-                        ("Dedicated memory", on(format!("{} in use", format_bytes(g.dedicated_used as f64)))),
-                        ("Engines", on(format!("{} reported", g.engines.len()))),
+                        ("Dedicated memory", dash_or(dedicated.filter(|_| g.available).map(|d| format!("{} in use", format_bytes(d as f64))))),
+                        ("Engines", on(format!("{} reported", engines.len()))),
                     ];
                     figure_at(&p, &pal, Exploded::Gpu, ix + gw, cy, 200.0, &labels);
                 }
@@ -444,17 +515,29 @@ impl App {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, SOURCES.no_gpu, theme::ui(12.0), theme::status(&pal).warn);
                     cy += 22.0;
                 }
-                for (e, v) in s.gpu.engines.iter().take(6) {
+                for (e, v) in engines.iter().take(6) {
                     widgets::text_fit(&p, pos2(ix, cy + 8.0), Align2::LEFT_CENTER, e, theme::ui(12.0), pal.text_dim, 130.0);
                     widgets::bar(&p, Rect::from_min_size(pos2(ix + 140.0, cy + 6.5), vec2((iw - 140.0 - 60.0).max(20.0), 3.0)), v / 100.0, c);
                     p.text(pos2(ix + iw, cy + 8.0), Align2::RIGHT_CENTER, format!("{v:.0}%"), theme::mono(12.0), pal.text_table());
                     cy += 24.0;
                 }
-                let mut facts = vec![("Utilization".to_string(), format!("{:.1}%", s.gpu.utilization_pct)), ("Dedicated memory in use".to_string(), format_bytes(s.gpu.dedicated_used as f64))];
+                let mut facts = vec![("Utilization".to_string(), format!("{util:.1}%")), (if one.is_some() { "Dedicated used" } else { "Dedicated memory in use" }.to_string(), dash_or(dedicated.map(|d| format_bytes(d as f64))))];
                 if self.caps.gpu_engines {
-                    facts.push(("Engines reported".to_string(), s.gpu.engines.len().to_string()));
+                    facts.push((if one.is_some() { "Engines" } else { "Engines reported" }.to_string(), engines.len().to_string()));
+                }
+                if let Some((_, a)) = one {
+                    facts.push(("Dedicated total".to_string(), dash_or(a.dedicated_total.map(|t| format_bytes(t as f64)))));
                 }
                 cy += dl(&p, &pal, ix, cy + 4.0, iw, &facts) + 4.0;
+                if let Some((_, a)) = one {
+                    let sensors = vec![
+                        ("Shared used".to_string(), dash_or(a.shared_used.map(|u| format_bytes(u as f64)))),
+                        ("Temperature".to_string(), dash_or(a.temperature_c.map(|t| self.temp(t)))),
+                        ("Power".to_string(), dash_or(a.power_w.map(|w| format!("{w:.0} W")))),
+                        ("Clock".to_string(), dash_or(a.clock_mhz.map(|m| format!("{m} MHz")))),
+                    ];
+                    cy += dl(&p, &pal, ix, cy + 12.0, iw, &sensors) + 12.0;
+                }
             }
             Device::Disk => {
                 let c = fd.metric("disk");

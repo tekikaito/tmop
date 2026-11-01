@@ -93,6 +93,11 @@ pub struct Collector {
     procs: Enumerator,
 }
 
+/// A card's id: its DRM directory name (`card0`).
+fn card_id(card: &Path) -> String {
+    card.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 impl Default for Collector {
     fn default() -> Self {
         Self::new()
@@ -239,7 +244,7 @@ impl Collector {
     /// idle (each read restarts its idle timer), when NVML is not kept open for it either.
     fn gpus(&mut self) -> Vec<GpuDev> {
         let now = Instant::now();
-        let idle = || GpuDev { engines: vec![("Graphics".into(), 0.0)], vram_used: None };
+        let idle = |name: &str| GpuDev { engines: vec![("Graphics".into(), 0.0)], name: name.into(), ..Default::default() };
         let mut devs = Vec::new();
         let cards = entries("/sys/class/drm", "card").into_iter().filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n[4..].bytes().all(|b| b.is_ascii_digit())));
         for card in cards {
@@ -251,11 +256,12 @@ impl Collector {
             let since = self.sleepy.get(&card).map(|c| now.saturating_duration_since(c.0));
             let busy = self.sleepy.get(&card).is_some_and(|c| procfs::gpu_busy(&c.1));
             match procfs::gpu_poll(power_of(&d), since, busy) {
-                procfs::GpuPoll::Idle => devs.push(idle()),
+                procfs::GpuPoll::Idle => devs.push(GpuDev { id: card_id(&card), ..idle("AMD GPU") }),
                 procfs::GpuPoll::Keep => devs.extend(self.sleepy.get(&card).map(|c| c.1.clone())),
                 procfs::GpuPoll::Read => {
                     let Some(busy) = read_u64(d.join("gpu_busy_percent")) else { continue };
-                    let dev = GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")) };
+                    let name = read(d.join("product_name")).map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "AMD GPU".into());
+                    let dev = GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")), vram_total: read_u64(d.join("mem_info_vram_total")), id: card_id(&card), name, ..Default::default() };
                     self.sleepy.insert(card, (now, dev.clone()));
                     devs.push(dev);
                 }
@@ -271,7 +277,7 @@ impl Collector {
             let awake = procfs::GpuPower { suspended: powers.iter().all(|p| p.suspended), may_sleep: true };
             let open = std::mem::replace(&mut self.nvml, NvmlState::Untried);
             match procfs::gpu_poll(awake, since, busy) {
-                procfs::GpuPoll::Idle => devs.extend(powers.iter().map(|_| idle())),
+                procfs::GpuPoll::Idle => devs.extend(powers.iter().enumerate().map(|(i, _)| GpuDev { id: format!("nvidia{i}"), ..idle("NVIDIA GPU") })),
                 procfs::GpuPoll::Keep => devs.extend(self.nvidia_last.iter().flat_map(|c| c.1.iter().cloned())),
                 procfs::GpuPoll::Read => {
                     let nvml = if let NvmlState::Loaded(n) = open { Some(n) } else { Nvml::load() };

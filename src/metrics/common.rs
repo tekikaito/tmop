@@ -2,7 +2,8 @@
 //! rates, the GPU engine fold and the CPU temperature label pick. Pure (bar CPUID) and tested on
 //! every host.
 
-use super::{GpuSample, NetworkSample};
+use super::procfs::GpuDev;
+use super::{GpuAdapter, GpuProcessUsage, GpuSample, NetworkSample};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -112,6 +113,94 @@ pub fn fold_gpu(items: impl IntoIterator<Item = EngineUse>) -> (GpuSample, HashM
     (gpu, per_pid)
 }
 
+/// A GPU the OS lists: (id, name, total dedicated memory).
+pub type KnownAdapter = (String, String, Option<u64>);
+
+/// Memory counters by adapter id. `None`: not read (see [`super::gpu_detail`]), not zero.
+#[derive(Clone, Debug, Default)]
+pub struct GpuMemory {
+    pub adapter_dedicated: HashMap<String, u64>,
+    pub adapter_shared: Option<HashMap<String, u64>>,
+    /// (pid, adapter) -> (dedicated, shared).
+    pub process: Option<HashMap<(u32, String), (u64, u64)>>,
+}
+
+/// Each known GPU with its engines and memory, and each process on each GPU. Same arithmetic as
+/// [`fold_gpu`], one adapter at a time. Readings of adapters not in `known`, of pid 0 and of
+/// processes that use nothing are left out; `with_processes` false leaves all processes out.
+pub fn fold_adapters(known: &[KnownAdapter], engines: &[EngineUse], mem: &GpuMemory, with_processes: bool) -> (Vec<GpuAdapter>, Vec<GpuProcessUsage>) {
+    // One card can be listed twice (an indirect display's second LUID); only its real LUID has
+    // counters. Without any counters there is nothing to tell them apart by, so all stay.
+    let counted = |id: &String| engines.iter().any(|u| u.1 == *id) || mem.adapter_dedicated.contains_key(id);
+    let live: Vec<&KnownAdapter> = known.iter().filter(|k| counted(&k.0)).collect();
+    let known: Vec<&KnownAdapter> = if live.is_empty() { known.iter().collect() } else { live };
+    let sorted = |m: &HashMap<String, f64>| {
+        let mut v: Vec<(String, f32)> = m.iter().map(|(e, u)| (e.clone(), u.min(100.0) as f32)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    let busiest = |e: &[(String, f32)]| e.iter().map(|e| e.1).fold(0.0, f32::max);
+    let adapters = known
+        .iter()
+        .map(|(id, name, total)| {
+            let mut by_engine: HashMap<String, f64> = HashMap::new();
+            for (_, _, e, v) in engines.iter().filter(|u| u.1 == *id) {
+                *by_engine.entry(e.clone()).or_default() += v;
+            }
+            let engines = sorted(&by_engine);
+            GpuAdapter {
+                id: id.clone(),
+                name: name.clone(),
+                utilization_pct: busiest(&engines),
+                engines,
+                dedicated_used: mem.adapter_dedicated.get(id).copied(),
+                dedicated_total: *total,
+                shared_used: mem.adapter_shared.as_ref().and_then(|m| m.get(id).copied()),
+                ..Default::default()
+            }
+        })
+        .collect();
+    let mut processes = Vec::new();
+    if with_processes {
+        let mut by_key: HashMap<(u32, String), HashMap<String, f64>> = HashMap::new();
+        for (pid, a, e, v) in engines {
+            *by_key.entry((*pid, a.clone())).or_default().entry(e.clone()).or_default() += v;
+        }
+        for key in mem.process.iter().flat_map(|m| m.keys()) {
+            by_key.entry(key.clone()).or_default();
+        }
+        for (key, by_engine) in by_key {
+            let (pid, gpu_id) = key.clone();
+            let m = mem.process.as_ref().and_then(|m| m.get(&key));
+            let mut engines = sorted(&by_engine);
+            engines.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let utilization_pct = busiest(&engines);
+            let idle = utilization_pct < 0.05 && m.is_none_or(|m| m.0 == 0 && m.1 == 0);
+            if pid != 0 && !idle && known.iter().any(|k| k.0 == gpu_id) {
+                processes.push(GpuProcessUsage { pid, gpu_id, utilization_pct, engines, dedicated: m.map(|m| m.0), shared: m.map(|m| m.1) });
+            }
+        }
+    }
+    (adapters, processes)
+}
+
+/// Adds the sensors of `devs` to the adapter of the same name. Sources do not share an index or
+/// id, so a name that several GPUs have stays unattributed: no reading beats the other card's.
+pub fn merge_sensors(adapters: &mut [GpuAdapter], devs: &[GpuDev]) {
+    let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let names: Vec<String> = adapters.iter().map(|a| a.name.clone()).collect();
+    for a in adapters.iter_mut() {
+        let mut matches = devs.iter().filter(|d| same(&d.name, &a.name));
+        let (Some(d), None) = (matches.next(), matches.next()) else { continue };
+        if names.iter().filter(|n| same(n, &a.name)).count() == 1 {
+            a.temperature_c = d.temperature_c;
+            a.power_w = d.power_w;
+            a.clock_mhz = d.clock_mhz;
+            a.dedicated_total = a.dedicated_total.or(d.vram_total);
+        }
+    }
+}
+
 /// HWiNFO's CPU temperature readings, best first.
 pub const HWINFO_CPU_LABELS: [&str; 5] = ["CPU Package", "CPU (Tctl/Tdie)", "CPU Tctl/Tdie", "CPU Die (average)", "CPU CCD1 (Tdie)"];
 
@@ -170,6 +259,55 @@ mod tests {
         assert_eq!(n.utilization_pct, 0.0);
         // A counter reset reads as no traffic.
         assert_eq!(net_delta(Some((t0, 5000, 5000)), t1, 10, 10, 0).rx_bps, 0.0);
+    }
+
+    #[test]
+    fn adapters_and_processes_fold_per_gpu() {
+        let e = |p: u32, a: &str, n: &str, v: f64| (p, a.to_string(), n.to_string(), v);
+        let known = vec![("a".to_string(), "RTX 4090".to_string(), Some(24)), ("b".to_string(), "RTX 4070".to_string(), None)];
+        let uses = [e(1, "a", "3D", 60.0), e(2, "a", "3D", 60.0), e(1, "a", "Copy", 5.0), e(1, "b", "Compute", 30.0), e(0, "a", "3D", 1.0), e(9, "ghost", "3D", 50.0), e(3, "b", "3D", 0.0)];
+        let mem = GpuMemory {
+            adapter_dedicated: [("a".to_string(), 7)].into(),
+            adapter_shared: None,
+            process: Some([((1, "a".to_string()), (5, 2)), ((4, "b".to_string()), (8, 0)), ((5, "b".to_string()), (0, 0))].into()),
+        };
+        let (adapters, mut procs) = fold_adapters(&known, &uses, &mem, true);
+        assert_eq!(adapters[0].utilization_pct, 100.0, "summed over processes, capped");
+        assert_eq!((adapters[0].dedicated_used, adapters[0].dedicated_total, adapters[0].shared_used), (Some(7), Some(24), None));
+        assert_eq!((adapters[1].utilization_pct, adapters[1].dedicated_used), (30.0, None));
+        procs.sort_by_key(|p| (p.pid, p.gpu_id.clone()));
+        let got: Vec<(u32, &str, f32)> = procs.iter().map(|p| (p.pid, p.gpu_id.as_str(), p.utilization_pct)).collect();
+        // A process on both GPUs is listed for each; pid 0, unknown adapters and idle ones are not.
+        assert_eq!(got, [(1, "a", 60.0), (1, "b", 30.0), (2, "a", 60.0), (4, "b", 0.0)]);
+        assert_eq!(procs[0].engines[0].0, "3D", "busiest engine first");
+        assert_eq!((procs[0].dedicated, procs[0].shared), (Some(5), Some(2)));
+        assert_eq!(procs[1].dedicated, None, "no memory row is unknown, not zero");
+        assert!(fold_adapters(&known, &uses, &mem, false).1.is_empty());
+    }
+
+    #[test]
+    fn a_listed_adapter_without_counters_is_a_duplicate() {
+        let k = |id: &str| (id.to_string(), "RTX".to_string(), None);
+        let known = [k("real"), k("idle"), k("ghost")];
+        let uses = [(1, "real".to_string(), "3D".to_string(), 5.0)];
+        let mem = GpuMemory { adapter_dedicated: [("idle".to_string(), 1)].into(), ..Default::default() };
+        let ids = |a: Vec<GpuAdapter>| a.into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(fold_adapters(&known, &uses, &mem, false).0), ["real", "idle"]);
+        assert_eq!(ids(fold_adapters(&known, &[], &GpuMemory::default(), false).0), ["real", "idle", "ghost"], "no counters at all");
+    }
+
+    #[test]
+    fn sensors_go_only_to_an_unambiguous_name() {
+        let a = |n: &str| GpuAdapter { name: n.into(), ..Default::default() };
+        let d = |n: &str, t: f32| GpuDev { name: n.into(), temperature_c: Some(t), vram_total: Some(8), ..Default::default() };
+        let mut adapters = [a("NVIDIA GeForce RTX 4090"), a("AMD Radeon"), a("Twin"), a("Twin")];
+        merge_sensors(&mut adapters, &[d("nvidia geforce rtx 4090", 60.0), d("Twin", 70.0), d("Twin", 71.0)]);
+        assert_eq!((adapters[0].temperature_c, adapters[0].dedicated_total), (Some(60.0), Some(8)));
+        assert!(adapters[1..].iter().all(|a| a.temperature_c.is_none()));
+        // One sensor but two cards of that name: still unknown which card it is.
+        let mut adapters = [a("Twin"), a("Twin")];
+        merge_sensors(&mut adapters, &[d("Twin", 70.0)]);
+        assert!(adapters.iter().all(|a| a.temperature_c.is_none()));
     }
 
     #[test]

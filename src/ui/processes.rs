@@ -1821,7 +1821,7 @@ mod tests {
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let fd = FrameData { snap: &snap, hist: &hist, rows: &[], smooth: &smooth, pal, metric_colors: theme::MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: true, lasting: Default::default() };
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &[], smooth: &smooth, pal, metric_colors: theme::MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: true, lasting: Default::default(), gpus_separated: false };
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 10.0), vec2(900.0, STRIP_H)), &fd, &pal, Some(Duration::from_secs(1)));
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 130.0), vec2(900.0, STRIP_H)), &fd, &pal, None);
                     let mut r = row(10, 4, 1, "chrome.exe");
