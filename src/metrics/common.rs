@@ -89,6 +89,38 @@ pub fn net_delta(prev: Option<NetMark>, now: Instant, rx: u64, tx: u64, link_bps
     n
 }
 
+/// One physical disk's cumulative counters (Windows `IOCTL_DISK_PERFORMANCE`): bytes moved, and
+/// idle and query time in 100 ns units.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskCounters {
+    pub read: u64,
+    pub written: u64,
+    pub idle: i64,
+    pub query: i64,
+}
+
+/// Active time (the disks' average, as PDH's `_Total`) and summed throughput between two readings
+/// of the same disks, keyed by device number; `None` when no disk was read both times.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn disk_delta(prev: &[(u32, DiskCounters)], now: &[(u32, DiskCounters)]) -> Option<(f32, f64, f64)> {
+    let (mut busy, mut disks, mut read, mut write) = (0.0f64, 0usize, 0.0f64, 0.0f64);
+    for (id, n) in now {
+        let Some((_, p)) = prev.iter().find(|(pid, _)| pid == id) else { continue };
+        let span = n.query - p.query;
+        if span <= 0 {
+            continue;
+        }
+        let secs = span as f64 / 1e7;
+        let idle = ((n.idle - p.idle) as f64 / span as f64).clamp(0.0, 1.0);
+        busy += 1.0 - idle;
+        disks += 1;
+        read += n.read.saturating_sub(p.read) as f64 / secs;
+        write += n.written.saturating_sub(p.written) as f64 / secs;
+    }
+    (disks > 0).then(|| ((busy / disks as f64 * 100.0) as f32, read, write))
+}
+
 /// One engine reading: (pid, adapter, engine type, %).
 pub type EngineUse = (u32, String, String, f64);
 
@@ -221,6 +253,20 @@ pub fn pick_cpu_temp<'a>(temps: &[(&'a str, f32)], priority: &[&str]) -> Option<
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn disk_counters_give_active_time_and_rates() {
+        let c = |read, written, idle, query| DiskCounters { read, written, idle, query };
+        // Disk 0: half a second busy of one second, 2 MB read; disk 1 idle; disk 2 new (skipped).
+        let prev = [(0, c(1_000, 0, 0, 0)), (1, c(0, 0, 0, 0))];
+        let now = [(0, c(2_001_000, 500, 5_000_000, 10_000_000)), (1, c(0, 0, 10_000_000, 10_000_000)), (2, c(9, 9, 0, 9))];
+        let (active, r, w) = disk_delta(&prev, &now).unwrap();
+        assert!((active - 25.0).abs() < 1e-3, "{active}");
+        assert_eq!((r, w), (2_000_000.0, 500.0));
+        // First reading, or a disk whose clock did not move: nothing to report.
+        assert_eq!(disk_delta(&[], &now), None);
+        assert_eq!(disk_delta(&now, &now), None);
+    }
 
     #[test]
     fn brand_bytes_are_trimmed_and_collapsed() {

@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, fold_adapters, fold_gpu, merge_sensors, net_delta, tick_delta_pct, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
+use super::common::{cpu_brand, disk_delta, fold_adapters, fold_gpu, merge_sensors, net_delta, tick_delta_pct, DiskCounters, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -198,6 +198,86 @@ pub struct Collector {
     nvml: Option<Option<Nvml>>,
     /// Opt-in PawnIO CPU temperature (closed while the Settings switch is off).
     pawnio: super::pawnio::Source,
+    /// The disks read directly, until PDH's PhysicalDisk counters have shown traffic.
+    disk_ioctl: Option<DiskIoctl>,
+    /// PDH's PhysicalDisk counters reported traffic once, so they work and the fallback is off.
+    pdh_disk_proven: bool,
+}
+
+/// How often the physical disks are listed again (one plugged in or removed).
+const DISK_LIST_PERIOD: Duration = Duration::from_secs(30);
+
+/// The physical disks' own counters (`IOCTL_DISK_PERFORMANCE` on `\\.\PhysicalDriveN`), what
+/// Task Manager shows too. Used when PDH's PhysicalDisk counters are missing or stay at zero (the
+/// counters switched off or their registration broken), which left every disk readout at 0.
+struct DiskIoctl {
+    drives: Vec<(u32, windows::Win32::Foundation::HANDLE)>,
+    listed: Option<Instant>,
+    prev: Vec<(u32, DiskCounters)>,
+}
+
+impl DiskIoctl {
+    fn new() -> Self {
+        Self { drives: Vec::new(), listed: None, prev: Vec::new() }
+    }
+
+    fn close(&mut self) {
+        for (_, h) in self.drives.drain(..) {
+            // SAFETY: a handle from CreateFileW, closed once.
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
+        }
+    }
+
+    /// Opens the disks without read or write access: the query needs none, nor administrator.
+    fn list(&mut self) {
+        use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+        self.close();
+        for n in 0..32u32 {
+            let w = wide(&format!(r"\\.\PhysicalDrive{n}"));
+            // SAFETY: a NUL-terminated path; the handle is kept and closed in `close`.
+            if let Ok(h) = unsafe { CreateFileW(PCWSTR(w.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) } {
+                if read_disk(h).is_some() {
+                    self.drives.push((n, h));
+                } else {
+                    // SAFETY: as above, never stored.
+                    unsafe {
+                        let _ = windows::Win32::Foundation::CloseHandle(h);
+                    }
+                }
+            }
+        }
+        self.listed = Some(Instant::now());
+    }
+
+    /// Active time and read and write rates since the last call; `None` on the first call or
+    /// without readable disks.
+    fn sample(&mut self) -> Option<(f32, f64, f64)> {
+        if self.listed.is_none_or(|t| t.elapsed() >= DISK_LIST_PERIOD) {
+            self.list();
+        }
+        let now: Vec<(u32, DiskCounters)> = self.drives.iter().filter_map(|(n, h)| read_disk(*h).map(|c| (*n, c))).collect();
+        let out = disk_delta(&self.prev, &now);
+        self.prev = now;
+        out
+    }
+}
+
+impl Drop for DiskIoctl {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn read_disk(h: windows::Win32::Foundation::HANDLE) -> Option<DiskCounters> {
+    use windows::Win32::System::Ioctl::{DISK_PERFORMANCE, IOCTL_DISK_PERFORMANCE};
+    use windows::Win32::System::IO::DeviceIoControl;
+    let mut d = DISK_PERFORMANCE::default();
+    let mut ret = 0u32;
+    // SAFETY: the output buffer is the struct the control code fills.
+    unsafe { DeviceIoControl(h, IOCTL_DISK_PERFORMANCE, None, 0, Some(&mut d as *mut _ as *mut std::ffi::c_void), std::mem::size_of::<DISK_PERFORMANCE>() as u32, Some(&mut ret), None) }.ok()?;
+    Some(DiskCounters { read: d.BytesRead.max(0) as u64, written: d.BytesWritten.max(0) as u64, idle: d.IdleTime, query: d.QueryTime })
 }
 
 /// How often the GPU list is taken again.
@@ -253,6 +333,8 @@ impl Collector {
             gpu_detail_pdh: None,
             nvml: None,
             pawnio: super::pawnio::Source::default(),
+            disk_ioctl: None,
+            pdh_disk_proven: false,
         }
     }
 
@@ -320,16 +402,15 @@ impl Collector {
         // Windows always shows the disk readouts (0% when PDH or its PhysicalDisk counter is
         // missing), as before 0.6; the PDH error below says why they stay at zero.
         snap.disk.available = true;
+        let mut pdh_disk = None;
         if let Some(pdh) = &self.pdh {
             pdh.collect();
             // Disk
-            if let Some(idle) = pdh.value("disk_idle") {
-                snap.disk.active_pct = (100.0 - idle).clamp(0.0, 100.0) as f32;
+            if let (Some(idle), Some(read), Some(write)) = (pdh.value("disk_idle"), pdh.value("disk_read"), pdh.value("disk_write")) {
+                pdh_disk = Some(((100.0 - idle).clamp(0.0, 100.0) as f32, read, write));
             }
-            snap.disk.read_bps = pdh.value("disk_read").unwrap_or(0.0);
             let pagefile_size = snap.memory.swap_total.unwrap_or(0);
             snap.memory.swap_used = pdh.value("pagefile").map(|pct| (pct / 100.0 * pagefile_size as f64) as u64);
-            snap.disk.write_bps = pdh.value("disk_write").unwrap_or(0.0);
             // GPU
             let engines = pdh.array("gpu_engine");
             if !engines.is_empty() {
@@ -358,8 +439,16 @@ impl Collector {
                     snap.cpu.per_core_mhz = cores;
                 }
             }
-        } else {
-            snap.errors.push("PDH unavailable: disk, GPU and thermal readings disabled".into());
+        }
+        let disk = self.disk(pdh_disk);
+        if let Some((active, read, write)) = disk {
+            snap.disk.active_pct = active;
+            snap.disk.read_bps = read;
+            snap.disk.write_bps = write;
+        }
+        if self.pdh.is_none() {
+            let what = if disk.is_some() { "GPU and thermal" } else { "disk, GPU and thermal" };
+            snap.errors.push(format!("PDH unavailable: {what} readings disabled"));
         }
         snap.cpu.base_mhz = clock_base(self.reg_mhz, snap.cpu.pdh_freq_mhz, snap.cpu.mhz_limit, snap.cpu.max_mhz);
         snap.cpu.boost_mhz = snap.cpu.max_mhz.filter(|m| snap.cpu.base_mhz.is_some_and(|b| *m > b));
@@ -434,6 +523,24 @@ impl Collector {
 
     /// Adds the CPU temperature (PawnIO when switched on and working, else HWiNFO's shared
     /// memory when it is up) and the source summary.
+    /// Disk active time and rates: PDH's, or the disks' own counters while PDH's are missing or
+    /// read zero although the disks move data.
+    fn disk(&mut self, pdh: Option<(f32, f64, f64)>) -> Option<(f32, f64, f64)> {
+        if pdh.is_some_and(|(_, r, w)| r + w > 0.0) {
+            self.pdh_disk_proven = true;
+            self.disk_ioctl = None;
+        }
+        if self.pdh_disk_proven {
+            return pdh;
+        }
+        let direct = self.disk_ioctl.get_or_insert_with(DiskIoctl::new).sample();
+        match (pdh, direct) {
+            (Some(p), Some(d)) if p.1 + p.2 > 0.0 || d.1 + d.2 <= 0.0 => Some(p),
+            (_, Some(d)) => Some(d),
+            (p, None) => p,
+        }
+    }
+
     fn thermal(&mut self, snap: &mut Snapshot) {
         let wait = Duration::from_secs(if self.hwinfo.running { 2 } else { 30 });
         if self.hwinfo.at.is_none_or(|t| t.elapsed() >= wait) {
