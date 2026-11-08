@@ -178,6 +178,20 @@ TMOP doesn't update itself. Your settings are kept when you update.
 ## Good to know
 
 - The Docker page appears when Docker is installed; you can hide it in *Settings*. On Windows without Docker, *Settings → Other options → Show the Docker page* lists it to set up TMOP's own engine.
+- **Docker on another computer:** on the Docker page click *Add host…*, choose *SSH* and enter
+  `user@server` (or pick a host you already added with `docker context create`). TMOP never asks
+  for or stores a password: it starts your system's `ssh` (OpenSSH, built into Windows 10 and 11),
+  which signs in with your SSH key. Set that up once in a terminal, then add the host in TMOP:
+
+  ```sh
+  ssh-keygen -t ed25519            # only if you have no key yet
+  ssh-copy-id user@server          # Windows: type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh user@server "cat >> ~/.ssh/authorized_keys"
+  ssh user@server docker version   # must work without a password prompt
+  ```
+
+  A key with a passphrase works when it is loaded in `ssh-agent`. A different key file, user or
+  port goes in `~/.ssh/config` under a `Host` entry, whose name you then enter as the host. The
+  user on the server needs access to Docker (for example by being in the `docker` group).
 - **CPU temperature on Windows:** Windows itself only reports the firmware's ACPI zones. For the
   CPU's own sensor (AMD Ryzen Tctl/Tdie or the Intel package), install the free
   [PawnIO](https://pawnio.eu) driver, switch on *Settings → General → CPU temperature through

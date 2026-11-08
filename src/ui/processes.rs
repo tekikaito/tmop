@@ -150,9 +150,28 @@ fn parent_in(rows: &[ProcessRow], by_pid: &HashMap<u32, usize>, i: usize) -> Opt
     by_pid.get(&r.parent_pid).copied().filter(|p| rows[*p].create_time <= r.create_time && rows[*p].pid != 0)
 }
 
-fn sort_idx(v: &mut [usize], rows: &[ProcessRow], col: Column, desc: bool) {
+/// Sorts entries by `col`; an entry in `aggs` (a group) sorts by the totals it shows instead of its
+/// own process's value, so a group of busy children ranks by what its row reads.
+fn sort_entries(v: &mut [usize], rows: &[ProcessRow], aggs: &HashMap<usize, Agg>, col: Column, desc: bool) {
+    let f = |x: f64, y: f64| x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
+    let own = |i: usize| Agg { cpu: rows[i].cpu_pct, mem: rows[i].private_working_set, read: rows[i].read_bps, write: rows[i].write_bps, gpu: rows[i].gpu_pct };
     v.sort_by(|a, b| {
-        let o = process::compare(&rows[*a], &rows[*b], col);
+        let o = match col {
+            Column::Cpu | Column::Memory | Column::DiskRead | Column::DiskWrite | Column::Disk | Column::Gpu if aggs.contains_key(a) || aggs.contains_key(b) => {
+                let (x, y) = (aggs.get(a).copied().unwrap_or_else(|| own(*a)), aggs.get(b).copied().unwrap_or_else(|| own(*b)));
+                match col {
+                    Column::Cpu => f(x.cpu as f64, y.cpu as f64),
+                    Column::Memory => x.mem.cmp(&y.mem),
+                    Column::DiskRead => f(x.read, y.read),
+                    Column::DiskWrite => f(x.write, y.write),
+                    Column::Disk => f(x.read + x.write, y.read + y.write),
+                    _ => f(x.gpu as f64, y.gpu as f64),
+                }
+            }
+            _ => process::compare(&rows[*a], &rows[*b], col),
+        };
+        // Equal values keep a fixed order (by name), so the list does not shuffle between updates.
+        let o = o.then_with(|| process::compare(&rows[*a], &rows[*b], Column::Name));
         if desc {
             o.reverse()
         } else {
@@ -170,6 +189,8 @@ struct Groups {
     app_procs: usize,
     bg_procs: usize,
     children: HashMap<usize, Vec<usize>>,
+    /// Totals of each entry with children.
+    aggs: HashMap<usize, Agg>,
 }
 
 fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool) -> Groups {
@@ -186,9 +207,11 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
                 }
             }
         }
-        for v in children.values_mut() {
-            sort_idx(v, rows, col, desc);
-        }
+    }
+    // Totals of every group, the ones its row shows; groups sort by them.
+    let aggs: HashMap<usize, Agg> = children.keys().map(|&i| (i, agg_of(i, rows, &children, 0))).collect();
+    for v in children.values_mut() {
+        sort_entries(v, rows, &aggs, col, desc);
     }
     // App membership: windowed processes and everything below them.
     let mut in_app = vec![false; rows.len()];
@@ -199,10 +222,10 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
     }
     let mut apps: Vec<usize> = visible.iter().copied().filter(|i| rows[*i].has_window && !is_child[*i]).collect();
     let mut bg: Vec<usize> = visible.iter().copied().filter(|i| !in_app[*i] && !is_child[*i]).collect();
-    sort_idx(&mut apps, rows, col, desc);
+    sort_entries(&mut apps, rows, &aggs, col, desc);
     let app_procs = visible.iter().filter(|i| in_app[**i]).count();
-    sort_idx(&mut bg, rows, col, desc);
-    Groups { apps, bg, app_procs, bg_procs: visible.len() - app_procs, children }
+    sort_entries(&mut bg, rows, &aggs, col, desc);
+    Groups { apps, bg, app_procs, bg_procs: visible.len() - app_procs, children, aggs }
 }
 
 /// The list rows and what they aggregate.
@@ -555,7 +578,7 @@ impl App {
             let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
             subset = group_rows(rows, &ids, tree, col, desc);
             let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
-            sort_idx(&mut roots, rows, col, desc);
+            sort_entries(&mut roots, rows, &subset.aggs, col, desc);
             (&subset, roots)
         } else {
             (&all, Vec::new())
@@ -704,133 +727,140 @@ impl App {
         let entries = &built.entries;
         let p = ui.painter().clone();
         p.rect_filled(table_rect, 8.0, with_alpha(pal.text, 0.03));
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(table_rect.shrink(1.0)).id_salt("proc-table-box"), |ui| {
+        let table_inner = table_rect.shrink(1.0);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(table_inner).id_salt("proc-table-box"), |ui| {
+            // Columns wider than the window must not paint past the table's box.
+            ui.set_clip_rect(table_inner.intersect(ui.clip_rect()));
             ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
-            let mut table = egui_extras::TableBuilder::new(ui)
-                .id_salt("proc-table")
-                .striped(false)
-                .resizable(true)
-                .sense(Sense::click())
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .auto_shrink([false, false]);
-            for (c, w) in cols.iter().zip(&widths) {
-                table = table.column(if c.is_trend() { egui_extras::Column::exact(*w) } else { egui_extras::Column::initial(*w).at_least(36.0).clip(true) });
-            }
-            table = table.column(egui_extras::Column::remainder().at_least(10.0));
-            table
-                .header(table::HEADER_H, |mut header| {
-                    for (k, c) in cols.iter().enumerate() {
+            // Columns that do not fit are reached by scrolling sideways.
+            egui::ScrollArea::horizontal().id_salt("proc-table-h").auto_shrink([false, false]).show(ui, |ui| {
+                let mut table = egui_extras::TableBuilder::new(ui)
+                    .id_salt("proc-table")
+                    .striped(false)
+                    .resizable(true)
+                    .sense(Sense::click())
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false]);
+                for (c, w) in cols.iter().zip(&widths) {
+                    table = table.column(if c.is_trend() { egui_extras::Column::exact(*w) } else { egui_extras::Column::initial(*w).at_least(36.0).clip(true) });
+                }
+                table = table.column(egui_extras::Column::remainder().at_least(10.0));
+                table
+                    .header(table::HEADER_H, |mut header| {
+                        for (k, c) in cols.iter().enumerate() {
+                            header.col(|ui| {
+                                let r = ui.max_rect();
+                                if !c.is_trend() && (r.width() - widths[k]).abs() > 1.0 {
+                                    resized.push((c.id().to_string(), r.width()));
+                                }
+                                let p = ui.painter();
+                                let rounding = egui::Rounding { nw: if k == 0 { 7.0 } else { 0.0 }, ..Default::default() };
+                                p.rect_filled(r, rounding, pal.panel);
+                                p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
+                                let sorted = col == c.base() && !c.is_trend();
+                                let arrow = if !sorted { "" } else if desc { " \u{2193}" } else { " \u{2191}" };
+                                let label = format!("{}{arrow}", titles[k].to_uppercase());
+                                let (font, color) = if sorted { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
+                                let clip = p.with_clip_rect(r);
+                                if c.right() {
+                                    widgets::tracked_text(&clip, pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, &label, font, color, 0.08);
+                                } else {
+                                    widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
+                                }
+                                let resp = ui.interact(r, ui.id().with(("hdr", c.id())), Sense::click());
+                                if resp.hovered() {
+                                    ui.painter().rect_filled(r, rounding, pal.raise(0.04));
+                                }
+                                if resp.clicked() {
+                                    sort_click = Some(c.base());
+                                }
+                            });
+                        }
                         header.col(|ui| {
                             let r = ui.max_rect();
-                            if !c.is_trend() && (r.width() - widths[k]).abs() > 1.0 {
-                                resized.push((c.id().to_string(), r.width()));
+                            let rounding = egui::Rounding { ne: 7.0, ..Default::default() };
+                            ui.painter().rect_filled(r, rounding, pal.panel);
+                            ui.painter().line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
+                        });
+                    })
+                    .body(|body| {
+                        body.heterogeneous_rows(heights.iter().copied(), |mut row| match &entries[row.index()] {
+                            Entry::Group(name, n) => {
+                                for ci in 0..=cols.len() {
+                                    row.col(|ui| {
+                                        let r = ui.max_rect();
+                                        let p = ui.painter();
+                                        p.rect_filled(r, 0.0, with_alpha(pal.text, 0.02));
+                                        p.line_segment([pos2(r.left(), r.top() + 0.5), pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
+                                        if ci == 0 {
+                                            let clip = p.with_clip_rect(r.expand2(vec2(600.0, 0.0)));
+                                            widgets::tracked_text(&clip, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &format!("{} \u{b7} {n}", name.to_uppercase()), theme::semibold(11.0), pal.text_faint, 0.12);
+                                        }
+                                    });
+                                }
                             }
-                            let p = ui.painter();
-                            let rounding = egui::Rounding { nw: if k == 0 { 7.0 } else { 0.0 }, ..Default::default() };
-                            p.rect_filled(r, rounding, pal.panel);
-                            p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
-                            let sorted = col == c.base() && !c.is_trend();
-                            let arrow = if !sorted { "" } else if desc { " \u{2193}" } else { " \u{2191}" };
-                            let label = format!("{}{arrow}", titles[k].to_uppercase());
-                            let (font, color) = if sorted { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
-                            let clip = p.with_clip_rect(r);
-                            if c.right() {
-                                widgets::tracked_text(&clip, pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, &label, font, color, 0.08);
-                            } else {
-                                widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
+                            Entry::More { key, n } => {
+                                for ci in 0..=cols.len() {
+                                    row.col(|ui| {
+                                        let r = ui.max_rect();
+                                        ui.painter().rect_filled(r, 0.0, with_alpha(pal.text, 0.025));
+                                        if ci == 0 {
+                                            ui.painter().text(pos2(r.left() + 56.0, r.center().y), Align2::LEFT_CENTER, format!("+ {n} more processes"), theme::ui(13.0), pal.text_faint);
+                                        }
+                                    });
+                                }
+                                let resp = row.response();
+                                if resp.clicked() {
+                                    more = Some(*key);
+                                }
+                                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                             }
-                            let resp = ui.interact(r, ui.id().with(("hdr", c.id())), Sense::click());
-                            if resp.hovered() {
-                                ui.painter().rect_filled(r, rounding, pal.raise(0.04));
-                            }
-                            if resp.clicked() {
-                                sort_click = Some(c.base());
+                            Entry::Row { idx, depth, kids, open } => {
+                                let r = &rows[*idx];
+                                let key = (r.pid, r.create_time);
+                                let is_sel = selected == Some(key);
+                                let agg = built.agg.get(idx).copied();
+                                let group_spark;
+                                let trend: Option<(&Series, &Series)> = if agg.is_some() {
+                                    let mut members = Vec::new();
+                                    members_of(*idx, &groups.children, &mut members, 0);
+                                    group_spark = summed_spark(rows, &members, spark);
+                                    Some((&group_spark.0, &group_spark.1))
+                                } else {
+                                    spark.get(&key).map(|s| (&s.0, &s.1))
+                                };
+                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st };
+                                for (ci, c) in cols.iter().enumerate() {
+                                    row.col(|ui| {
+                                        if cell_ui(ui, r, *c, &pal, cx, icons, ci == 0, false) {
+                                            toggle = Some(key);
+                                        }
+                                    });
+                                }
+                                row.col(|ui| {
+                                    cell_ui(ui, r, PCol::Data(Column::Name), &pal, CellCtx { kids: 0, ..cx }, icons, false, true);
+                                });
+                                let resp = row.response();
+                                if resp.clicked() || resp.secondary_clicked() {
+                                    clicked = Some(key);
+                                }
+                                if resp.double_clicked() {
+                                    if *kids > 0 {
+                                        toggle = Some(key);
+                                    } else {
+                                        open_details = Some(key);
+                                    }
+                                }
+                                resp.context_menu(|ui| {
+                                    if let Some(a) = action_menu(ui, r, &proc_caps) {
+                                        menu_pick = Some((a, r.clone()));
+                                    }
+                                });
                             }
                         });
-                    }
-                    header.col(|ui| {
-                        let r = ui.max_rect();
-                        let rounding = egui::Rounding { ne: 7.0, ..Default::default() };
-                        ui.painter().rect_filled(r, rounding, pal.panel);
-                        ui.painter().line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
                     });
-                })
-                .body(|body| {
-                    body.heterogeneous_rows(heights.iter().copied(), |mut row| match &entries[row.index()] {
-                        Entry::Group(name, n) => {
-                            for ci in 0..=cols.len() {
-                                row.col(|ui| {
-                                    let r = ui.max_rect();
-                                    let p = ui.painter();
-                                    p.rect_filled(r, 0.0, with_alpha(pal.text, 0.02));
-                                    p.line_segment([pos2(r.left(), r.top() + 0.5), pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
-                                    if ci == 0 {
-                                        let clip = p.with_clip_rect(r.expand2(vec2(600.0, 0.0)));
-                                        widgets::tracked_text(&clip, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &format!("{} \u{b7} {n}", name.to_uppercase()), theme::semibold(11.0), pal.text_faint, 0.12);
-                                    }
-                                });
-                            }
-                        }
-                        Entry::More { key, n } => {
-                            for ci in 0..=cols.len() {
-                                row.col(|ui| {
-                                    let r = ui.max_rect();
-                                    ui.painter().rect_filled(r, 0.0, with_alpha(pal.text, 0.025));
-                                    if ci == 0 {
-                                        ui.painter().text(pos2(r.left() + 56.0, r.center().y), Align2::LEFT_CENTER, format!("+ {n} more processes"), theme::ui(13.0), pal.text_faint);
-                                    }
-                                });
-                            }
-                            let resp = row.response();
-                            if resp.clicked() {
-                                more = Some(*key);
-                            }
-                            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                        }
-                        Entry::Row { idx, depth, kids, open } => {
-                            let r = &rows[*idx];
-                            let key = (r.pid, r.create_time);
-                            let is_sel = selected == Some(key);
-                            let agg = built.agg.get(idx).copied();
-                            let group_spark;
-                            let trend: Option<(&Series, &Series)> = if agg.is_some() {
-                                let mut members = Vec::new();
-                                members_of(*idx, &groups.children, &mut members, 0);
-                                group_spark = summed_spark(rows, &members, spark);
-                                Some((&group_spark.0, &group_spark.1))
-                            } else {
-                                spark.get(&key).map(|s| (&s.0, &s.1))
-                            };
-                            let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st };
-                            for (ci, c) in cols.iter().enumerate() {
-                                row.col(|ui| {
-                                    if cell_ui(ui, r, *c, &pal, cx, icons, ci == 0, false) {
-                                        toggle = Some(key);
-                                    }
-                                });
-                            }
-                            row.col(|ui| {
-                                cell_ui(ui, r, PCol::Data(Column::Name), &pal, CellCtx { kids: 0, ..cx }, icons, false, true);
-                            });
-                            let resp = row.response();
-                            if resp.clicked() || resp.secondary_clicked() {
-                                clicked = Some(key);
-                            }
-                            if resp.double_clicked() {
-                                if *kids > 0 {
-                                    toggle = Some(key);
-                                } else {
-                                    open_details = Some(key);
-                                }
-                            }
-                            resp.context_menu(|ui| {
-                                if let Some(a) = action_menu(ui, r, &proc_caps) {
-                                    menu_pick = Some((a, r.clone()));
-                                }
-                            });
-                        }
-                    });
-                });
+            });
         });
         if built.entries.is_empty() {
             kit::empty_state(&p, table_rect.shrink2(vec2(0.0, 40.0)), &pal, "No matching processes");
@@ -1726,6 +1756,30 @@ mod tests {
         assert_eq!(flat.apps, vec![1]);
         assert_eq!(flat.bg.len(), 4);
         assert_eq!((flat.app_procs, flat.bg_procs), (1, 4));
+    }
+
+    #[test]
+    fn groups_sort_by_the_totals_they_show() {
+        // A host process idling itself but with a busy child, beside a lone busier process.
+        let mut host = row(10, 1, 5, "svchost.exe");
+        host.cpu_pct = 0.1;
+        let mut child = row(11, 10, 6, "worker.exe");
+        child.cpu_pct = 9.0;
+        child.read_bps = 5e6;
+        let mut lone = row(20, 1, 7, "busy.exe");
+        lone.cpu_pct = 5.0;
+        lone.read_bps = 1e6;
+        let rows = vec![host, child, lone];
+        let visible = vec![0, 1, 2];
+        for col in [Column::Cpu, Column::Disk, Column::DiskRead] {
+            let g = group_rows(&rows, &visible, true, col, true);
+            assert_eq!(g.bg, vec![0, 2], "{col:?} descending");
+            let g = group_rows(&rows, &visible, true, col, false);
+            assert_eq!(g.bg, vec![2, 0], "{col:?} ascending");
+        }
+        // Without grouping each process sorts by its own value.
+        let flat = group_rows(&rows, &visible, false, Column::Cpu, true);
+        assert_eq!(flat.bg, vec![1, 2, 0]);
     }
 
     #[test]
