@@ -368,6 +368,21 @@
             <li>Remove it with <code class="inline">curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall</code></li>
           </ul>
         </div>
+        <div class="cmd-card" data-only="macos">
+          <div class="os-tag">macOS</div>
+          <h3 style="margin:0 0 4px; font-size:17px;">Or install with Homebrew</h3>
+          <p style="margin:0; color:var(--muted); font-size:15px;">If you use <a href="https://brew.sh">Homebrew</a>, paste this into a <b>Terminal</b>:</p>
+          <div class="cmd">
+            <code><span class="p">$ </span>brew install tekikaito/tmop/tmop</code>
+            <button class="copy" data-copy="brew install tekikaito/tmop/tmop">Copy</button>
+          </div>
+          <ul>
+            <li>Puts TMOP.app in <i>Applications</i>, with no "could not verify" prompt</li>
+            <li><code class="inline">brew upgrade</code> keeps it up to date with every new release</li>
+            <li>Remove it with <code class="inline">brew uninstall --cask tmop</code></li>
+            <li>Use either Homebrew or the command above, not both: each installs its own copy</li>
+          </ul>
+        </div>
         <div class="cmd-card" data-only="linux macos">
           <div class="os-tag">Linux and macOS</div>
           <h3 style="margin:0 0 4px; font-size:17px;">Good to know</h3>
@@ -442,6 +457,7 @@
         <div class="a">
           <p data-only="windows"><b>Windows:</b> if you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it.</p>
           <p data-only="linux macos"><b>Linux and macOS:</b> if you used the install command, run it again. Otherwise download the newest version here and replace the old <span data-only="linux">AppImage</span><span data-only="macos">TMOP in <i>Applications</i></span> with it.</p>
+          <p data-only="macos"><b>Installed with Homebrew:</b> run <code>brew upgrade --cask tmop</code> (or just <code>brew upgrade</code>).</p>
           <p>Your settings are kept either way. TMOP doesn't check for updates by itself.</p>
         </div>
       </details>
@@ -455,6 +471,7 @@
           </div>
           <div data-only="linux macos">
             <p><b>Linux and macOS</b>, installed with the command: run <code>curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall</code>. It removes exactly the files it installed.</p>
+            <p data-only="macos"><b>Installed with Homebrew:</b> run <code>brew uninstall --cask tmop</code>; <code>brew uninstall --zap --cask tmop</code> also removes your settings and recordings.</p>
             <p>Downloaded by hand: delete the <span data-only="linux">AppImage</span><span data-only="macos">TMOP app from <i>Applications</i></span>.</p>
             <p data-only="linux">To also remove your settings and recordings, delete <code>~/.config/tmop</code> and <code>~/.local/share/tmop</code>.</p>
             <p data-only="macos">To also remove your settings and recordings, delete <code>~/Library/Application Support/TMOP</code>.</p>

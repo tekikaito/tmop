@@ -75,6 +75,15 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 That puts TMOP.app in `~/Applications` (the *Applications* folder in your home folder) and checks
 the download's SHA-256. Apps installed this way start without the "could not verify" prompt.
 
+Or, if you use [Homebrew](https://brew.sh):
+
+```sh
+brew install tekikaito/tmop/tmop
+```
+
+That puts TMOP.app in `/Applications`, also without the prompt, and `brew upgrade` keeps it up to
+date. Use either Homebrew or the install command, not both: each installs its own copy.
+
 To download it by hand instead, take **`TMOP-macos-universal.dmg`** from the
 **[release page](https://github.com/tekikaito/tmop/releases/latest)**, open it and drag TMOP onto
 *Applications*. One app runs on Apple Silicon and Intel Macs.
@@ -168,6 +177,9 @@ TMOP doesn't update itself. Your settings are kept when you update.
   - Linux and macOS: remove it with
     `curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall`.
     It removes exactly the files it installed.
+- **Installed with Homebrew (macOS)?** Update with `brew upgrade --cask tmop` (or just
+  `brew upgrade`), remove with `brew uninstall --cask tmop`; add `--zap` to also remove your
+  settings.
 - **Downloaded by hand?** Download the newest version and replace the old file (TMOP.exe, the
   AppImage, or TMOP in *Applications*). On Windows, keep the new TMOP.exe in the same place if
   TMOP opens instead of Task Manager. To remove TMOP, delete that file; on Windows, if TMOP opens
