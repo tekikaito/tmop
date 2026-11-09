@@ -187,6 +187,7 @@ pub fn fold_accel(stats: &[AccelStats]) -> GpuSample {
             })
             .collect(),
         processes: Vec::new(),
+        ..Default::default()
     }
 }
 

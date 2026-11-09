@@ -312,6 +312,7 @@ impl Collector {
             ("disk_write", r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"),
             ("gpu_engine", r"\GPU Engine(*)\Utilization Percentage"),
             ("gpu_mem", r"\GPU Adapter Memory(*)\Dedicated Usage"),
+            ("gpu_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
             ("thermal", r"\Thermal Zone Information(*)\Temperature"),
             ("pagefile", r"\Paging File(_Total)\% Usage"),
             // Live clock as a share of base; CurrentMhz from CallNtPowerInformation stays at base.
@@ -340,7 +341,7 @@ impl Collector {
 
     /// Each GPU and, while [`gpu_detail`] is on, its processes and sensors. WDDM's counters are the
     /// base for every vendor; NVML only adds what they lack.
-    fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)]) {
+    fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)], gpu_shared: Option<Vec<(String, f64)>>) {
         // Re-listed now and then: LUIDs change with a driver reset or an eGPU.
         if self.dxgi.as_ref().is_none_or(|d| d.0.elapsed() >= DXGI_PERIOD) {
             self.dxgi = Some((Instant::now(), dxgi_adapters()));
@@ -351,17 +352,13 @@ impl Collector {
             self.nvml = None;
         } else if self.gpu_detail_pdh.is_none() {
             self.gpu_detail_pdh = Some(Pdh::new(&[
-                ("adapter_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
                 ("process_dedicated", r"\GPU Process Memory(*)\Dedicated Usage"),
                 ("process_shared", r"\GPU Process Memory(*)\Shared Usage"),
             ]));
         }
-        let mut mem = GpuMemory { adapter_dedicated: adapter_memory(gpu_mem), ..Default::default() };
+        let mut mem = GpuMemory { adapter_dedicated: adapter_memory(gpu_mem), adapter_shared: gpu_shared.map(|s| adapter_memory(&s)), ..Default::default() };
         if let Some(Some(pdh)) = &self.gpu_detail_pdh {
             pdh.collect();
-            if pdh.counters.contains_key("adapter_shared") {
-                mem.adapter_shared = Some(adapter_memory(&pdh.array("adapter_shared")));
-            }
             if pdh.counters.contains_key("process_dedicated") {
                 mem.process = Some(process_memory(&pdh.array("process_dedicated"), &pdh.array("process_shared")));
             }
@@ -374,7 +371,7 @@ impl Collector {
             let mut ids: Vec<&String> = uses.iter().map(|u| &u.1).collect();
             ids.sort();
             ids.dedup();
-            fallback = ids.into_iter().map(|id| (id.clone(), "GPU".to_string(), None)).collect();
+            fallback = ids.into_iter().map(|id| (id.clone(), "GPU".to_string(), None, None)).collect();
             &fallback
         } else {
             listed
@@ -388,6 +385,7 @@ impl Collector {
         }
         snap.gpu.adapters = adapters;
         snap.gpu.processes = processes;
+        super::common::group_memory(&mut snap.gpu);
     }
 
     pub fn collect(&mut self) -> (Snapshot, Vec<ProcessRow>) {
@@ -420,7 +418,8 @@ impl Collector {
             }
             let gpu_mem = pdh.array("gpu_mem");
             snap.gpu.dedicated_used = gpu_mem.iter().map(|(_, v)| *v as u64).sum();
-            gpu_counters = Some((engines, gpu_mem));
+            let gpu_shared = pdh.counters.contains_key("gpu_shared").then(|| pdh.array("gpu_shared"));
+            gpu_counters = Some((engines, gpu_mem, gpu_shared));
             // Thermal (Kelvin -> Celsius); zones read 0 when the sensor is not implemented.
             snap.thermal.zones = pdh
                 .array("thermal")
@@ -457,8 +456,8 @@ impl Collector {
             snap.cpu.current_mhz = snap.cpu.base_mhz.or(snap.cpu.current_mhz);
         }
         self.thermal(&mut snap);
-        if let Some((engines, gpu_mem)) = gpu_counters {
-            self.gpu_adapters(&mut snap, &engines, &gpu_mem);
+        if let Some((engines, gpu_mem, gpu_shared)) = gpu_counters {
+            self.gpu_adapters(&mut snap, &engines, &gpu_mem, gpu_shared);
         }
         let rows = match self.procs.collect(self.logical, &gpu_by_pid) {
             Ok((rows, t)) => {
@@ -706,7 +705,7 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
             }
             let len = d.Description.iter().position(|c| *c == 0).unwrap_or(d.Description.len());
             let id = format!("0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart);
-            out.push((id, String::from_utf16_lossy(&d.Description[..len]).trim().to_string(), Some(d.DedicatedVideoMemory as u64)));
+            out.push((id, String::from_utf16_lossy(&d.Description[..len]).trim().to_string(), Some(d.DedicatedVideoMemory as u64), Some(d.SharedSystemMemory as u64)));
         }
         out
     }

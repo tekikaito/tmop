@@ -123,6 +123,13 @@ pub struct GpuSample {
     /// Busiest engine type of the busiest adapter, like Windows Task Manager.
     pub utilization_pct: f32,
     pub dedicated_used: u64,
+    /// The GPUs' dedicated memory added up, when a size is known.
+    pub dedicated_total: Option<u64>,
+    /// Shared (system) memory the GPUs use, added up.
+    pub shared_used: Option<u64>,
+    /// How much system memory a GPU may share: the largest GPU's limit, as they draw on the same
+    /// RAM.
+    pub shared_total: Option<u64>,
     /// (engine type, %) for the busiest adapter.
     pub engines: Vec<(String, f32)>,
     /// Each GPU on its own; the fields above stay the grouped view.
@@ -145,6 +152,8 @@ pub struct GpuAdapter {
     pub dedicated_used: Option<u64>,
     pub dedicated_total: Option<u64>,
     pub shared_used: Option<u64>,
+    /// System memory this GPU may use (Windows: DXGI's shared system memory, amdgpu: GTT).
+    pub shared_total: Option<u64>,
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,

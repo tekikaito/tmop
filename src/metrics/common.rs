@@ -145,8 +145,17 @@ pub fn fold_gpu(items: impl IntoIterator<Item = EngineUse>) -> (GpuSample, HashM
     (gpu, per_pid)
 }
 
-/// A GPU the OS lists: (id, name, total dedicated memory).
-pub type KnownAdapter = (String, String, Option<u64>);
+/// A GPU the OS lists: (id, name, total dedicated memory, shared system memory it may use).
+pub type KnownAdapter = (String, String, Option<u64>, Option<u64>);
+
+/// The grouped memory figures from each GPU's: dedicated sizes and shared use add up; the shared
+/// limit is the largest GPU's, since every GPU draws on the same system RAM.
+pub fn group_memory(g: &mut GpuSample) {
+    let sum = |v: Vec<u64>| (!v.is_empty()).then(|| v.iter().sum());
+    g.dedicated_total = sum(g.adapters.iter().filter_map(|a| a.dedicated_total).filter(|t| *t > 0).collect());
+    g.shared_used = sum(g.adapters.iter().filter_map(|a| a.shared_used).collect());
+    g.shared_total = g.adapters.iter().filter_map(|a| a.shared_total).filter(|t| *t > 0).max();
+}
 
 /// Memory counters by adapter id. `None`: not read (see [`super::gpu_detail`]), not zero.
 #[derive(Clone, Debug, Default)]
@@ -174,7 +183,7 @@ pub fn fold_adapters(known: &[KnownAdapter], engines: &[EngineUse], mem: &GpuMem
     let busiest = |e: &[(String, f32)]| e.iter().map(|e| e.1).fold(0.0, f32::max);
     let adapters = known
         .iter()
-        .map(|(id, name, total)| {
+        .map(|(id, name, total, shared_total)| {
             let mut by_engine: HashMap<String, f64> = HashMap::new();
             for (_, _, e, v) in engines.iter().filter(|u| u.1 == *id) {
                 *by_engine.entry(e.clone()).or_default() += v;
@@ -186,8 +195,9 @@ pub fn fold_adapters(known: &[KnownAdapter], engines: &[EngineUse], mem: &GpuMem
                 utilization_pct: busiest(&engines),
                 engines,
                 dedicated_used: mem.adapter_dedicated.get(id).copied(),
-                dedicated_total: *total,
+                dedicated_total: total.filter(|t| *t > 0),
                 shared_used: mem.adapter_shared.as_ref().and_then(|m| m.get(id).copied()),
+                shared_total: shared_total.filter(|t| *t > 0),
                 ..Default::default()
             }
         })
@@ -310,7 +320,7 @@ mod tests {
     #[test]
     fn adapters_and_processes_fold_per_gpu() {
         let e = |p: u32, a: &str, n: &str, v: f64| (p, a.to_string(), n.to_string(), v);
-        let known = vec![("a".to_string(), "RTX 4090".to_string(), Some(24)), ("b".to_string(), "RTX 4070".to_string(), None)];
+        let known = vec![("a".to_string(), "RTX 4090".to_string(), Some(24), Some(32)), ("b".to_string(), "RTX 4070".to_string(), None, None)];
         let uses = [e(1, "a", "3D", 60.0), e(2, "a", "3D", 60.0), e(1, "a", "Copy", 5.0), e(1, "b", "Compute", 30.0), e(0, "a", "3D", 1.0), e(9, "ghost", "3D", 50.0), e(3, "b", "3D", 0.0)];
         let mem = GpuMemory {
             adapter_dedicated: [("a".to_string(), 7)].into(),
@@ -321,6 +331,7 @@ mod tests {
         assert_eq!(adapters[0].utilization_pct, 100.0, "summed over processes, capped");
         assert_eq!((adapters[0].dedicated_used, adapters[0].dedicated_total, adapters[0].shared_used), (Some(7), Some(24), None));
         assert_eq!((adapters[1].utilization_pct, adapters[1].dedicated_used), (30.0, None));
+        assert_eq!((adapters[0].shared_total, adapters[1].shared_total), (Some(32), None));
         procs.sort_by_key(|p| (p.pid, p.gpu_id.clone()));
         let got: Vec<(u32, &str, f32)> = procs.iter().map(|p| (p.pid, p.gpu_id.as_str(), p.utilization_pct)).collect();
         // A process on both GPUs is listed for each; pid 0, unknown adapters and idle ones are not.
@@ -333,13 +344,25 @@ mod tests {
 
     #[test]
     fn a_listed_adapter_without_counters_is_a_duplicate() {
-        let k = |id: &str| (id.to_string(), "RTX".to_string(), None);
+        let k = |id: &str| (id.to_string(), "RTX".to_string(), None, None);
         let known = [k("real"), k("idle"), k("ghost")];
         let uses = [(1, "real".to_string(), "3D".to_string(), 5.0)];
         let mem = GpuMemory { adapter_dedicated: [("idle".to_string(), 1)].into(), ..Default::default() };
         let ids = |a: Vec<GpuAdapter>| a.into_iter().map(|a| a.id).collect::<Vec<_>>();
         assert_eq!(ids(fold_adapters(&known, &uses, &mem, false).0), ["real", "idle"]);
         assert_eq!(ids(fold_adapters(&known, &[], &GpuMemory::default(), false).0), ["real", "idle", "ghost"], "no counters at all");
+    }
+
+    #[test]
+    fn grouped_memory_adds_sizes_and_takes_the_largest_shared_limit() {
+        let a = |d: Option<u64>, su: Option<u64>, st: Option<u64>| GpuAdapter { dedicated_total: d, shared_used: su, shared_total: st, ..Default::default() };
+        let mut g = GpuSample { adapters: vec![a(Some(6), Some(1), Some(16)), a(Some(2), None, Some(14)), a(None, Some(3), None)], ..Default::default() };
+        group_memory(&mut g);
+        assert_eq!((g.dedicated_total, g.shared_used, g.shared_total), (Some(8), Some(4), Some(16)));
+        // Nothing known stays unknown rather than 0.
+        let mut g = GpuSample { adapters: vec![a(None, None, None)], ..Default::default() };
+        group_memory(&mut g);
+        assert_eq!((g.dedicated_total, g.shared_used, g.shared_total), (None, None, None));
     }
 
     #[test]

@@ -489,6 +489,11 @@ impl App {
                     Some((_, a)) => (a.utilization_pct, a.utilization_pct, &a.engines, a.dedicated_used),
                     None => (s.gpu.utilization_pct, fd.smooth.gpu, &s.gpu.engines, Some(s.gpu.dedicated_used)),
                 };
+                // (used, total) of dedicated and of shared memory.
+                let (ded_total, shared) = match one {
+                    Some((_, a)) => (a.dedicated_total, (a.shared_used, a.shared_total)),
+                    None => (s.gpu.dedicated_total, (s.gpu.shared_used, s.gpu.shared_total)),
+                };
                 let value = if s.gpu.available { (format!("{shown_util:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
                 let sub = if one.is_some() { "Busiest engine of this GPU" } else { SOURCES.gpu };
                 let hd = Head { title: &title, sub: sub.into(), value, side: String::new() };
@@ -503,7 +508,7 @@ impl App {
                     let labels = [
                         ("Utilization", on(format!("{util:.0}%"))),
                         ("Busiest engine", dash_or(top.filter(|_| g.available))),
-                        ("Dedicated memory", dash_or(dedicated.filter(|_| g.available).map(|d| format!("{} in use", format_bytes(d as f64))))),
+                        ("Dedicated memory", dash_or(gpu_memory(dedicated, ded_total).filter(|_| g.available))),
                         ("Engines", on(format!("{} reported", engines.len()))),
                     ];
                     figure_at(&p, &pal, Exploded::Gpu, ix + gw, cy, 200.0, &labels);
@@ -521,17 +526,17 @@ impl App {
                     p.text(pos2(ix + iw, cy + 8.0), Align2::RIGHT_CENTER, format!("{v:.0}%"), theme::mono(12.0), pal.text_table());
                     cy += 24.0;
                 }
-                let mut facts = vec![("Utilization".to_string(), format!("{util:.1}%")), (if one.is_some() { "Dedicated used" } else { "Dedicated memory in use" }.to_string(), dash_or(dedicated.map(|d| format_bytes(d as f64))))];
+                let mut facts = vec![("Utilization".to_string(), format!("{util:.1}%")), ("Dedicated memory".to_string(), dash_or(gpu_memory(dedicated, ded_total)))];
+                // Only where the system reports it (Windows, amdgpu): a dash would read as "none".
+                if let Some(text) = gpu_memory(shared.0, shared.1) {
+                    facts.push(("Shared memory".to_string(), text));
+                }
                 if self.caps.gpu_engines {
                     facts.push((if one.is_some() { "Engines" } else { "Engines reported" }.to_string(), engines.len().to_string()));
-                }
-                if let Some((_, a)) = one {
-                    facts.push(("Dedicated total".to_string(), dash_or(a.dedicated_total.map(|t| format_bytes(t as f64)))));
                 }
                 cy += dl(&p, &pal, ix, cy + 4.0, iw, &facts) + 4.0;
                 if let Some((_, a)) = one {
                     let sensors = vec![
-                        ("Shared used".to_string(), dash_or(a.shared_used.map(|u| format_bytes(u as f64)))),
                         ("Temperature".to_string(), dash_or(a.temperature_c.map(|t| self.temp(t)))),
                         ("Power".to_string(), dash_or(a.power_w.map(|w| format!("{w:.0} W")))),
                         ("Clock".to_string(), dash_or(a.clock_mhz.map(|m| format!("{m} MHz")))),
@@ -1212,12 +1217,22 @@ fn figure_at(p: &egui::Painter, pal: &Palette, kind: Exploded, gx: f32, y: f32, 
     hardware::exploded_view(p, Rect::from_min_size(pos2(fx + 150.0 - fw, y + (h - fh) / 2.0), vec2(fw, fh)), kind, pal.text_code(), pal.accent, &labels, FIGURE_W - 28.0 - 150.0 - 18.0 + 16.0, pal);
 }
 
+/// "0.2 / 6.0 GB" with a known size, else what is known of use and size.
+fn gpu_memory(used: Option<u64>, total: Option<u64>) -> Option<String> {
+    match (used, total) {
+        (Some(u), Some(t)) => Some(bytes_pair(u, t)),
+        (Some(u), None) => Some(format!("{} in use", format_bytes(u as f64))),
+        (None, Some(t)) => Some(format!("{} total", format_bytes(t as f64))),
+        (None, None) => None,
+    }
+}
+
 fn dash_or(s: Option<String>) -> String {
     s.unwrap_or_else(|| "\u{2014}".to_string())
 }
 
 /// "19.0 / 31.1 GB": both in the unit of the total.
-fn bytes_pair(used: u64, total: u64) -> String {
+pub(super) fn bytes_pair(used: u64, total: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let (mut i, mut t) = (0, total as f64);
     while t >= 1024.0 && i < U.len() - 1 {
@@ -1304,6 +1319,14 @@ mod tests {
         assert_eq!(bytes_pair(19 << 30, 32 << 30), "19.0 / 32.0 GB");
         assert_eq!(rate_pair(1.2 * 1024.0 * 1024.0, 0.2 * 1024.0 * 1024.0), "\u{2193}1.2 \u{2191}0.2 MB/s");
         assert_eq!(rate_pair(0.0, 0.0), "\u{2193}0.0 \u{2191}0.0 B/s");
+    }
+
+    #[test]
+    fn gpu_memory_reads_use_and_size() {
+        assert_eq!(gpu_memory(Some(237 << 20), Some(6 << 30)).as_deref(), Some("0.2 / 6.0 GB"));
+        assert_eq!(gpu_memory(Some(237 << 20), None).as_deref(), Some("237.0 MB in use"));
+        assert_eq!(gpu_memory(None, Some(16 << 30)).as_deref(), Some("16.0 GB total"));
+        assert_eq!(gpu_memory(None, None), None);
     }
 
     #[test]
