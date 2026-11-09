@@ -261,7 +261,7 @@ impl Collector {
                 procfs::GpuPoll::Read => {
                     let Some(busy) = read_u64(d.join("gpu_busy_percent")) else { continue };
                     let name = read(d.join("product_name")).map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "AMD GPU".into());
-                    let dev = GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")), vram_total: read_u64(d.join("mem_info_vram_total")), id: card_id(&card), name, ..Default::default() };
+                    let dev = GpuDev { engines: vec![("Graphics".into(), busy as f32)], vram_used: read_u64(d.join("mem_info_vram_used")), vram_total: read_u64(d.join("mem_info_vram_total")), shared_used: read_u64(d.join("mem_info_gtt_used")), shared_total: read_u64(d.join("mem_info_gtt_total")), id: card_id(&card), name, ..Default::default() };
                     self.sleepy.insert(card, (now, dev.clone()));
                     devs.push(dev);
                 }

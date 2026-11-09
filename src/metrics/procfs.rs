@@ -286,6 +286,9 @@ pub struct GpuDev {
     /// Dedicated memory in use (bytes), when known.
     pub vram_used: Option<u64>,
     pub vram_total: Option<u64>,
+    /// System memory the GPU uses and may use (amdgpu GTT).
+    pub shared_used: Option<u64>,
+    pub shared_total: Option<u64>,
     /// Stable across samples, even when another GPU's reading fails.
     pub id: String,
     pub name: String,
@@ -314,12 +317,14 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
             engines: d.engines.iter().map(|(e, v)| (e.clone(), v.clamp(0.0, 100.0))).collect(),
             dedicated_used: d.vram_used,
             dedicated_total: d.vram_total,
+            shared_used: d.shared_used,
+            shared_total: d.shared_total,
             temperature_c: d.temperature_c,
             power_w: d.power_w,
             clock_mhz: d.clock_mhz,
-            ..Default::default()
         })
         .collect();
+    super::common::group_memory(&mut g);
     g
 }
 

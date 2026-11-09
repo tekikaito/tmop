@@ -305,7 +305,7 @@ impl App {
             (None, Some(t)) => t,
             (None, None) => "\u{2014}".to_string(),
         };
-        let gpu_footer = if s.gpu.available || s.gpu.dedicated_used > 0 { format!("VRAM {}", format_bytes(s.gpu.dedicated_used as f64)) } else { "No GPU engine counters".to_string() };
+        let gpu_footer = if s.gpu.available || s.gpu.dedicated_used > 0 { format!("VRAM {}", vram_text(s.gpu.dedicated_used, s.gpu.dedicated_total)) } else { "No GPU engine counters".to_string() };
         let (net_value, net_unit) = if s.net_known() { split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps)) } else { ("\u{2014}".to_string(), String::new()) };
         let disk_value = if s.disk_known() { (format!("{:.0}", fd.smooth.disk), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
         let gpu_value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
@@ -319,7 +319,7 @@ impl App {
                 .filter_map(|(i, a)| {
                     let series = fd.hist.gpu_adapter(&a.id)?;
                     let color = lc(fd.metric("gpu"), level_of(a.utilization_pct, GPU_LEVELS));
-                    let vram = a.dedicated_used.map(|u| format!("VRAM {} \u{b7} ", format_bytes(u as f64))).unwrap_or_default();
+                    let vram = a.dedicated_used.map(|u| format!("VRAM {} \u{b7} ", vram_text(u, a.dedicated_total))).unwrap_or_default();
                     Some(Res {
                         label: format!("GPU {i}"),
                         device: Device::Gpu,
@@ -802,6 +802,14 @@ struct Res<'a> {
 }
 
 /// The app group most responsible for `b` (memory by bytes, disk by transfer rate, else CPU).
+/// "1.2 / 8.0 GB" when the size is known, else the use alone.
+fn vram_text(used: u64, total: Option<u64>) -> String {
+    match total {
+        Some(t) if t > 0 => super::performance::bytes_pair(used, t),
+        _ => format_bytes(used as f64),
+    }
+}
+
 fn leader(groups: &[AppGroup], b: Option<Bottleneck>) -> Option<&AppGroup> {
     match b {
         Some(Bottleneck::Memory) => groups.iter().max_by_key(|g| g.memory),

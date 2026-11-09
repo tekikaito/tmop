@@ -312,6 +312,7 @@ impl Collector {
             ("disk_write", r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"),
             ("gpu_engine", r"\GPU Engine(*)\Utilization Percentage"),
             ("gpu_mem", r"\GPU Adapter Memory(*)\Dedicated Usage"),
+            ("gpu_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
             ("thermal", r"\Thermal Zone Information(*)\Temperature"),
             ("pagefile", r"\Paging File(_Total)\% Usage"),
             // Live clock as a share of base; CurrentMhz from CallNtPowerInformation stays at base.
@@ -340,7 +341,7 @@ impl Collector {
 
     /// Each GPU and, while [`gpu_detail`] is on, its processes and sensors. WDDM's counters are the
     /// base for every vendor; NVML only adds what they lack.
-    fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)]) {
+    fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)], gpu_shared: Option<Vec<(String, f64)>>) {
         // Re-listed now and then: LUIDs change with a driver reset or an eGPU.
         if self.dxgi.as_ref().is_none_or(|d| d.0.elapsed() >= DXGI_PERIOD) {
             self.dxgi = Some((Instant::now(), dxgi_adapters()));
@@ -351,17 +352,13 @@ impl Collector {
             self.nvml = None;
         } else if self.gpu_detail_pdh.is_none() {
             self.gpu_detail_pdh = Some(Pdh::new(&[
-                ("adapter_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
                 ("process_dedicated", r"\GPU Process Memory(*)\Dedicated Usage"),
                 ("process_shared", r"\GPU Process Memory(*)\Shared Usage"),
             ]));
         }
-        let mut mem = GpuMemory { adapter_dedicated: adapter_memory(gpu_mem), ..Default::default() };
+        let mut mem = GpuMemory { adapter_dedicated: adapter_memory(gpu_mem), adapter_shared: gpu_shared.map(|s| adapter_memory(&s)), ..Default::default() };
         if let Some(Some(pdh)) = &self.gpu_detail_pdh {
             pdh.collect();
-            if pdh.counters.contains_key("adapter_shared") {
-                mem.adapter_shared = Some(adapter_memory(&pdh.array("adapter_shared")));
-            }
             if pdh.counters.contains_key("process_dedicated") {
                 mem.process = Some(process_memory(&pdh.array("process_dedicated"), &pdh.array("process_shared")));
             }
@@ -374,7 +371,7 @@ impl Collector {
             let mut ids: Vec<&String> = uses.iter().map(|u| &u.1).collect();
             ids.sort();
             ids.dedup();
-            fallback = ids.into_iter().map(|id| (id.clone(), "GPU".to_string(), None)).collect();
+            fallback = ids.into_iter().map(|id| (id.clone(), "GPU".to_string(), None, None)).collect();
             &fallback
         } else {
             listed
@@ -388,6 +385,7 @@ impl Collector {
         }
         snap.gpu.adapters = adapters;
         snap.gpu.processes = processes;
+        super::common::group_memory(&mut snap.gpu);
     }
 
     pub fn collect(&mut self) -> (Snapshot, Vec<ProcessRow>) {
@@ -420,7 +418,8 @@ impl Collector {
             }
             let gpu_mem = pdh.array("gpu_mem");
             snap.gpu.dedicated_used = gpu_mem.iter().map(|(_, v)| *v as u64).sum();
-            gpu_counters = Some((engines, gpu_mem));
+            let gpu_shared = pdh.counters.contains_key("gpu_shared").then(|| pdh.array("gpu_shared"));
+            gpu_counters = Some((engines, gpu_mem, gpu_shared));
             // Thermal (Kelvin -> Celsius); zones read 0 when the sensor is not implemented.
             snap.thermal.zones = pdh
                 .array("thermal")
@@ -457,8 +456,8 @@ impl Collector {
             snap.cpu.current_mhz = snap.cpu.base_mhz.or(snap.cpu.current_mhz);
         }
         self.thermal(&mut snap);
-        if let Some((engines, gpu_mem)) = gpu_counters {
-            self.gpu_adapters(&mut snap, &engines, &gpu_mem);
+        if let Some((engines, gpu_mem, gpu_shared)) = gpu_counters {
+            self.gpu_adapters(&mut snap, &engines, &gpu_mem, gpu_shared);
         }
         let rows = match self.procs.collect(self.logical, &gpu_by_pid) {
             Ok((rows, t)) => {
@@ -698,6 +697,8 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
     unsafe {
         let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return Vec::new() };
         let mut out = Vec::new();
+        // Read once, when there is a GPU to look up.
+        let mut drivers: Option<Vec<(String, u64)>> = None;
         for i in 0.. {
             let Ok(adapter) = factory.EnumAdapters1(i) else { break };
             let Ok(d) = adapter.GetDesc1() else { continue };
@@ -706,10 +707,42 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
             }
             let len = d.Description.iter().position(|c| *c == 0).unwrap_or(d.Description.len());
             let id = format!("0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart);
-            out.push((id, String::from_utf16_lossy(&d.Description[..len]).trim().to_string(), Some(d.DedicatedVideoMemory as u64)));
+            let name = String::from_utf16_lossy(&d.Description[..len]).trim().to_string();
+            let dedicated = d.DedicatedVideoMemory as u64;
+            let drivers = drivers.get_or_insert_with(display_driver_memory);
+            let total = super::common::physical_vram(&name, dedicated, drivers).unwrap_or(dedicated);
+            out.push((id, name, Some(total), Some(d.SharedSystemMemory as u64)));
         }
         out
     }
+}
+
+/// (driver name, physical memory size) of each display driver, from the display adapter class in
+/// the registry: `HardwareInformation.qwMemorySize`, or the 32-bit `HardwareInformation.MemorySize`
+/// of older drivers. What Task Manager shows as the dedicated memory size.
+fn display_driver_memory() -> Vec<(String, u64)> {
+    use crate::pro::winutil::{Key, Value, View};
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    const CLASS: &str = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    let size = |v: Option<Value>| match v? {
+        Value::U64(n) => Some(n),
+        Value::U32(n) => Some(n as u64),
+        Value::Bytes(b) if b.len() >= 8 => Some(u64::from_le_bytes(b[..8].try_into().ok()?)),
+        Value::Bytes(b) if b.len() >= 4 => Some(u32::from_le_bytes(b[..4].try_into().ok()?) as u64),
+        _ => None,
+    };
+    let Some(class) = Key::open(HKEY_LOCAL_MACHINE, CLASS, View::Default) else { return Vec::new() };
+    class
+        .subkeys()
+        .iter()
+        .filter(|k| k.len() == 4 && k.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|k| class.subkey(k))
+        .filter_map(|k| {
+            let name = k.string("DriverDesc")?;
+            let bytes = size(k.value("HardwareInformation.qwMemorySize")).or_else(|| size(k.value("HardwareInformation.MemorySize")))?;
+            Some((name, bytes))
+        })
+        .collect()
 }
 
 /// The PDH `GPU Engine(*)` instances folded by [`fold_gpu`] (unparsable names are skipped).
