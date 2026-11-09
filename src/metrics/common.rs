@@ -148,6 +148,17 @@ pub fn fold_gpu(items: impl IntoIterator<Item = EngineUse>) -> (GpuSample, HashM
 /// A GPU the OS lists: (id, name, total dedicated memory, shared system memory it may use).
 pub type KnownAdapter = (String, String, Option<u64>, Option<u64>);
 
+/// The physical memory size of a GPU named `name`, from the display drivers' (name, size) list in
+/// the registry, when it is at least what DXGI reports. DXGI leaves out what the hardware reserves
+/// (345 MB on a 12 GB card), Task Manager shows the full size. Several drivers of that name must
+/// agree, so two cards of one name with different memory keep DXGI's figure.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn physical_vram(name: &str, dxgi: u64, drivers: &[(String, u64)]) -> Option<u64> {
+    let mut sizes = drivers.iter().filter(|(n, s)| n.trim().eq_ignore_ascii_case(name.trim()) && *s > 0).map(|d| d.1);
+    let first = sizes.next()?;
+    (sizes.all(|s| s == first) && first >= dxgi).then_some(first)
+}
+
 /// The grouped memory figures from each GPU's: dedicated sizes and shared use add up; the shared
 /// limit is the largest GPU's, since every GPU draws on the same system RAM.
 pub fn group_memory(g: &mut GpuSample) {
@@ -351,6 +362,19 @@ mod tests {
         let ids = |a: Vec<GpuAdapter>| a.into_iter().map(|a| a.id).collect::<Vec<_>>();
         assert_eq!(ids(fold_adapters(&known, &uses, &mem, false).0), ["real", "idle"]);
         assert_eq!(ids(fold_adapters(&known, &[], &GpuMemory::default(), false).0), ["real", "idle", "ghost"], "no counters at all");
+    }
+
+    #[test]
+    fn physical_vram_takes_the_drivers_size() {
+        let d = |n: &str, s: u64| (n.to_string(), s);
+        let drivers = [d("NVIDIA GeForce RTX 5070", 12 << 30), d("AMD Radeon(TM) Graphics", 512 << 20), d("Twin", 8 << 30), d("Twin", 12 << 30)];
+        // 12 GB card of which DXGI reports 11.66 GB.
+        assert_eq!(physical_vram("NVIDIA GeForce RTX 5070", 12_520_000_000, &drivers), Some(12 << 30));
+        assert_eq!(physical_vram(" amd radeon(tm) graphics", 509_400_000, &drivers), Some(512 << 20));
+        // Ambiguous name, no driver entry, or a registry size below DXGI's: DXGI stays.
+        assert_eq!(physical_vram("Twin", 1, &drivers), None);
+        assert_eq!(physical_vram("Intel Arc", 1, &drivers), None);
+        assert_eq!(physical_vram("AMD Radeon(TM) Graphics", 1 << 30, &drivers), None);
     }
 
     #[test]

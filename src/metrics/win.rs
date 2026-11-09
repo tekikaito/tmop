@@ -697,6 +697,8 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
     unsafe {
         let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return Vec::new() };
         let mut out = Vec::new();
+        // Read once, when there is a GPU to look up.
+        let mut drivers: Option<Vec<(String, u64)>> = None;
         for i in 0.. {
             let Ok(adapter) = factory.EnumAdapters1(i) else { break };
             let Ok(d) = adapter.GetDesc1() else { continue };
@@ -705,10 +707,42 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
             }
             let len = d.Description.iter().position(|c| *c == 0).unwrap_or(d.Description.len());
             let id = format!("0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart);
-            out.push((id, String::from_utf16_lossy(&d.Description[..len]).trim().to_string(), Some(d.DedicatedVideoMemory as u64), Some(d.SharedSystemMemory as u64)));
+            let name = String::from_utf16_lossy(&d.Description[..len]).trim().to_string();
+            let dedicated = d.DedicatedVideoMemory as u64;
+            let drivers = drivers.get_or_insert_with(display_driver_memory);
+            let total = super::common::physical_vram(&name, dedicated, drivers).unwrap_or(dedicated);
+            out.push((id, name, Some(total), Some(d.SharedSystemMemory as u64)));
         }
         out
     }
+}
+
+/// (driver name, physical memory size) of each display driver, from the display adapter class in
+/// the registry: `HardwareInformation.qwMemorySize`, or the 32-bit `HardwareInformation.MemorySize`
+/// of older drivers. What Task Manager shows as the dedicated memory size.
+fn display_driver_memory() -> Vec<(String, u64)> {
+    use crate::pro::winutil::{Key, Value, View};
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    const CLASS: &str = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    let size = |v: Option<Value>| match v? {
+        Value::U64(n) => Some(n),
+        Value::U32(n) => Some(n as u64),
+        Value::Bytes(b) if b.len() >= 8 => Some(u64::from_le_bytes(b[..8].try_into().ok()?)),
+        Value::Bytes(b) if b.len() >= 4 => Some(u32::from_le_bytes(b[..4].try_into().ok()?) as u64),
+        _ => None,
+    };
+    let Some(class) = Key::open(HKEY_LOCAL_MACHINE, CLASS, View::Default) else { return Vec::new() };
+    class
+        .subkeys()
+        .iter()
+        .filter(|k| k.len() == 4 && k.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|k| class.subkey(k))
+        .filter_map(|k| {
+            let name = k.string("DriverDesc")?;
+            let bytes = size(k.value("HardwareInformation.qwMemorySize")).or_else(|| size(k.value("HardwareInformation.MemorySize")))?;
+            Some((name, bytes))
+        })
+        .collect()
 }
 
 /// The PDH `GPU Engine(*)` instances folded by [`fold_gpu`] (unparsable names are skipped).
