@@ -160,6 +160,11 @@ the PC.
 - You can still reach the real Task Manager: *File* → *Open Windows Task Manager*.
 - Windows remembers where TMOP.exe is. **Before you move or delete TMOP.exe, turn the setting
   off**; otherwise Ctrl+Shift+Esc opens nothing. If you start a moved copy, TMOP offers to fix it.
+- Don't set TMOP.exe to *Run this program as an administrator* (Properties → Compatibility).
+  Windows can't start such a program from Ctrl+Shift+Esc or the taskbar: Ctrl+Shift+Esc does
+  nothing and the taskbar shows *The requested operation requires elevation*. Turning the
+  setting on removes that checkbox, and TMOP offers to remove it if it is set later. To run TMOP
+  as administrator once, right-click it and choose *Run as administrator*.
 - To turn it off without the window, run `TMOP.exe --restore-taskmgr`.
 - If TMOP.exe is already gone, open *Command Prompt* as administrator and run:
 
