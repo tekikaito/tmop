@@ -41,6 +41,12 @@ To download it by hand instead:
 that Windows doesn't know yet. Click **More info**, then **Run anyway**. You only have to do this
 once.
 
+**TMOP doesn't open?** It shows a message saying why and saves it in
+`%LOCALAPPDATA%\TMOP\startup-error.log`; please add that file to a bug report. TMOP draws its
+window with OpenGL 2.0 or newer, which needs a graphics driver: on Windows Server or in a virtual
+machine with only the *Microsoft Basic Display Adapter*, install the driver or turn on GPU
+acceleration for the virtual machine.
+
 ### Linux (x86_64 and ARM64)
 
 In a terminal:

@@ -12,6 +12,7 @@ pub mod process;
 pub mod screensaver;
 pub mod settings;
 pub mod skin;
+pub mod startup;
 pub mod taskmgr;
 pub mod terminal;
 pub mod ui;
