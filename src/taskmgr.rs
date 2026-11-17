@@ -15,6 +15,11 @@
 //!   detached at once (Windows skips the `Debugger` value for processes started under a debugger).
 //!   It does so from an elevated copy, because a non-elevated Task Manager restarts itself
 //!   elevated, and that restart would open TMOP again.
+//! * The registered exe must not carry the "Run this program as an administrator"
+//!   compatibility setting (`RUNASADMIN` under `AppCompatFlags\Layers`): Windows then refuses
+//!   the start from the taskbar with "The requested operation requires elevation", and
+//!   Ctrl+Shift+Esc opens nothing. Turning the replacement on removes that setting, and
+//!   [`admin_flag`] finds it when it is added later.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +31,11 @@ pub const HELPER_ARG: &str = "--set-taskmgr-replacement=";
 pub const RESTORE_ARG: &str = "--restore-taskmgr";
 /// Hidden switch: start the real Task Manager (used elevated when it needs elevation).
 pub const OPEN_REAL_ARG: &str = "--open-taskmgr";
+/// Hidden switch for the elevated helper: removes the all-users "run as administrator"
+/// compatibility setting of the registered exe.
+pub const CLEAR_ADMIN_FLAG_ARG: &str = "--clear-runasadmin";
+/// Compatibility settings per exe (under HKCU for one user, under HKLM for all users).
+pub const LAYERS_KEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 /// Exit code of the helper when the value belongs to another program and was left alone.
 pub const EXIT_NOT_OURS: i32 = 0x2000_0001;
 
@@ -124,6 +134,69 @@ pub fn risky_location(exe: &Path, downloads: Option<&Path>, temp: &Path, removab
     }
 }
 
+/// Where a "Run this program as an administrator" compatibility setting is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminFlag {
+    /// For the current user only (HKCU); removing it needs no administrator rights.
+    User,
+    /// For all users (HKLM), set under "Change settings for all users".
+    AllUsers,
+}
+
+/// True when a `Layers` value (`~ RUNASADMIN HIGHDPIAWARE`) asks to run as administrator.
+pub fn layers_run_as_admin(value: &str) -> bool {
+    value.split_whitespace().any(|t| t.eq_ignore_ascii_case("RUNASADMIN"))
+}
+
+/// A `Layers` value without `RUNASADMIN`, other settings kept; `None` when nothing is left and
+/// the value should be deleted.
+pub fn layers_without_admin(value: &str) -> Option<String> {
+    let rest: Vec<&str> = value.split_whitespace().filter(|t| !t.eq_ignore_ascii_case("RUNASADMIN")).collect();
+    (!rest.iter().all(|t| *t == "~")).then(|| rest.join(" "))
+}
+
+/// The exe Task Manager launches open, when it is a TMOP.exe that exists.
+fn registered_tmop() -> Option<PathBuf> {
+    match state() {
+        State::Ours => Some(this_exe()),
+        State::OtherTmop { path, exists: true } => Some(path),
+        _ => None,
+    }
+}
+
+/// The "run as administrator" compatibility setting of the registered TMOP.exe, if it has one
+/// (per-user first). Only looked for while a TMOP.exe is registered, since only then it matters.
+pub fn admin_flag() -> Option<AdminFlag> {
+    win::admin_flags(&registered_tmop()?).first().copied()
+}
+
+/// True when this exe is set to run as administrator (for this user or all users).
+pub fn this_exe_runs_as_admin() -> bool {
+    !win::admin_flags(&this_exe()).is_empty()
+}
+
+/// Removes the "run as administrator" setting of the registered TMOP.exe: for this user in
+/// this process, for all users through the elevated helper when that one is set too.
+/// Blocks while the helper runs; call it off the UI thread.
+pub fn clear_admin_flag() -> Result<(), String> {
+    let Some(exe) = registered_tmop() else { return Ok(()) };
+    let flags = win::admin_flags(&exe);
+    if flags.contains(&AdminFlag::User) {
+        win::clear_admin_flag(&exe, AdminFlag::User).map_err(describe_exit)?;
+    }
+    if flags.contains(&AdminFlag::AllUsers) {
+        if crate::platform::is_elevated() {
+            win::clear_admin_flag(&exe, AdminFlag::AllUsers).map_err(describe_exit)?;
+        } else {
+            match win::run_elevated(CLEAR_ADMIN_FLAG_ARG, true)? {
+                0 => {}
+                c => return Err(describe_exit(c)),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A launch in place of Task Manager.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskmgrLaunch {
@@ -161,6 +234,13 @@ pub fn run_switches(args: &[String]) -> Option<i32> {
             Err(e) => message(&format!("Windows Task Manager was not restored: {e}"), true),
         }
         return Some(if r.is_ok() { 0 } else { 1 });
+    }
+    if args.iter().any(|a| a == CLEAR_ADMIN_FLAG_ARG) {
+        // The elevated helper; the per-user setting was already removed by the caller.
+        return Some(match registered_tmop() {
+            Some(exe) => win::clear_admin_flag(&exe, AdminFlag::AllUsers).err().unwrap_or(0),
+            None => 0,
+        });
     }
     if args.iter().any(|a| a == OPEN_REAL_ARG) {
         return Some(match open_real() {
@@ -212,7 +292,11 @@ pub fn state() -> State {
 /// Makes the change in this process (needs administrator rights).
 pub fn apply(on: bool) -> Result<(), ApplyError> {
     if on {
-        return win::write_value(&debugger_value(&this_exe())).map_err(ApplyError::Os);
+        win::write_value(&debugger_value(&this_exe())).map_err(ApplyError::Os)?;
+        // Set to run as administrator, TMOP cannot be started from the taskbar or Ctrl+Shift+Esc
+        // at all. This process is elevated, so the all-users setting is removed here; [`set`]
+        // removes the per-user one in the user's own process.
+        return win::clear_admin_flag(&this_exe(), AdminFlag::AllUsers).map_err(ApplyError::Os);
     }
     match state() {
         State::Foreign(v) => Err(ApplyError::NotOurs(v)),
@@ -224,6 +308,9 @@ pub fn apply(on: bool) -> Result<(), ApplyError> {
 /// Turns the replacement on (this exe) or off, elevating through the helper when needed.
 /// Blocks until the helper has finished; call it off the UI thread.
 pub fn set(on: bool) -> Result<(), String> {
+    if on {
+        win::clear_admin_flag(&this_exe(), AdminFlag::User).map_err(describe_exit)?;
+    }
     if crate::platform::is_elevated() {
         return apply(on).map_err(|e| describe_exit(code(Err(e))));
     }
@@ -283,8 +370,8 @@ fn message(text: &str, error: bool) {
 
 #[cfg(windows)]
 mod win {
-    use super::Inbox;
-    use crate::pro::winutil::{wide, Key, View};
+    use super::{AdminFlag, Inbox};
+    use crate::pro::winutil::{long_path, wide, Key, Value, View};
     use std::io::{Read, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::{Path, PathBuf};
@@ -294,7 +381,8 @@ mod win {
     use windows::Win32::System::Diagnostics::Debug::{DebugActiveProcessStop, DebugSetProcessKillOnExit};
     use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_NON_VOLATILE,
+        REG_SAM_FLAGS, REG_SZ,
     };
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows::Win32::System::Threading::{CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, WaitForSingleObject, DEBUG_ONLY_THIS_PROCESS, INFINITE, PROCESS_INFORMATION, STARTUPINFOW};
@@ -363,6 +451,89 @@ mod win {
         Ok(())
     }
 
+
+    /// The `Layers` keys of `scope`. HKLM is read in both registry views: a 32-bit program
+    /// writing there lands in the 32-bit one.
+    fn layers_keys(scope: AdminFlag) -> &'static [(HKEY, View)] {
+        match scope {
+            AdminFlag::User => &[(HKEY_CURRENT_USER, View::Default)],
+            AdminFlag::AllUsers => &[(HKEY_LOCAL_MACHINE, View::Wow64_64), (HKEY_LOCAL_MACHINE, View::Wow64_32)],
+        }
+    }
+
+    /// The values of a `Layers` key that name `exe` (in any spelling) and ask to run it as
+    /// administrator: (value name, data).
+    fn admin_values(root: HKEY, view: View, exe: &Path) -> Vec<(String, String)> {
+        let Some(key) = Key::open(root, super::LAYERS_KEY, view) else { return Vec::new() };
+        let target = long_path(exe).unwrap_or_else(|| exe.to_path_buf());
+        key.values()
+            .into_iter()
+            .filter_map(|(name, value)| match value {
+                Value::Str(s) if super::layers_run_as_admin(&s) => Some((name, s)),
+                _ => None,
+            })
+            .filter(|(name, _)| {
+                let p = Path::new(name);
+                super::same_path(p, exe) || super::same_path(p, &target) || long_path(p).is_some_and(|l| super::same_path(&l, &target))
+            })
+            .collect()
+    }
+
+    /// Where `exe` carries the "run as administrator" setting, per-user first.
+    pub fn admin_flags(exe: &Path) -> Vec<AdminFlag> {
+        [AdminFlag::User, AdminFlag::AllUsers]
+            .into_iter()
+            .filter(|&scope| layers_keys(scope).iter().any(|&(root, view)| !admin_values(root, view, exe).is_empty()))
+            .collect()
+    }
+
+    /// Removes `RUNASADMIN` from the settings of `exe` in `scope` and keeps the others. All
+    /// users (HKLM) needs administrator rights.
+    pub fn clear_admin_flag(exe: &Path, scope: AdminFlag) -> Result<(), i32> {
+        let path = wide(super::LAYERS_KEY);
+        for &(root, view) in layers_keys(scope) {
+            let found = admin_values(root, view, exe);
+            if found.is_empty() {
+                continue;
+            }
+            let sam = KEY_SET_VALUE
+                | match view {
+                    View::Wow64_64 => KEY_WOW64_64KEY,
+                    View::Wow64_32 => KEY_WOW64_32KEY,
+                    View::Default => REG_SAM_FLAGS(0),
+                };
+            let mut h = HKEY::default();
+            // SAFETY: valid NUL-terminated path; `h` is closed below.
+            let st = unsafe { RegOpenKeyExW(root, PCWSTR(path.as_ptr()), 0, sam, &mut h) };
+            if st != ERROR_SUCCESS {
+                return Err(st.0 as i32);
+            }
+            let mut result = ERROR_SUCCESS;
+            for (name, value) in found {
+                let n = wide(&name);
+                let st = match super::layers_without_admin(&value) {
+                    Some(rest) => {
+                        let data: Vec<u8> = wide(&rest).iter().flat_map(|c| c.to_le_bytes()).collect();
+                        // SAFETY: `h` is open; `data` is a NUL-terminated UTF-16 string.
+                        unsafe { RegSetValueExW(h, PCWSTR(n.as_ptr()), 0, REG_SZ, Some(&data)) }
+                    }
+                    // SAFETY: `h` is open; valid NUL-terminated name.
+                    None => unsafe { RegDeleteValueW(h, PCWSTR(n.as_ptr())) },
+                };
+                if st != ERROR_SUCCESS {
+                    result = st;
+                }
+            }
+            // SAFETY: opened above.
+            unsafe {
+                let _ = RegCloseKey(h);
+            }
+            if result != ERROR_SUCCESS {
+                return Err(result.0 as i32);
+            }
+        }
+        Ok(())
+    }
 
     /// Starts this exe elevated with `args`. With `wait`, returns its exit code.
     pub fn run_elevated(args: &str, wait: bool) -> Result<i32, String> {
@@ -511,8 +682,15 @@ mod win {
 
 #[cfg(not(windows))]
 mod win {
-    use super::Inbox;
+    use super::{AdminFlag, Inbox};
     use std::path::{Path, PathBuf};
+
+    pub fn admin_flags(_: &Path) -> Vec<AdminFlag> {
+        Vec::new()
+    }
+    pub fn clear_admin_flag(_: &Path, _: AdminFlag) -> Result<(), i32> {
+        Ok(())
+    }
 
     pub fn read_value() -> Option<String> {
         None
@@ -566,6 +744,19 @@ mod tests {
         assert_eq!(taskmgr_launch(&args(&["--page=processes"])), None);
         assert_eq!(taskmgr_launch(&args(&[r"C:\tools\taskmgr.txt"])), None);
         assert_eq!(taskmgr_launch(&[]), None);
+    }
+
+    #[test]
+    fn reads_and_strips_run_as_admin_layers() {
+        assert!(layers_run_as_admin("~ RUNASADMIN"));
+        assert!(layers_run_as_admin("~ HIGHDPIAWARE runasadmin"));
+        assert!(layers_run_as_admin("RUNASADMIN"));
+        assert!(!layers_run_as_admin("~ HIGHDPIAWARE WIN8RTM"));
+        assert!(!layers_run_as_admin(""));
+        assert_eq!(layers_without_admin("~ RUNASADMIN"), None);
+        assert_eq!(layers_without_admin("RUNASADMIN"), None);
+        assert_eq!(layers_without_admin("~ RUNASADMIN HIGHDPIAWARE"), Some("~ HIGHDPIAWARE".into()));
+        assert_eq!(layers_without_admin("~ WIN7RTM  RUNASADMIN"), Some("~ WIN7RTM".into()));
     }
 
     #[test]

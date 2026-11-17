@@ -835,8 +835,8 @@ mod tests {
         assert_eq!(p.nodes[0].parent, NO_PARENT);
         assert_eq!(p.nodes[1].name, "a");
         assert_eq!(p.nodes[0].children, vec![1]);
-        for i in 1..p.nodes.len() {
-            assert!((p.nodes[i].parent as usize) < i);
+        for (i, n) in p.nodes.iter().enumerate().skip(1) {
+            assert!((n.parent as usize) < i);
         }
         assert_eq!(p.files.len(), 3, "x.bin, nosize.bin, hidden.txt");
         let big = p.files.iter().find(|f| p.names.get(f.name_off, f.name_len) == "x.bin").unwrap();

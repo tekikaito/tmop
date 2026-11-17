@@ -8,13 +8,19 @@ use super::theme::{self, Palette};
 use super::widgets::{Button, ButtonSize, Icon};
 use super::{App, Page};
 use crate::pro::Loader;
-use crate::taskmgr::{self, State};
+use crate::taskmgr::{self, AdminFlag, State};
 use eframe::egui::{self, RichText, ViewportCommand};
 use std::time::{Duration, Instant};
+
+/// Why Task Manager launches fail while TMOP.exe is set to run as administrator.
+const ADMIN_FLAG_TEXT: &str = "TMOP is set to run as administrator (Properties \u{2192} Compatibility), so Windows refuses to open it from Ctrl+Shift+Esc or the taskbar (\u{201c}The requested operation requires elevation\u{201d}).";
 
 pub struct ReplaceUi {
     /// Last state read from the registry.
     pub state: State,
+    /// "Run as administrator" compatibility setting of the registered TMOP.exe, which keeps
+    /// Windows from starting it in place of Task Manager.
+    admin_flag: Option<AdminFlag>,
     read_at: Instant,
     /// An elevated change in progress; its result is the status message.
     job: Loader<String>,
@@ -34,11 +40,12 @@ impl ReplaceUi {
         } else {
             None
         };
-        Self { state: taskmgr::state(), read_at: Instant::now(), job: Loader::default(), confirm: None, banner_dismissed: false, inbox }
+        Self { state: taskmgr::state(), admin_flag: taskmgr::admin_flag(), read_at: Instant::now(), job: Loader::default(), confirm: None, banner_dismissed: false, inbox }
     }
 
     fn refresh(&mut self) {
         self.state = taskmgr::state();
+        self.admin_flag = taskmgr::admin_flag();
         self.read_at = Instant::now();
     }
 
@@ -47,6 +54,14 @@ impl ReplaceUi {
             taskmgr::set(on)
                 .map(|()| if on { "TMOP now opens in place of Windows Task Manager".to_string() } else { "Windows Task Manager is restored".to_string() })
                 .map_err(|e| format!("Task Manager setting not changed: {e}"))
+        });
+    }
+
+    fn start_clear_admin_flag(&mut self) {
+        self.job.start(|| {
+            taskmgr::clear_admin_flag()
+                .map(|()| "TMOP no longer runs as administrator, so Ctrl+Shift+Esc and the taskbar can open it".to_string())
+                .map_err(|e| format!("Run-as-administrator setting not removed: {e}"))
         });
     }
 }
@@ -94,15 +109,46 @@ impl App {
         clicked
     }
 
-    /// Banner shown when Task Manager launches point at a TMOP.exe that no longer exists.
+    /// Banner shown when Task Manager launches cannot open TMOP: the registered TMOP.exe no
+    /// longer exists, or Windows is told to run it as administrator.
     pub fn replace_banner(&mut self, ctx: &egui::Context, pal: &Palette) {
-        let State::OtherTmop { path, exists: false } = &self.replace.state else { return };
         if self.replace.banner_dismissed || !self.caps.taskmgr_replace {
             return;
         }
-        let text = format!("Ctrl+Shift+Esc is set to open TMOP at {}, which no longer exists, so no task manager opens.", path.display());
+        if let State::OtherTmop { path, exists: false } = &self.replace.state {
+            let text = format!("Ctrl+Shift+Esc is set to open TMOP at {}, which no longer exists, so no task manager opens.", path.display());
+            self.missing_exe_banner(ctx, pal, text);
+        } else if self.replace.admin_flag.is_some() {
+            self.admin_flag_banner(ctx, pal);
+        }
+    }
+
+    fn banner_frame(pal: &Palette) -> egui::Frame {
         let warn = theme::status(pal).warn;
-        let frame = egui::Frame::none().fill(theme::mix(pal.body, warn, 0.12)).stroke(egui::Stroke::new(1.0_f32, theme::with_alpha(warn, 0.3))).inner_margin(egui::Margin::symmetric(16.0, 8.0));
+        egui::Frame::none().fill(theme::mix(pal.body, warn, 0.12)).stroke(egui::Stroke::new(1.0_f32, theme::with_alpha(warn, 0.3))).inner_margin(egui::Margin::symmetric(16.0, 8.0))
+    }
+
+    fn admin_flag_banner(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let busy = self.replace.job.is_loading();
+        let (mut fix, mut dismiss) = (false, false);
+        egui::TopBottomPanel::top("taskmgr-banner").frame(Self::banner_frame(pal)).show_separator_line(false).show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                ui.label(RichText::new(ADMIN_FLAG_TEXT).font(theme::ui(13.0)).color(pal.text));
+                ui.add_enabled_ui(!busy, |ui| fix = Button::new("Fix it").size(ButtonSize::Small).show(ui, pal).clicked());
+                dismiss = Button::ghost("Dismiss").size(ButtonSize::Small).show(ui, pal).clicked();
+            });
+        });
+        if fix {
+            self.replace.start_clear_admin_flag();
+        }
+        if dismiss {
+            self.replace.banner_dismissed = true;
+        }
+    }
+
+    fn missing_exe_banner(&mut self, ctx: &egui::Context, pal: &Palette, text: String) {
+        let frame = Self::banner_frame(pal);
         let busy = self.replace.job.is_loading();
         let (mut repoint, mut restore, mut dismiss) = (false, false, false);
         egui::TopBottomPanel::top("taskmgr-banner").frame(frame).show_separator_line(false).show(ctx, |ui| {
@@ -151,6 +197,15 @@ impl App {
             State::OtherTmop { path, exists: false } => note(ui, pal, &format!("Task Manager is set to open {}, which no longer exists.", path.display())),
             State::Foreign(v) => note(ui, pal, &format!("Another program replaces Task Manager: {v}")),
         }
+        if self.replace.admin_flag.is_some() {
+            note(ui, pal, ADMIN_FLAG_TEXT);
+            let mut fix = false;
+            ui.add_space(4.0);
+            ui.add_enabled_ui(!busy, |ui| fix = Button::new("Stop running TMOP as administrator").size(ButtonSize::Medium).show(ui, pal).clicked());
+            if fix {
+                self.replace.start_clear_admin_flag();
+            }
+        }
         if matches!(self.replace.state, State::OtherTmop { .. }) {
             let mut restore = false;
             ui.add_space(4.0);
@@ -168,6 +223,9 @@ impl App {
             "Ctrl+Shift+Esc, the taskbar menu and taskmgr.exe will open TMOP instead of Windows Task Manager, for every user on this PC. Windows will ask for administrator permission.",
         );
         t.push_str(&format!("\n\nThis copy is registered: {exe}\nBefore moving or deleting it, turn this off again (or run TMOP.exe --restore-taskmgr)."));
+        if taskmgr::this_exe_runs_as_admin() {
+            t.push_str("\n\nTMOP is set to run as administrator (Properties \u{2192} Compatibility). Windows cannot start such a program from Ctrl+Shift+Esc or the taskbar, so this setting is removed. You can still right-click TMOP and choose Run as administrator.");
+        }
         if let Some(w) = taskmgr::location_warning() {
             t.push_str(&format!("\n\n{w}"));
         }
