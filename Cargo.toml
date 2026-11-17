@@ -33,7 +33,7 @@ bollard = "0.21.1"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "time", "io-util", "macros", "process", "net"] }
 futures-util = "0.3.34"
 tar = "0.4.46"
-sha2 = "0.10"
+sha2 = "0.11"
 flate2 = "1"
 bytes = "1.12.1"
 alacritty_terminal = { version = "0.26.0", default-features = false }
