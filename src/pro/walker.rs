@@ -492,8 +492,8 @@ mod tests {
         let t = run(&dir);
         assert_eq!(t.nodes.len(), 1 + 3 + 9 + 27 + 81);
         assert_eq!(t.files.len(), t.nodes.len());
-        for i in 1..t.nodes.len() {
-            assert!((t.nodes[i].parent as usize) < i, "node {i}");
+        for (i, n) in t.nodes.iter().enumerate().skip(1) {
+            assert!((n.parent as usize) < i, "node {i}");
         }
         assert_eq!(t.nodes[0].files, t.nodes.len() as u64);
         let _ = std::fs::remove_dir_all(&dir);
