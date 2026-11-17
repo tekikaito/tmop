@@ -49,6 +49,19 @@ pub struct PerfState {
     pub gpu_activity: bool,
     pub gpu_overview_table: TableState,
     pub gpu_table: Option<TableState>,
+    /// The highest temperature seen since TMOP started (°C) and when (`HH:MM`, local time).
+    pub thermal_peak: Option<(f32, String)>,
+}
+
+impl PerfState {
+    /// Records `now_c` (the hottest sensor of a sample) when it is a new peak.
+    pub fn note_temperature(&mut self, now_c: Option<f32>) {
+        let Some(t) = now_c.filter(|t| t.is_finite()) else { return };
+        if self.thermal_peak.as_ref().is_none_or(|(peak, _)| t > *peak) {
+            let (_, _, _, h, m, _) = crate::platform::local_time();
+            self.thermal_peak = Some((t, format!("{h:02}:{m:02}")));
+        }
+    }
 }
 
 /// Docker series copied from the backend for the Performance page.
@@ -614,8 +627,8 @@ impl App {
                     let th = &s.thermal;
                     let zones = th.zones.len();
                     let labels = [
-                        ("Hottest", dash_or(th.max_c().map(|t| self.temp(t)))),
-                        ("Thermal zone", dash_or(th.zones.first().map(|(z, c)| format!("{z} {}", self.temp(*c))))),
+                        ("Hottest now", dash_or(th.max_c().map(|t| self.temp(t)))),
+                        ("Peak since start", dash_or(self.perf.thermal_peak.as_ref().map(|(t, at)| format!("{} at {at}", self.temp(*t))))),
                         ("CPU", dash_or(th.cpu.as_ref().map(|(l, c)| format!("{l} {}", self.temp(*c))))),
                         ("Zones", dash_or((zones > 0).then(|| format!("{zones} thermal zone{}", if zones == 1 { "" } else { "s" })))),
                     ];
@@ -1257,6 +1270,18 @@ fn rate_pair(rx: f64, tx: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_peak_keeps_the_highest_reading() {
+        let mut p = PerfState::default();
+        p.note_temperature(None);
+        assert!(p.thermal_peak.is_none());
+        for t in [47.0, 58.5, 51.0, f32::NAN] {
+            p.note_temperature(Some(t));
+        }
+        assert_eq!(p.thermal_peak.as_ref().map(|(t, _)| *t), Some(58.5));
+        assert_eq!(p.thermal_peak.as_ref().map(|(_, at)| at.len()), Some(5), "HH:MM");
+    }
 
     /// Runs `add` in a few frames of a headless context; the pointer rests at (320, 120) from the
     /// second frame on.

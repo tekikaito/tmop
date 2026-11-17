@@ -997,6 +997,7 @@ impl App {
             self.recorder.on_sample(&snap, &rows);
             let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(&rows, dt);
+            self.perf.note_temperature(snap.thermal.max_c());
         }
         let interval = self.settings.update_speed().interval();
         let hf = self.settings.appearance.high_frequency_visuals;
