@@ -241,6 +241,8 @@ fn main() -> eframe::Result<()> {
         dump();
         return Ok(());
     }
+    // From here on TMOP opens a window: make failures visible (#46).
+    tmop::startup::install_panic_hook();
     let value = |names: &[&str]| args.iter().find_map(|a| names.iter().find_map(|n| a.strip_prefix(n)).map(|v| v.to_string()));
     let popout_only = args.iter().any(|a| a == "--popout");
     let launch = Launch {
@@ -311,4 +313,5 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, settings, status, launch)))),
     )
+    .inspect_err(|e| tmop::startup::report(&e.to_string()))
 }

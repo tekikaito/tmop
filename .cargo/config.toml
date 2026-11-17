@@ -1,0 +1,4 @@
+# Link the C runtime statically on Windows: TMOP.exe then runs without the Visual C++
+# Redistributable (VCRUNTIME140.dll), which fresh Windows Server installs often lack (#46).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
