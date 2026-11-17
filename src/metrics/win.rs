@@ -12,12 +12,11 @@ use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W,
+    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_HCOUNTER, PDH_HQUERY,
 };
 
 /// PDH_FMT_DOUBLE | PDH_FMT_NOCAP100
 const FMT: PDH_FMT = PDH_FMT(0x0000_0200 | 0x0000_8000);
-type PdhHandle = isize;
 use windows::Win32::System::Power::{CallNtPowerInformation, ProcessorInformation};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO};
 use windows::Win32::System::Threading::GetSystemTimes;
@@ -82,20 +81,20 @@ pub fn query_processor_performance(size: usize) -> Result<Vec<u8>, String> {
 
 /// A PDH query with named counters.
 struct Pdh {
-    query: PdhHandle,
-    counters: HashMap<&'static str, PdhHandle>,
+    query: PDH_HQUERY,
+    counters: HashMap<&'static str, PDH_HCOUNTER>,
 }
 
 impl Pdh {
     fn new(paths: &[(&'static str, &str)]) -> Option<Self> {
-        let mut query = PdhHandle::default();
+        let mut query = PDH_HQUERY::default();
         if unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) } != 0 {
             return None;
         }
         let mut counters = HashMap::new();
         for (key, path) in paths {
             let w = wide(path);
-            let mut c = PdhHandle::default();
+            let mut c = PDH_HCOUNTER::default();
             if unsafe { PdhAddEnglishCounterW(query, PCWSTR(w.as_ptr()), 0, &mut c) } == 0 {
                 counters.insert(*key, c);
             }

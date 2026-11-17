@@ -670,7 +670,7 @@ mod ops {
     use crate::engine::wsl::{self, WslProblem};
     use std::time::Instant;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, BOOL};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{CreateEventW, ResetEvent};
 
     pub(super) fn run(sh: &Shared, op: Op) -> Result<(), String> {
@@ -756,7 +756,7 @@ mod ops {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: `wide` is NUL-terminated and alive for the calls; the handle is closed before returning.
         unsafe {
-            let handle = CreateEventW(None, BOOL(1), BOOL(0), PCWSTR(wide.as_ptr())).map_err(|e| format!("CreateEventW failed: {e}"))?;
+            let handle = CreateEventW(None, true, false, PCWSTR(wide.as_ptr())).map_err(|e| format!("CreateEventW failed: {e}"))?;
             let reset = ResetEvent(handle);
             let _ = CloseHandle(handle);
             reset.map_err(|e| format!("ResetEvent failed: {e}"))

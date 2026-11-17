@@ -260,7 +260,7 @@ mod gdi {
                 return None;
             }
             let font = CreateFontIndirectW(&lf);
-            let old = SelectObject(dc, font);
+            let old = SelectObject(dc, font.into());
             let mut face = [0u16; 64];
             GetTextFaceW(dc, Some(&mut face));
             let file = if from_wide(&face).to_lowercase() != family.to_lowercase() {
@@ -272,7 +272,7 @@ mod gdi {
                 font_data(dc, 0).map(|bytes| FontFile { family: family.into(), bytes, index: 0 })
             };
             SelectObject(dc, old);
-            let _ = DeleteObject(font);
+            let _ = DeleteObject(font.into());
             let _ = DeleteDC(dc);
             file
         }

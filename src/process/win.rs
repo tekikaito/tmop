@@ -52,7 +52,8 @@ pub(crate) fn query_system_information(class: u32, initial: usize) -> Result<Vec
 /// PIDs that own a visible, titled, non-tool top-level window, with whether any of
 /// those windows is hung (IsHungAppWindow, Windows' "Not responding").
 fn windowed_pids() -> HashMap<u32, bool> {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongW, GetWindowTextLengthW, GetWindowThreadProcessId, IsHungAppWindow, IsWindowVisible, GWL_EXSTYLE,
         WS_EX_TOOLWINDOW,
@@ -375,9 +376,9 @@ fn token_user(h: &OwnedHandle) -> Option<String> {
         LookupAccountSidW(
             PCWSTR::null(),
             tu.User.Sid,
-            PWSTR(name.as_mut_ptr()),
+            Some(PWSTR(name.as_mut_ptr())),
             &mut nl,
-            PWSTR(domain.as_mut_ptr()),
+            Some(PWSTR(domain.as_mut_ptr())),
             &mut dl,
             &mut use_,
         )

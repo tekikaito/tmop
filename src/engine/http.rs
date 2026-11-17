@@ -98,7 +98,7 @@ fn send(url: &str, verb: &str) -> Result<(Transfer, u32), String> {
     unsafe {
         let session = Handle(WinHttpOpen(PCWSTR(agent.as_ptr()), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if session.0.is_null() {
-            return Err(win_error("WinHttpOpen", windows::core::Error::from_win32()));
+            return Err(win_error("WinHttpOpen", windows::core::Error::from_thread()));
         }
         // Resolve and connect 30 s, send and receive 60 s.
         WinHttpSetTimeouts(session.0, 30_000, 30_000, 60_000, 60_000)
@@ -106,7 +106,7 @@ fn send(url: &str, verb: &str) -> Result<(Transfer, u32), String> {
 
         let connect = Handle(WinHttpConnect(session.0, PCWSTR(host_w.as_ptr()), port, 0));
         if connect.0.is_null() {
-            return Err(win_error("WinHttpConnect", windows::core::Error::from_win32()));
+            return Err(win_error("WinHttpConnect", windows::core::Error::from_thread()));
         }
         let flags = if secure { WINHTTP_FLAG_SECURE } else { Default::default() };
         let request = Handle(WinHttpOpenRequest(
@@ -119,7 +119,7 @@ fn send(url: &str, verb: &str) -> Result<(Transfer, u32), String> {
             flags,
         ));
         if request.0.is_null() {
-            return Err(win_error("WinHttpOpenRequest", windows::core::Error::from_win32()));
+            return Err(win_error("WinHttpOpenRequest", windows::core::Error::from_thread()));
         }
         // Follow redirects, but never downgrade an https download to plain http.
         let policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP.to_ne_bytes();

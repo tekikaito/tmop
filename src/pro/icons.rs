@@ -36,7 +36,7 @@ pub fn file_icon(path: &str) -> Option<IconImage> {
                 return None;
             }
             let mut bm = BITMAP::default();
-            if GetObjectW(bmp, std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut BITMAP as *mut c_void)) == 0 {
+            if GetObjectW(bmp.into(), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut BITMAP as *mut c_void)) == 0 {
                 return None;
             }
             let (bw, bh) = (bm.bmWidth.max(0) as usize, bm.bmHeight.max(0) as usize);
@@ -63,8 +63,8 @@ pub fn file_icon(path: &str) -> Option<IconImage> {
         };
         let color = read(ii.hbmColor);
         let mask = read(ii.hbmMask);
-        let _ = DeleteObject(ii.hbmColor);
-        let _ = DeleteObject(ii.hbmMask);
+        let _ = DeleteObject(ii.hbmColor.into());
+        let _ = DeleteObject(ii.hbmMask.into());
         let _ = DestroyIcon(hicon);
         let (bw, bh, mut px) = color?;
         let has_alpha = px.as_chunks::<4>().0.iter().any(|p| p[3] != 0);

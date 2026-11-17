@@ -143,7 +143,7 @@ pub fn read() -> Result<PowerInfo, String> {
         let mut p: *mut GUID = std::ptr::null_mut();
         if PowerGetActiveScheme(None, &mut p).0 == 0 && !p.is_null() {
             let g = *p;
-            let _ = LocalFree(HLOCAL(p as *mut _));
+            let _ = LocalFree(Some(HLOCAL(p as *mut _)));
             Some(g)
         } else {
             None
@@ -197,7 +197,7 @@ pub fn read() -> Result<PowerInfo, String> {
             .is_ok();
             info.battery = Some(Battery {
                 percent: st.BatteryLifePercent.min(100),
-                charging: ok && bs.Charging.as_bool(),
+                charging: ok && bs.Charging,
                 rate_mw: if ok { bs.Rate as i32 } else { 0 },
                 remaining_mwh: if ok { bs.RemainingCapacity } else { 0 },
                 full_mwh: if ok { bs.MaxCapacity } else { 0 },

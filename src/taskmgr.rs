@@ -376,7 +376,7 @@ mod win {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::{Path, PathBuf};
     use windows::core::{w, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE, HWND};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE};
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, PIPE_ACCESS_INBOUND};
     use windows::Win32::System::Diagnostics::Debug::{DebugActiveProcessStop, DebugSetProcessKillOnExit};
     use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
@@ -398,14 +398,14 @@ mod win {
         let mut h = HKEY::default();
         // SAFETY: valid NUL-terminated path; `h` receives the handle and is closed below.
         let st = unsafe {
-            RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), 0, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY, None, &mut h, None)
+            RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY, None, &mut h, None)
         };
         if st != ERROR_SUCCESS {
             return Err(st.0 as i32);
         }
         let data: Vec<u8> = wide(value).iter().flat_map(|c| c.to_le_bytes()).collect();
         // SAFETY: `h` is open; `data` is a NUL-terminated UTF-16 string.
-        let st = unsafe { RegSetValueExW(h, w!("Debugger"), 0, REG_SZ, Some(&data)) };
+        let st = unsafe { RegSetValueExW(h, w!("Debugger"), None, REG_SZ, Some(&data)) };
         // SAFETY: opened above.
         unsafe {
             let _ = RegCloseKey(h);
@@ -423,7 +423,7 @@ mod win {
         let path = wide(super::IFEO_KEY);
         let mut h = HKEY::default();
         // SAFETY: as in `write_value`.
-        let st = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), 0, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY, &mut h) };
+        let st = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), None, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY, &mut h) };
         if st == ERROR_FILE_NOT_FOUND {
             return Ok(());
         }
@@ -434,7 +434,7 @@ mod win {
         let st = unsafe { RegDeleteValueW(h, w!("Debugger")) };
         let (mut subkeys, mut values) = (1u32, 1u32);
         // SAFETY: `h` is open; only the two counts are written.
-        let info = unsafe { RegQueryInfoKeyW(h, PWSTR::null(), None, None, Some(&mut subkeys), None, None, Some(&mut values), None, None, None, None) };
+        let info = unsafe { RegQueryInfoKeyW(h, None, None, None, Some(&mut subkeys), None, None, Some(&mut values), None, None, None, None) };
         // SAFETY: opened above.
         unsafe {
             let _ = RegCloseKey(h);
@@ -445,7 +445,7 @@ mod win {
         if info == ERROR_SUCCESS && subkeys == 0 && values == 0 {
             // SAFETY: valid NUL-terminated path. A failure only leaves an empty key behind.
             unsafe {
-                let _ = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), KEY_WOW64_64KEY.0, 0);
+                let _ = RegDeleteKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), KEY_WOW64_64KEY.0, None);
             }
         }
         Ok(())
@@ -504,7 +504,7 @@ mod win {
                 };
             let mut h = HKEY::default();
             // SAFETY: valid NUL-terminated path; `h` is closed below.
-            let st = unsafe { RegOpenKeyExW(root, PCWSTR(path.as_ptr()), 0, sam, &mut h) };
+            let st = unsafe { RegOpenKeyExW(root, PCWSTR(path.as_ptr()), None, sam, &mut h) };
             if st != ERROR_SUCCESS {
                 return Err(st.0 as i32);
             }
@@ -515,7 +515,7 @@ mod win {
                     Some(rest) => {
                         let data: Vec<u8> = wide(&rest).iter().flat_map(|c| c.to_le_bytes()).collect();
                         // SAFETY: `h` is open; `data` is a NUL-terminated UTF-16 string.
-                        unsafe { RegSetValueExW(h, PCWSTR(n.as_ptr()), 0, REG_SZ, Some(&data)) }
+                        unsafe { RegSetValueExW(h, PCWSTR(n.as_ptr()), None, REG_SZ, Some(&data)) }
                     }
                     // SAFETY: `h` is open; valid NUL-terminated name.
                     None => unsafe { RegDeleteValueW(h, PCWSTR(n.as_ptr())) },
@@ -596,7 +596,7 @@ mod win {
         let si = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, ..Default::default() };
         let mut pi = PROCESS_INFORMATION::default();
         // SAFETY: valid strings and out structs; the handles are closed below.
-        let r = unsafe { CreateProcessW(PCWSTR(app.as_ptr()), PWSTR(cmd.as_mut_ptr()), None, None, false, DEBUG_ONLY_THIS_PROCESS, None, PCWSTR::null(), &si, &mut pi) };
+        let r = unsafe { CreateProcessW(PCWSTR(app.as_ptr()), Some(PWSTR(cmd.as_mut_ptr())), None, None, false, DEBUG_ONLY_THIS_PROCESS, None, PCWSTR::null(), &si, &mut pi) };
         match r {
             Ok(()) => {
                 // Detach straight away; Task Manager then runs as usual.
@@ -675,7 +675,7 @@ mod win {
         let style = MB_OK | if error { MB_ICONERROR } else { MB_ICONINFORMATION };
         // SAFETY: valid NUL-terminated strings.
         unsafe {
-            MessageBoxW(HWND::default(), PCWSTR(t.as_ptr()), w!("TMOP"), style);
+            MessageBoxW(None, PCWSTR(t.as_ptr()), w!("TMOP"), style);
         }
     }
 }
