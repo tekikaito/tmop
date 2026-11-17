@@ -12,7 +12,8 @@ use super::FrameData;
 use crate::metrics::Series;
 use crate::process::format_rate;
 use crate::skin::{Channel, Color, Fill, FontDesign, FontSpec, FontWeight, Ink, MeterStyle, Quadrant, Skin, SkinSource, Surfaces};
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::epaint::CornerRadiusF32;
 use std::path::{Path, PathBuf};
 
 const WIDTH: f32 = 320.0;
@@ -23,7 +24,7 @@ const PT: f32 = 4.0 / 3.0;
 pub const DEFAULT_TITLE: &str = "TMOP Popout";
 
 pub fn c32(c: Color, opacity: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, (c.a as f32 * opacity.clamp(0.0, 1.0)).round() as u8)
+    theme::rgba_unmultiplied(c.r, c.g, c.b, (c.a as f32 * opacity.clamp(0.0, 1.0)).round() as u8)
 }
 
 /// Default channel colours of the popout.
@@ -161,7 +162,7 @@ fn load_png(ctx: &egui::Context, path: &Path, name: &str) -> Option<(TextureHand
         png::ColorType::GrayscaleAlpha => buf[..w * h * 2].chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
         png::ColorType::Indexed => return None,
     };
-    let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+    let image = theme::color_image_unmultiplied([w, h], &rgba);
     Some((ctx.load_texture(name, image, TextureOptions::NEAREST), vec2(w as f32, h as f32)))
 }
 
@@ -305,7 +306,7 @@ fn accent(skin: &Skin, q: Quadrant, op: f32, metrics: &MetricColors) -> (Color32
 /// Top-process heat band for a row at `t` (0..1 of the busiest): the tile tinted towards the
 /// badge colour, so row text keeps the contrast it has on the tile.
 fn proc_band(p: &Paint, t: f32) -> Color32 {
-    let [r, g, b, _] = p.tile.1.to_srgba_unmultiplied();
+    let [r, g, b, _] = theme::srgba_unmultiplied(p.tile.1);
     mix(Color32::from_rgb(r, g, b), p.badge, 0.10 + 0.14 * t)
 }
 
@@ -466,9 +467,9 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let win_pts = match kind.as_str() {
         "circle" => ellipse_points(Rect::from_center_size(rect.center(), Vec2::splat(rect.width().min(rect.height()))), 96),
         "ellipse" | "oval" => ellipse_points(rect, 96),
-        "capsule" | "pill" => rounded_rect_points(rect, Rounding::same(rect.height().min(rect.width()) / 2.0)),
+        "capsule" | "pill" => rounded_rect_points(rect, CornerRadiusF32::same(rect.height().min(rect.width()) / 2.0)),
         "polygon" => polygon_points(rect, sides as usize, rot),
-        _ => rounded_rect_points(rect, Rounding::same(radius)),
+        _ => rounded_rect_points(rect, CornerRadiusF32::same(radius)),
     };
     fill_vertical_gradient(&painter, &win_pts, p.window.0, p.window.1);
     if let (Some(img), Some(spec)) = (&tex.window, image_spec(surf.window_image.as_ref())) {
@@ -480,7 +481,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let rounded_rect = matches!(kind.as_str(), "rectangle");
     if p.header != p.window || tex.header.is_some() {
         let hr = if rounded_rect { header.shrink2(vec2(border, 0.0)).with_min_y(header.top() + border) } else { header.shrink(4.0) };
-        let r = if rounded_rect { Rounding { nw: (radius - border).max(0.0), ne: (radius - border).max(0.0), sw: 0.0, se: 0.0 } } else { Rounding::same(6.0) };
+        let r = if rounded_rect { CornerRadiusF32 { nw: (radius - border).max(0.0), ne: (radius - border).max(0.0), sw: 0.0, se: 0.0 } } else { CornerRadiusF32::same(6.0) };
         fill_vertical_gradient(&painter, &rounded_rect_points(hr, r), p.header.0, p.header.1);
     }
     if let (Some(img), Some(spec)) = (&tex.header, image_spec(surf.header_image.as_ref())) {
@@ -502,7 +503,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         None => {
             let badge = Rect::from_min_size(pos2(x, hc - 11.5), vec2(23.0, 23.0));
             let br = m.badge_corner_radius.unwrap_or(3.0);
-            painter.rect_stroke(badge, br, Stroke::new(1.0_f32, p.badge_stroke));
+            painter.rect_stroke(badge, br, Stroke::new(1.0_f32, p.badge_stroke), egui::StrokeKind::Outside);
             draw_icon(&painter, badge.shrink2(vec2(3.5, 6.0)), Icon::Pulse, p.title);
             x = badge.right() + 10.0;
         }
@@ -522,8 +523,8 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     // Controls: chevron (skin menu) and close.
     let close = Rect::from_center_size(pos2(header.right() - pad - 8.0, hc), Vec2::splat(20.0));
     let chev = Rect::from_center_size(close.center() - vec2(26.0, 0.0), Vec2::splat(20.0));
-    let close_resp = ui.interact(close, ui.id().with("popout-close"), Sense::click());
-    let chev_resp = ui.interact(chev, ui.id().with("popout-chevron"), Sense::click());
+    let close_resp = ui.interact(close, ui.scope_id().with("popout-close"), Sense::click());
+    let chev_resp = ui.interact(chev, ui.scope_id().with("popout-chevron"), Sense::click());
     let ctl = |hovered: bool| if hovered { p.title } else { p.control };
     painter.line_segment([close.left_top() + vec2(4.0, 4.0), close.right_bottom() - vec2(4.0, 4.0)], Stroke::new(1.6_f32, ctl(close_resp.hovered())));
     painter.line_segment([close.right_top() + vec2(-4.0, 4.0), close.left_bottom() + vec2(4.0, -4.0)], Stroke::new(1.6_f32, ctl(close_resp.hovered())));
@@ -532,20 +533,20 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     ev.menu = chev_resp.clicked();
     ev.chevron = Some(chev_resp);
     let drag_rect = Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom()));
-    let drag = ui.interact(drag_rect, ui.id().with("popout-drag"), egui::Sense::click_and_drag());
+    let drag = ui.interact(drag_rect, ui.scope_id().with("popout-drag"), egui::Sense::click_and_drag());
     ev.drag = drag.drag_started();
 
     // Tiles.
     let tile_r = m.tile_corner_radius.unwrap_or(6.0);
     let tile_sw = m.tile_stroke_width.unwrap_or(1.0);
     let tile_bg = |r: Rect| {
-        fill_vertical_gradient(&painter, &rounded_rect_points(r, Rounding::same(tile_r)), p.tile.0, p.tile.1);
+        fill_vertical_gradient(&painter, &rounded_rect_points(r, CornerRadiusF32::same(tile_r)), p.tile.0, p.tile.1);
         if let Some((g0, g1)) = p.tile_gloss {
             let gloss = Rect::from_min_size(r.min, vec2(r.width(), r.height() * 0.5));
-            fill_vertical_gradient(&painter, &rounded_rect_points(gloss, Rounding { nw: tile_r, ne: tile_r, sw: 0.0, se: 0.0 }), g0, g1);
+            fill_vertical_gradient(&painter, &rounded_rect_points(gloss, CornerRadiusF32 { nw: tile_r, ne: tile_r, sw: 0.0, se: 0.0 }), g0, g1);
         }
         if let Some(ts) = p.tile_stroke {
-            painter.rect_stroke(r, tile_r, Stroke::new(tile_sw, ts));
+            painter.rect_stroke(r, tile_r, Stroke::new(tile_sw, ts), egui::StrokeKind::Outside);
         }
     };
     let mut y = header.bottom() + l.header_gap;
@@ -721,8 +722,8 @@ fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, 
     hline(header.bottom() + 0.5);
     let close = Rect::from_center_size(pos2(header.right() - 22.0, hc), Vec2::splat(28.0));
     let chev = Rect::from_center_size(close.center() - vec2(36.0, 0.0), Vec2::splat(28.0));
-    let close_resp = ui.interact(close, ui.id().with("popout-close"), Sense::click());
-    let chev_resp = ui.interact(chev, ui.id().with("popout-chevron"), Sense::click());
+    let close_resp = ui.interact(close, ui.scope_id().with("popout-close"), Sense::click());
+    let chev_resp = ui.interact(chev, ui.scope_id().with("popout-chevron"), Sense::click());
     for (r, resp) in [(close, &close_resp), (chev, &chev_resp)] {
         if resp.hovered() {
             painter.rect_filled(r, 4.0, fade(pal.raise(0.08)));
@@ -737,7 +738,7 @@ fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, 
     ev.close = close_resp.clicked();
     ev.menu = chev_resp.clicked();
     ev.chevron = Some(chev_resp);
-    let drag = ui.interact(Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom())), ui.id().with("popout-drag"), Sense::click_and_drag());
+    let drag = ui.interact(Rect::from_min_max(header.min, pos2(chev.left() - 2.0, header.bottom())), ui.scope_id().with("popout-drag"), Sense::click_and_drag());
     ev.drag = drag.drag_started();
 
     // Tiles: label and value over a 20 px history, a hairline between them.
@@ -830,7 +831,7 @@ fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, 
         painter.text(pos2(rr.right() - 6.0, rr.center().y), Align2::RIGHT_CENTER, format!("{:.1}%", r.cpu_pct), rowv_f.clone(), if own { p.faint } else { p.primary });
     }
     if let Some(ws) = p.window_stroke {
-        painter.rect_stroke(rect, radius, Stroke::new(skin.metrics.as_ref().and_then(|m| m.border_width).unwrap_or(1.0), ws));
+        painter.rect_stroke(rect, radius, Stroke::new(skin.metrics.as_ref().and_then(|m| m.border_width).unwrap_or(1.0), ws), egui::StrokeKind::Outside);
     }
     ev
 }
@@ -873,7 +874,7 @@ fn draw_vertical(skin: &Skin, painter: &egui::Painter, cell: Rect, r: &Reading, 
     let well = Rect::from_min_max(pos2(inner.left(), inner.top() + label_f.size + 4.0), pos2(inner.right(), inner.bottom() - label_f.size - 6.0));
     painter.rect_filled(well, 0.0, ground);
     if meters.flat != Some(true) {
-        painter.rect_stroke(well, 0.0, Stroke::new(1.0_f32, with_alpha(Color32::WHITE, 0.15 * op)));
+        painter.rect_stroke(well, 0.0, Stroke::new(1.0_f32, with_alpha(Color32::WHITE, 0.15 * op)), egui::StrokeKind::Outside);
     } else {
         // Etched: dark top-left, light bottom-right (the classic sunken box).
         painter.line_segment([well.left_bottom(), well.left_top()], Stroke::new(1.0_f32, p.rule));
@@ -956,7 +957,7 @@ fn draw_gauge(skin: &Skin, painter: &egui::Painter, cell: Rect, r: &Reading, acc
 }
 
 fn skin_color(c: Color32) -> Color {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = theme::srgba_unmultiplied(c);
     Color::rgba(r, g, b, a)
 }
 
@@ -1077,13 +1078,13 @@ mod tests {
         let rows = vec![crate::process::ProcessRow { pid: 4, name: "chrome.exe".into(), cpu_pct: 18.4, ..Default::default() }];
         let mut icons = IconCache::new(&ctx);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default(), gpus_separated: false };
                     let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
                     assert!(!ev.close && !ev.menu);
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

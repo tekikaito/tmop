@@ -580,8 +580,8 @@ mod tests {
         theme::install_fonts(&ctx, None);
         let kinds = [Hardware::Cpu, Hardware::Memory, Hardware::Disk, Hardware::Hdd, Hardware::Gpu, Hardware::Network, Hardware::Battery, Hardware::Npu, Hardware::Mainboard, Hardware::CpuExploded];
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let p = ui.painter().clone();
                     for kind in kinds {
                         let (vw, vh) = kind.view_box();
@@ -592,7 +592,7 @@ mod tests {
                         exploded_view(&p, Rect::from_min_size(pos2(40.0, 40.0), vec2(150.0, 180.0)), kind, theme::DARK.text, theme::DARK.accent, &[("a", "b"), ("c", "d"), ("e", "f"), ("g", "h")], 200.0, &theme::DARK);
                     }
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

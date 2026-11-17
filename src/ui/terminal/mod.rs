@@ -162,7 +162,7 @@ impl TerminalView {
     /// clicked or typed in the terminal, so the caller can mark the tab active.
     pub fn show(&mut self, ui: &mut egui::Ui, rect: Rect, pal: &Palette, emulator: &Arc<Mutex<Emulator>>, transport: &mut dyn Transport) -> bool {
         let font = theme::mono(self.font_size);
-        let (cell_w, row_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let (cell_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let inner = rect.shrink(PAD);
         let (cols, rows) = grid_for(ui, rect);
         if self.grid != Some((cols, rows)) {
@@ -306,7 +306,7 @@ impl TerminalView {
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, bg);
         let frame = if flashing { pal.accent } else { pal.panel_stroke };
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, frame));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, frame), egui::StrokeKind::Outside);
 
         let (cells, cursor, offset, history) = {
             let emu = lock(emulator);
@@ -332,7 +332,7 @@ impl TerminalView {
                     }
                 }
                 CursorShape::Block => {
-                    clip.rect_stroke(cell_rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, pal.accent));
+                    clip.rect_stroke(cell_rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, pal.accent), egui::StrokeKind::Outside);
                 }
                 CursorShape::Underline => {
                     clip.rect_filled(Rect::from_min_size(pos2(origin.x, cell_rect.bottom() - BAR), vec2(width, BAR)), 0.0, pal.accent);
@@ -379,7 +379,7 @@ fn lock(emulator: &Arc<Mutex<Emulator>>) -> MutexGuard<'_, Emulator> {
 fn copy_selection(ui: &egui::Ui, emu: &mut Emulator) -> bool {
     match emu.selection_text().filter(|t| !t.is_empty()) {
         Some(text) => {
-            ui.output_mut(|o| o.copied_text = text);
+            ui.ctx().copy_text(text);
             emu.selection_clear();
             true
         }
@@ -405,7 +405,7 @@ fn terminal_bg(pal: &Palette) -> Color32 {
 }
 
 fn luma(c: Color32) -> u32 {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    let [r, g, b, _] = theme::srgba_unmultiplied(c);
     r as u32 + g as u32 + b as u32
 }
 
@@ -413,7 +413,7 @@ fn luma(c: Color32) -> u32 {
 /// computes them. Use it to open a session at the size the view will show.
 pub fn grid_for(ui: &egui::Ui, rect: Rect) -> (usize, usize) {
     let font = theme::mono(DEFAULT_FONT_SIZE);
-    let (cell_w, row_h) = ui.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    let (cell_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     grid_size(rect.shrink(PAD), cell_w, row_h)
 }
 

@@ -5,7 +5,7 @@
 use super::kit::{self, DialogButton};
 use super::settings_page::{note, toggle_row_hint};
 use super::theme::{self, Palette};
-use super::widgets::{Button, ButtonSize, Icon};
+use super::widgets::{self, Button, ButtonSize, Icon};
 use super::{App, Page};
 use crate::pro::Loader;
 use crate::taskmgr::{self, AdminFlag, State};
@@ -111,27 +111,27 @@ impl App {
 
     /// Banner shown when Task Manager launches cannot open TMOP: the registered TMOP.exe no
     /// longer exists, or Windows is told to run it as administrator.
-    pub fn replace_banner(&mut self, ctx: &egui::Context, pal: &Palette) {
+    pub fn replace_banner(&mut self, root: &mut egui::Ui, pal: &Palette) {
         if self.replace.banner_dismissed || !self.caps.taskmgr_replace {
             return;
         }
         if let State::OtherTmop { path, exists: false } = &self.replace.state {
             let text = format!("Ctrl+Shift+Esc is set to open TMOP at {}, which no longer exists, so no task manager opens.", path.display());
-            self.missing_exe_banner(ctx, pal, text);
+            self.missing_exe_banner(root, pal, text);
         } else if self.replace.admin_flag.is_some() {
-            self.admin_flag_banner(ctx, pal);
+            self.admin_flag_banner(root, pal);
         }
     }
 
     fn banner_frame(pal: &Palette) -> egui::Frame {
         let warn = theme::status(pal).warn;
-        egui::Frame::none().fill(theme::mix(pal.body, warn, 0.12)).stroke(egui::Stroke::new(1.0_f32, theme::with_alpha(warn, 0.3))).inner_margin(egui::Margin::symmetric(16.0, 8.0))
+        widgets::stroke_outside(egui::Frame::new().fill(theme::mix(pal.body, warn, 0.12)).stroke(egui::Stroke::new(1.0_f32, theme::with_alpha(warn, 0.3))).inner_margin(egui::Margin::symmetric(16, 8)))
     }
 
-    fn admin_flag_banner(&mut self, ctx: &egui::Context, pal: &Palette) {
+    fn admin_flag_banner(&mut self, root: &mut egui::Ui, pal: &Palette) {
         let busy = self.replace.job.is_loading();
         let (mut fix, mut dismiss) = (false, false);
-        egui::TopBottomPanel::top("taskmgr-banner").frame(Self::banner_frame(pal)).show_separator_line(false).show(ctx, |ui| {
+        egui::Panel::top("taskmgr-banner").resizable(false).frame(Self::banner_frame(pal)).show_separator_line(false).show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 ui.label(RichText::new(ADMIN_FLAG_TEXT).font(theme::ui(13.0)).color(pal.text));
@@ -147,11 +147,11 @@ impl App {
         }
     }
 
-    fn missing_exe_banner(&mut self, ctx: &egui::Context, pal: &Palette, text: String) {
+    fn missing_exe_banner(&mut self, root: &mut egui::Ui, pal: &Palette, text: String) {
         let frame = Self::banner_frame(pal);
         let busy = self.replace.job.is_loading();
         let (mut repoint, mut restore, mut dismiss) = (false, false, false);
-        egui::TopBottomPanel::top("taskmgr-banner").frame(frame).show_separator_line(false).show(ctx, |ui| {
+        egui::Panel::top("taskmgr-banner").resizable(false).frame(frame).show_separator_line(false).show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
                 ui.label(RichText::new(text).font(theme::ui(13.0)).color(pal.text));

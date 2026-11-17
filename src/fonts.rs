@@ -366,9 +366,9 @@ mod tests {
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx, Some(egui_gets));
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| ui.label(egui::RichText::new("TMOP 42%").font(theme::display(20.0))));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| ui.label(egui::RichText::new("TMOP 42%").font(theme::display(20.0))));
+            }).drop_without_applying_deltas();
         }
     }
 

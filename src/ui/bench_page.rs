@@ -54,12 +54,9 @@ fn clock(d: Duration) -> String {
 
 /// A single-line field in the page's mono input style (36 px).
 fn mono_input(ui: &mut egui::Ui, text: &mut String, width: f32, hint: &str, pal: &theme::Palette) -> egui::Response {
-    egui::Frame::none()
-        .fill(pal.control)
-        .stroke(egui::Stroke::new(1.0_f32, pal.control_stroke))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(12.0, 9.0))
-        .show(ui, |ui| ui.add(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(pal.text_faint)).desired_width(width - 26.0).frame(false).font(theme::mono(12.0))))
+    let frame = egui::Frame::new().fill(pal.control).stroke(egui::Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 9));
+    widgets::stroke_outside(frame)
+        .show(ui, |ui| ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(pal.text_faint)).desired_width(width - 26.0 + 8.0).font(theme::mono(12.0)), false)))
         .inner
 }
 
@@ -259,7 +256,7 @@ impl App {
             widgets::accent_card(&p, r, &pal, pal.accent, fd.bloom);
         } else {
             p.rect_filled(r, 8.0, pal.card);
-            p.rect_stroke(r, 8.0, egui::Stroke::new(1.0_f32, pal.card_stroke));
+            p.rect_stroke(r, 8.0, egui::Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
         }
         let hist: Vec<&BenchResult> = self.bench.history.iter().filter(|h| h.test == t).collect();
         let latest = hist.last().copied();
@@ -321,7 +318,7 @@ impl App {
 
         // Run link next to the value.
         let btn = Rect::from_min_max(pos2(r.right() - 16.0 - 70.0, vy), pos2(r.right() - 16.0, vy + 28.0));
-        let resp = ui.interact(btn, ui.id().with(("bench-run", t.id())), Sense::click());
+        let resp = ui.interact(btn, ui.scope_id().with(("bench-run", t.id())), Sense::click());
         let label_c = if running { pal.text_faint } else if resp.hovered() { pal.text } else { pal.accent };
         if is_running {
             clip.text(btn.right_center(), Align2::RIGHT_CENTER, "Running\u{2026}", theme::semibold(12.5), label_c);

@@ -1,6 +1,6 @@
 //! Colours, fonts and egui style (dark and light palettes).
 
-use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle, Vec2};
+use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, CornerRadius, Margin, Stroke, TextStyle, Vec2};
 use std::sync::Arc;
 
 pub const MICHROMA: &[u8] = include_bytes!("../../assets/fonts/Michroma-Regular.ttf");
@@ -43,6 +43,12 @@ pub fn mono_medium(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(F_MONO_MEDIUM.into()))
 }
 
+/// A label for egui's own buttons, check boxes, radio buttons, combo boxes and selectable labels
+/// in `TextStyle::Button` (semibold), as egui 0.29 drew them; since 0.37 they use `TextStyle::Body`.
+pub fn button_text(text: impl Into<egui::RichText>) -> egui::RichText {
+    text.into().text_style(TextStyle::Button)
+}
+
 /// Installs the application fonts (see [`font_definitions`]). Takes effect from the next frame.
 pub fn install_fonts(ctx: &egui::Context, display: Option<crate::fonts::FontFile>) {
     ctx.set_fonts(font_definitions(display));
@@ -57,9 +63,9 @@ pub fn font_definitions(display: Option<crate::fonts::FontFile>) -> FontDefiniti
         Some(f) => FontData { index: f.index, ..FontData::from_owned(f.bytes) },
         None => FontData::from_static(INTER_LIGHT),
     };
-    defs.font_data.insert(F_DISPLAY.into(), display);
+    defs.font_data.insert(F_DISPLAY.into(), Arc::new(display));
     for (name, bytes) in [("inter-light", INTER_LIGHT), ("inter", INTER), ("inter-medium", INTER_MEDIUM), ("jbmono", JBMONO), ("jbmono-medium", JBMONO_MEDIUM)] {
-        defs.font_data.insert(name.into(), FontData::from_static(bytes));
+        defs.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
     }
     let default_prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let default_mono = defs.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
@@ -534,14 +540,14 @@ impl Palette {
     /// Applies the palette to egui's own widgets (combos, sliders, text edits, menus). egui keeps
     /// one style per OS theme; both get this palette, so a Windows theme change can't swap it out.
     pub fn apply(&self, ctx: &egui::Context) {
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = self.body;
         // Glass: dialogs, menus and popups let the backdrop show through a little.
         v.window_fill = with_alpha(mix(self.body, self.card, 0.6), 0.95);
         v.window_stroke = Stroke::new(1.0_f32, with_alpha(self.text, 0.10));
-        v.window_rounding = Rounding::same(10.0);
-        v.menu_rounding = Rounding::same(8.0);
+        v.window_corner_radius = CornerRadius::same(10);
+        v.menu_corner_radius = CornerRadius::same(8);
         v.extreme_bg_color = self.control;
         v.faint_bg_color = self.hover;
         v.code_bg_color = self.control;
@@ -557,34 +563,53 @@ impl Palette {
         v.widgets.inactive.weak_bg_fill = self.control;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, self.control_stroke);
         v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.inactive.rounding = Rounding::same(6.0);
+        v.widgets.inactive.corner_radius = CornerRadius::same(6);
         v.widgets.hovered.bg_fill = self.hover;
         v.widgets.hovered.weak_bg_fill = self.hover;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.hovered.rounding = Rounding::same(6.0);
+        v.widgets.hovered.corner_radius = CornerRadius::same(6);
         v.widgets.active.bg_fill = self.selection;
         v.widgets.active.weak_bg_fill = self.selection;
         v.widgets.active.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.on_selection());
-        v.widgets.active.rounding = Rounding::same(6.0);
+        v.widgets.active.corner_radius = CornerRadius::same(6);
         v.widgets.open.bg_fill = self.control;
         v.widgets.open.weak_bg_fill = self.control;
         v.widgets.open.bg_stroke = Stroke::new(1.0_f32, self.accent);
         v.widgets.open.fg_stroke = Stroke::new(1.0_f32, self.text);
-        v.widgets.open.rounding = Rounding::same(6.0);
+        v.widgets.open.corner_radius = CornerRadius::same(6);
         v.slider_trailing_fill = true;
-        v.popup_shadow = egui::epaint::Shadow { offset: Vec2::new(0.0, 16.0), blur: 48.0, spread: 0.0, color: Color32::from_black_alpha(140) };
+        v.popup_shadow = egui::epaint::Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(140) };
         v.window_shadow = v.popup_shadow;
         v.striped = false;
+        // egui 0.37 defaults that differ from 0.29, set back so the look stays the same: round
+        // slider handles, hovered/pressed widgets expanded by 1 px, 2 px rounding on non-interactive
+        // frames, and weak text as a tint towards the panel rather than translucent text.
+        v.handle_shape = egui::style::HandleShape::Circle;
+        v.widgets.noninteractive.corner_radius = CornerRadius::same(2);
+        v.widgets.hovered.expansion = 1.0;
+        v.widgets.active.expansion = 1.0;
+        v.weak_text_color = Some(egui::ecolor::tint_color_towards(self.text, self.panel));
         style.visuals = v;
+        // Likewise: 0.29 animated in 1/12 s (0.37: 0.2 s), had no faded scroll-area edges and no
+        // rubber-band overscroll, a 5 px window resize grab, and no "Unaligned" debug marks.
+        style.animation_time = 1.0 / 12.0;
+        style.spacing.scroll.fade.strength = 0.0;
+        style.spacing.scroll.kinetic.rubber_band = false;
+        style.interaction.resize_grab_radius_side = 5.0;
+        #[cfg(debug_assertions)]
+        {
+            style.debug.show_unaligned = false;
+        }
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
         style.spacing.button_padding = Vec2::new(12.0, 6.0);
         style.spacing.interact_size = Vec2::new(40.0, 30.0);
         style.spacing.combo_width = 180.0;
         style.spacing.slider_width = 160.0;
-        style.spacing.menu_margin = Margin::same(6.0);
-        style.spacing.window_margin = Margin::same(10.0);
+        // 6 and 10 px inside the 1 px border, which egui (since 0.31) counts into the margin.
+        style.spacing.menu_margin = Margin::same(5);
+        style.spacing.window_margin = Margin::same(9);
         style.text_styles = [
             (TextStyle::Small, ui(11.0)),
             (TextStyle::Body, ui(13.0)),
@@ -715,24 +740,57 @@ impl MetricColors {
     }
 }
 
+/// `Color32::from_rgba_unmultiplied` as egui 0.29 had it: alpha premultiplied in linear space.
+/// Since 0.32 egui premultiplies in gamma space, which makes translucent colours darker; TMOP's
+/// colours (hairlines, washes, glass) are tuned to the old result.
+pub fn rgba_unmultiplied(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+    use egui::ecolor::{gamma_u8_from_linear_f32, linear_f32_from_gamma_u8, linear_f32_from_linear_u8};
+    match a {
+        0 => Color32::TRANSPARENT,
+        255 => Color32::from_rgb(r, g, b),
+        a => {
+            let alpha = linear_f32_from_linear_u8(a);
+            let m = |v: u8| gamma_u8_from_linear_f32(linear_f32_from_gamma_u8(v) * alpha);
+            Color32::from_rgba_premultiplied(m(r), m(g), m(b), a)
+        }
+    }
+}
+
+/// `Color32::to_srgba_unmultiplied` as egui 0.29 had it, the inverse of [`rgba_unmultiplied`].
+pub fn srgba_unmultiplied(c: Color32) -> [u8; 4] {
+    use egui::ecolor::{gamma_u8_from_linear_f32, linear_f32_from_gamma_u8, linear_f32_from_linear_u8, linear_u8_from_linear_f32};
+    let [r, g, b, a] = c.to_array();
+    let alpha = linear_f32_from_linear_u8(a);
+    let m = |v: u8| {
+        let l = linear_f32_from_gamma_u8(v);
+        gamma_u8_from_linear_f32(if alpha == 0.0 { l } else { l / alpha })
+    };
+    [m(r), m(g), m(b), linear_u8_from_linear_f32(alpha)]
+}
+
+/// `ColorImage::from_rgba_unmultiplied` with [`rgba_unmultiplied`] (egui 0.29's premultiplication).
+pub fn color_image_unmultiplied(size: [usize; 2], rgba: &[u8]) -> egui::ColorImage {
+    egui::ColorImage::new(size, rgba.as_chunks::<4>().0.iter().map(|&[r, g, b, a]| rgba_unmultiplied(r, g, b, a)).collect())
+}
+
 /// `c` with its alpha replaced.
 pub fn with_alpha(c: Color32, a: f32) -> Color32 {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
-    Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8)
+    let [r, g, b, _] = srgba_unmultiplied(c);
+    rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 /// `c` scaled towards black (alpha preserved).
 pub fn dim(c: Color32, factor: f32) -> Color32 {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = srgba_unmultiplied(c);
     let m = |v: u8| (v as f32 * factor.clamp(0.0, 1.0)).round() as u8;
-    Color32::from_rgba_unmultiplied(m(r), m(g), m(b), a)
+    rgba_unmultiplied(m(r), m(g), m(b), a)
 }
 
 /// `c` mixed towards white by `t`.
 pub fn lighten(c: Color32, t: f32) -> Color32 {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = srgba_unmultiplied(c);
     let m = |v: u8| (v as f32 + (255.0 - v as f32) * t.clamp(0.0, 1.0)).round() as u8;
-    Color32::from_rgba_unmultiplied(m(r), m(g), m(b), a)
+    rgba_unmultiplied(m(r), m(g), m(b), a)
 }
 
 /// WCAG contrast ratio of `fg` over the opaque `bg` (see [`crate::skin::contrast`]).
@@ -741,21 +799,21 @@ pub fn contrast(fg: Color32, bg: Color32) -> f32 {
 }
 
 pub fn to_skin(c: Color32) -> crate::skin::Color {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = srgba_unmultiplied(c);
     crate::skin::Color::rgba(r, g, b, a)
 }
 
 pub fn from_skin(c: crate::skin::Color) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+    rgba_unmultiplied(c.r, c.g, c.b, c.a)
 }
 
 /// Gamma-space mix of two colours.
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
-    let [r0, g0, b0, a0] = a.to_srgba_unmultiplied();
-    let [r1, g1, b1, a1] = b.to_srgba_unmultiplied();
+    let [r0, g0, b0, a0] = srgba_unmultiplied(a);
+    let [r1, g1, b1, a1] = srgba_unmultiplied(b);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_unmultiplied(m(r0, r1), m(g0, g1), m(b0, b1), m(a0, a1))
+    rgba_unmultiplied(m(r0, r1), m(g0, g1), m(b0, b1), m(a0, a1))
 }
 
 #[cfg(test)]
@@ -841,13 +899,14 @@ mod tests {
     #[test]
     fn display_font_only_changes_the_display_family() {
         let family = |d: &FontDefinitions, f: FontFamily| d.families.get(&f).cloned().unwrap_or_default();
+        let bytes = |d: &FontDefinitions| -> Vec<u8> { (*d.font_data[F_DISPLAY].font).as_ref().to_vec() };
         let builtin = font_definitions(None);
-        assert_eq!(builtin.font_data[F_DISPLAY].font.as_ref(), INTER_LIGHT);
+        assert_eq!(bytes(&builtin), INTER_LIGHT);
         let classic = font_definitions(crate::fonts::resolve(crate::fonts::CLASSIC, crate::fonts::load).0);
-        assert_eq!(classic.font_data[F_DISPLAY].font.as_ref(), MICHROMA);
+        assert_eq!(bytes(&classic), MICHROMA);
         let file = crate::fonts::FontFile { family: "Other".into(), bytes: vec![7; 16], index: 2 };
         let custom = font_definitions(Some(file));
-        assert_eq!((custom.font_data[F_DISPLAY].font.as_ref(), custom.font_data[F_DISPLAY].index), (&[7u8; 16][..], 2));
+        assert_eq!((bytes(&custom), custom.font_data[F_DISPLAY].index), (vec![7u8; 16], 2));
         for d in [&builtin, &classic, &custom] {
             let display = family(d, FontFamily::Name(F_DISPLAY.into()));
             assert_eq!(display[0], F_DISPLAY);

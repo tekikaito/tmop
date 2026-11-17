@@ -5,6 +5,7 @@ use super::theme::{self, with_alpha, Palette};
 use super::widgets;
 use crate::metrics::Series;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 
 pub const ROW_H: f32 = 32.0;
 /// Height of the header row.
@@ -212,14 +213,16 @@ pub fn show_with_menu(
     ui.painter().rect_filled(rect, 8.0, with_alpha(pal.text, 0.03));
     let inner = rect.shrink(1.0);
     let widths = fit_widths(cols, inner.width());
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner).id_salt(id), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner).id_salt(id), |ui| {
         // Columns wider than the box must not paint over what sits beside it (the Services panel).
         ui.set_clip_rect(inner.intersect(ui.clip_rect()));
         ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
         // Columns that cannot shrink any further are reached by scrolling sideways.
-        egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show_029(ui, [true, false], |ui| {
             let mut table = egui_extras::TableBuilder::new(ui)
                 .id_salt(id)
+                // Mouse drags scroll the rows, as in egui 0.29 (since 0.35 only on touch screens).
+                .drag_to_scroll(egui::scroll_area::DragScroll::Always)
                 .striped(false)
                 .resizable(true)
                 .sense(Sense::click())
@@ -237,7 +240,7 @@ pub fn show_with_menu(
                         header.col(|ui| {
                             let r = ui.max_rect();
                             let p = ui.painter();
-                            let rounding = egui::Rounding { nw: if i == 0 { 7.0 } else { 0.0 }, ne: if i == last { 7.0 } else { 0.0 }, ..Default::default() };
+                            let rounding = egui::CornerRadius { nw: if i == 0 { 7 } else { 0 }, ne: if i == last { 7 } else { 0 }, ..Default::default() };
                             p.rect_filled(r, rounding, pal.panel);
                             p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
                             let sorted = sort_col == i;
@@ -249,7 +252,7 @@ pub fn show_with_menu(
                             } else {
                                 widgets::tracked_text(p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                             }
-                            let resp = ui.interact(r, ui.id().with(("hdr", i)), Sense::click());
+                            let resp = ui.interact(r, ui.scope_id().with(("hdr", i)), Sense::click());
                             if resp.hovered() {
                                 ui.painter().rect_filled(r, rounding, pal.raise(0.04));
                             }
@@ -336,7 +339,7 @@ pub fn show_with_menu(
                                     let text_r = widgets::text_fit(&clip, pos2(x, ty), Align2::LEFT_CENTER, &content.text, font, color, max_w);
                                     // A shortened value shows in full on hover.
                                     if cut {
-                                        ui.interact(text_r.intersect(r), ui.id().with(("cut", ci)), Sense::hover()).on_hover_text(&content.text);
+                                        ui.interact(text_r.intersect(r), ui.scope_id().with(("cut", ci)), Sense::hover()).on_hover_text(&content.text);
                                     }
                                     if let Some(b) = content.badge {
                                         widgets::badge(&clip, pos2(text_r.right() + 6.0, ty), b, pal);
@@ -352,7 +355,7 @@ pub fn show_with_menu(
                             clicked = Some(k.clone());
                         }
                         if let Some(menu) = menu {
-                            resp.context_menu(|ui| menu(item, ui));
+                            super::kit::context_menu(&resp, |ui| menu(item, ui));
                         }
                         if resp.double_clicked() {
                             activated = Some(item);
@@ -361,7 +364,7 @@ pub fn show_with_menu(
                 });
         });
     });
-    ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.grid));
+    ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
     if let Some(c) = sort_click {
         if state.sort == c {
             state.desc = !state.desc;
@@ -449,12 +452,12 @@ mod tests {
                 }
             };
             for _ in 0..3 {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                ctx.run_ui(egui::RawInput::default(), |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
                         let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(700.0, 300.0));
                         show(ui, rect, "t", &pal, &cols, &order, &mut state, &|i| i.to_string(), &cell, &mut icons);
                     });
-                });
+                }).drop_without_applying_deltas();
             }
         }
         assert_eq!((state.sort, state.desc), (1, true));

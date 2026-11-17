@@ -7,7 +7,7 @@ use crate::docker::backend::{Command, ContainerAction, NoticeKind, PruneKind, Ta
 use crate::docker::stack::{stack_action, StackAction};
 use crate::ui::kit;
 use crate::ui::theme::{self, Palette};
-use crate::ui::widgets::{ButtonKind, Icon};
+use crate::ui::widgets::{self, ButtonKind, Icon};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, Key, RichText};
 use std::time::Duration;
@@ -259,12 +259,12 @@ fn confirm_window(app: &mut App, ctx: &egui::Context, pal: &Palette) {
         if !c.options.is_empty() {
             ui.add_space(10.0);
             for (label, value) in c.options.iter_mut() {
-                ui.checkbox(value, label.as_str());
+                ui.checkbox(value, theme::button_text(label.as_str()));
             }
         }
         if c.require.is_some() {
             ui.add_space(10.0);
-            ui.add(egui::TextEdit::singleline(&mut c.typed).hint_text("Type the volume name to confirm").desired_width(f32::INFINITY));
+            ui.add(widgets::text_edit(egui::TextEdit::singleline(&mut c.typed).hint_text("Type the volume name to confirm").desired_width(f32::INFINITY), true));
         }
         ui.add_space(12.0);
         // The verb stays disabled until the volume name is typed.

@@ -78,12 +78,12 @@ pub fn stat_row(p: &egui::Painter, rect: Rect, pal: &Palette, _bloom: f32, cards
 /// Right-aligned toolbar area on the page header row.
 pub fn header_toolbar<R>(ui: &mut egui::Ui, body: Rect, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let r = Rect::from_min_max(pos2(body.right() - width, body.top() - super::HEADER_H + 14.0), pos2(body.right() - 16.0, body.top() - 14.0));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), add).inner
+    ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), add).inner
 }
 
 /// Interactive child UI in `rect` (left-to-right).
 pub fn row_ui<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
 }
 
 /// Centered hint text (empty states, loading).
@@ -247,7 +247,7 @@ pub fn section_card(p: &egui::Painter, rect: Rect, pal: &Palette, title: &str, r
 #[allow(clippy::too_many_arguments)]
 pub fn stat_tile(p: &egui::Painter, rect: Rect, pal: &Palette, label: &str, value: &str, sub: &str, bar: Option<(f32, Color32)>, icon: Option<Hardware>) {
     p.rect_filled(rect, 8.0, pal.card);
-    p.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.card_stroke));
+    p.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
     let clip = p.with_clip_rect(rect);
     let inner_w = rect.width() - 32.0 - if icon.is_some() { 64.0 } else { 0.0 };
     tracked_text(&clip, pos2(rect.left() + 16.0, rect.top() + 14.0), Align2::LEFT_TOP, &label.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.14);
@@ -312,7 +312,7 @@ pub fn tile_strip(p: &egui::Painter, rect: Rect, pal: &Palette, n: usize) -> Vec
     (0..n)
         .map(|i| {
             let r = Rect::from_min_size(pos2(inner.left() + i as f32 * (w + 1.0), inner.top()), vec2(w, inner.height()));
-            let rounding = egui::Rounding { nw: if i == 0 { 7.0 } else { 0.0 }, sw: if i == 0 { 7.0 } else { 0.0 }, ne: if i + 1 == n { 7.0 } else { 0.0 }, se: if i + 1 == n { 7.0 } else { 0.0 } };
+            let rounding = egui::CornerRadius { nw: if i == 0 { 7 } else { 0 }, sw: if i == 0 { 7 } else { 0 }, ne: if i + 1 == n { 7 } else { 0 }, se: if i + 1 == n { 7 } else { 0 } };
             p.rect_filled(r, rounding, pal.panel);
             r
         })
@@ -349,11 +349,11 @@ pub fn code_box(ui: &mut egui::Ui, rect: Rect, pal: &Palette, label: &str, text:
     tracked_text(&p, pos2(rect.left(), rect.top()), Align2::LEFT_TOP, &label.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.12);
     let body = Rect::from_min_max(pos2(rect.left(), rect.top() + 20.0), rect.max);
     p.rect_filled(body, 6.0, pal.well());
-    p.rect_stroke(body, 6.0, Stroke::new(1.0_f32, pal.row_rule()));
+    p.rect_stroke(body, 6.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
     let galley = p.layout(text.to_string(), theme::mono(12.0), pal.text_code(), (body.width() - 52.0).max(20.0));
     p.with_clip_rect(body.shrink(1.0)).galley(body.min + vec2(12.0, 10.0), galley, pal.text_code());
     let btn = Rect::from_min_size(pos2(body.right() - 34.0, body.top() + 6.0), vec2(28.0, 28.0));
-    let resp = ui.interact(btn, ui.id().with(("code-copy", label)), Sense::click());
+    let resp = ui.interact(btn, ui.scope_id().with(("code-copy", label)), Sense::click());
     if resp.hovered() {
         p.rect_filled(btn, 4.0, pal.raise(0.08));
     }
@@ -372,10 +372,10 @@ pub fn code_box(ui: &mut egui::Ui, rect: Rect, pal: &Palette, label: &str, text:
 
 /// A glass bar floating above the bottom edge of `anchor` (centred), holding `add` (selection
 /// actions). It uses the dialog look.
-pub fn floating_bar<R>(ui: &egui::Ui, anchor: Rect, id: impl std::hash::Hash, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub fn floating_bar<R>(ui: &egui::Ui, anchor: Rect, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let ctx = ui.ctx();
-    let frame = egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::symmetric(14.0, 8.0)).rounding(10.0);
-    egui::Area::new(egui::Id::new(("floating-bar", id)))
+    let frame = widgets::stroke_outside(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::symmetric(14, 8)).corner_radius(10));
+    egui::Area::new(egui::Id::unique(("floating-bar", id)))
         .order(egui::Order::Foreground)
         .pivot(Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(anchor.center().x, anchor.bottom() - 16.0))
@@ -385,10 +385,10 @@ pub fn floating_bar<R>(ui: &egui::Ui, anchor: Rect, id: impl std::hash::Hash, ad
 
 /// A modal-looking dialog window (560 px wide, centred, no title bar, glass fill). `add` draws
 /// the content: [`dialog_header`], [`fact_box`], then [`dialog_buttons`].
-pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
-    let frame = egui::Frame::window(&ctx.style()).inner_margin(egui::Margin { left: 28.0, right: 28.0, top: 28.0, bottom: 24.0 }).rounding(10.0);
+pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let frame = widgets::stroke_outside(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin { left: 28, right: 28, top: 28, bottom: 24 }).corner_radius(10));
     egui::Window::new("")
-        .id(egui::Id::new(("dialog", id)))
+        .id(egui::Id::unique(("dialog", id)))
         .title_bar(false)
         .collapsible(false)
         .resizable(false)
@@ -435,7 +435,7 @@ pub fn fact_box(ui: &mut egui::Ui, pal: &Palette, facts: &[(&str, &str, Option<C
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, 6.0, pal.well());
-    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.row_rule()));
+    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
     let col_w = (rect.width() - 32.0 - 20.0) / 2.0;
     for (i, (label, value, color)) in facts.iter().enumerate() {
         let (c, r) = (i % 2, i / 2);
@@ -500,9 +500,48 @@ pub fn menu_item(ui: &mut egui::Ui, label: &str, hint: Option<&str>, danger: boo
     }
     let clicked = resp.clicked();
     if clicked {
-        ui.close_menu();
+        ui.close();
     }
     clicked
+}
+
+/// A popup below `widget_response` while `popup_id` is open (open and close it with
+/// [`egui::Popup::toggle_id`] and [`egui::Popup::close_id`]), placed and sized like egui 0.29's
+/// `popup_below_widget`: at least as wide as the widget, top-down justified, and always below it
+/// (egui's `Popup` would otherwise flip it near the window edge).
+pub fn popup_below_widget<R>(
+    ui: &egui::Ui,
+    popup_id: egui::Id,
+    widget_response: &egui::Response,
+    close_behavior: egui::PopupCloseBehavior,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let inner_width = widget_response.rect.width() - egui::Frame::popup(ui.style()).total_margin().sum().x;
+    egui::Popup::from_response(widget_response)
+        .id(popup_id)
+        .open_memory(None)
+        .close_behavior(close_behavior)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[])
+        .layout(Layout::top_down_justified(Align::LEFT))
+        .width(inner_width)
+        .show(|ui| {
+            ui.set_min_width(inner_width);
+            add_contents(ui)
+        })
+        .map(|r| r.inner)
+}
+
+/// `response.context_menu(add_contents)` as in egui 0.29: a click inside the menu leaves it open
+/// (items close it with [`egui::Ui::close`]; since 0.32 any click closes it), and it opens below
+/// and right of the pointer, pushed back inside the window where it would not fit (0.32+ would
+/// pick another side of the pointer).
+pub fn context_menu(response: &egui::Response, add_contents: impl FnOnce(&mut egui::Ui)) -> Option<egui::InnerResponse<()>> {
+    egui::Popup::context_menu(response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[])
+        .show(add_contents)
 }
 
 /// Small mono heading of a context menu ("chrome.exe · PID 4821").
@@ -533,9 +572,9 @@ mod tests {
         theme::DARK.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| add(ctx, &ui.painter().clone()));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| add(&ctx, &ui.painter().clone()));
+            }).drop_without_applying_deltas();
         }
     }
 
@@ -569,8 +608,8 @@ mod tests {
         theme::install_fonts(&ctx, None);
         let mut filter = String::new();
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     assert!(!code_box(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 70.0)), &pal, "Path", "svchost.exe -k netsvcs"));
                     let r = filter_box(ui, &mut filter, "Filter", 220.0, &pal);
                     assert!((r.rect.height() - 20.0).abs() < 40.0);
@@ -578,7 +617,7 @@ mod tests {
                     menu_header(ui, "chrome.exe \u{b7} PID 4821");
                     floating_bar(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)), "sel", |ui| ui.label("selected"));
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

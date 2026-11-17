@@ -420,7 +420,7 @@ impl App {
         widgets::draw_icon(&p, Rect::from_min_size(pos2(full.left() + 12.0, full.top() + 4.0), vec2(56.0, 56.0)), Icon::Container, pal.text_code());
         let title_area = Rect::from_min_max(pos2(full.left() + 72.0, full.top()), full.max);
         // The three spaces leave room for the dot and its glow.
-        let body = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(title_area), |ui| self.page_title(ui, &pal, "Docker", &format!("   {subtitle}"))).inner;
+        let body = ui.scope_builder(egui::UiBuilder::new().max_rect(title_area), |ui| self.page_title(ui, &pal, "Docker", &format!("   {subtitle}"))).inner;
         let dot_at = pos2(title_area.left() + 17.0, full.top() + 52.0);
         p.circle_filled(dot_at, 9.0, theme::with_alpha(dot, 0.10));
         p.circle_filled(dot_at, 6.5, theme::with_alpha(dot, 0.20));
@@ -502,7 +502,7 @@ impl App {
         let mut run = false;
         let contexts = &self.docker.contexts;
         let filter = &mut self.docker.ui.filter;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // Right to left: the first widget added sits at the right edge.
             if Button::ghost("Add host\u{2026}").show(ui, pal).clicked() {
@@ -516,10 +516,10 @@ impl App {
             }
             kit::filter_box(ui, filter, "Filter", 150.0, pal);
             let shown = contexts.iter().find(|c| c.name == active).map(context_label).unwrap_or_else(|| active.to_string());
-            egui::ComboBox::from_id_salt("docker-host").width(220.0).selected_text(shown).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("docker-host").width(220.0).selected_text(theme::button_text(shown)).show_ui(ui, |ui| {
                 for c in contexts {
                     let is_active = c.name == active;
-                    if ui.selectable_label(is_active, context_label(c)).clicked() && !is_active {
+                    if ui.selectable_label(is_active, theme::button_text(context_label(c))).clicked() && !is_active {
                         switch_to = Some(c.name.clone());
                     }
                 }
@@ -641,7 +641,7 @@ impl App {
         let pal = self.palette();
         let toasts = self.docker.ui.toasts.clone();
         let mut dismiss: Option<usize> = None;
-        egui::Area::new(Id::new("docker-toasts"))
+        egui::Area::new(Id::unique("docker-toasts"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -(STATUS_H + 12.0)))
             .order(Order::Foreground)
             .show(ctx, |ui| {
@@ -654,7 +654,7 @@ impl App {
                             NoticeKind::Info => pal.accent,
                         };
                         // The glass of the dialogs, with a bar in the colour of the kind at the left.
-                        let frame = egui::Frame::window(&ctx.style()).rounding(8.0).inner_margin(egui::Margin { left: 18.0, right: 14.0, top: 10.0, bottom: 10.0 });
+                        let frame = widgets::stroke_outside(egui::Frame::window(&ctx.global_style()).corner_radius(8).inner_margin(egui::Margin { left: 18, right: 14, top: 10, bottom: 10 }));
                         let r = frame
                             .show(ui, |ui| {
                                 ui.set_width(296.0);
@@ -663,7 +663,7 @@ impl App {
                             .response
                             .rect;
                         ui.painter().rect_filled(Rect::from_min_max(r.left_top() + vec2(0.0, 6.0), pos2(r.left() + 4.0, r.bottom() - 6.0)), 2.0, bar);
-                        let click = ui.interact(r, ui.id().with(("docker-toast", i)), Sense::click());
+                        let click = ui.interact(r, ui.scope_id().with(("docker-toast", i)), Sense::click());
                         if click.clicked() {
                             dismiss = Some(i);
                         }

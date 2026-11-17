@@ -12,6 +12,7 @@ use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, text_fit};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, pos2, Align, Align2, Layout, Rect, RichText};
+use crate::ui::widgets::ScrollArea029 as _;
 use std::time::{Duration, Instant};
 
 const EVENT_ROW_H: f32 = 18.0;
@@ -149,8 +150,8 @@ fn engine_card(app: &mut App, ui: &mut egui::Ui, rect: Rect, pal: &Palette) {
         }
     }
     let mut open_wizard = false;
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::LEFT)), |ui| {
-        egui::ScrollArea::vertical().id_salt("engine-card").auto_shrink([false, false]).show(ui, |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::LEFT)), |ui| {
+        egui::ScrollArea::vertical().id_salt("engine-card").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
             card_body(app, ui, pal, &status, &mut open_wizard);
         });
     });

@@ -23,8 +23,10 @@ screensaver = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-eframe = { version = "0.29.1", default-features = false, features = ["default_fonts", "glow"] }
-egui_extras = { version = "0.29.1", default-features = false }
+# glow only, no wgpu. In 0.37 the clipboard and links (Context::open_url) support that eframe 0.29 always
+# had are features of their own; system_fonts stays off, TMOP loads its fonts itself.
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
+egui_extras = { version = "0.37.0", default-features = false }
 png = "0.18"
 # Checks an installed font parses before egui gets it (egui panics on one it cannot parse).
 ab_glyph = "0.2"
@@ -90,7 +92,7 @@ libc = "0.2"
 # wgpu crates to Cargo.lock through weak `egui-wgpu?/...` features, cargo#10801). They make
 # `with_app_id` reach Wayland and X11 window types work; winit itself already has both backends.
 [target.'cfg(target_os = "linux")'.dependencies]
-egui-winit = { version = "0.29.1", default-features = false, features = ["x11", "wayland"] }
+egui-winit = { version = "0.37.0", default-features = false, features = ["x11", "wayland"] }
 # Which processes own a window on X11 (_NET_CLIENT_LIST + _NET_WM_PID, X-Resource for clients
 # without a pid) for the Processes page; the pure-Rust connection, already in the tree through
 # winit, so Cargo.lock gains no crate.

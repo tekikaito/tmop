@@ -101,7 +101,7 @@ impl App {
             let text = format!(" {} holds {n} connections to {m} external endpoints \u{2014} most apps use 1\u{2013}3.", name_of(pid));
             widgets::text_fit(&p, pos2(head.right(), banner.center().y), Align2::LEFT_CENTER, &text, theme::ui(13.0), st.yellow, (banner.right() - head.right() - link_w - 48.0).max(60.0));
             let hit = Rect::from_center_size(pos2(banner.right() - 20.0 - link_w / 2.0, banner.center().y), vec2(link_w + 8.0, 28.0));
-            let resp = ui.interact(hit, ui.id().with("inspect-unusual"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(hit, ui.scope_id().with("inspect-unusual"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             p.text(pos2(banner.right() - 20.0, banner.center().y), Align2::RIGHT_CENTER, link, theme::ui(13.0), if resp.hovered() { lighten(st.info, 0.25) } else { st.info });
             if resp.clicked() {
                 if let Some(row) = fd.rows.iter().find(|r| r.pid == pid) {

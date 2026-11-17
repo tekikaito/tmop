@@ -484,6 +484,12 @@ impl App {
             status = format!("{} failed to load", failed.join(" and "));
         }
         let settings_popout_on = settings.popout.mode != "off";
+        cc.egui_ctx.options_mut(|o| {
+            // Since 0.34 egui closes the app on Ctrl+Q; TMOP never did (the Docker terminal sends it).
+            o.quit_shortcuts.clear();
+            // Since 0.36 egui sets the window theme; TMOP leaves the title bar to the system.
+            o.sync_window_theme = false;
+        });
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let app = Self {
             caps,
@@ -737,9 +743,9 @@ impl App {
         if let Some(icon) = crate::icon::window_icon() {
             builder = builder.with_icon(icon);
         }
-        let close = ctx.show_viewport_immediate(ViewportId::from_hash_of("tmop-popout"), builder, |ctx, _class| {
-            let c = self.popout_ui(ctx, fd);
-            c || ctx.input(|i| i.viewport().close_requested())
+        let close = ctx.show_viewport_immediate(ViewportId::from_hash_of("tmop-popout"), builder, |ui, _class| {
+            let c = self.popout_ui(ui, fd);
+            c || ui.input(|i| i.viewport().close_requested())
         });
         if close {
             self.set_popout(false);
@@ -769,19 +775,20 @@ impl App {
         }
     }
 
-    /// Draws the popout into `ctx`. Returns true when the user asked to close it.
-    fn popout_ui(&mut self, ctx: &egui::Context, fd: &FrameData<'_>) -> bool {
+    /// Draws the popout into `root` (the viewport's). Returns true when the user asked to close it.
+    fn popout_ui(&mut self, root: &mut egui::Ui, fd: &FrameData<'_>) -> bool {
+        let ctx = &root.ctx().clone();
         let skin = self.current_skin();
         let mut close = false;
         let mut new_skin: Option<String> = None;
         let opacity_setting = self.settings.popout.opacity as f32;
         let fahrenheit = self.settings.fahrenheit();
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::TRANSPARENT)).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::TRANSPARENT)).show(root, |ui| {
             let rect = ui.max_rect();
             let hovered = ctx.input(|i| i.pointer.hover_pos().map(|p| rect.contains(p)).unwrap_or(false));
             let op = if self.settings.popout.opaque_on_hover && hovered { 1.0 } else { opacity_setting };
             // Registered before the chrome so the close/chevron/drag areas stay on top of it.
-            let menu = ui.interact(rect, ui.id().with("popout-menu"), Sense::click());
+            let menu = ui.interact(rect, ui.scope_id().with("popout-menu"), Sense::click());
             let ev = popout::draw(ui, rect, &skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
             if ev.drag {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
@@ -791,29 +798,29 @@ impl App {
             let skin_menu = |ui: &mut egui::Ui, new_skin: &mut Option<String>, close: &mut bool| {
                 ui.label(egui::RichText::new("Skin").strong());
                 for k in &catalog.skins {
-                    if ui.radio(k.id == skin.id, &k.name).clicked() {
+                    if ui.radio(k.id == skin.id, theme::button_text(&k.name)).clicked() {
                         *new_skin = Some(k.id.clone());
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
                 ui.separator();
-                if ui.button("Close popout").clicked() {
+                if ui.button(theme::button_text("Close popout")).clicked() {
                     *close = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             };
-            menu.context_menu(|ui| skin_menu(ui, &mut new_skin, &mut close));
+            kit::context_menu(&menu, |ui| skin_menu(ui, &mut new_skin, &mut close));
             if let Some(chev) = &ev.chevron {
-                let id = ui.id().with("popout-chevron-menu");
+                let id = ui.scope_id().with("popout-chevron-menu");
                 if ev.menu {
-                    ui.memory_mut(|m| m.toggle_popup(id));
+                    egui::Popup::toggle_id(ui.ctx(), id);
                 }
-                egui::popup_below_widget(ui, id, chev, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                kit::popup_below_widget(ui, id, chev, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
                     ui.set_min_width(140.0);
                     skin_menu(ui, &mut new_skin, &mut close);
                 });
                 if new_skin.is_some() || close {
-                    ui.memory_mut(|m| m.close_popup());
+                    egui::Popup::close_id(ui.ctx(), id);
                 }
             }
         });
@@ -901,13 +908,20 @@ impl eframe::App for App {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe 0.37 skips `ui` while the window is minimized or hidden (0.29 still ran `update`
+        // then): new samples are taken in here, so recording and App history go on meanwhile.
+        let (snap, _, rows) = self.snapshot();
+        self.take_sample(&snap, &rows, Instant::now());
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t_update = Instant::now();
-        self.update_inner(ctx);
+        self.update_inner(ui);
         if let Some(p) = &mut self.profile {
             p.frames += 1;
             p.busy += t_update.elapsed();
-            for c in ctx.repaint_causes() {
+            for c in ui.ctx().repaint_causes() {
                 *p.causes.entry(format!("{c:?}")).or_default() += 1;
             }
             if p.since.elapsed() >= Duration::from_secs(2) {
@@ -952,7 +966,22 @@ impl Default for Profile {
 }
 
 impl App {
-    fn update_inner(&mut self, ctx: &egui::Context) {
+    /// Feeds a sample the sampler has not delivered before to the recorder, App history and the
+    /// temperature log.
+    fn take_sample(&mut self, snap: &Snapshot, rows: &[ProcessRow], now: Instant) {
+        if snap.seq != self.last_seq {
+            self.last_seq = snap.seq;
+            self.last_sample_at = now;
+            self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
+            self.recorder.on_sample(snap, rows);
+            let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            self.pro.inv.history.update(rows, dt);
+            self.perf.note_temperature(snap.thermal.max_c());
+        }
+    }
+
+    fn update_inner(&mut self, root: &mut egui::Ui) {
+        let ctx = &root.ctx().clone();
         self.system_theme = ctx.system_theme();
         let pal = self.palette();
         widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
@@ -961,7 +990,7 @@ impl App {
         widgets::set_spark_neutral(!self.settings.graphs.color_keyed);
         // Any change of palette (another palette, or a role edited in the editor) restyles egui,
         // and so does a style that no longer matches it (egui swaps styles with the OS theme).
-        let live = ctx.style();
+        let live = ctx.global_style();
         if self.applied_pal != Some(pal) || live.visuals.panel_fill != pal.body || live.visuals.dark_mode != pal.dark {
             pal.apply(ctx);
             self.applied_pal = Some(pal);
@@ -990,15 +1019,7 @@ impl App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame_at).as_secs_f32().min(0.25);
         self.last_frame_at = now;
-        if snap.seq != self.last_seq {
-            self.last_seq = snap.seq;
-            self.last_sample_at = now;
-            self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
-            self.recorder.on_sample(&snap, &rows);
-            let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
-            self.pro.inv.history.update(&rows, dt);
-            self.perf.note_temperature(snap.thermal.max_c());
-        }
+        self.take_sample(&snap, &rows, now);
         let interval = self.settings.update_speed().interval();
         let hf = self.settings.appearance.high_frequency_visuals;
         let phase = match interval {
@@ -1020,24 +1041,24 @@ impl App {
         let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting, gpus_separated };
 
         if self.popout_only {
-            if self.popout_ui(ctx, &fd) {
+            if self.popout_ui(root, &fd) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         } else {
             self.replace_poll(ctx);
             self.updates_poll(ctx);
             if let Some([hi, mid, edge]) = pal.backdrop {
-                widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.screen_rect(), hi, mid, edge);
+                widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.content_rect(), hi, mid, edge);
             }
-            self.header_bar(ctx, &pal, &snap);
-            self.replace_banner(ctx, &pal);
-            self.status_bar(ctx, &pal, &snap);
-            self.rail(ctx, &pal);
+            self.header_bar(root, &pal, &snap);
+            self.replace_banner(root, &pal);
+            self.status_bar(root, &pal, &snap);
+            self.rail(root, &pal);
             if self.own_title_bar {
                 titlebar::frame(ctx, &pal);
             }
-            let frame = egui::Frame::none().inner_margin(egui::Margin { left: 8.0, right: 32.0, top: 12.0, bottom: 36.0 });
-            egui::CentralPanel::default().frame(frame).show(ctx, |ui| match self.page {
+            let frame = egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 32, top: 12, bottom: 36 });
+            egui::CentralPanel::default().frame(frame).show(root, |ui| match self.page {
                 Page::Summary => self.summary_page(ui, &fd),
                 Page::Performance => self.performance_page(ui, &fd),
                 Page::Processes => self.processes_page(ui, &fd),

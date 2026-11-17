@@ -147,7 +147,7 @@ pub(super) fn page_layout(body: Rect, need: f32) -> (Rect, Rect) {
 /// Runs `add` right to left inside `rect` (the toolbar of [`page_layout`]): the first control added
 /// ends up at the right edge.
 pub(super) fn toolbar<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         add(ui)
     })
@@ -173,12 +173,12 @@ pub(super) fn tile_rects(rect: Rect, n: usize, min_w: f32) -> (Vec<Rect>, f32) {
 
 /// Text field in the mono font (36 px high, no icon): folders, drives and paths.
 pub(super) fn mono_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
-    let frame = egui::Frame::none().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).rounding(6.0).inner_margin(egui::Margin::symmetric(12.0, 0.0));
+    let frame = widgets::stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 0)));
     frame
         .show(ui, |ui| {
             ui.set_min_height(34.0);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 24.0).frame(false).font(theme::mono(12.0)))
+                ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 24.0 + 8.0).font(theme::mono(12.0)), false))
             })
             .inner
         })
@@ -240,11 +240,11 @@ pub(super) fn list_row(p: &egui::Painter, rect: Rect, pal: &Palette, look: RowLo
             if hovered {
                 p.rect_filled(rect, 6.0, pal.raise(0.04));
             }
-            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.raise(0.08)));
+            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.raise(0.08)), egui::StrokeKind::Outside);
         }
         RowLook::Marked(c) => {
             p.rect_filled(rect, 6.0, with_alpha(c, 0.08));
-            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, with_alpha(c, 0.35)));
+            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, with_alpha(c, 0.35)), egui::StrokeKind::Outside);
         }
     }
 }
@@ -318,8 +318,8 @@ mod tests {
         theme::install_fonts(&ctx, None);
         let mut path = String::from("C:\\");
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let p = ui.painter().clone();
                     let items = [("CPU", Swatch::Line(pal.accent)), ("Base 3.6 GHz", Swatch::Dashed(pal.text_faint)), ("Process event", Swatch::Tick(pal.warn))];
                     let drawn = swatch_legend(&p, &pal, pos2(10.0, 10.0), &items);
@@ -332,7 +332,7 @@ mod tests {
                     assert_eq!(confirm_row(ui, &pal, "Cancel", "Delete", ButtonKind::DangerFill, false), None);
                     toolbar(ui, Rect::from_min_size(pos2(10.0, 200.0), vec2(400.0, 36.0)), |ui| ui.label("x"));
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 
@@ -343,12 +343,12 @@ mod tests {
         theme::DARK.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.run_ui(egui::RawInput::default(), |_root| {
                 for font in [theme::ui(13.0), theme::semibold(13.0), theme::mono(12.0)] {
-                    let missing: Vec<char> = "\u{25a0}\u{25cf}\u{2191}\u{2193}\u{2192}\u{203a}\u{b7}\u{2022}\u{2014}\u{2026}".chars().filter(|c| !ctx.fonts(|f| f.has_glyph(&font, *c))).collect();
+                    let missing: Vec<char> = "\u{25a0}\u{25cf}\u{2191}\u{2193}\u{2192}\u{203a}\u{b7}\u{2022}\u{2014}\u{2026}".chars().filter(|c| !ctx.fonts_mut(|f| f.has_glyph(&font, *c))).collect();
                     assert!(missing.is_empty(), "{:?} lacks {missing:?}", font.family);
                 }
-            });
+            }).drop_without_applying_deltas();
         }
     }
 
