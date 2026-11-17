@@ -77,9 +77,9 @@ impl App {
         let mut controls = |ui: &mut egui::Ui| {
             save_flight = Button::new(&format!("Save flight recorder ({ring_len})")).show(ui, &pal).clicked();
             toggle = if recording { Button::new("\u{25a0} Stop recording").kind(ButtonKind::DangerFill) } else { Button::primary("\u{25cf} Start recording") }.show(ui, &pal).clicked();
-            egui::ComboBox::from_id_salt("rec-limit").width(130.0).selected_text(LIMITS[self.pro.rec_limit].0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("rec-limit").width(130.0).selected_text(theme::button_text(LIMITS[self.pro.rec_limit].0)).show_ui(ui, |ui| {
                 for (i, (l, _)) in LIMITS.iter().enumerate() {
-                    ui.selectable_value(&mut self.pro.rec_limit, i, *l);
+                    ui.selectable_value(&mut self.pro.rec_limit, i, theme::button_text(*l));
                 }
             });
             ui.label(RichText::new("Stop after").font(theme::ui(12.0)).color(pal.text_faint));
@@ -173,13 +173,13 @@ impl App {
         let mut reveal: Option<PathBuf> = None;
         for (i, r) in self.pro.recordings.iter().take((list.height() / 42.0).floor() as usize).enumerate() {
             let rr = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * 42.0), vec2(list.width(), 38.0));
-            let resp = ui.interact(rr, ui.id().with(("recording", i)), Sense::click());
+            let resp = ui.interact(rr, ui.scope_id().with(("recording", i)), Sense::click());
             let playing = self.pro.playback.as_ref().map(|(pp, _)| *pp == r.path).unwrap_or(false);
             let live = writing.as_deref().is_some_and(|n| r.path.file_name() == Some(n));
             if live {
                 widgets::tinted_card(&p, rr, &pal, st.danger);
                 if playing {
-                    p.rect_stroke(rr, 10.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.8)));
+                    p.rect_stroke(rr, 10.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.8)), egui::StrokeKind::Outside);
                 }
             } else {
                 list_row(&p, rr, &pal, if playing { RowLook::Marked(pal.accent) } else { RowLook::Plain }, resp.hovered());
@@ -251,7 +251,7 @@ impl App {
         // Readout row under the time labels.
         let readout_y = graph.bottom() + 16.0 + 8.0 + 14.0;
         if n < 2 {
-            p.rect_stroke(graph, 0.0, Stroke::new(1.0_f32, pal.grid));
+            p.rect_stroke(graph, 0.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
             empty_state(&p, graph, &pal, "Collecting samples\u{2026}");
         } else {
             let px = (graph.width() / (n - 1) as f32).clamp(0.25, 16.0);
@@ -335,7 +335,7 @@ impl App {
             let w = widgets::text_width(&p, &text, theme::mono(12.0)).min(content.width() - 20.0);
             let chip = Rect::from_min_size(pos2(content.left(), readout_y - 13.0), vec2(w + 16.0, 26.0));
             p.rect_filled(chip, 4.0, pal.raise(0.06));
-            p.rect_stroke(chip, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)));
+            p.rect_stroke(chip, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)), egui::StrokeKind::Outside);
             widgets::text_fit(&p, chip.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, &text, theme::mono(12.0), pal.text, w);
             let hint_x = chip.right() + 14.0;
             if content.right() - hint_x > 300.0 {
@@ -345,7 +345,7 @@ impl App {
         if playing {
             let r = p.text(pos2(content.right() - 18.0, readout_y), Align2::RIGHT_CENTER, "Close playback", theme::ui(12.0), pal.accent);
             widgets::draw_icon(&p, Rect::from_center_size(pos2(content.right() - 7.0, readout_y), vec2(11.0, 11.0)), Icon::Close, pal.accent);
-            close = ui.interact(Rect::from_min_max(r.min, pos2(content.right(), r.max.y)).expand(4.0), ui.id().with("close-playback"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            close = ui.interact(Rect::from_min_max(r.min, pos2(content.right(), r.max.y)).expand(4.0), ui.scope_id().with("close-playback"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
         }
         close
     }

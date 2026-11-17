@@ -5,7 +5,8 @@
 use super::hardware::Iso;
 use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
 use crate::metrics::Series;
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Rounding, Sense, Shape, Stroke, TextureId, Ui, Vec2};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2};
+use eframe::egui::epaint::CornerRadiusF32;
 use std::cell::Cell;
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,7 @@ use std::cell::Cell;
 // ---------------------------------------------------------------------------
 
 /// Polygon outline of a rounded rectangle (convex), clockwise from the top-left.
-pub fn rounded_rect_points(rect: Rect, r: Rounding) -> Vec<Pos2> {
+pub fn rounded_rect_points(rect: Rect, r: CornerRadiusF32) -> Vec<Pos2> {
     let max = rect.width().min(rect.height()) / 2.0;
     let mut pts = Vec::with_capacity(40);
     let mut corner = |c: Pos2, rad: f32, start_deg: f32| {
@@ -93,7 +94,7 @@ pub fn fill_horizontal_gradient(painter: &egui::Painter, rect: Rect, left: Color
 /// Glass card: rounded panel (radius 10) with a 1 px border.
 pub fn card(painter: &egui::Painter, rect: Rect, pal: &Palette) {
     painter.rect_filled(rect, 10.0, pal.card);
-    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, pal.card_stroke));
+    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
 }
 
 /// Card washed with `tint` (pressure and anomaly cards, warning banners, the recording in
@@ -101,7 +102,7 @@ pub fn card(painter: &egui::Painter, rect: Rect, pal: &Palette) {
 pub fn tinted_card(painter: &egui::Painter, rect: Rect, pal: &Palette, tint: Color32) {
     painter.rect_filled(rect, 10.0, pal.card);
     painter.rect_filled(rect, 10.0, with_alpha(tint, 0.08));
-    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(tint, 0.3)));
+    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(tint, 0.3)), egui::StrokeKind::Outside);
 }
 
 /// Card whose border is tinted with a metric colour (the running test, the active device).
@@ -110,10 +111,10 @@ pub fn accent_card(painter: &egui::Painter, rect: Rect, pal: &Palette, accent: C
     painter.rect_filled(rect, 10.0, pal.card);
     painter.rect_filled(rect, 10.0, with_alpha(accent, 0.10));
     if bloom > 0.0 {
-        painter.rect_stroke(rect.expand(1.5), 11.0, Stroke::new(3.0_f32, with_alpha(accent, 0.10 * bloom)));
-        painter.rect_stroke(rect.shrink(1.0), 9.0, Stroke::new(2.0_f32, with_alpha(accent, 0.08 * bloom)));
+        painter.rect_stroke(rect.expand(1.5), 11.0, Stroke::new(3.0_f32, with_alpha(accent, 0.10 * bloom)), egui::StrokeKind::Outside);
+        painter.rect_stroke(rect.shrink(1.0), 9.0, Stroke::new(2.0_f32, with_alpha(accent, 0.08 * bloom)), egui::StrokeKind::Outside);
     }
-    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(accent, 0.5)));
+    painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(accent, 0.5)), egui::StrokeKind::Outside);
 }
 
 pub fn text(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, font: FontId, color: Color32) -> Rect {
@@ -195,13 +196,13 @@ fn glow_splats(painter: &egui::Painter, pts: &[Pos2], color: Color32, radius: f3
     let step = (0.36 * radius).max(1.5);
     // Summed along a straight line, splats of amplitude A every `step` peak at A * sigma * sqrt(pi) / step.
     let amp = peak * step / (sigma * std::f32::consts::PI.sqrt());
-    let [r, g, b, _] = color.to_srgba_unmultiplied();
+    let [r, g, b, _] = theme::srgba_unmultiplied(color);
     let tint = if additive {
         // Premultiplied colour with zero alpha is pure additive blending.
         let s = |v: u8| (v as f32 * amp).round() as u8;
         Color32::from_rgba_premultiplied(s(r), s(g), s(b), 0)
     } else {
-        Color32::from_rgba_unmultiplied(r, g, b, (amp * 255.0).round() as u8)
+        theme::rgba_unmultiplied(r, g, b, (amp * 255.0).round() as u8)
     };
     // Splat centres at even arc-length spacing.
     let mut centres = vec![pts[0]];
@@ -229,7 +230,7 @@ fn glow_splats(painter: &egui::Painter, pts: &[Pos2], color: Color32, radius: f3
 /// edge), eased to exactly zero at the rim so splats have no visible boundary.
 fn splat_texture(ctx: &egui::Context) -> egui::TextureId {
     const N: usize = 64;
-    let id = egui::Id::new("tmop-glow-splat");
+    let id = egui::Id::unique("tmop-glow-splat");
     if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return t.id();
     }
@@ -242,7 +243,7 @@ fn splat_texture(ctx: &egui::Context) -> egui::TextureId {
             Color32::from_rgba_premultiplied(v, v, v, v)
         })
         .collect();
-    let image = egui::ColorImage { size: [N, N], pixels };
+    let image = egui::ColorImage::new([N, N], pixels);
     let handle = ctx.load_texture("glow-splat", image, egui::TextureOptions::LINEAR);
     let tid = handle.id();
     ctx.data_mut(|d| d.insert_temp(id, handle));
@@ -470,12 +471,12 @@ impl<'a> Graph<'a> {
 /// Eases an auto-scaled graph bound towards `target` over half a second, so a new sample that
 /// moves the scale doesn't make the whole trace jump. Keyed by `id`; the first call returns
 /// `target` unchanged.
-pub fn eased(ctx: &egui::Context, id: impl std::hash::Hash, target: f32) -> f32 {
-    ctx.animate_value_with_time(egui::Id::new(("tmop-eased-scale", id)), target, 0.5)
+pub fn eased(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, target: f32) -> f32 {
+    ctx.animate_value_with_time(egui::Id::unique(("tmop-eased-scale", id)), target, 0.5)
 }
 
 /// [`eased`] for a (low, high) range.
-pub fn eased_range(ctx: &egui::Context, id: impl std::hash::Hash + Copy, (lo, hi): (f32, f32)) -> (f32, f32) {
+pub fn eased_range(ctx: &egui::Context, id: impl std::hash::Hash + Copy + std::fmt::Debug, (lo, hi): (f32, f32)) -> (f32, f32) {
     (eased(ctx, (id, 0u8), lo), eased(ctx, (id, 1u8), hi))
 }
 
@@ -572,7 +573,7 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
     let shift = g.phase.clamp(0.0, 1.0);
     // Additive glow only reads well on dark graph backgrounds.
     let additive = g.background.is_none_or(|bg| {
-        let [r, gg, b, _] = bg.to_srgba_unmultiplied();
+        let [r, gg, b, _] = theme::srgba_unmultiplied(bg);
         (r as u32 + gg as u32 + b as u32) < 3 * 96
     });
     if let Some(grid) = g.grid {
@@ -660,15 +661,15 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         glow_polyline(&painter, &drawn, line.color, g.line_width, g.bloom, g.dashed, additive);
         if g.markers {
             let y = head.y;
-            let m = Color32::from_rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
+            let m = theme::rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
             painter.add(Shape::convex_polygon(vec![pos2(rect.right() - 6.0, y), pos2(rect.right(), y - 4.0), pos2(rect.right(), y + 4.0)], m, Stroke::NONE));
         }
     }
     if let Some(b) = g.border {
         if g.bloom > 0.0 {
-            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * g.bloom)));
+            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * g.bloom)), egui::StrokeKind::Outside);
         }
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, b));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, b), egui::StrokeKind::Outside);
     }
 }
 
@@ -751,7 +752,7 @@ fn led_segment(painter: &egui::Painter, r: Rect, c: Color32, lit: bool, style: &
     if lit {
         painter.rect_filled(r, style.rounding, c);
         if style.rim && r.height() >= 4.0 && r.width() >= 4.0 {
-            painter.rect_stroke(r.shrink(0.5), style.rounding, Stroke::new(1.0_f32, lighten(c, 0.38)));
+            painter.rect_stroke(r.shrink(0.5), style.rounding, Stroke::new(1.0_f32, lighten(c, 0.38)), egui::StrokeKind::Outside);
         }
     } else {
         painter.rect_filled(r, style.rounding, unlit(c, style.unlit_factor));
@@ -875,7 +876,7 @@ pub fn led_text_width(s: &str) -> f32 {
 /// filling the rest ("CPU OVERVIEW ........ 9.8%").
 pub fn led_panel(painter: &egui::Painter, rect: Rect, left: &str, right: &str, pal: &Palette, bloom: f32) {
     painter.rect_filled(rect, 2.0, pal.led_bg);
-    painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, with_alpha(pal.card_stroke, 0.6)));
+    painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, with_alpha(pal.card_stroke, 0.6)), egui::StrokeKind::Outside);
     let inner = rect.shrink2(vec2(5.0, 3.0));
     let cols = (inner.width() / LED_PITCH).floor() as usize;
     let rows = 7usize;
@@ -1049,7 +1050,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, pal: &Palette) -> Response {
     let p = ui.painter();
     p.rect_filled(rect, 9.0, bg);
     if resp.hovered() {
-        p.rect_stroke(rect, 9.0, Stroke::new(1.0_f32, lighten(bg, 0.25)));
+        p.rect_stroke(rect, 9.0, Stroke::new(1.0_f32, lighten(bg, 0.25)), egui::StrokeKind::Outside);
     }
     let knob_x = rect.left() + 9.0 + t * (rect.width() - 18.0);
     // The ring keeps the knob visible on a light track (High Contrast's white control border).
@@ -1179,7 +1180,7 @@ impl<'a> Button<'a> {
         let p = ui.painter();
         p.rect_filled(rect, 6.0, fill);
         if border != Color32::TRANSPARENT {
-            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, border));
+            p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, border), egui::StrokeKind::Outside);
         }
         let mut x = rect.center().x - (tw + icon_w) / 2.0;
         if let Some(i) = self.icon {
@@ -1215,16 +1216,78 @@ pub fn danger_button(ui: &mut Ui, label: &str, pal: &Palette) -> Response {
     Button::danger(label).show(ui, pal)
 }
 
+/// `ScrollArea::show` and `show_rows` as in egui 0.29: the content is clipped 3 px outside the
+/// visible area along the scrolled `axes` ([horizontal, vertical]), so that strokes drawn on its
+/// edge (card borders) stay whole (0.36 removed that margin, `Visuals::clip_rect_margin`), and
+/// dragging the content with the mouse scrolls it (since 0.35 only on touch screens).
+pub trait ScrollArea029 {
+    fn show_029<R>(self, ui: &mut Ui, axes: [bool; 2], add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
+    fn show_rows_029<R>(self, ui: &mut Ui, axes: [bool; 2], row_height: f32, total_rows: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
+}
+
+impl ScrollArea029 for egui::ScrollArea {
+    fn show_029<R>(self, ui: &mut Ui, axes: [bool; 2], add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+        let outer = ui.clip_rect();
+        self.scroll_source(egui::scroll_area::ScrollSource::ALL).show(ui, |ui| {
+            clip_margin_029(ui, outer, axes);
+            add(ui)
+        })
+    }
+
+    fn show_rows_029<R>(self, ui: &mut Ui, axes: [bool; 2], row_height: f32, total_rows: usize, add: impl FnOnce(&mut Ui, std::ops::Range<usize>) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+        let outer = ui.clip_rect();
+        self.scroll_source(egui::scroll_area::ScrollSource::ALL).show_rows(ui, row_height, total_rows, |ui, range| {
+            clip_margin_029(ui, outer, axes);
+            add(ui, range)
+        })
+    }
+}
+
+fn clip_margin_029(ui: &mut Ui, outer: Rect, [h, v]: [bool; 2]) {
+    const MARGIN: f32 = 3.0;
+    let mut clip = ui.clip_rect();
+    if h {
+        clip = clip.expand2(vec2(MARGIN, 0.0));
+    }
+    if v {
+        clip = clip.expand2(vec2(0.0, MARGIN));
+    }
+    ui.set_clip_rect(clip.intersect(outer));
+}
+
+/// `frame` drawn as egui 0.29 drew frames: its stroke outside the margin, overhanging the space the
+/// frame takes. Since 0.31 egui draws the stroke inside and counts it into the frame's size; a
+/// negative outer margin of the stroke width restores both the size and the look.
+pub fn stroke_outside(frame: egui::Frame) -> egui::Frame {
+    let w = frame.stroke.width.round() as i8;
+    frame.outer_margin(egui::Margin::same(-w))
+}
+
+/// `edit` laid out as egui 0.29 did: a 4 x 2 px margin and no minimum height (0.37 pads a text
+/// edit like a button and makes it at least `interact_size.y` tall). `frame: false` leaves out
+/// the background and border but keeps the margin, like 0.29's `TextEdit::frame(false)`.
+/// 0.37 also counts the margin into `desired_width`, so callers add 8 px to keep the old width.
+pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget + 't {
+    move |ui: &mut Ui| {
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 0.0;
+            let margin = egui::Margin::symmetric(4, 2);
+            ui.add(if frame { edit.margin(margin) } else { edit.frame(egui::Frame::NONE.inner_margin(margin)) })
+        })
+        .inner
+    }
+}
+
 /// Text field with a magnifier and a hint, in the application style (36 px high).
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> Response {
-    let frame = egui::Frame::none().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).rounding(6.0).inner_margin(egui::Margin::symmetric(10.0, 8.0));
+    let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)));
     frame
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 draw_icon(ui.painter(), Rect::from_center_size(icon.center(), vec2(15.0, 15.0)), Icon::Search, pal.text_faint);
-                ui.add(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 46.0).frame(false).font(theme::ui(13.0)))
+                ui.add(text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 46.0 + 8.0).font(theme::ui(13.0)), false))
             })
             .inner
         })
@@ -1239,12 +1302,12 @@ pub fn segmented(ui: &mut Ui, labels: &[&str], selected: usize, pal: &Palette, m
     let (rect, _) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 4.0, outer_h), Sense::hover());
     let p = ui.painter().clone();
     p.rect_filled(rect, 6.0, pal.control);
-    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.control_stroke));
+    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.control_stroke), egui::StrokeKind::Outside);
     let mut x = rect.left() + 2.0;
     let mut clicked = None;
     for (i, (l, w)) in labels.iter().zip(&widths).enumerate() {
         let r = Rect::from_min_size(pos2(x, rect.top() + 2.0), vec2(*w, outer_h - 4.0));
-        let resp = ui.interact(r, ui.id().with(("segment", rect.min.x as i32, rect.min.y as i32, i)), Sense::click());
+        let resp = ui.interact(r, ui.scope_id().with(("segment", rect.min.x as i32, rect.min.y as i32, i)), Sense::click());
         let on = i == selected;
         if on {
             p.rect_filled(r, 4.0, pal.raise(0.12));
@@ -1278,7 +1341,7 @@ pub fn tab_bar(ui: &mut Ui, rect: Rect, pal: &Palette, tabs: &[(&str, Option<usi
         let lw = text_width(&p, label, theme::semibold(13.0));
         let cw = count.map(|c| text_width(&p, &c.to_string(), theme::mono(11.0)) + 6.0).unwrap_or(0.0);
         let r = Rect::from_min_size(pos2(x, band.top()), vec2(lw + cw + 28.0, band.height()));
-        let resp = ui.interact(r, ui.id().with(("tab", band.min.x as i32, band.min.y as i32, i)), Sense::click());
+        let resp = ui.interact(r, ui.scope_id().with(("tab", band.min.x as i32, band.min.y as i32, i)), Sense::click());
         let color = if on || resp.hovered() { pal.text } else { pal.text_dim };
         p.text(pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, label, font, color);
         if let Some(c) = count {
@@ -1568,7 +1631,7 @@ pub fn tracked_text(p: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, fo
     job.wrap.max_width = f32::INFINITY;
     let galley = p.layout_job(job);
     let rect = anchor.anchor_size(pos, galley.size());
-    let min = p.round_pos_to_pixels(rect.min);
+    let min = egui::emath::GuiRounding::round_to_pixels(rect.min, p.pixels_per_point());
     p.galley(min, galley, color);
     Rect::from_min_size(min, rect.size())
 }
@@ -1601,7 +1664,7 @@ pub fn badge_width(p: &egui::Painter, text: &str) -> f32 {
 /// left edge, vertically centred.
 pub fn badge(p: &egui::Painter, pos: Pos2, text: &str, pal: &Palette) -> Rect {
     let rect = Rect::from_min_size(pos2(pos.x, pos.y - 8.0), vec2(badge_width(p, text), 16.0));
-    p.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, pal.raise(0.14)));
+    p.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, pal.raise(0.14)), egui::StrokeKind::Outside);
     tracked_text(p, rect.center(), Align2::CENTER_CENTER, text, theme::ui(10.0), pal.text_faint, 0.06);
     rect
 }
@@ -1609,7 +1672,7 @@ pub fn badge(p: &egui::Painter, pos: Pos2, text: &str, pal: &Palette) -> Rect {
 /// Keyboard hint ("Ctrl K"): mono 11 in a hairline box. `pos` is the left edge, vertically centred.
 pub fn key_hint(p: &egui::Painter, pos: Pos2, text: &str, pal: &Palette) -> Rect {
     let rect = Rect::from_min_size(pos2(pos.x, pos.y - 9.0), vec2(text_width(p, text, theme::mono(11.0)) + 12.0, 18.0));
-    p.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, pal.raise(0.12)));
+    p.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, pal.raise(0.12)), egui::StrokeKind::Outside);
     p.text(rect.center(), Align2::CENTER_CENTER, text, theme::mono(11.0), pal.text_faint);
     rect
 }
@@ -1665,7 +1728,7 @@ pub fn icon_box(p: &egui::Painter, rect: Rect, pal: &Palette, icon: Option<Textu
     } else {
         (Color32::from_rgb(0xD6, 0xDD, 0xF0), Color32::from_rgb(0xB8, 0xC3, 0xE0), pal.text_dim)
     };
-    let pts = rounded_rect_points(rect, Rounding::same(radius));
+    let pts = rounded_rect_points(rect, CornerRadiusF32::same(radius));
     let span = rect.width() + rect.height();
     let color_at = |q: Pos2| mix(a, b, ((q.x - rect.left()) + (q.y - rect.top())) / span.max(1.0));
     let mut mesh = Mesh::default();
@@ -2125,12 +2188,12 @@ mod tests {
         pal.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let p = ui.painter().clone();
                     add(&p, ui, &pal);
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

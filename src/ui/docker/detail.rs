@@ -22,6 +22,7 @@ use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, Button, ButtonSize, Graph, GraphLine, Icon};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, pos2, text::LayoutJob, text::TextFormat, vec2, Align, Align2, Color32, Layout, Rect, RichText, Stroke};
+use crate::ui::widgets::ScrollArea029 as _;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -395,7 +396,7 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
     // Buttons first, so a click is handled even when the pane below has nothing to show.
     let mut clicked_btn: Option<usize> = None;
     for (i, (b, r)) in btns.iter().zip(&lay.buttons).enumerate() {
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(*r), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(*r), |ui| {
             let button = if b.danger { Button::danger(b.label) } else { Button::new(b.label) }.size(ButtonSize::Small);
             let resp = ui.add_enabled_ui(b.reason.is_none(), |ui| button.show(ui, &pal)).inner;
             match b.reason {
@@ -471,7 +472,7 @@ pub fn detail_area(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<
     // The pane: a well under the tab content.
     let content = lay.content;
     p.rect_filled(content, 6.0, pal.well());
-    p.rect_stroke(content, 6.0, Stroke::new(1.0_f32, pal.row_rule()));
+    p.rect_stroke(content, 6.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
     let pane = pane_of(content, tab);
     let Some(tab) = tab else {
         // Objects without detail tabs show their facts.
@@ -792,15 +793,15 @@ fn logs_tab(
     }
 
     let rows = rows_of(state);
-    let row_h = ui.fonts(|f| f.row_height(&theme::mono(11.5))) + 2.0;
+    let row_h = ui.fonts_mut(|f| f.row_height(&theme::mono(11.5))) + 2.0;
     let paused = state.paused;
     let body = split[1];
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
         egui::ScrollArea::vertical()
             .id_salt("docker-detail-logs")
             .stick_to_bottom(!paused)
             .auto_shrink([false, false])
-            .show_rows(ui, row_h, rows.len(), |ui, range| {
+            .show_rows_029(ui, [false, true], row_h, rows.len(), |ui, range| {
                 for row in &rows[range] {
                     let mut job = LayoutJob::default();
                     if let Some((idx, label)) = &row.source {
@@ -942,9 +943,9 @@ fn inspect_tab(state: &mut InspectState, engine: &Engine, id: &str, ui: &mut egu
     }
 
     let body = split[1];
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
         if let Some(text) = &state.text {
-            egui::ScrollArea::both().id_salt("docker-detail-inspect").auto_shrink([false, false]).show(ui, |ui| {
+            egui::ScrollArea::both().id_salt("docker-detail-inspect").auto_shrink([false, false]).show_029(ui, [true, true], |ui| {
                 ui.add(egui::Label::new(RichText::new(text.as_str()).font(theme::mono(11.5)).color(pal.text_code())));
             });
         } else if let Some(e) = &state.error {
@@ -1328,8 +1329,8 @@ mod tests {
         assert_eq!(btns.iter().map(|b| b.label).collect::<Vec<_>>(), vec!["Run image...", "Prune stopped..."]);
         assert!(btns.iter().all(|b| b.reason.is_none()));
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let p = ui.painter().clone();
                     for width in [260.0, 700.0, 1200.0] {
                         let inner = Rect::from_min_size(pos2(0.0, 0.0), vec2(width, 500.0));
@@ -1343,7 +1344,7 @@ mod tests {
                         }
                     }
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 }

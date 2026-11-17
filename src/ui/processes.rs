@@ -12,6 +12,7 @@ use crate::metrics::Series;
 use crate::pro::connections::{Conn, Proto};
 use crate::process::{self, format_bytes, format_cpu_time, format_rate, Action, Column, Priority, ProcessRow, Status};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -393,13 +394,13 @@ fn check_chip(ui: &mut egui::Ui, label: &str, on: bool, pal: &Palette) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(tw + 12.0 + 16.0 + 10.0 + 14.0, 36.0), Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 6.0, if resp.hovered() { pal.raise(0.09) } else { pal.control });
-    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.control_stroke));
+    p.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, pal.control_stroke), egui::StrokeKind::Outside);
     let boxr = Rect::from_center_size(pos2(rect.left() + 12.0 + 8.0, rect.center().y), vec2(16.0, 16.0));
     if on {
         p.rect_filled(boxr, 4.0, pal.accent);
         widgets::draw_icon(p, boxr.shrink(2.5), Icon::Check, pal.body);
     } else {
-        p.rect_stroke(boxr, 4.0, Stroke::new(1.2_f32, pal.raise(0.35)));
+        p.rect_stroke(boxr, 4.0, Stroke::new(1.2_f32, pal.raise(0.35)), egui::StrokeKind::Outside);
     }
     p.text(pos2(boxr.right() + 10.0, rect.center().y), Align2::LEFT_CENTER, label, font, pal.text_table());
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
@@ -671,14 +672,14 @@ impl App {
                 let resp = Button::ghost("Columns").icon(Icon::ChevronDown).size(ButtonSize::Compact).show(ui, &pal);
                 let id = ui.make_persistent_id("proc-columns");
                 if resp.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(id));
+                    egui::Popup::toggle_id(ui.ctx(), id);
                 }
-                egui::popup::popup_below_widget(ui, id, &resp, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                kit::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
                     ui.set_min_width(170.0);
                     let caps = self.caps.proc;
                     for c in ORDER.into_iter().filter(|c| *c != Column::Name && c.supported(&caps)) {
                         let mut shown = self.column_visible(c);
-                        if ui.checkbox(&mut shown, c.title()).changed() {
+                        if ui.checkbox(&mut shown, theme::button_text(c.title())).changed() {
                             self.set_column_visible(c, shown);
                         }
                     }
@@ -728,14 +729,16 @@ impl App {
         let p = ui.painter().clone();
         p.rect_filled(table_rect, 8.0, with_alpha(pal.text, 0.03));
         let table_inner = table_rect.shrink(1.0);
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(table_inner).id_salt("proc-table-box"), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(table_inner).id_salt("proc-table-box"), |ui| {
             // Columns wider than the window must not paint past the table's box.
             ui.set_clip_rect(table_inner.intersect(ui.clip_rect()));
             ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
             // Columns that do not fit are reached by scrolling sideways.
-            egui::ScrollArea::horizontal().id_salt("proc-table-h").auto_shrink([false, false]).show(ui, |ui| {
+            egui::ScrollArea::horizontal().id_salt("proc-table-h").auto_shrink([false, false]).show_029(ui, [true, false], |ui| {
                 let mut table = egui_extras::TableBuilder::new(ui)
                     .id_salt("proc-table")
+                    // Mouse drags scroll the rows, as in egui 0.29 (since 0.35 only on touch screens).
+                    .drag_to_scroll(egui::scroll_area::DragScroll::Always)
                     .striped(false)
                     .resizable(true)
                     .sense(Sense::click())
@@ -755,7 +758,7 @@ impl App {
                                     resized.push((c.id().to_string(), r.width()));
                                 }
                                 let p = ui.painter();
-                                let rounding = egui::Rounding { nw: if k == 0 { 7.0 } else { 0.0 }, ..Default::default() };
+                                let rounding = egui::CornerRadius { nw: if k == 0 { 7 } else { 0 }, ..Default::default() };
                                 p.rect_filled(r, rounding, pal.panel);
                                 p.line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
                                 let sorted = col == c.base() && !c.is_trend();
@@ -768,7 +771,7 @@ impl App {
                                 } else {
                                     widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                                 }
-                                let resp = ui.interact(r, ui.id().with(("hdr", c.id())), Sense::click());
+                                let resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), Sense::click());
                                 if resp.hovered() {
                                     ui.painter().rect_filled(r, rounding, pal.raise(0.04));
                                 }
@@ -779,7 +782,7 @@ impl App {
                         }
                         header.col(|ui| {
                             let r = ui.max_rect();
-                            let rounding = egui::Rounding { ne: 7.0, ..Default::default() };
+                            let rounding = egui::CornerRadius { ne: 7, ..Default::default() };
                             ui.painter().rect_filled(r, rounding, pal.panel);
                             ui.painter().line_segment([pos2(r.left(), r.bottom() - 0.5), pos2(r.right(), r.bottom() - 0.5)], Stroke::new(1.0_f32, pal.panel_stroke));
                         });
@@ -852,7 +855,7 @@ impl App {
                                         open_details = Some(key);
                                     }
                                 }
-                                resp.context_menu(|ui| {
+                                kit::context_menu(&resp, |ui| {
                                     if let Some(a) = action_menu(ui, r, &proc_caps) {
                                         menu_pick = Some((a, r.clone()));
                                     }
@@ -865,7 +868,7 @@ impl App {
         if built.entries.is_empty() {
             kit::empty_state(&p, table_rect.shrink2(vec2(0.0, 40.0)), &pal, "No matching processes");
         }
-        p.rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, pal.grid));
+        p.rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
         for (id, w) in resized {
             self.settings.window.process_table_column_widths.insert(id, w.round() as u32);
             self.settings_dirty = true;
@@ -917,7 +920,7 @@ impl App {
                 }
             });
             let ctx = ui.ctx();
-            if self.pending.is_none() && !ctx.wants_keyboard_input() {
+            if self.pending.is_none() && !ctx.egui_wants_keyboard_input() {
                 if key_once(ctx, egui::Key::Delete) {
                     let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
                     requested = Some((action, r.clone()));
@@ -939,7 +942,7 @@ impl App {
         let pal = fd.pal;
         let st = theme::status(&pal);
         let ctx = ui.ctx().clone();
-        if self.pending.is_none() && !ctx.wants_keyboard_input() && key_once(&ctx, egui::Key::Escape) {
+        if self.pending.is_none() && !ctx.egui_wants_keyboard_input() && key_once(&ctx, egui::Key::Escape) {
             self.proc.details = false;
             return;
         }
@@ -969,7 +972,7 @@ impl App {
         // Breadcrumb.
         let crumb_font = theme::ui(13.0);
         let back = Rect::from_min_size(pos2(x0, y), vec2(widgets::text_width(&p, "\u{2039} Processes", crumb_font.clone()), 20.0));
-        let back_resp = ui.interact(back, ui.id().with("proc-back"), Sense::click());
+        let back_resp = ui.interact(back, ui.scope_id().with("proc-back"), Sense::click());
         p.text(back.left_center(), Align2::LEFT_CENTER, "\u{2039} Processes", crumb_font.clone(), if back_resp.hovered() { pal.text } else { pal.text_faint });
         let rest = p.text(pos2(back.right() + 8.0, y + 10.0), Align2::LEFT_CENTER, format!("/ {group_name} /"), crumb_font.clone(), pal.text_faint);
         p.text(pos2(rest.right() + 8.0, y + 10.0), Align2::LEFT_CENTER, &r.name, crumb_font, pal.text);
@@ -1003,7 +1006,7 @@ impl App {
         } else {
             (Rect::from_min_max(pos2(x0, y + 76.0), pos2(full.right(), y + 112.0)), y + 112.0)
         };
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(btn_rect).layout(if inline { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) }), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(btn_rect).layout(if inline { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) }), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let shown = buttons.iter().filter(|b| b.0.is_some());
             let mut add = |ui: &mut egui::Ui, b: &(Option<&str>, ButtonKind, Option<Icon>, Action)| {
@@ -1042,8 +1045,8 @@ impl App {
         let mut go_parent: Option<(u32, i64)> = None;
         let mut go_network = false;
         let facts = self.facts(r, &group_name, group_n, parent.as_ref().map(|p| p.0.as_str()), logical, &st);
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area), |ui| {
-            egui::ScrollArea::vertical().id_salt("proc-details-scroll").auto_shrink([false, false]).show(ui, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            egui::ScrollArea::vertical().id_salt("proc-details-scroll").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 let w = ui.available_width();
                 let p = ui.painter().clone();
                 let two_col = w >= 860.0;
@@ -1099,7 +1102,7 @@ impl App {
                 let net = Rect::from_min_size(pos2(main.left(), res.bottom() + 16.0), vec2(main_w, net_h));
                 let inner = kit::section_card(&p, net, &pal, "Network connections", "");
                 let link = p.text(pos2(net.right() - 22.0, net.top() + 14.0), Align2::RIGHT_TOP, "Network tab \u{2192}", theme::ui(13.0), st.info);
-                let link_resp = ui.interact(link.expand(4.0), ui.id().with("proc-net-link"), Sense::click());
+                let link_resp = ui.interact(link.expand(4.0), ui.scope_id().with("proc-net-link"), Sense::click());
                 if link_resp.hovered() {
                     p.text(link.right_top(), Align2::RIGHT_TOP, "Network tab \u{2192}", theme::ui(13.0), theme::lighten(st.info, 0.25));
                 }
@@ -1143,7 +1146,7 @@ impl App {
                 if let (Some((name, key)), Some(row)) = (&parent, facts.iter().position(|f| f.0 == "Parent")) {
                     let label_w = widgets::text_width(&p, &format!("{name} ({})", r.parent_pid), theme::mono(12.0));
                     let hit = Rect::from_min_size(pos2(inner.left() + 104.0, inner.top() + row as f32 * 28.0), vec2(label_w, 28.0));
-                    let resp = ui.interact(hit, ui.id().with("proc-parent"), Sense::click());
+                    let resp = ui.interact(hit, ui.scope_id().with("proc-parent"), Sense::click());
                     if resp.hovered() {
                         let y = hit.center().y + 8.0;
                         p.line_segment([pos2(hit.left(), y), pos2(hit.right(), y)], Stroke::new(1.0_f32, st.info));
@@ -1614,7 +1617,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
 /// Expand / collapse arrow of a group row; true when clicked.
 fn chevron(ui: &mut egui::Ui, r: &ProcessRow, pal: &Palette, center: egui::Pos2, open: bool) -> bool {
     let hit = Rect::from_center_size(center, vec2(22.0, 26.0));
-    let resp = ui.interact(hit, ui.id().with(("chev", r.pid, r.create_time)), Sense::click());
+    let resp = ui.interact(hit, ui.scope_id().with(("chev", r.pid, r.create_time)), Sense::click());
     let color = if resp.hovered() { pal.text } else { pal.text_faint };
     widgets::draw_icon(ui.painter(), Rect::from_center_size(center, vec2(12.0, 12.0)), if open { Icon::ChevronDown } else { Icon::ChevronRight }, color);
     resp.clicked()
@@ -1873,8 +1876,8 @@ mod tests {
             series.1.push(1000.0 + k as f32);
         }
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let fd = FrameData { snap: &snap, hist: &hist, rows: &[], smooth: &smooth, pal, metric_colors: theme::MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: true, lasting: Default::default(), gpus_separated: false };
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 10.0), vec2(900.0, STRIP_H)), &fd, &pal, Some(Duration::from_secs(1)));
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 130.0), vec2(900.0, STRIP_H)), &fd, &pal, None);
@@ -1898,7 +1901,7 @@ mod tests {
                             st,
                         };
                         let (rect, _) = ui.allocate_exact_size(vec2(300.0, ROW_H), Sense::hover());
-                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                             for pc in [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Status), PCol::Data(Column::Cpu), PCol::CpuTrend, PCol::MemTrend, PCol::Data(Column::Description)] {
                                 cell_ui(ui, &r, pc, &pal, cx, &mut icons, true, false);
                             }
@@ -1906,10 +1909,10 @@ mod tests {
                         });
                     }
                     let mut out = None;
-                    egui::Area::new(egui::Id::new("menu-smoke")).show(ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc));
+                    egui::Area::new(egui::Id::unique("menu-smoke")).show(&ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc));
                     assert!(out.is_none());
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

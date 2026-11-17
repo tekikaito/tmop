@@ -17,6 +17,7 @@ use crate::pro::{trash, Loader};
 use crate::platform::{elevation_word, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -330,7 +331,7 @@ impl App {
         let content = section_card(&p, rect, &pal, "Clean up", "");
         // Refresh at the right end of the heading row; while measuring, a note beside the title.
         let mut refresh = false;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(rect.right() - 22.0 - 120.0, rect.top() + 10.0), vec2(120.0, 28.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(rect.right() - 22.0 - 120.0, rect.top() + 10.0), vec2(120.0, 28.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             refresh = Button::new("Refresh").size(ButtonSize::Compact).show(ui, &pal).clicked();
         });
         if busy {
@@ -371,8 +372,8 @@ impl App {
         let tiles_h = stat_grid(&p, content, &pal, &tiles, 190.0);
         let foot = Rect::from_min_max(pos2(content.left(), content.bottom() - 40.0), content.max);
         let list = Rect::from_min_max(pos2(content.left(), content.top() + tiles_h + 14.0), pos2(content.right(), foot.top() - 10.0));
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 // Windows Disk Cleanup: the handlers Windows' own Disk Cleanup offers. They replace TMOP's
                 // temp, thumbnail, Delivery Optimization, Recycle Bin and error report categories.
@@ -478,7 +479,7 @@ impl App {
                     if no_scan && !scanning {
                         let br = Rect::from_min_size(pos2(rx - 92.0, r.center().y - 14.0), vec2(92.0, 28.0));
                         widgets::text_fit(p, pos2(br.left() - 10.0, r.center().y), Align2::RIGHT_CENTER, &top, theme::ui(12.0), pal.text_dim, 140.0);
-                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(br), |ui| {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(br), |ui| {
                             if Button::new("Scan").icon(Icon::Play).size(ButtonSize::Compact).show(ui, &pal).clicked() {
                                 want_scan = true;
                             }
@@ -517,7 +518,7 @@ impl App {
         widgets::text_fit(&p, pos2(foot.left(), foot.center().y + 2.0), Align2::LEFT_CENTER, &foot_text, theme::ui(12.0), pal.text_faint, (foot.width() - 220.0).max(40.0));
         let can_go = delete_safe && n > 0 && !busy && c.pending.is_none() && !self.pro.del.job.is_loading();
         let mut want_clean = false;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left(), foot.top() + 6.0), foot.max)).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(foot.left(), foot.top() + 6.0), foot.max)).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(can_go, |ui| {
                 want_clean = Button::primary("Clean up selected\u{2026}").show(ui, &pal).clicked();
             });
@@ -696,7 +697,7 @@ impl App {
             }
             verdict_lists(ui, pal, &warns, &blocked);
             if !warns.is_empty() {
-                ui.checkbox(&mut ack, "I know what I'm doing");
+                ui.checkbox(&mut ack, theme::button_text("I know what I'm doing"));
                 ui.add_space(4.0);
             }
             answer = confirm_row(ui, pal, "Cancel", "Clean up", ButtonKind::DangerFill, ok_to_go);

@@ -246,7 +246,7 @@ fn driver_bar(ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette, driver: Optio
     widgets::text_fit(&p, pos2(name.right() + 16.0, rect.center().y), Align2::LEFT_CENTER, &facts.join(" \u{b7} "), theme::ui(13.0), pal.text_dim, (rect.right() - buttons_w - name.right() - 32.0).max(40.0));
     let exists = !s.path.is_empty() && Path::new(&s.path).exists();
     let r = Rect::from_min_max(pos2(rect.right() - 18.0 - buttons_w, rect.center().y - 17.0), pos2(rect.right() - 18.0, rect.center().y + 17.0));
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), |ui| {
         if Button::ghost("Copy path").size(ButtonSize::Medium).show(ui, pal).clicked() {
             ui.ctx().copy_text(s.path.clone());
         }
@@ -330,7 +330,7 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
             (_, Some(r)) => {
                 let link = format!("{} ({})", r.name, r.pid);
                 let hit = Rect::from_min_size(pos2(x + 96.0, y), vec2(widgets::text_width(&p, &link, theme::mono(12.0)).min(w - 96.0), 18.0));
-                let resp = ui.interact(hit, ui.id().with(("service-process", r.pid)), Sense::click());
+                let resp = ui.interact(hit, ui.scope_id().with(("service-process", r.pid)), Sense::click());
                 let c = if resp.hovered() { theme::lighten(st.info, 0.25) } else { st.info };
                 widgets::text_fit(&p, pos2(hit.left(), label_y), Align2::LEFT_CENTER, &link, theme::mono(12.0), c, w - 96.0);
                 if resp.hovered() {
@@ -412,13 +412,13 @@ mod tests {
         for (width, drivers, selected) in [(1500.0, false, None), (1500.0, false, Some("Dnscache")), (900.0, false, Some("Spooler")), (1500.0, true, None), (900.0, true, Some("Spooler"))] {
             let mut state = TableState { selected: selected.map(String::from), ..Default::default() };
             for _ in 0..2 {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                ctx.run_ui(egui::RawInput::default(), |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
                         let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(width, 700.0));
                         assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info), None);
                         assert_eq!(driver_like_page(ui, area, &fd, &[], &mut state, Some("no access"), drivers, &mut icons, &mut info), None);
                     });
-                });
+                }).drop_without_applying_deltas();
             }
         }
     }

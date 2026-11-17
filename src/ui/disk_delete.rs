@@ -12,6 +12,7 @@ use crate::pro::Loader;
 use crate::platform::{file_manager, os_name, trash_word};
 use crate::process::{format_bytes, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Rect, RichText, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -196,13 +197,13 @@ pub fn file_target(t: &Tree, idx: usize) -> Option<Target> {
 /// the full check.
 pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_safe: bool, out: &mut MenuOut) {
     out.want_rules = delete_safe;
-    if ui.button(format!("Show in {}", file_manager())).clicked() {
+    if ui.button(theme::button_text(format!("Show in {}", file_manager()))).clicked() {
         let _ = kit::reveal(&t.path);
-        ui.close_menu();
+        ui.close();
     }
-    if ui.button("Copy path").clicked() {
+    if ui.button(theme::button_text("Copy path")).clicked() {
         ui.ctx().copy_text(t.path.display().to_string());
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     let blocked = if !delete_safe {
@@ -216,7 +217,7 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_sa
     // No file-system I/O here (the menu is drawn every frame): whether the item's volume has a
     // bin is asked by the dialog's background check, which skips it with the reason.
     for (label, mode) in [(format!("Move to {}", trash_word()), Mode::Recycle), ("Delete permanently\u{2026}".to_string(), Mode::Permanent)] {
-        let r = ui.add_enabled(blocked.is_none(), egui::Button::new(label));
+        let r = ui.add_enabled(blocked.is_none(), egui::Button::new(theme::button_text(label)));
         let r = match &blocked {
             Some(why) => r.on_disabled_hover_text(why),
             None => r,
@@ -224,7 +225,7 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_sa
         if r.clicked() {
             out.mode = Some(mode);
             out.target = Some(t.clone());
-            ui.close_menu();
+            ui.close();
         }
     }
 }
@@ -232,7 +233,7 @@ pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_sa
 /// Highlight for a selected row: the table's selected-row wash with a 1 px accent inset.
 pub fn paint_selected(p: &egui::Painter, r: Rect, pal: &Palette) {
     p.rect_filled(r, 4.0, pal.selected_row());
-    p.rect_stroke(r.shrink(0.5), 4.0, Stroke::new(1.0_f32, pal.accent));
+    p.rect_stroke(r.shrink(0.5), 4.0, Stroke::new(1.0_f32, pal.accent), egui::StrokeKind::Outside);
 }
 
 /// The warnings and the skipped items of a delete / clean up confirmation, in a scroll area:
@@ -243,7 +244,7 @@ pub fn verdict_lists(ui: &mut egui::Ui, pal: &Palette, warns: &[&Assessed], bloc
         return;
     }
     let st = theme::status(pal);
-    egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show_029(ui, [false, true], |ui| {
         for a in warns.iter().take(40) {
             let Verdict::Warn(reasons) = &a.verdict else { continue };
             ui.horizontal_top(|ui| {
@@ -280,7 +281,7 @@ pub fn verdict_lists(ui: &mut egui::Ui, pal: &Palette, warns: &[&Assessed], bloc
 /// Paths in an inset box (the first `max`, then "+n more").
 pub fn path_box<'a>(ui: &mut egui::Ui, pal: &Palette, paths: impl ExactSizeIterator<Item = &'a std::path::Path>, max: usize) {
     let total = paths.len();
-    egui::Frame::none().fill(pal.well()).stroke(Stroke::new(1.0_f32, pal.row_rule())).rounding(6.0).inner_margin(egui::Margin::symmetric(12.0, 8.0)).show(ui, |ui| {
+    widgets::stroke_outside(egui::Frame::new().fill(pal.well()).stroke(Stroke::new(1.0_f32, pal.row_rule())).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 8))).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         for p in paths.take(max) {
             ui.add(egui::Label::new(RichText::new(p.display().to_string()).font(theme::mono(12.0)).color(pal.text_code())).truncate());
@@ -323,7 +324,7 @@ impl DiskDeleteUi {
         if resp.secondary_clicked() && !self.sel.rows.contains(&i) {
             self.sel.select_only(i);
         }
-        resp.context_menu(|ui| {
+        kit::context_menu(resp, |ui| {
             if let Some(t) = mk(i) {
                 item_menu(ui, &t, rules, self.delete_safe, out);
             }
@@ -356,7 +357,7 @@ impl DiskDeleteUi {
                     }
                 });
             }
-            if self.delete_safe && mode.is_none() && self.pending.is_none() && !ui.ctx().wants_keyboard_input() {
+            if self.delete_safe && mode.is_none() && self.pending.is_none() && !ui.ctx().egui_wants_keyboard_input() {
                 let (del, shift) = ui.input(|i| (i.key_pressed(egui::Key::Delete), i.modifiers.shift));
                 if del {
                     mode = Some(if shift { Mode::Permanent } else { Mode::Recycle });
@@ -385,7 +386,7 @@ impl App {
         widgets::text_fit(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, "Not running as administrator: slower scan, some folders unreadable, protected files can't be deleted.", theme::ui(13.0), st.yellow, txt_w);
         let btn = Rect::from_min_max(pos2(rect.right() - btn_w - 8.0, rect.top()), pos2(rect.right() - 8.0, rect.bottom()));
         let mut clicked = false;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(btn).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(btn).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
             ui.add_enabled_ui(!busy, |ui| {
                 clicked = Button::new("Restart as administrator").icon(Icon::Shield).size(ButtonSize::Small).show(ui, pal).clicked();
             });
@@ -528,7 +529,7 @@ impl App {
             }
             verdict_lists(ui, pal, &warns, &blocked);
             if !warns.is_empty() {
-                ui.checkbox(&mut ack, "I know what I'm doing");
+                ui.checkbox(&mut ack, theme::button_text("I know what I'm doing"));
                 ui.add_space(4.0);
             }
             if no_bin {
@@ -603,7 +604,7 @@ impl App {
         kit::dialog(ctx, "disk-skipped", |ui| {
             kit::dialog_header(ui, pal, Some((Icon::Alert, st.warn)), "Some items were **skipped**", &format!("{} deleted, {} skipped ({} freed)", rep.deleted.len(), rep.skipped.len(), format_bytes(rep.freed as f64)));
             ui.add_space(10.0);
-            egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show_029(ui, [false, true], |ui| {
                 for (t, why) in &rep.skipped {
                     ui.add(egui::Label::new(RichText::new(t.path.display().to_string()).font(theme::mono(12.0)).color(pal.text)).truncate());
                     ui.label(RichText::new(why).font(theme::ui(12.0)).color(pal.text_dim));

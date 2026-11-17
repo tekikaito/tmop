@@ -1,6 +1,6 @@
 //! Texture cache of process / file icons, extracted on a worker thread.
 
-use eframe::egui::{self, ColorImage, TextureHandle, TextureId, TextureOptions};
+use eframe::egui::{self, TextureHandle, TextureId, TextureOptions};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ impl IconCache {
         let items: Vec<_> = self.done.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default();
         for (path, img) in items {
             self.pending.remove(&path);
-            let tex = img.map(|i| ctx.load_texture(format!("icon:{path}"), ColorImage::from_rgba_unmultiplied([i.size, i.size], &i.rgba), TextureOptions::LINEAR));
+            let tex = img.map(|i| ctx.load_texture(format!("icon:{path}"), super::theme::color_image_unmultiplied([i.size, i.size], &i.rgba), TextureOptions::LINEAR));
             self.textures.insert(path, tex);
         }
     }

@@ -71,7 +71,7 @@ fn filled(ctx: &egui::Context) -> bool {
 /// Makes the empty part of the header `rect` the title bar. Register it before the header's
 /// controls so they stay on top of it.
 pub fn drag_area(ui: &mut egui::Ui, rect: Rect) {
-    let resp = ui.interact(rect, Id::new("tmop-titlebar-drag"), Sense::click_and_drag());
+    let resp = ui.interact(rect, Id::unique("tmop-titlebar-drag"), Sense::click_and_drag());
     if resp.double_clicked() {
         let maximized = filled(ui.ctx());
         ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
@@ -88,7 +88,7 @@ pub fn window_buttons(ui: &mut egui::Ui, right: f32, cy: f32, pal: &Palette) -> 
     let left = right - 3.0 * BUTTON - 2.0 * BUTTON_GAP;
     for (i, kind) in order.into_iter().enumerate() {
         let rect = Rect::from_min_size(pos2(left + i as f32 * (BUTTON + BUTTON_GAP), cy - BUTTON / 2.0), vec2(BUTTON, BUTTON));
-        let resp = ui.interact(rect, Id::new(("tmop-window-button", i)), Sense::click());
+        let resp = ui.interact(rect, Id::unique(("tmop-window-button", i)), Sense::click());
         let p = ui.painter();
         let hot = resp.hovered();
         let color = match (kind, hot) {
@@ -133,12 +133,12 @@ fn draw_glyph(p: &egui::Painter, c: Pos2, kind: WindowButton, maximized: bool, c
         WindowButton::Maximize if maximized => {
             // Restore: a front square and the edge of one behind it.
             let front = Rect::from_min_size(pos2(c.x - h, c.y - h + 2.0), vec2(2.0 * h - 2.0, 2.0 * h - 2.0));
-            p.rect_stroke(front, 1.0, s);
+            p.rect_stroke(front, 1.0, s, egui::StrokeKind::Outside);
             p.line_segment([pos2(front.left() + 2.0, front.top() - 2.0), pos2(front.right() + 2.0, front.top() - 2.0)], s);
             p.line_segment([pos2(front.right() + 2.0, front.top() - 2.0), pos2(front.right() + 2.0, front.bottom() - 2.0)], s);
         }
         WindowButton::Maximize => {
-            p.rect_stroke(Rect::from_center_size(c, vec2(2.0 * h, 2.0 * h)), 1.0, s);
+            p.rect_stroke(Rect::from_center_size(c, vec2(2.0 * h, 2.0 * h)), 1.0, s, egui::StrokeKind::Outside);
         }
         WindowButton::Close => {
             p.line_segment([pos2(c.x - h, c.y - h), pos2(c.x + h, c.y + h)], s);
@@ -153,8 +153,8 @@ pub fn frame(ctx: &egui::Context, pal: &Palette) {
     if filled(ctx) {
         return;
     }
-    let screen = ctx.screen_rect();
-    ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("tmop-window-edge"))).rect_stroke(screen.shrink(0.5), 0.0, Stroke::new(1.0_f32, pal.sidebar_rule));
+    let screen = ctx.content_rect();
+    ctx.layer_painter(LayerId::new(Order::Foreground, Id::unique("tmop-window-edge"))).rect_stroke(screen.shrink(0.5), 0.0, Stroke::new(1.0_f32, pal.sidebar_rule), egui::StrokeKind::Outside);
     let Some(dir) = ctx.input(|i| i.pointer.hover_pos()).and_then(|pos| resize_direction(screen, pos, EDGE, CORNER)) else { return };
     ctx.set_cursor_icon(cursor(dir));
     if ctx.input(|i| i.pointer.primary_pressed()) {
@@ -195,15 +195,15 @@ mod tests {
         pal.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let full = ui.max_rect();
                     drag_area(ui, full);
                     let left = window_buttons(ui, full.right() - 12.0, full.top() + 36.0, &pal);
                     assert!((full.right() - 12.0 - left - (3.0 * BUTTON + 2.0 * BUTTON_GAP + 10.0)).abs() < 0.01);
                 });
-                frame(ctx, &pal);
-            });
+                frame(&ctx, &pal);
+            }).drop_without_applying_deltas();
         }
     }
 }

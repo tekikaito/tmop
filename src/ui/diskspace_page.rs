@@ -11,6 +11,7 @@ use crate::pro::diskdelete::{self, Target};
 use crate::pro::diskspace::{self, ScanProgress, Tree, Volume};
 use crate::process::format_bytes;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -104,7 +105,7 @@ impl App {
             let active = diskspace::volume_index(&scanned, &roots);
             for (i, v) in vols.iter().take(shown).enumerate() {
                 let r = Rect::from_min_size(pos2(area.left() + (i % cols) as f32 * (w + 12.0), y + (i / cols) as f32 * (VOLUME_H + 12.0)), vec2(w, VOLUME_H));
-                let resp = ui.interact(r, ui.id().with(("vol", &v.root)), Sense::click());
+                let resp = ui.interact(r, ui.scope_id().with(("vol", &v.root)), Sense::click());
                 volume_card(&p, r, &pal, v, active == Some(i), resp.hovered());
                 if resp.clicked() && !progress.running {
                     self.pro.disk_root = v.root.clone();
@@ -162,7 +163,7 @@ impl App {
             kit::dialog(ui.ctx(), "stop-scan", |ui| {
                 kit::dialog_header(ui, &pal, Some((Icon::Stop, st.danger)), "Stop the **Disk Space scan**?", "The results found so far are kept.");
                 ui.add_space(8.0);
-                ui.checkbox(&mut dont_ask, "Don't ask again");
+                ui.checkbox(&mut dont_ask, theme::button_text("Don't ask again"));
                 ui.add_space(8.0);
                 answer = confirm_row(ui, &pal, "Keep scanning", "Stop scan", ButtonKind::DangerFill, true);
             });
@@ -219,9 +220,9 @@ impl App {
         if !notes.is_empty() {
             let r = widgets::text_fit(&p, pos2(content.right(), hint_y), Align2::RIGHT_CENTER, &notes.join(" \u{b7} "), theme::mono(11.0), pal.text_faint, (content.width() - hint.width() - 20.0).max(40.0));
             if let Some(why) = progress.fell_back.as_ref().filter(|_| self.caps.mft) {
-                ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(format!("MFT unavailable: {why}, used the parallel walker"));
+                ui.interact(r, ui.scope_id().with("scan-note"), Sense::hover()).on_hover_text(format!("MFT unavailable: {why}, used the parallel walker"));
             } else if let Some(hint) = denied_hint().filter(|_| progress.finished && progress.denied > 0) {
-                ui.interact(r, ui.id().with("scan-note"), Sense::hover()).on_hover_text(hint);
+                ui.interact(r, ui.scope_id().with("scan-note"), Sense::hover()).on_hover_text(hint);
             }
         }
         let kids: Vec<u32> = node.children.iter().copied().filter(|c| t.nodes[*c as usize].size > 0).take(60).collect();
@@ -243,7 +244,7 @@ impl App {
         let rects = diskspace::squarify(&sizes, map.left(), map.top(), map.width(), map.height());
         let hover = ui.ctx().pointer_hover_pos();
         // Registered first so the tiles sit on top; right-click on empty map goes up one level.
-        let bg = ui.interact(map, ui.id().with("tm-bg"), Sense::click());
+        let bg = ui.interact(map, ui.scope_id().with("tm-bg"), Sense::click());
         let mut tiles: Vec<Rect> = Vec::new();
         let rules = self.pro.del.rules.ok().cloned();
         let mut menu = super::disk_delete::MenuOut::default();
@@ -262,7 +263,7 @@ impl App {
                 (with_alpha(c, if hovered { 0.30 } else { 0.20 }), with_alpha(c, 0.5))
             };
             p.rect_filled(r, 2.0, fill);
-            p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, stroke));
+            p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, stroke), egui::StrokeKind::Outside);
             let is_more = is_rest && more > 0 && i == kids.len();
             let (name, size) = if is_more { ("More folders".to_string(), more) } else if is_rest { ("Files here".to_string(), rest) } else { let n = &t.nodes[kids[i] as usize]; (n.name.clone(), n.size) };
             if r.width() > 46.0 && r.height() > 22.0 {
@@ -276,16 +277,16 @@ impl App {
                 }
             }
             if !is_rest {
-                let resp = ui.interact(r, ui.id().with(("tm", kids[i])), Sense::click());
+                let resp = ui.interact(r, ui.scope_id().with(("tm", kids[i])), Sense::click());
                 if resp.clicked() && !t.nodes[kids[i] as usize].children.is_empty() {
                     go = Some(kids[i]);
                 }
-                resp.context_menu(|ui| super::disk_delete::item_menu(ui, &diskdelete::folder_target(t, kids[i]), rules.as_deref(), self.pro.del.delete_safe, &mut menu));
+                kit::context_menu(&resp, |ui| super::disk_delete::item_menu(ui, &diskdelete::folder_target(t, kids[i]), rules.as_deref(), self.pro.del.delete_safe, &mut menu));
                 resp.on_hover_text(format!("{}\n{}  \u{2022}  {} files", t.path_of(kids[i]).display(), format_bytes(size as f64), t.nodes[kids[i] as usize].files));
             } else if is_more {
-                ui.interact(r, ui.id().with("tm-more"), Sense::hover()).on_hover_text(format!("{} in smaller folders not drawn here\nSee the Folders tab", format_bytes(more as f64)));
+                ui.interact(r, ui.scope_id().with("tm-more"), Sense::hover()).on_hover_text(format!("{} in smaller folders not drawn here\nSee the Folders tab", format_bytes(more as f64)));
             } else {
-                let resp = ui.interact(r, ui.id().with("tm-rest"), Sense::click());
+                let resp = ui.interact(r, ui.scope_id().with("tm-rest"), Sense::click());
                 if resp.clicked() {
                     self.pro.disk_tab = 1;
                 }
@@ -422,7 +423,7 @@ impl App {
                 }
                 // Include-subfolders switch, then the header strip with sortable columns.
                 let tgl = Rect::from_min_size(list.min, vec2(list.width(), 24.0));
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(tgl).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(tgl).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
                     ui.label(RichText::new("Include subfolders").font(theme::ui(12.0)).color(pal.text_dim));
                     ui.add_space(4.0);
                     widgets::toggle(ui, &mut self.pro.disk_files_sub, &pal);
@@ -439,7 +440,7 @@ impl App {
                     let arrow = if !active { "" } else if self.pro.disk_files_asc { " \u{2191}" } else { " \u{2193}" };
                     let (font, color) = if active { (theme::semibold(11.0), pal.accent) } else { (theme::ui(11.0), pal.text_faint) };
                     let r = tracked_text(&p, pos2(*x, hdr.center().y), *anchor, &format!("{}{arrow}", label.to_uppercase()), font, color, 0.08);
-                    if ui.interact(r.expand2(vec2(4.0, 3.0)), ui.id().with(("files-hdr", k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    if ui.interact(r.expand2(vec2(4.0, 3.0)), ui.scope_id().with(("files-hdr", k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         if active {
                             self.pro.disk_files_asc = !self.pro.disk_files_asc;
                         } else {
@@ -583,13 +584,13 @@ impl App {
 
 /// Virtualised list in `rect`: `row(ui, i, r, resp)` draws item i into r (use `ui.painter()`).
 /// `id` is salted with the folder so each one starts scrolled to the top.
-pub(super) fn disk_list(ui: &mut egui::Ui, rect: Rect, id: impl std::hash::Hash + Copy, pal: &Palette, row_h: f32, n: usize, mut row: impl FnMut(&mut egui::Ui, usize, Rect, egui::Response)) {
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
+pub(super) fn disk_list(ui: &mut egui::Ui, rect: Rect, id: impl std::hash::Hash + Copy + std::fmt::Debug, pal: &Palette, row_h: f32, n: usize, mut row: impl FnMut(&mut egui::Ui, usize, Rect, egui::Response)) {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
         ui.style_mut().spacing.item_spacing = vec2(0.0, 0.0);
-        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows(ui, row_h, n, |ui, range| {
+        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show_rows_029(ui, [false, true], row_h, n, |ui, range| {
             for i in range {
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
-                let resp = ui.interact(r, ui.id().with(("row", i)), Sense::click());
+                let resp = ui.interact(r, ui.scope_id().with(("row", i)), Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(r, 4.0, pal.raise(0.04));
                 }
@@ -686,7 +687,7 @@ fn breadcrumb(ui: &mut egui::Ui, rect: Rect, pal: &Palette, t: &Tree, cursor: u3
         let hovered = !last && ui.rect_contains_pointer(hit);
         let r = put(&mut x, name, if last { pal.text } else if hovered { pal.accent } else { pal.text_faint });
         if !last {
-            if ui.interact(r.expand2(vec2(2.0, 4.0)), ui.id().with(("crumb", *idx)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            if ui.interact(r.expand2(vec2(2.0, 4.0)), ui.scope_id().with(("crumb", *idx)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 go = Some(*idx);
             }
             put(&mut x, sep, pal.text_faint);
@@ -708,9 +709,9 @@ fn volume_card(p: &egui::Painter, r: Rect, pal: &Palette, v: &Volume, active: bo
     }
     if active {
         p.rect_filled(r, 8.0, with_alpha(pal.accent, 0.08));
-        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.4)));
+        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.4)), egui::StrokeKind::Outside);
     } else {
-        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.card_stroke));
+        p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
     }
     hardware::draw(p, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(60.0, 40.0)), if v.kind == "Fixed" { Hardware::Disk } else { Hardware::Hdd }, pal.text_rail());
     let (x0, x1) = (r.left() + 88.0, r.right() - 16.0);
@@ -807,9 +808,9 @@ mod tests {
         theme::DARK.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| add(ui));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| add(ui));
+            }).drop_without_applying_deltas();
         }
     }
 

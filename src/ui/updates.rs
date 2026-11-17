@@ -4,12 +4,13 @@
 use super::kit::{self, DialogButton};
 use super::settings_page::{note, toggle_row_hint};
 use super::theme::{self, Palette};
-use super::widgets::{Button, ButtonSize, Icon};
+use super::widgets::{self, Button, ButtonSize, Icon};
 use super::App;
 use crate::pro::Loader;
 use crate::settings::General;
 use crate::update::{self, Method, Release};
 use eframe::egui::{self, RichText, ViewportCommand};
+use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -103,7 +104,7 @@ fn update_source_row(ui: &mut egui::Ui, pal: &Palette, general: &mut General) ->
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
         ui.label(RichText::new("Update source").font(theme::ui(13.0)).color(pal.text));
-        let edit = egui::TextEdit::singleline(&mut general.update_repo).hint_text(update::RELEASE_REPO).desired_width(220.0).font(theme::mono(12.0));
+        let edit = widgets::text_edit(egui::TextEdit::singleline(&mut general.update_repo).hint_text(update::RELEASE_REPO).desired_width(220.0 + 8.0).font(theme::mono(12.0)), true);
         changed = ui.add(edit).changed();
         if !general.update_repo.trim().is_empty() && Button::ghost("Reset").size(ButtonSize::Small).show(ui, pal).clicked() {
             general.update_repo.clear();
@@ -192,8 +193,8 @@ impl App {
             let body = format!("You have TMOP {}. What's new:", update::current_version());
             kit::dialog_header(ui, pal, Some((Icon::Refresh, accent)), &format!("TMOP **{}** is available", release.version), &body);
             ui.add_space(10.0);
-            egui::Frame::none().fill(pal.card).rounding(6.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
+            egui::Frame::new().fill(pal.card).corner_radius(6).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show_029(ui, [false, true], |ui| {
                     let text = if notes.is_empty() { "This release has no notes." } else { notes.as_str() };
                     ui.label(RichText::new(text).font(theme::ui(13.0)).color(pal.text_dim));
                 });

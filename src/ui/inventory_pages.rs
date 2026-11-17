@@ -13,6 +13,7 @@ use crate::pro::inventory::{keys, Sections, StartupApp};
 use crate::pro::Loader;
 use crate::process::{format_bytes, format_cpu_time, format_rate, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
+use super::widgets::ScrollArea029 as _;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -289,8 +290,8 @@ impl App {
         let heights: Vec<f32> = sections.iter().map(|(title, items)| (40.0 + items.len() as f32 * 22.0 + 18.0).max(if *title == keys::DEVICE { 96.0 } else { 0.0 })).collect();
         let (at, cards_h) = masonry(&heights, cols);
         let total = tiles_height(w, tiles.len(), 190.0) + BLOCK_GAP + cards_h;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area).id_salt("sysinfo-scroll"), |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area).id_salt("sysinfo-scroll"), |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(w, total), Sense::hover());
                 let p = ui.painter().clone();
                 let used = kit::stat_grid(&p, rect, &pal, &tiles, 190.0);

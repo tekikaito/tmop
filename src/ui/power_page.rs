@@ -254,7 +254,7 @@ impl App {
             let h = (mhz / (max * 1.25)).clamp(0.0, 1.0) * region.height();
             let bar = Rect::from_min_max(pos2(x, region.bottom() - h), pos2(x + w, region.bottom()));
             p.rect_filled(bar, 1.0, if i == hot { with_alpha(st.warn, 0.9) } else { pal.accent });
-            ui.interact(col, ui.id().with(("core-bar", i)), Sense::hover()).on_hover_text(format!("Core {i}: {:.2} GHz", mhz / 1000.0));
+            ui.interact(col, ui.scope_id().with(("core-bar", i)), Sense::hover()).on_hover_text(format!("Core {i}: {:.2} GHz", mhz / 1000.0));
         }
         let label = |i: usize| {
             let x = region.left() + i as f32 * (w + gap) + w / 2.0;
@@ -324,13 +324,13 @@ mod tests {
         let pal = theme::DARK;
         pal.apply(&ctx);
         theme::install_fonts(&ctx, None);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
                 for frac in [0.0, 0.5, 1.0] {
                     battery_icon(ui.painter(), Rect::from_min_size(pos2(10.0, 10.0), vec2(54.0, 36.0)), pal.text_rail(), pal.ok, frac);
                 }
             });
-        });
+        }).drop_without_applying_deltas();
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::ui::kit;
 use crate::ui::terminal::{grid_for, TerminalView};
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets;
-use eframe::egui::{self, pos2, popup::popup_below_widget, popup::PopupCloseBehavior, vec2, Align2, Color32, Rect, Sense, Stroke, TextEdit};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Stroke, TextEdit};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -260,19 +260,19 @@ pub fn terminal_tab(
             action = Action::New(ExecOptions::default());
         }
         let drop = drop_button(ui, pal);
-        let menu_id = ui.id().with("docker-term-menu");
+        let menu_id = ui.scope_id().with("docker-term-menu");
         if drop.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(menu_id));
+            egui::Popup::toggle_id(ui.ctx(), menu_id);
         }
-        popup_below_widget(ui, menu_id, &drop, PopupCloseBehavior::CloseOnClickOutside, |ui| {
+        kit::popup_below_widget(ui, menu_id, &drop, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
             ui.set_min_width(MENU_W);
-            ui.add(TextEdit::singleline(&mut cs.command).hint_text("Command (empty = bash, then sh)").desired_width(MENU_W).font(theme::ui(13.0)));
-            ui.add(TextEdit::singleline(&mut cs.user).hint_text("User (optional)").desired_width(MENU_W).font(theme::ui(13.0)));
+            ui.add(widgets::text_edit(TextEdit::singleline(&mut cs.command).hint_text("Command (empty = bash, then sh)").desired_width(MENU_W + 8.0).font(theme::ui(13.0)), true));
+            ui.add(widgets::text_edit(TextEdit::singleline(&mut cs.user).hint_text("User (optional)").desired_width(MENU_W + 8.0).font(theme::ui(13.0)), true));
             if gated_button(ui, "Start", pal, blocked) {
                 let command = Some(split_command(&cs.command)).filter(|c| !c.is_empty());
                 let user = Some(cs.user.trim().to_string()).filter(|u| !u.is_empty());
                 action = Action::New(ExecOptions { command, user, ..ExecOptions::default() });
-                ui.memory_mut(|m| m.close_popup());
+                egui::Popup::close_id(ui.ctx(), menu_id);
             }
         });
         if let Some(s) = cs.sessions.get(cs.active) {
@@ -332,8 +332,8 @@ fn session_tab(ui: &mut egui::Ui, pal: &Palette, index: usize, s: &Session, sele
     let (rect, _) = ui.allocate_exact_size(vec2(label_w + CLOSE_W, TOOLBAR_H), Sense::hover());
     let label_rect = Rect::from_min_size(rect.min, vec2(label_w, TOOLBAR_H));
     let close_rect = Rect::from_min_size(pos2(label_rect.right(), rect.top()), vec2(CLOSE_W, TOOLBAR_H));
-    let tab = ui.interact(label_rect, ui.id().with(("term-tab", index)), Sense::click());
-    let close = ui.interact(close_rect, ui.id().with(("term-close", index)), Sense::click());
+    let tab = ui.interact(label_rect, ui.scope_id().with(("term-tab", index)), Sense::click());
+    let close = ui.interact(close_rect, ui.scope_id().with(("term-close", index)), Sense::click());
 
     let p = ui.painter();
     if selected {
@@ -400,7 +400,7 @@ fn drop_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         pal.control
     };
     p.rect_filled(rect, 4.0, bg);
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke));
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0_f32, pal.control_stroke), egui::StrokeKind::Outside);
     let c = rect.center();
     p.add(egui::Shape::convex_polygon(vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x + 4.0, c.y - 2.0), pos2(c.x, c.y + 2.5)], pal.text, Stroke::NONE));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)

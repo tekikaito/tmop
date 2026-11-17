@@ -78,11 +78,11 @@ mod scr {
             // Rendering into the Control Panel preview HWND is not supported by eframe;
             // exit quietly so Windows shows its default preview (design choice).
             ScrMode::Preview(_) => Ok(()),
-            ScrMode::Configure => eframe::run_simple_native(
+            ScrMode::Configure => eframe::run_ui_native(
                 "TMOP screensaver",
                 eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 120.0]), ..Default::default() },
-                |ctx, _| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |ui, _| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         ui.label("TMOP screensaver: CPU, GPU and memory traces.");
                         ui.label("Windows controls idle time and sign-in on resume.");
                     });
@@ -121,9 +121,10 @@ mod scr {
     }
 
     impl eframe::App for Saver {
-        fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        fn ui(&mut self, root: &mut egui::Ui, _f: &mut eframe::Frame) {
+            let ctx = &root.ctx().clone();
             let h = self.sampler.shared.lock().map(|g| std::sync::Arc::clone(&g.history)).ok();
-            egui::CentralPanel::default().frame(egui::Frame::none().fill(egui::Color32::BLACK)).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::BLACK)).show(root, |ui| {
                 let r = ui.max_rect().shrink(40.0);
                 if let Some(h) = h {
                     // Glowing traces on black.

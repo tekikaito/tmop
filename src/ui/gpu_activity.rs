@@ -33,15 +33,15 @@ pub enum GpuMenu {
 pub fn gpu_menu(ui: &mut egui::Ui, fd: &FrameData<'_>, activity: bool) -> Option<GpuMenu> {
     let mut out = None;
     let label = if fd.gpus_separated { "Show GPUs grouped" } else { "Show GPUs separately" };
-    let toggle = ui.add_enabled(fd.snap.gpu.adapters.len() >= 2, egui::Button::new(label)).on_disabled_hover_text("TMOP found only one GPU");
+    let toggle = ui.add_enabled(fd.snap.gpu.adapters.len() >= 2, egui::Button::new(super::theme::button_text(label))).on_disabled_hover_text("TMOP found only one GPU");
     if toggle.clicked() {
         out = Some(GpuMenu::Separated(!fd.gpus_separated));
     }
-    if ui.button(if activity { "Hide GPU activity" } else { "View GPU activity" }).clicked() {
+    if ui.button(super::theme::button_text(if activity { "Hide GPU activity" } else { "View GPU activity" })).clicked() {
         out = Some(GpuMenu::Activity(!activity));
     }
     if out.is_some() {
-        ui.close_menu();
+        ui.close();
     }
     out
 }

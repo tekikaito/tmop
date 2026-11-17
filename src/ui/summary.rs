@@ -12,6 +12,7 @@ use crate::metrics::{History, Series};
 use crate::pro::recorder::EventKind;
 use crate::process::{format_bytes, format_rate, Action, Column};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,7 +86,7 @@ impl App {
         }
         let n_rows = ((area.height() - 540.0) / CONSUMER_ROW_H).floor().clamp(4.0, 6.0) as usize;
         let mut go = None;
-        egui::ScrollArea::vertical().id_salt("summary-scroll").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("summary-scroll").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
             let top = ui.cursor().min;
             let w = ui.available_width();
             let mut y = top.y;
@@ -400,9 +401,9 @@ impl App {
         for (i, c) in cards.iter().enumerate() {
             let (col, row) = (i % cols, i / cols);
             let r = Rect::from_min_size(pos2(x + col as f32 * (cw + GAP_X), y + row as f32 * (RESOURCE_CARD_H + GAP_X)), vec2(cw, RESOURCE_CARD_H));
-            let resp = ui.interact(r, ui.id().with(("res", &c.label)), Sense::click());
+            let resp = ui.interact(r, ui.scope_id().with(("res", &c.label)), Sense::click());
             if c.device == Device::Gpu {
-                resp.context_menu(|ui| {
+                kit::context_menu(&resp, |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
                         *go = Some(Go::GpuMenu(m));
                     }
@@ -410,7 +411,7 @@ impl App {
             }
             widgets::card(&p, r, &pal);
             if resp.hovered() {
-                p.rect_stroke(r, 10.0, Stroke::new(1.0_f32, pal.raise(0.14)));
+                p.rect_stroke(r, 10.0, Stroke::new(1.0_f32, pal.raise(0.14)), egui::StrokeKind::Outside);
             }
             let ring_c = pos2(r.left() + 20.0 + 26.0, r.top() + 20.0 + 26.0);
             widgets::ring(&p, ring_c, 27.0 * 52.0 / 64.0, 4.0 * 52.0 / 64.0, c.frac, c.color, with_alpha(pal.text, 0.08));
@@ -475,7 +476,7 @@ impl App {
         let c = kit::section_card(&p, rect, &pal, "Top consumers", "");
         // "All processes" link at the right of the heading.
         let link = p.text(pos2(rect.right() - 22.0, rect.top() + 15.0), Align2::RIGHT_TOP, "All processes \u{2192}", theme::ui(13.0), st.info);
-        let lr = ui.interact(link.expand(4.0), ui.id().with("all-processes"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let lr = ui.interact(link.expand(4.0), ui.scope_id().with("all-processes"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         if lr.hovered() {
             p.text(link.right_top(), Align2::RIGHT_TOP, "All processes \u{2192}", theme::ui(13.0), lighten(st.info, 0.25));
         }
@@ -509,7 +510,7 @@ impl App {
         for (i, g) in order.iter().enumerate() {
             let ry = c.top() + 32.0 + i as f32 * CONSUMER_ROW_H;
             let row = Rect::from_min_size(pos2(c.left(), ry), vec2(c.width(), CONSUMER_ROW_H));
-            let resp = ui.interact(row, ui.id().with(("consumer", &g.key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(row, ui.scope_id().with(("consumer", &g.key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.hovered() {
                 p.rect_filled(row.shrink2(vec2(-8.0, 1.0)), 6.0, pal.raise(0.04));
             }
@@ -738,9 +739,9 @@ impl App {
             let (col, row) = (i % 2, i / 2);
             let r = Rect::from_min_size(pos2(tiles_x + col as f32 * (tw + GAP_X), tiles_y + row as f32 * (th + GAP_X)), vec2(tw, th));
             let level = v.levels[*li];
-            let resp = ui.interact(r, ui.id().with(("tile", *label)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(r, ui.scope_id().with(("tile", *label)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if *dev == Device::Gpu {
-                resp.context_menu(|ui| {
+                kit::context_menu(&resp, |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
                         *go = Some(Go::GpuMenu(m));
                     }
@@ -752,7 +753,7 @@ impl App {
                 widgets::card(&p, r, &pal);
             }
             if resp.hovered() {
-                p.rect_stroke(r, 10.0, Stroke::new(1.0_f32, pal.raise(0.14)));
+                p.rect_stroke(r, 10.0, Stroke::new(1.0_f32, pal.raise(0.14)), egui::StrokeKind::Outside);
             }
             widgets::tracked_text(&p, pos2(r.left() + 18.0, r.top() + 18.0), Align2::LEFT_TOP, &label.to_uppercase(), theme::ui(11.0), pal.text_faint, 0.14);
             let nr = p.text(pos2(r.left() + 18.0, r.top() + 18.0 + 13.0 + 8.0), Align2::LEFT_TOP, value, theme::light(28.0), pal.text);
@@ -937,7 +938,7 @@ pub fn visible_range(s: &Series, n: usize) -> (f32, f32) {
 pub fn proc_icon(p: &egui::Painter, r: Rect, app: bool) {
     let c = Color32::from_rgb(if app { 0x4C } else { 0x8A }, if app { 0x9E } else { 0x8A }, if app { 0xF7 } else { 0x8A });
     p.rect_filled(r, 2.0, with_alpha(c, 0.25));
-    p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, c));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0_f32, c), egui::StrokeKind::Outside);
     if app {
         p.line_segment([pos2(r.left() + 2.0, r.top() + 4.0), pos2(r.right() - 2.0, r.top() + 4.0)], Stroke::new(1.0_f32, c));
     } else {
@@ -956,8 +957,8 @@ mod tests {
         theme::DARK.apply(&ctx);
         theme::install_fonts(&ctx, None);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let p = ui.painter().clone();
                     let parts = [("Memory is ", theme::light(44.0), Color32::WHITE), ("almost full", theme::ui(44.0), Color32::RED), (".", theme::light(44.0), Color32::WHITE)];
                     let one = rich(&p, &parts, 2000.0, 46.0);
@@ -968,7 +969,7 @@ mod tests {
                         marker(&p, pos2(20.0 + i as f32 * 20.0, 300.0), level, Color32::RED);
                     }
                 });
-            });
+            }).drop_without_applying_deltas();
         }
     }
 

@@ -26,7 +26,7 @@ fn join_machine(host: Option<String>, user: Option<String>) -> String {
 
 /// A 40 x 40 icon button of the header: faint icon, bright on hover, `selection` fill when `on`.
 fn icon_button(ui: &mut egui::Ui, rect: Rect, id: &str, icon: Icon, pal: &Palette, on: bool, tip: &str) -> Response {
-    let resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    let resp = ui.interact(rect, ui.scope_id().with(id), Sense::click());
     let p = ui.painter();
     if on {
         p.rect_filled(rect, 6.0, pal.selection);
@@ -41,10 +41,11 @@ fn icon_button(ui: &mut egui::Ui, rect: Rect, id: &str, icon: Icon, pal: &Palett
 impl App {
     /// The 64 px header bar: logo and machine name, global search, live readouts, and the pin,
     /// theme and overflow buttons.
-    pub(super) fn header_bar(&mut self, ctx: &egui::Context, pal: &Palette, snap: &Snapshot) {
+    pub(super) fn header_bar(&mut self, root: &mut egui::Ui, pal: &Palette, snap: &Snapshot) {
+        let ctx = root.ctx().clone();
         let focus = std::mem::take(&mut self.focus_search);
-        let frame = egui::Frame::none();
-        egui::TopBottomPanel::top("header").exact_height(TOP_BAR_H).frame(frame).show_separator_line(false).show(ctx, |ui| {
+        let frame = egui::Frame::new();
+        egui::Panel::top("header").exact_size(TOP_BAR_H).resizable(false).frame(frame).show_separator_line(false).show(root, |ui| {
             let full = ui.max_rect();
             if self.own_title_bar {
                 super::titlebar::drag_area(ui, full);
@@ -103,20 +104,22 @@ impl App {
             if w >= 140.0 {
                 let search = Rect::from_min_size(pos2(left + (avail - w) / 2.0, cy - 20.0), vec2(w, 40.0));
                 p.rect_filled(search, 6.0, pal.control);
-                p.rect_stroke(search, 6.0, Stroke::new(1.0_f32, pal.control_stroke));
+                p.rect_stroke(search, 6.0, Stroke::new(1.0_f32, pal.control_stroke), egui::StrokeKind::Outside);
                 draw_icon(&p, Rect::from_center_size(pos2(search.left() + 22.0, cy), vec2(16.0, 16.0)), Icon::Search, pal.text_faint);
                 let hint_w = if w >= 300.0 { widgets::key_hint(&p, pos2(search.right() - 14.0 - widgets::text_width(&p, "Ctrl K", theme::mono(11.0)) - 12.0, cy), "Ctrl K", pal).width() + 14.0 } else { 0.0 };
                 let edit = Rect::from_min_max(pos2(search.left() + 38.0, cy - 12.0), pos2(search.right() - 12.0 - hint_w, cy + 12.0));
-                let id = Id::new("global-search");
+                let id = Id::unique("global-search");
                 let resp = ui.put(
                     edit,
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .id(id)
-                        .hint_text(egui::RichText::new("Search processes by name, PID, user, description").color(pal.text_faint))
-                        .frame(false)
-                        .font(theme::ui(14.0))
-                        .vertical_align(egui::Align::Center)
-                        .desired_width(edit.width()),
+                    widgets::text_edit(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .id(id)
+                            .hint_text(egui::RichText::new("Search processes by name, PID, user, description").color(pal.text_faint))
+                            .font(theme::ui(14.0))
+                            .align(egui::Align2::LEFT_CENTER)
+                            .desired_width(edit.width() + 8.0),
+                        false,
+                    ),
                 );
                 if focus {
                     resp.request_focus();
@@ -147,12 +150,12 @@ impl App {
             }
             // Overflow menu.
             let dots = icon_button(ui, dots_rect, "hdr-dots", Icon::Dots, pal, false, "More");
-            let menu_id = ui.id().with("hdr-menu");
+            let menu_id = ui.scope_id().with("hdr-menu");
             if dots.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(menu_id));
+                egui::Popup::toggle_id(ui.ctx(), menu_id);
             }
             let mut close = false;
-            egui::popup_below_widget(ui, menu_id, &dots, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            kit::popup_below_widget(ui, menu_id, &dots, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
                 ui.set_min_width(240.0);
                 if kit::menu_item(ui, "Refresh now", Some("F5"), false) {
                     self.sampler.refresh();
@@ -180,7 +183,7 @@ impl App {
                 }
             });
             if close {
-                ui.memory_mut(|m| m.close_popup());
+                egui::Popup::close_id(ui.ctx(), menu_id);
             }
         });
     }
@@ -188,7 +191,7 @@ impl App {
     /// One rail entry (60 x 46): icon above a tracked 10 px label. Returns the response.
     #[allow(clippy::too_many_arguments)]
     fn rail_item(ui: &mut egui::Ui, p: &egui::Painter, rect: Rect, hit: Rect, id: &str, icon: Icon, label: &str, active: bool, pal: &Palette) -> Response {
-        let resp = ui.interact(hit, ui.id().with(id), Sense::click());
+        let resp = ui.interact(hit, ui.scope_id().with(id), Sense::click());
         if active {
             p.rect_filled(rect, 8.0, pal.selection);
             p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.top() + 5.0), pos2(rect.left() + 2.0, rect.bottom() - 5.0)), 1.0, pal.accent);
@@ -211,8 +214,8 @@ impl App {
     }
 
     /// The 84 px navigation rail: every page, then Settings and the popout toggle at the bottom.
-    pub(super) fn rail(&mut self, ctx: &egui::Context, pal: &Palette) {
-        egui::SidePanel::left("rail").exact_width(RAIL_W).resizable(false).frame(egui::Frame::none()).show_separator_line(false).show(ctx, |ui| {
+    pub(super) fn rail(&mut self, root: &mut egui::Ui, pal: &Palette) {
+        egui::Panel::left("rail").exact_size(RAIL_W).resizable(false).frame(egui::Frame::new()).show_separator_line(false).show(root, |ui| {
             let full = ui.max_rect();
             let p = ui.painter().clone();
             p.line_segment([pos2(full.right() - 0.5, full.top()), pos2(full.right() - 0.5, full.bottom())], Stroke::new(1.0_f32, pal.sidebar_rule));
@@ -226,14 +229,14 @@ impl App {
             let bottom_top = full.bottom() - 16.0 - 2.0 * step + RAIL_GAP;
             let nav_rect = Rect::from_min_max(pos2(full.left(), full.top() + 12.0), pos2(full.right(), (bottom_top - 8.0).max(full.top() + 12.0)));
             let nav_h = pages.len() as f32 * step;
-            let scroll_id = ui.id().with("nav-scroll");
+            let scroll_id = ui.scope_id().with("nav-scroll");
             let max_scroll = (nav_h - nav_rect.height()).max(0.0);
             let mut scroll = ui.data(|d| d.get_temp::<f32>(scroll_id)).unwrap_or(0.0);
             if max_scroll > 0.0 && ui.rect_contains_pointer(nav_rect) {
                 scroll -= ui.input(|i| i.smooth_scroll_delta.y);
             }
             // A page picked elsewhere (shortcut, link) is scrolled into view.
-            let seen_id = ui.id().with("nav-seen");
+            let seen_id = ui.scope_id().with("nav-seen");
             if ui.data(|d| d.get_temp::<Page>(seen_id)) != Some(self.page) {
                 ui.data_mut(|d| d.insert_temp(seen_id, self.page));
                 if let Some(i) = pages.iter().position(|&q| q == self.page) {
@@ -272,7 +275,7 @@ impl App {
         });
     }
 
-    pub(super) fn status_bar(&mut self, ctx: &egui::Context, pal: &Palette, snap: &Snapshot) {
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui, pal: &Palette, snap: &Snapshot) {
         // Transient messages fade out after a while; the provider line stays.
         if self.status != self.status_seen.0 {
             self.status_seen = (self.status.clone(), Instant::now());
@@ -281,7 +284,7 @@ impl App {
             self.ip = (crate::pro::connections::primary_ipv4().map(|a| a.to_string()), Some(Instant::now()));
         }
         let st = theme::status(pal);
-        egui::TopBottomPanel::bottom("status").exact_height(STATUS_H).frame(egui::Frame::none()).show_separator_line(false).show(ctx, |ui| {
+        egui::Panel::bottom("status").exact_size(STATUS_H).resizable(false).frame(egui::Frame::new()).show_separator_line(false).show(root, |ui| {
             let r = ui.max_rect();
             let p = ui.painter();
             p.line_segment([pos2(r.left(), r.top() + 0.5), pos2(r.right(), r.top() + 0.5)], Stroke::new(1.0_f32, pal.sidebar_rule));
@@ -325,19 +328,19 @@ impl App {
             let lcd = Rect::from_min_size(pos2(r.right() - 14.0 - cw - 14.0, r.center().y - 11.0), vec2(cw + 14.0, 22.0));
             let lcd_pal = pal.lcd();
             p.rect_filled(lcd, 3.0, lcd_pal.bg);
-            p.rect_stroke(lcd, 3.0, Stroke::new(1.0_f32, lcd_pal.rim));
+            p.rect_stroke(lcd, 3.0, Stroke::new(1.0_f32, lcd_pal.rim), egui::StrokeKind::Outside);
             let lit = if rec { Color32::from_rgb(0xFF, 0x6A, 0x6A) } else { lcd_pal.lit };
             widgets::seven_segment(p, pos2(lcd.left() + 7.0, lcd.top() + 3.5), &clock, h, lit, lcd_pal.unlit, if rec { self.bloom() } else { 0.0 });
             let lap = pos2(lcd.left() - 18.0, r.center().y);
             p.circle_filled(lap, 3.5, pal.control_stroke);
             let stop = Rect::from_center_size(pos2(lap.x - 34.0, r.center().y), vec2(24.0, 20.0));
-            let stop_resp = ui.interact(stop, ui.id().with("status-stop"), Sense::click());
+            let stop_resp = ui.interact(stop, ui.scope_id().with("status-stop"), Sense::click());
             let p = ui.painter();
             p.rect_filled(stop, 3.0, if stop_resp.hovered() && rec { pal.hover } else { pal.control });
             p.rect_filled(Rect::from_center_size(stop.center(), vec2(9.0, 9.0)), 1.0, if rec { pal.text } else { pal.control_stroke });
             p.line_segment([pos2(stop.right() + 9.5, r.top() + 6.0), pos2(stop.right() + 9.5, r.bottom() - 6.0)], Stroke::new(1.0_f32, pal.panel_stroke));
             let ball = pos2(stop.left() - 26.0, r.center().y);
-            let rec_resp = ui.interact(Rect::from_center_size(ball, vec2(22.0, 22.0)), ui.id().with("status-rec"), Sense::click());
+            let rec_resp = ui.interact(Rect::from_center_size(ball, vec2(22.0, 22.0)), ui.scope_id().with("status-rec"), Sense::click());
             let p = ui.painter();
             let base = if rec { Color32::from_rgb(0xE0, 0x20, 0x20) } else { Color32::from_rgb(0x6A, 0x18, 0x18) };
             if rec && self.bloom() > 0.0 {

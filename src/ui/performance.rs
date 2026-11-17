@@ -14,6 +14,7 @@ use crate::docker::model::{Container, EngineStatus};
 use crate::metrics::{GpuAdapter, Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -200,11 +201,11 @@ impl App {
         let list = Rect::from_min_size(area.min, vec2(LIST_W, area.height()));
         let detail = Rect::from_min_max(pos2(list.right() + GAP, area.top()), area.max);
         let mut act = None;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
-            egui::ScrollArea::vertical().id_salt("perf-list").auto_shrink([false, false]).show(ui, |ui| self.device_list(ui, list, fd, &mut act));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
+            egui::ScrollArea::vertical().id_salt("perf-list").auto_shrink([false, false]).show_029(ui, [false, true], |ui| self.device_list(ui, list, fd, &mut act));
         });
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(detail), |ui| {
-            egui::ScrollArea::vertical().id_salt("perf-detail").auto_shrink([false, false]).show(ui, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(detail), |ui| {
+            egui::ScrollArea::vertical().id_salt("perf-detail").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 let top = ui.cursor().min;
                 let w = ui.available_width();
                 let mut y = top.y;
@@ -346,9 +347,9 @@ impl App {
         for (d, gpu) in entries {
             let adapter = gpu.map(|i| &fd.snap.gpu.adapters[i]);
             let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), DEVICE_CARD_H));
-            let resp = ui.interact(r, ui.id().with(("dev", d.key(), gpu)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(r, ui.scope_id().with(("dev", d.key(), gpu)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if d == Device::Gpu {
-                resp.context_menu(|ui| {
+                kit::context_menu(&resp, |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
                         *act = Some(Act::GpuMenu(m));
                     }
@@ -357,12 +358,12 @@ impl App {
             let active = self.device == d && (gpu.is_none() || gpu == selected);
             if active {
                 p.rect_filled(r, 8.0, with_alpha(pal.accent, 0.1));
-                p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.5)));
+                p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.5)), egui::StrokeKind::Outside);
                 let bar = Rect::from_min_max(pos2(r.left() + 1.0, r.top() + 1.0), pos2(r.left() + 4.0, r.bottom() - 1.0));
-                p.rect_filled(bar, egui::Rounding { nw: 7.0, sw: 7.0, ..Default::default() }, pal.accent);
+                p.rect_filled(bar, egui::CornerRadius { nw: 7, sw: 7, ..Default::default() }, pal.accent);
             } else {
                 p.rect_filled(r, 8.0, pal.raise(if resp.hovered() { 0.06 } else { 0.04 }));
-                p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.raise(0.08)));
+                p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.raise(0.08)), egui::StrokeKind::Outside);
             }
             let view = match adapter.and_then(|a| Some((a, fd.hist.gpu_adapter(&a.id)?))) {
                 Some((a, series)) => DevView { value: format!("{:.0}%", a.utilization_pct), lines: vec![(series, fd.metric("gpu"), (0.0, 100.0))], dashed_second: false },
@@ -489,7 +490,7 @@ impl App {
                 let c = fd.metric("gpu");
                 // Under the card's content, so the plot keeps its hover readout: right-click only.
                 let section = Rect::from_min_size(pos2(x, y), vec2(w, 300.0));
-                ui.interact(section, ui.id().with("gpu-section"), Sense::click()).context_menu(|ui| {
+                kit::context_menu(&ui.interact(section, ui.scope_id().with("gpu-section"), Sense::click()), |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
                         *act = Some(Act::GpuMenu(m));
                     }
@@ -689,7 +690,7 @@ impl App {
         }
         cy += 18.0;
         let rect = Rect::from_min_max(pos2(x, y), pos2(x + w, cy));
-        p.set(slot, Shape::Vec(vec![Shape::rect_filled(rect, 10.0, pal.card), Shape::rect_stroke(rect, 10.0, Stroke::new(1.0_f32, pal.card_stroke))]));
+        p.set(slot, Shape::Vec(vec![Shape::rect_filled(rect, 10.0, pal.card), Shape::rect_stroke(rect, 10.0, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside)]));
         let mut h = rect.height();
         if self.device == Device::Docker {
             // The container cards sit under the card.
@@ -716,7 +717,7 @@ impl App {
         let strip = Rect::from_min_size(pos2(x, y), vec2(w, 80.0));
         let tiles = kit::tile_strip(&p, strip, &pal, others.len());
         for (d, t) in others.iter().zip(tiles) {
-            let resp = ui.interact(t, ui.id().with(("other", d.key())), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(t, ui.scope_id().with(("other", d.key())), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.hovered() {
                 p.rect_filled(t, 0.0, pal.raise(0.03));
             }
@@ -784,7 +785,7 @@ impl App {
         // View toggle and fold button at the right of the heading.
         let mut tx = left.right() - 22.0;
         let fold = Rect::from_center_size(pos2(tx - 10.0, left.top() + 25.0), vec2(24.0, 24.0));
-        let fr = ui.interact(fold, ui.id().with("cores-fold"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if self.cpus_expanded() { "Hide the processors" } else { "Show the processors" });
+        let fr = ui.interact(fold, ui.scope_id().with("cores-fold"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if self.cpus_expanded() { "Hide the processors" } else { "Show the processors" });
         if fr.hovered() {
             p.rect_filled(fold, 4.0, pal.raise(0.06));
         }
@@ -798,7 +799,7 @@ impl App {
             for (label, view) in labels.iter().rev() {
                 let tw = widgets::text_width(&p, label, theme::mono(11.0)) + 16.0;
                 let r = Rect::from_min_size(pos2(tx - tw, left.top() + 13.0), vec2(tw, 24.0));
-                let resp = ui.interact(r, ui.id().with(("core-view", *label)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let resp = ui.interact(r, ui.scope_id().with(("core-view", *label)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                 let on = self.perf.core_view == *view;
                 if on {
                     p.rect_filled(r, 3.0, pal.raise(0.12));
@@ -824,13 +825,13 @@ impl App {
                     CoreView::Graphs => {
                         p.rect_filled(cell, 4.0, pal.well());
                         widgets::sparkline(&p, Rect::from_min_max(pos2(cell.left() + 1.0, cell.top() + 18.0), cell.max - vec2(1.0, 1.0)), &[(series, pal.accent, (0.0, 100.0))], 0.2, false);
-                        p.rect_stroke(cell, 4.0, Stroke::new(1.0_f32, pal.row_rule()));
+                        p.rect_stroke(cell, 4.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
                         p.text(cell.left_top() + vec2(6.0, 5.0), Align2::LEFT_TOP, i.to_string(), theme::mono(10.0), pal.text_faint);
                         p.text(cell.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, format!("{pct:.0}%"), theme::mono(11.0), pal.text_dim);
                     }
                     CoreView::Heatmap => {
                         p.rect_filled(cell, 4.0, mix(pal.well(), pal.accent, f));
-                        p.rect_stroke(cell, 4.0, Stroke::new(1.0_f32, pal.row_rule()));
+                        p.rect_stroke(cell, 4.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
                         let ink = if f > 0.55 { pal.body } else { pal.text };
                         p.text(cell.center(), Align2::CENTER_CENTER, format!("{pct:.0}%"), theme::mono(11.0), ink);
                     }
@@ -849,7 +850,7 @@ impl App {
         for (i, g) in order.iter().enumerate() {
             let ry = tc.top() + i as f32 * 32.0;
             let row = Rect::from_min_size(pos2(tc.left(), ry), vec2(tc.width(), 32.0));
-            let resp = ui.interact(row, ui.id().with(("top-cpu", &g.key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(row, ui.scope_id().with(("top-cpu", &g.key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.hovered() {
                 p.rect_filled(row.shrink2(vec2(-6.0, 1.0)), 4.0, pal.raise(0.04));
             }
@@ -880,7 +881,7 @@ impl App {
         }
         let st = theme::status(&pal);
         let link = p.text(pos2(tc.left(), right.bottom() - 18.0 - 18.0), Align2::LEFT_TOP, "Sort processes by CPU \u{2192}", theme::ui(13.0), st.info);
-        let lr = ui.interact(link.expand(4.0), ui.id().with("sort-cpu"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let lr = ui.interact(link.expand(4.0), ui.scope_id().with("sort-cpu"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         if lr.hovered() {
             p.text(link.left_top(), Align2::LEFT_TOP, "Sort processes by CPU \u{2192}", theme::ui(13.0), lighten(st.info, 0.25));
         }
@@ -961,8 +962,8 @@ impl App {
         let (gap, ch) = (10.0, 110.0);
         let cw = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
         let content_h = cards.len().div_ceil(cols) as f32 * (ch + gap) - gap;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area), |ui| {
-            egui::ScrollArea::vertical().id_salt("docker-cards").auto_shrink([false, false]).show(ui, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            egui::ScrollArea::vertical().id_salt("docker-cards").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 let (content, _) = ui.allocate_exact_size(vec2(area.width(), content_h), Sense::hover());
                 let p = ui.painter().clone();
                 for (i, (c, series)) in cards.iter().enumerate() {
@@ -1083,7 +1084,7 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
         }
     }
     // Cursor.
-    let resp = ui.interact(gr, ui.id().with(("plot", id)), Sense::hover());
+    let resp = ui.interact(gr, ui.scope_id().with(("plot", id)), Sense::hover());
     let mut text = None;
     if let (Some(pos), Some(first)) = (resp.hover_pos(), lines.first()) {
         let n = first.series.values.len();
@@ -1132,7 +1133,7 @@ fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str,
     }
     if let Some((t, r)) = boxed {
         p.rect_filled(r, 4.0, pal.raise(0.06));
-        p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)));
+        p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, pal.raise(0.08)), egui::StrokeKind::Outside);
         p.text(r.center(), Align2::CENTER_CENTER, t, theme::mono(12.0), pal.text);
     }
 }
@@ -1294,9 +1295,9 @@ mod tests {
             if i > 0 {
                 input.events.push(egui::Event::PointerMoved(pos2(320.0, 120.0)));
             }
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| add(ui));
-            });
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| add(ui));
+            }).drop_without_applying_deltas();
         }
     }
 

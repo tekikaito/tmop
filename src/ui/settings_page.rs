@@ -11,6 +11,7 @@ use crate::platform::Caps;
 use crate::settings::{self, Settings, UpdateSpeed};
 use crate::skin;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
+use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -143,14 +144,14 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
     let mut changed = false;
     let hint = "Headings, names and large values: page titles, device and process names, and the Classic popout's title. Other text stays Inter.";
     row_hint(ui, pal, "Display font", hint, |ui| {
-        egui::ComboBox::from_id_salt("display-font").width(200.0).selected_text(fonts::picker_label(&a.display_font, missing)).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("display-font").width(200.0).selected_text(theme::button_text(fonts::picker_label(&a.display_font, missing))).show_ui(ui, |ui| {
             let built_in = fonts::is_built_in(&a.display_font);
-            if ui.selectable_label(built_in, fonts::BUILT_IN_LABEL).clicked() && !built_in {
+            if ui.selectable_label(built_in, theme::button_text(fonts::BUILT_IN_LABEL)).clicked() && !built_in {
                 a.display_font = fonts::BUILT_IN.into();
                 changed = true;
             }
             let classic = fonts::is_classic(&a.display_font);
-            if ui.selectable_label(classic, fonts::CLASSIC_LABEL).clicked() && !classic {
+            if ui.selectable_label(classic, theme::button_text(fonts::CLASSIC_LABEL)).clicked() && !classic {
                 a.display_font = fonts::CLASSIC.into();
                 changed = true;
             }
@@ -160,7 +161,7 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
                     let current = a.display_font.to_lowercase();
                     for f in list {
                         let selected = f.to_lowercase() == current;
-                        if ui.selectable_label(selected, f).clicked() && !selected {
+                        if ui.selectable_label(selected, theme::button_text(f)).clicked() && !selected {
                             a.display_font = f.clone();
                             changed = true;
                         }
@@ -296,9 +297,9 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
                 None => format!("{} (not installed)", s.appearance.theme),
             }
         };
-        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(selected).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("theme").width(200.0).selected_text(theme::button_text(selected)).show_ui(ui, |ui| {
             for p in &pals.palettes {
-                picked |= ui.selectable_value(&mut s.appearance.theme, p.id.clone(), &p.name).changed();
+                picked |= ui.selectable_value(&mut s.appearance.theme, p.id.clone(), theme::button_text(&p.name)).changed();
             }
         });
     });
@@ -326,7 +327,7 @@ fn palette_controls(ui: &mut egui::Ui, pal: &Palette, s: &mut Settings, pals: &m
                 if small_button(ui, pal, "Rename").clicked() {
                     rename_done = Some(true);
                 }
-                let resp = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+                let resp = ui.add(widgets::text_edit(egui::TextEdit::singleline(name).desired_width(200.0 + 8.0), true));
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     rename_done = Some(true);
                 }
@@ -437,9 +438,9 @@ fn accent_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, ba
             ui.painter().rect_filled(r, 6.0, color);
             let on = a.accent.trim().eq_ignore_ascii_case(hex);
             if on {
-                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.text));
+                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.text), egui::StrokeKind::Outside);
             } else if resp.hovered() {
-                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.raise(0.4)));
+                ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(2.0_f32, pal.raise(0.4)), egui::StrokeKind::Outside);
             }
             if resp.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on {
                 a.accent = hex.into();
@@ -466,7 +467,7 @@ struct Sections {
 /// and rows. Records its top for the section list and scrolls to itself when asked to.
 fn section(ui: &mut egui::Ui, pal: &Palette, sections: &mut Sections, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     let index = sections.tops.len();
-    let frame = egui::Frame::none().fill(pal.card).stroke(Stroke::new(1.0_f32, pal.card_stroke)).rounding(10.0).inner_margin(egui::Margin { left: 22.0, right: 22.0, top: 18.0, bottom: 8.0 });
+    let frame = widgets::stroke_outside(egui::Frame::new().fill(pal.card).stroke(Stroke::new(1.0_f32, pal.card_stroke)).corner_radius(10).inner_margin(egui::Margin { left: 22, right: 22, top: 18, bottom: 8 }));
     let out = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -570,16 +571,16 @@ impl App {
         let font_missing = self.display_font.1;
         let docker_found = self.docker.found();
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
-        let nav_id = egui::Id::new("settings-nav");
+        let nav_id = egui::Id::unique("settings-nav");
         let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))), ..Default::default() };
         // The cards are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
         let scroll = ui
-            .allocate_new_ui(egui::UiBuilder::new().max_rect(column), |ui| {
+            .scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("settings-scroll")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show_029(ui, [false, true], |ui| {
                         // Leave room for the scroll bar so the cards aren't covered by it.
                         ui.set_max_width(ui.available_width() - 14.0);
                         let s = &mut self.settings;
@@ -596,9 +597,9 @@ impl App {
                             });
                             let mut mode = s.popout.mode.clone();
                             row(ui, &pal, "Popout", |ui| {
-                                egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(popout_mode_label(&mode, &caps)).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("popout-mode").width(200.0).selected_text(theme::button_text(popout_mode_label(&mode, &caps))).show_ui(ui, |ui| {
                                     for &m in popout_modes(&caps) {
-                                        if ui.selectable_value(&mut mode, m.to_string(), title_case(m)).changed() {
+                                        if ui.selectable_value(&mut mode, m.to_string(), theme::button_text(title_case(m))).changed() {
                                             popout_change = Some(m);
                                         }
                                     }
@@ -606,9 +607,9 @@ impl App {
                             });
                             row(ui, &pal, "Popout skin", |ui| {
                                 let current = catalog_names.iter().find(|(id, _)| *id == s.popout.skin).map(|(_, n)| n.clone()).unwrap_or_else(|| s.popout.skin.clone());
-                                egui::ComboBox::from_id_salt("skin").width(200.0).selected_text(current).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("skin").width(200.0).selected_text(theme::button_text(current)).show_ui(ui, |ui| {
                                     for (id, name) in &catalog_names {
-                                        changed |= ui.selectable_value(&mut s.popout.skin, id.clone(), name).changed();
+                                        changed |= ui.selectable_value(&mut s.popout.skin, id.clone(), theme::button_text(name)).changed();
                                     }
                                 });
                             });
@@ -626,13 +627,13 @@ impl App {
                             let hf_hint = "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use.";
                             row_hint(ui, &pal, "High frequency visuals", hf_hint, |ui| {
                                 let label = if s.appearance.high_frequency_visuals { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
-                                egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(label).show_ui(ui, |ui| {
-                                    if ui.selectable_label(!s.appearance.high_frequency_visuals, "Off").clicked() {
+                                egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(theme::button_text(label)).show_ui(ui, |ui| {
+                                    if ui.selectable_label(!s.appearance.high_frequency_visuals, theme::button_text("Off")).clicked() {
                                         s.appearance.high_frequency_visuals = false;
                                         changed = true;
                                     }
                                     for fps in [30u32, 60, 120] {
-                                        if ui.selectable_label(s.appearance.high_frequency_visuals && s.appearance.frame_rate == fps, format!("{fps} fps")).clicked() {
+                                        if ui.selectable_label(s.appearance.high_frequency_visuals && s.appearance.frame_rate == fps, theme::button_text(format!("{fps} fps"))).clicked() {
                                             s.appearance.high_frequency_visuals = true;
                                             s.appearance.frame_rate = fps;
                                             changed = true;
@@ -656,16 +657,16 @@ impl App {
                             changed |= toggle_row(ui, &pal, &mut s.graphs.compressed_time, "Compress older history");
                             let history_hint = "How much history is kept. With Compress older history on, the live part on the right of the Performance and Docker graphs tracks the grid 1:1 and older time is compressed progressively; with it off the Performance graphs fit the whole history.";
                             row_hint(ui, &pal, "History multiplier", history_hint, |ui| {
-                                egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(format!("{}\u{d7} history", s.graphs.history_multiplier)).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("hist").width(200.0).selected_text(theme::button_text(format!("{}\u{d7} history", s.graphs.history_multiplier))).show_ui(ui, |ui| {
                                     for m in [1u32, 3, 7, 15] {
-                                        changed |= ui.selectable_value(&mut s.graphs.history_multiplier, m, format!("{m}\u{d7} history")).changed();
+                                        changed |= ui.selectable_value(&mut s.graphs.history_multiplier, m, theme::button_text(format!("{m}\u{d7} history"))).changed();
                                     }
                                 });
                             });
                             row_hint(ui, &pal, "Pixels per update", "With Compress older history on, each data update advances the Performance and Docker graphs by this many pixels; traces glide smoothly between updates.", |ui| {
-                                egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(s.graphs.pixels_per_update.to_string()).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("ppu").width(200.0).selected_text(theme::button_text(s.graphs.pixels_per_update.to_string())).show_ui(ui, |ui| {
                                     for px in [4u32, 8, 12, 16, 24, 32] {
-                                        changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, px.to_string()).changed();
+                                        changed |= ui.selectable_value(&mut s.graphs.pixels_per_update, px, theme::button_text(px.to_string())).changed();
                                     }
                                 });
                             });
@@ -673,9 +674,9 @@ impl App {
                         section(ui, &pal, &mut sections, SECTIONS[2], |ui| {
                             row(ui, &pal, "Real-time update speed", |ui| {
                                 let cur = s.update_speed();
-                                egui::ComboBox::from_id_salt("speed").width(200.0).selected_text(cur.label()).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("speed").width(200.0).selected_text(theme::button_text(cur.label())).show_ui(ui, |ui| {
                                     for sp in UpdateSpeed::ALL {
-                                        if ui.selectable_label(cur == sp, sp.label()).clicked() {
+                                        if ui.selectable_label(cur == sp, theme::button_text(sp.label())).clicked() {
                                             s.general.update_speed = sp.token().into();
                                             changed = true;
                                         }
@@ -684,9 +685,9 @@ impl App {
                             });
                             row(ui, &pal, "Default start page", |ui| {
                                 let cur = Page::from_id_on(&s.general.default_page, &caps).title();
-                                egui::ComboBox::from_id_salt("page").width(200.0).selected_text(cur).show_ui(ui, |ui| {
+                                egui::ComboBox::from_id_salt("page").width(200.0).selected_text(theme::button_text(cur)).show_ui(ui, |ui| {
                                     for p in Page::start_choices(&caps) {
-                                        changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), p.title()).changed();
+                                        changed |= ui.selectable_value(&mut s.general.default_page, p.id().to_string(), theme::button_text(p.title())).changed();
                                     }
                                 });
                             });
@@ -775,7 +776,7 @@ impl App {
             .inner;
 
         // The section list: the active entry follows the scroll position.
-        let at_end = scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 1.0;
+        let at_end = scroll.state.unclamped_offset().y + scroll.inner_rect.height() >= scroll.content_size.y - 1.0;
         let picked: Option<usize> = ui.data_mut(|d| d.get_temp(nav_id.with("picked")));
         let active = active_section(&sections.tops, scroll.inner_rect.top(), at_end, picked);
         if !at_end && picked.is_some() {
@@ -966,9 +967,9 @@ mod tests {
             g.color_keyed = keyed;
             let before = g.clone();
             let mut changed = true;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| changed = metric_color_rows(ui, &theme::DARK, &mut g));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| changed = metric_color_rows(ui, &theme::DARK, &mut g));
+            }).drop_without_applying_deltas();
             assert!(!changed);
             assert_eq!(g, before);
         }
@@ -985,9 +986,9 @@ mod tests {
             let mut a = settings::Appearance { display_font: font.into(), ..Default::default() };
             let before = a.clone();
             let mut changed = true;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| changed = display_font_row(ui, &theme::DARK, &mut a, families, missing));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| changed = display_font_row(ui, &theme::DARK, &mut a, families, missing));
+            }).drop_without_applying_deltas();
             assert!(!changed);
             assert_eq!(a, before);
         }
@@ -1002,15 +1003,15 @@ mod tests {
         theme::install_fonts(&ctx, None);
         let mut sections = Sections::default();
         let (mut on, mut changed) = (true, true);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
                 section(ui, &theme::DARK, &mut sections, "Appearance", |ui| {
                     changed = toggle_row_hint(ui, &theme::DARK, &mut on, "Visual bloom", "A long hint that wraps onto a second line when the row is narrow enough to need it.");
                     note(ui, &theme::DARK, "C:\\Users\\x\\settings.json");
                 });
                 section(ui, &theme::DARK, &mut sections, "", |ui| hint(ui, &theme::DARK, "About"));
             });
-        });
+        }).drop_without_applying_deltas();
         assert!(!changed && on);
         assert_eq!(sections.tops.len(), 2);
         assert!(sections.tops[0] < sections.tops[1]);
@@ -1027,9 +1028,9 @@ mod tests {
             let mut a = settings::Appearance { accent: accent.into(), ..Default::default() };
             let before = a.clone();
             let mut changed = true;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| changed = accent_row(ui, &theme::DARK, &mut a, theme::DARK.accent));
-            });
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| changed = accent_row(ui, &theme::DARK, &mut a, theme::DARK.accent));
+            }).drop_without_applying_deltas();
             assert!(!changed);
             assert_eq!(a, before);
         }

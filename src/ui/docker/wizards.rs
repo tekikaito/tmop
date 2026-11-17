@@ -18,6 +18,7 @@ use crate::ui::kit;
 use crate::ui::widgets::{self, Button, ButtonKind, ButtonSize, Icon};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, vec2, Align, Layout, RichText};
+use crate::ui::widgets::ScrollArea029 as _;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -431,12 +432,12 @@ fn note(ui: &mut egui::Ui, text: &str, pal: &Palette) {
     ui.label(RichText::new(text).font(theme::ui(12.5)).color(pal.warn));
 }
 
-pub(super) fn single<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<'a> {
-    egui::TextEdit::singleline(text).hint_text(hint).desired_width(width).font(theme::ui(13.0))
+pub(super) fn single<'a>(text: &'a mut String, hint: &'a str, width: f32) -> impl egui::Widget + 'a {
+    widgets::text_edit(egui::TextEdit::singleline(text).hint_text(hint).desired_width(width + 8.0).font(theme::ui(13.0)), true)
 }
 
-fn multi<'a>(text: &'a mut String, hint: &'a str, width: f32) -> egui::TextEdit<'a> {
-    egui::TextEdit::multiline(text).hint_text(hint).desired_width(width).desired_rows(2).font(theme::mono(12.0))
+fn multi<'a>(text: &'a mut String, hint: &'a str, width: f32) -> impl egui::Widget + 'a {
+    widgets::text_edit(egui::TextEdit::multiline(text).hint_text(hint).desired_width(width + 8.0).desired_rows(2).font(theme::mono(12.0)), true)
 }
 
 /// Small button that is clicked only when `enabled`.
@@ -512,7 +513,7 @@ fn pull_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         label(ui, "No images found.", pal);
     }
     if !hits.is_empty() {
-        egui::ScrollArea::vertical().id_salt("pull-hits").max_height(260.0).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("pull-hits").max_height(260.0).auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
             egui::Grid::new("pull-hit-grid").num_columns(5).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
                 for head in ["Name", "Stars", "Official", "Description", ""] {
                     label(ui, head, pal);
@@ -618,9 +619,9 @@ fn run_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         ui.end_row();
 
         label(ui, "Restart policy", pal);
-        egui::ComboBox::from_id_salt("run-restart").width(200.0).selected_text(f.spec.restart.label()).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("run-restart").width(200.0).selected_text(theme::button_text(f.spec.restart.label())).show_ui(ui, |ui| {
             for r in Restart::ALL {
-                ui.selectable_value(&mut f.spec.restart, r, r.label());
+                ui.selectable_value(&mut f.spec.restart, r, theme::button_text(r.label()));
             }
         });
         ui.end_row();
@@ -737,8 +738,8 @@ fn host_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
 
         label(ui, "Type", pal);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut f.tcp, false, "SSH");
-            ui.selectable_value(&mut f.tcp, true, "TCP");
+            ui.selectable_value(&mut f.tcp, false, theme::button_text("SSH"));
+            ui.selectable_value(&mut f.tcp, true, theme::button_text("TCP"));
         });
         ui.end_row();
 
@@ -900,7 +901,7 @@ fn compose_body(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
             .min_scrolled_height(120.0)
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .show(ui, |ui| {
+            .show_029(ui, [false, true], |ui| {
                 ui.label(RichText::new(&f.output).font(theme::mono(12.0)).color(pal.text));
             });
     }
