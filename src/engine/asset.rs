@@ -199,14 +199,9 @@ mod tests {
         assert_eq!(asset_name("v0.1.0", "x64"), "tmop-engine-v0.1.0-x64.tar.gz");
         assert_eq!(asset_name("v0.1.0", "arm64"), "tmop-engine-v0.1.0-arm64.tar.gz");
         assert_eq!(sha_name("v0.1.0", "arm64"), "tmop-engine-v0.1.0-arm64.tar.gz.sha256");
-        assert_eq!(
-            asset_url("v0.1.0", "x64"),
-            "https://github.com/tekikaito/tmop/releases/download/v0.1.0/tmop-engine-v0.1.0-x64.tar.gz"
-        );
-        assert_eq!(
-            sha_url("v0.1.0", "x64"),
-            "https://github.com/tekikaito/tmop/releases/download/v0.1.0/tmop-engine-v0.1.0-x64.tar.gz.sha256"
-        );
+        // RELEASE_REPO is tekikaito/tmop unless a fork's build sets TMOP_RELEASE_REPO.
+        assert_eq!(asset_url("v0.1.0", "x64"), format!("https://github.com/{RELEASE_REPO}/releases/download/v0.1.0/tmop-engine-v0.1.0-x64.tar.gz"));
+        assert_eq!(sha_url("v0.1.0", "x64"), format!("https://github.com/{RELEASE_REPO}/releases/download/v0.1.0/tmop-engine-v0.1.0-x64.tar.gz.sha256"));
     }
 
     #[test]

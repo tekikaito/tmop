@@ -18,6 +18,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The repository the built app takes its Docker engine and updates from (src/engine/mod.rs):
+  # this one, so a fork's releases point at the fork.
+  TMOP_RELEASE_REPO: ${{ github.repository }}
 
 jobs:
   meta:

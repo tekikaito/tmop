@@ -33,19 +33,20 @@ pub struct UpdateUi {
 }
 
 impl UpdateUi {
-    /// Starts a check unless one is running.
-    pub fn start_check(&mut self, manual: bool) {
+    /// Starts a check of `general`'s update repository unless one is running.
+    pub fn start_check(&mut self, general: &General, manual: bool) {
         if self.check.is_loading() {
             return;
         }
         self.manual = manual;
-        self.check.start(update::check);
+        let repo = update::repo(&general.update_repo).to_string();
+        self.check.start(move || update::check(&repo));
     }
 
     /// The start-up check: only when switched on and a day has passed since the last one.
     pub fn check_on_start(&mut self, general: &General) {
         if general.check_for_updates && update::due(general.update_last_check, update::now_secs()) {
-            self.start_check(false);
+            self.start_check(general, false);
         }
     }
 
@@ -72,7 +73,7 @@ fn install(_: &Release, _: Arc<Mutex<(u64, u64)>>) -> Result<PathBuf, String> {
 
 /// The rows in Settings → General. Returns true when a setting changed.
 pub fn settings_rows(ui: &mut egui::Ui, pal: &Palette, general: &mut General, u: &mut UpdateUi) -> bool {
-    let changed = toggle_row_hint(ui, pal, &mut general.check_for_updates, "Check for updates when TMOP starts", TOGGLE_HINT);
+    let mut changed = toggle_row_hint(ui, pal, &mut general.check_for_updates, "Check for updates when TMOP starts", TOGGLE_HINT);
     if changed {
         u.check_on_start(general);
     }
@@ -88,9 +89,42 @@ pub fn settings_rows(ui: &mut egui::Ui, pal: &Palette, general: &mut General, u:
         }
     });
     if now {
-        u.start_check(true);
+        u.start_check(general, true);
     }
+    changed |= update_source_row(ui, pal, general);
     ui.add_space(8.0);
+    changed
+}
+
+/// "Update source": the GitHub repository updates come from, for forks of TMOP.
+fn update_source_row(ui: &mut egui::Ui, pal: &Palette, general: &mut General) -> bool {
+    ui.add_space(6.0);
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        ui.label(RichText::new("Update source").font(theme::ui(13.0)).color(pal.text));
+        let edit = egui::TextEdit::singleline(&mut general.update_repo).hint_text(update::RELEASE_REPO).desired_width(220.0).font(theme::mono(12.0));
+        changed = ui.add(edit).changed();
+        if !general.update_repo.trim().is_empty() && Button::ghost("Reset").size(ButtonSize::Small).show(ui, pal).clicked() {
+            general.update_repo.clear();
+            changed = true;
+        }
+    });
+    let entry = general.update_repo.trim();
+    let text = if entry.is_empty() {
+        format!("The GitHub repository (owner/name) TMOP takes updates from. Empty: {}, which this copy was released from. Only enter a fork you trust: TMOP installs what it publishes.", update::RELEASE_REPO)
+    } else if update::valid_repo(entry) {
+        format!("Updates come from github.com/{entry}. Only enter a fork you trust: TMOP installs what it publishes.")
+    } else {
+        format!("Not a GitHub repository (owner/name), so updates come from {}.", update::RELEASE_REPO)
+    };
+    note(ui, pal, &text);
+    if changed {
+        // Another repository has other releases: the daily check starts over, and a version
+        // skipped in the old one isn't hidden in the new one.
+        general.update_last_check = 0;
+        general.update_skipped.clear();
+    }
     changed
 }
 
@@ -144,7 +178,7 @@ impl App {
     /// The "new version" dialog.
     pub fn updates_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
         let Some(release) = self.updates.offer.clone() else { return };
-        let method = update::method();
+        let method = update::method(&release.repo);
         let installing = self.updates.install.is_loading();
         let error = self.updates.install.error().map(str::to_string);
         let (done, total) = *self.updates.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -166,7 +200,7 @@ impl App {
             });
             ui.add_space(6.0);
             ui.hyperlink_to(RichText::new("Open the release page").font(theme::ui(13.0)), &release.page);
-            if let Some(cmd) = method.command() {
+            if let Some(cmd) = method.command(&release.repo) {
                 ui.add_space(8.0);
                 ui.label(RichText::new(method.instructions()).font(theme::ui(13.0)).color(pal.text));
                 ui.label(RichText::new(cmd).font(theme::mono(12.0)).color(pal.text));
@@ -194,7 +228,7 @@ impl App {
             _ => match method {
                 Method::InPlace => self.updates.start_install(release),
                 Method::InstallCommand | Method::Homebrew => {
-                    ctx.copy_text(method.command().unwrap_or_default().to_string());
+                    ctx.copy_text(method.command(&release.repo).unwrap_or_default());
                     self.status = "Update command copied: paste it in a terminal".into();
                     self.updates.offer = None;
                 }

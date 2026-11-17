@@ -13,8 +13,12 @@
 //! [`remove_leftover`] deletes the `.old` file on the next start. Linux and macOS show the
 //! install command (or `brew upgrade tmop`) instead, because TMOP is installed in several ways
 //! there (AppImage, tar.gz, install command, Homebrew cask).
+//!
+//! Where updates come from: the GitHub repository this build was released from
+//! ([`RELEASE_REPO`], set by a fork's release workflow), or the one named in
+//! `general.updateRepo`, so a fork's users can follow it (see [`repo`]).
 
-use crate::engine::RELEASE_REPO;
+pub use crate::engine::RELEASE_REPO;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -22,16 +26,38 @@ use std::path::{Path, PathBuf};
 pub const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// The largest API response accepted (a release with its notes and asset list is ~30 KB).
 const MAX_RESPONSE: usize = 1024 * 1024;
-/// The download page.
-pub const DOWNLOAD_PAGE: &str = "https://tekikaito.github.io/tmop/";
+
+/// True for a GitHub repository name `owner/name` (letters, digits, `-`, `_`, `.`).
+pub fn valid_repo(s: &str) -> bool {
+    let ok = |p: &str| !p.is_empty() && p != "." && p != ".." && p.len() <= 100 && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    matches!(s.split_once('/'), Some((owner, name)) if ok(owner) && ok(name) && !name.contains('/'))
+}
+
+/// The repository updates come from: `setting` (`general.updateRepo`) when it names one,
+/// else the one this build was released from.
+pub fn repo(setting: &str) -> &str {
+    let s = setting.trim();
+    if valid_repo(s) {
+        s
+    } else {
+        RELEASE_REPO
+    }
+}
+
+/// The repository's GitHub Pages site (`https://owner.github.io/name/`), where the download
+/// page and the install command live.
+pub fn pages_url(repo: &str) -> String {
+    let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
+    format!("https://{}.github.io/{name}/", owner.to_ascii_lowercase())
+}
 
 /// This build's version, `X.Y.Z`.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-fn latest_api() -> String {
-    format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest")
+fn latest_api(repo: &str) -> String {
+    format!("https://api.github.com/repos/{repo}/releases/latest")
 }
 
 /// A published release.
@@ -47,6 +73,8 @@ pub struct Release {
     pub page: String,
     /// (file name, download URL) of each attached file.
     pub assets: Vec<(String, String)>,
+    /// The repository (`owner/name`) it was published in.
+    pub repo: String,
 }
 
 impl Release {
@@ -82,8 +110,8 @@ pub fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Reads GitHub's release JSON. Drafts and pre-releases are refused.
-pub fn parse_release(json: &str) -> Result<Release, String> {
+/// Reads GitHub's release JSON of `repo`. Drafts and pre-releases are refused.
+pub fn parse_release(json: &str, repo: &str) -> Result<Release, String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("unexpected answer from GitHub: {e}"))?;
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) {
         return Err("the newest release is a pre-release".into());
@@ -102,14 +130,15 @@ pub fn parse_release(json: &str) -> Result<Release, String> {
         version: format!("{a}.{b}.{c}"),
         tag,
         notes: v["body"].as_str().unwrap_or_default().to_string(),
-        page: v["html_url"].as_str().map(str::to_string).unwrap_or_else(|| format!("https://github.com/{RELEASE_REPO}/releases/latest")),
+        page: v["html_url"].as_str().map(str::to_string).unwrap_or_else(|| format!("https://github.com/{repo}/releases/latest")),
         assets,
+        repo: repo.to_string(),
     })
 }
 
-/// Asks GitHub for the newest release. `Ok(None)` when this build is up to date.
-pub fn check() -> Result<Option<Release>, String> {
-    let release = parse_release(&http_get(&latest_api())?)?;
+/// Asks GitHub for the newest release of `repo`. `Ok(None)` when this build is up to date.
+pub fn check(repo: &str) -> Result<Option<Release>, String> {
+    let release = parse_release(&http_get(&latest_api(repo))?, repo)?;
     Ok(is_newer(&release.version, current_version()).then_some(release))
 }
 
@@ -202,12 +231,12 @@ pub enum Method {
 }
 
 impl Method {
-    /// The command that updates TMOP; none for [`Method::InPlace`].
-    pub fn command(self) -> Option<&'static str> {
+    /// The command that updates TMOP from `repo`; none for [`Method::InPlace`].
+    pub fn command(self, repo: &str) -> Option<String> {
         match self {
             Method::InPlace => None,
-            Method::InstallCommand => Some("curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh"),
-            Method::Homebrew => Some("brew upgrade --cask tmop"),
+            Method::InstallCommand => Some(format!("curl -fsSL {}install.sh | sh", pages_url(repo))),
+            Method::Homebrew => Some("brew upgrade --cask tmop".into()),
         }
     }
 
@@ -221,11 +250,14 @@ impl Method {
     }
 }
 
-/// How to update the running copy.
-pub fn method() -> Method {
+/// The repository the Homebrew cask (`tekikaito/tmop` tap) installs from.
+const HOMEBREW_REPO: &str = "tekikaito/tmop";
+
+/// How to update the running copy from `repo`. The Homebrew cask only follows its own repository.
+pub fn method(repo: &str) -> Method {
     if cfg!(windows) {
         Method::InPlace
-    } else if ["/opt/homebrew/Caskroom/tmop", "/usr/local/Caskroom/tmop"].iter().any(|d| Path::new(d).is_dir()) {
+    } else if repo.eq_ignore_ascii_case(HOMEBREW_REPO) && ["/opt/homebrew/Caskroom/tmop", "/usr/local/Caskroom/tmop"].iter().any(|d| Path::new(d).is_dir()) {
         Method::Homebrew
     } else {
         Method::InstallCommand
@@ -377,28 +409,42 @@ mod tests {
 
     #[test]
     fn reads_a_release() {
-        let r = parse_release(SAMPLE).unwrap();
+        let r = parse_release(SAMPLE, "tekikaito/tmop").unwrap();
         assert_eq!((r.tag.as_str(), r.version.as_str()), ("v0.8.0", "0.8.0"));
         assert_eq!(r.asset_url("TMOP-windows-x64.exe"), Some("https://example/x64.exe"));
         assert_eq!(r.asset_url("TMOP-windows-arm64.exe"), None);
-        assert!(parse_release(&SAMPLE.replace(r#""prerelease": false"#, r#""prerelease": true"#)).is_err());
-        assert!(parse_release("{}").is_err());
-        assert!(parse_release("not json").is_err());
+        assert!(parse_release(&SAMPLE.replace(r#""prerelease": false"#, r#""prerelease": true"#), "a/b").is_err());
+        assert!(parse_release("{}", "a/b").is_err());
+        assert!(parse_release("not json", "a/b").is_err());
     }
 
     #[test]
     fn notes_become_plain_text() {
-        let r = parse_release(SAMPLE).unwrap();
+        let r = parse_release(SAMPLE, "tekikaito/tmop").unwrap();
         assert_eq!(plain_notes(&r.notes), "TMOP 0.8.0 adds things.\n\nNew\n\u{2022} Update check in Settings, see the README.");
         assert_eq!(strip_inline("a [b] c [d](e) `f`"), "a [b] c d f");
     }
 
     #[test]
     fn update_commands() {
-        assert_eq!(Method::InPlace.command(), None);
-        assert_eq!(Method::Homebrew.command(), Some("brew upgrade --cask tmop"));
-        assert!(Method::InstallCommand.command().unwrap().ends_with("install.sh | sh"));
-        assert_eq!(method() == Method::InPlace, cfg!(windows));
+        assert_eq!(Method::InPlace.command("tekikaito/tmop"), None);
+        assert_eq!(Method::Homebrew.command("tekikaito/tmop").as_deref(), Some("brew upgrade --cask tmop"));
+        assert_eq!(Method::InstallCommand.command("tekikaito/tmop").as_deref(), Some("curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh"));
+        assert_eq!(Method::InstallCommand.command("Someone/tmop-fork").as_deref(), Some("curl -fsSL https://someone.github.io/tmop-fork/install.sh | sh"));
+        assert_eq!(method("tekikaito/tmop") == Method::InPlace, cfg!(windows));
+        assert_ne!(method("someone/fork"), Method::Homebrew, "the cask only updates from its own repository");
+    }
+
+    #[test]
+    fn update_repository_setting() {
+        assert!(valid_repo("tekikaito/tmop") && valid_repo("A-b_c.d/x.y-z_9"));
+        for bad in ["", "tmop", "/tmop", "owner/", "a/b/c", "a b/c", "../x", "a/..", "https://github.com/a/b", "a/b?x"] {
+            assert!(!valid_repo(bad), "{bad:?}");
+        }
+        assert_eq!(repo(""), RELEASE_REPO);
+        assert_eq!(repo("  someone/fork "), "someone/fork");
+        assert_eq!(repo("not a repo"), RELEASE_REPO, "an invalid entry falls back to the built-in repository");
+        assert_eq!(pages_url("Tekikaito/tmop"), "https://tekikaito.github.io/tmop/");
     }
 
     #[test]
@@ -427,7 +473,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_check_and_install() {
-        let release = parse_release(&http_get(&latest_api()).unwrap()).unwrap();
+        let release = parse_release(&http_get(&latest_api(RELEASE_REPO)).unwrap(), RELEASE_REPO).unwrap();
         assert!(!is_newer(current_version(), &release.version), "this build is not newer than the latest release");
         let dir = std::env::temp_dir().join(format!("tmop-update-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
