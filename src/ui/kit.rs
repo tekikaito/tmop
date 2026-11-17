@@ -156,11 +156,11 @@ fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
                 dialog.SetFileName(&HSTRING::from(d.file_name.as_str()))?;
             }
             dialog.SetOptions(opts)?;
-            dialog.Show(HWND(d.owner as *mut _))?;
+            dialog.Show(Some(HWND(d.owner as *mut _)))?;
             let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
             let s = path.to_string();
             CoTaskMemFree(Some(path.0 as *const _));
-            Ok(std::path::PathBuf::from(s.map_err(|_| windows::core::Error::from_win32())?))
+            Ok(std::path::PathBuf::from(s.map_err(|_| windows::core::Error::from_thread())?))
         };
         let out = run().ok();
         if init.is_ok() {

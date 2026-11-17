@@ -302,7 +302,7 @@ pub fn file_version(path: &str) -> Option<FileVersion> {
             return None;
         }
         let mut data = vec![0u8; size as usize];
-        GetFileVersionInfoW(PCWSTR(w.as_ptr()), 0, size, data.as_mut_ptr() as *mut _).ok()?;
+        GetFileVersionInfoW(PCWSTR(w.as_ptr()), None, size, data.as_mut_ptr() as *mut _).ok()?;
         let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
         let mut len = 0u32;
         let q = wide(r"\VarFileInfo\Translation");

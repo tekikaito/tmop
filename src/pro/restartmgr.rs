@@ -16,7 +16,7 @@ pub fn holders(path: &Path) -> Vec<String> {
     let mut session = 0u32;
     let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
     // SAFETY: `session` and `key` are valid for writes; the key buffer has the documented size.
-    if unsafe { RmStartSession(&mut session, 0, PWSTR(key.as_mut_ptr())) }.0 != 0 {
+    if unsafe { RmStartSession(&mut session, None, PWSTR(key.as_mut_ptr())) }.0 != 0 {
         return Vec::new();
     }
     let w = wide(&path.to_string_lossy());

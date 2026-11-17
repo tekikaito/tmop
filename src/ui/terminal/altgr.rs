@@ -78,7 +78,7 @@ pub fn altgr_char(physical: Key) -> Option<char> {
     let scan = scancode(physical)?;
     // SAFETY: plain user32 queries with no side effects; no input is injected.
     let layout = unsafe { GetKeyboardLayout(0) };
-    let vk = unsafe { MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, layout) };
+    let vk = unsafe { MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, Some(layout)) };
     if vk == 0 {
         return None;
     }
@@ -105,7 +105,7 @@ fn to_unicode(vk: u32, scan: u32, state: &[u8; 256], layout: windows::Win32::UI:
 
     let mut buf = [0u16; 8];
     // SAFETY: the buffer and state array are valid for the lengths passed.
-    let n = unsafe { ToUnicodeEx(vk, scan, state, &mut buf, DO_NOT_CHANGE_KEYBOARD_STATE, layout) };
+    let n = unsafe { ToUnicodeEx(vk, scan, state, &mut buf, DO_NOT_CHANGE_KEYBOARD_STATE, Some(layout)) };
     // Negative: a dead key, which produces no character by itself.
     if n <= 0 {
         return None;

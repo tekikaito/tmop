@@ -362,7 +362,6 @@ pub fn parse_lsof(text: &str) -> Vec<Conn> {
 
 #[cfg(windows)]
 pub fn read() -> Result<Vec<Conn>, String> {
-    use windows::Win32::Foundation::BOOL;
     use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, GetExtendedUdpTable, TCP_TABLE_CLASS, UDP_TABLE_CLASS};
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
@@ -390,9 +389,9 @@ pub fn read() -> Result<Vec<Conn>, String> {
     let mut out = Vec::new();
     for (af, v6) in [(AF_INET, false), (AF_INET6, true)] {
         // SAFETY: buffers are sized by the API's own size query.
-        let tcp = fetch(&|p, s| unsafe { GetExtendedTcpTable(p, s, BOOL(1), af, TCP_TABLE_OWNER_PID_ALL, 0) })?;
+        let tcp = fetch(&|p, s| unsafe { GetExtendedTcpTable(p, s, true, af, TCP_TABLE_OWNER_PID_ALL, 0) })?;
         out.extend(parse_table(&tcp, Proto::Tcp, v6));
-        let udp = fetch(&|p, s| unsafe { GetExtendedUdpTable(p, s, BOOL(1), af, UDP_TABLE_OWNER_PID, 0) })?;
+        let udp = fetch(&|p, s| unsafe { GetExtendedUdpTable(p, s, true, af, UDP_TABLE_OWNER_PID, 0) })?;
         out.extend(parse_table(&udp, Proto::Udp, v6));
     }
     Ok(out)

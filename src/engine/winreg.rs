@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, BOOL, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HLOCAL,
-    HWND, LPARAM, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HLOCAL,
+    LPARAM, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -168,7 +168,7 @@ pub fn run_elevated(exe: &str, args: &str) -> Result<(), String> {
     // SAFETY: all strings are NUL-terminated and alive for the call.
     let result = unsafe {
         ShellExecuteW(
-            HWND::default(),
+            None,
             PCWSTR(verb.as_ptr()),
             PCWSTR(exe_w.as_ptr()),
             PCWSTR(args_w.as_ptr()),
@@ -235,7 +235,7 @@ impl NamedMutex {
     pub fn try_acquire(name: &str) -> Result<Option<NamedMutex>, String> {
         let w = wide(name);
         // SAFETY: `w` is NUL-terminated and alive for the call.
-        let handle = unsafe { CreateMutexW(None, BOOL(0), PCWSTR(w.as_ptr())) }.map_err(|e| format!("CreateMutexW failed: {e}"))?;
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(w.as_ptr())) }.map_err(|e| format!("CreateMutexW failed: {e}"))?;
         let handle = Kernel(handle);
         // SAFETY: GetLastError has no preconditions; it is read right after the create call.
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -253,7 +253,7 @@ impl NamedEvent {
     pub fn create(name: &str) -> Result<NamedEvent, String> {
         let w = wide(name);
         // SAFETY: `w` is NUL-terminated and alive for the call.
-        let handle = unsafe { CreateEventW(None, BOOL(1), BOOL(0), PCWSTR(w.as_ptr())) }.map_err(|e| format!("CreateEventW failed: {e}"))?;
+        let handle = unsafe { CreateEventW(None, true, false, PCWSTR(w.as_ptr())) }.map_err(|e| format!("CreateEventW failed: {e}"))?;
         Ok(NamedEvent(Kernel(handle)))
     }
 
@@ -261,7 +261,7 @@ impl NamedEvent {
     pub fn open(name: &str) -> Option<NamedEvent> {
         let w = wide(name);
         // SAFETY: `w` is NUL-terminated and alive for the call.
-        unsafe { OpenEventW(EVENT_ALL_ACCESS, BOOL(0), PCWSTR(w.as_ptr())) }.ok().map(|h| NamedEvent(Kernel(h)))
+        unsafe { OpenEventW(EVENT_ALL_ACCESS, false, PCWSTR(w.as_ptr())) }.ok().map(|h| NamedEvent(Kernel(h)))
     }
 
     /// Sets the event.
@@ -321,7 +321,7 @@ fn take_local_wide(p: windows::core::PWSTR) -> String {
             len += 1;
         }
         let text = String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len));
-        LocalFree(HLOCAL(p.0 as *mut c_void));
+        LocalFree(Some(HLOCAL(p.0 as *mut c_void)));
         text
     }
 }
@@ -347,7 +347,7 @@ impl Drop for SecurityAttributes {
     fn drop(&mut self) {
         // SAFETY: the descriptor was allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
         unsafe {
-            LocalFree(HLOCAL(self.descriptor.0));
+            LocalFree(Some(HLOCAL(self.descriptor.0)));
         }
     }
 }

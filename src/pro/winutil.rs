@@ -38,7 +38,7 @@ impl Key {
         }
         let mut h = HKEY::default();
         // SAFETY: valid NUL-terminated path; `h` receives the handle.
-        let st = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, sam, &mut h) };
+        let st = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), None, sam, &mut h) };
         (st == ERROR_SUCCESS).then_some(Key(h))
     }
 
@@ -51,7 +51,7 @@ impl Key {
         let w = wide(name);
         let mut h = HKEY::default();
         // SAFETY: as above, relative to an open key.
-        let st = unsafe { RegOpenKeyExW(self.0, PCWSTR(w.as_ptr()), 0, KEY_READ, &mut h) };
+        let st = unsafe { RegOpenKeyExW(self.0, PCWSTR(w.as_ptr()), None, KEY_READ, &mut h) };
         (st == ERROR_SUCCESS).then_some(Key(h))
     }
 
@@ -63,7 +63,7 @@ impl Key {
             let mut buf = [0u16; 512];
             let mut len = buf.len() as u32;
             // SAFETY: buffer and length describe valid writable memory.
-            let st = unsafe { RegEnumKeyExW(self.0, i, windows::core::PWSTR(buf.as_mut_ptr()), &mut len, None, windows::core::PWSTR::null(), None, None) };
+            let st = unsafe { RegEnumKeyExW(self.0, i, Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) };
             if st != ERROR_SUCCESS {
                 break;
             }
@@ -85,7 +85,7 @@ impl Key {
             let mut data_len = data.len() as u32;
             // SAFETY: all buffers are valid for the lengths passed.
             let st = unsafe {
-                RegEnumValueW(self.0, i, windows::core::PWSTR(name.as_mut_ptr()), &mut name_len, None, Some(&mut ty), Some(data.as_mut_ptr()), Some(&mut data_len))
+                RegEnumValueW(self.0, i, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut name_len, None, Some(&mut ty), Some(data.as_mut_ptr()), Some(&mut data_len))
             };
             if st != ERROR_SUCCESS {
                 break;

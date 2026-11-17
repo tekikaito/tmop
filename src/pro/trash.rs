@@ -490,10 +490,9 @@ fn recycle_bin_size() -> Option<(u64, u64)> {
 #[cfg(windows)]
 fn empty_recycle_bin() -> Result<(), String> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
     // SAFETY: no window, no root path (all drives); flags are plain constants.
-    unsafe { SHEmptyRecycleBinW(HWND::default(), PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }.map_err(|e| e.message())
+    unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) }.map_err(|e| e.message())
 }
 
 // ---------------------------------------------------------------- Linux: FreeDesktop Trash
