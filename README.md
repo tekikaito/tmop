@@ -4,10 +4,12 @@ TMOP shows what your computer is doing: how busy the processor, memory, disk, ne
 graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
 macOS**, is free and needs no installation.
 
-TMOP itself sends no data. On Linux and macOS it makes no internet requests at all. On Windows its
-only internet requests go to GitHub: downloading TMOP's own Docker engine when you set it up, and
-checking for a newer engine release (switch the check off on the Docker page's *Engine* tab). A
-Docker engine downloads only what you ask it to (for example an image you pull).
+TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
+update check (*Settings → General*, off by default), which asks GitHub for the newest release. On
+Windows its only internet requests go to GitHub: that update check if you turn it on, downloading
+TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
+check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
+(for example an image you pull).
 
 ![TMOP overview](docs/screenshots/summary.png)
 
@@ -174,7 +176,10 @@ the PC.
 
 ## Update or remove
 
-TMOP doesn't update itself. Your settings are kept when you update.
+TMOP can tell you about new versions: turn on *Check for updates when TMOP starts* in
+*Settings → General*. It then asks GitHub at most once a day when it starts, and shows what's new
+when there is a newer version. On Windows, *Update now* downloads it, checks it and restarts TMOP;
+on Linux and macOS TMOP shows the command that updates it. Your settings are kept when you update.
 
 - **Installed with a command?** Run the same command again to update.
   - Windows: remove TMOP in *Settings → Apps → Installed apps* (that also hands Ctrl+Shift+Esc

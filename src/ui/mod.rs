@@ -30,6 +30,7 @@ pub mod table;
 pub mod terminal;
 pub mod theme;
 pub mod titlebar;
+pub mod updates;
 pub mod widgets;
 
 use crate::docker::model::EngineStatus;
@@ -437,6 +438,7 @@ pub struct App {
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
     pub replace: replace::ReplaceUi,
+    pub updates: updates::UpdateUi,
     pub docker: docker::DockerState,
     /// Docker series for the Performance page, refreshed when the backend has new stats.
     pub perf_docker: performance::DockerPerfCache,
@@ -526,11 +528,16 @@ impl App {
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
             replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
+            updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
         let mut app = app;
+        if !popout_only {
+            crate::update::remove_leftover();
+            app.updates.check_on_start(&app.settings.general);
+        }
         app.pro.del.delete_safe = caps.delete_safe;
         if !app.settings.general.recording_folder.is_empty() {
             app.recorder.dir = std::path::PathBuf::from(&app.settings.general.recording_folder);
@@ -1017,6 +1024,7 @@ impl App {
             }
         } else {
             self.replace_poll(ctx);
+            self.updates_poll(ctx);
             if let Some([hi, mid, edge]) = pal.backdrop {
                 widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.screen_rect(), hi, mid, edge);
             }
@@ -1049,6 +1057,7 @@ impl App {
             });
             self.confirm_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
+            self.updates_dialog(ctx, &pal);
             self.disk_delete_dialogs(ctx, &pal);
             self.draw_toasts(ctx);
             if self.popout_open {

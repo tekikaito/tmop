@@ -67,6 +67,12 @@ pub struct General {
     pub recording_folder: String,
     /// Empty means the temporary folder.
     pub benchmark_folder: String,
+    /// Ask GitHub for a newer TMOP release on start, at most once a day (opt-in; see [`crate::update`]).
+    pub check_for_updates: bool,
+    /// When the last check succeeded, in seconds since 1970 (0: never).
+    pub update_last_check: u64,
+    /// A release tag the user chose to skip (`v0.8.0`); the start-up check doesn't offer it again.
+    pub update_skipped: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -214,6 +220,9 @@ impl Default for General {
             pawnio_cpu_temperature: false,
             recording_folder: String::new(),
             benchmark_folder: String::new(),
+            check_for_updates: false,
+            update_last_check: 0,
+            update_skipped: String::new(),
         }
     }
 }
@@ -640,6 +649,8 @@ mod tests {
         assert_eq!(s.popout.opacity, 1.0);
         assert_eq!(s.appearance.display_font, "Michroma");
         assert!(s.graphs.color_keyed && s.graphs.smooth_curves && !s.graphs.dashed_summary);
+        // TMOG's checkForUpdatesOnStart (on by default there) doesn't turn on TMOP's opt-in check.
+        assert!(!s.general.check_for_updates);
         // Unimplemented TMOG keys are gone from the written file.
         let out: Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
