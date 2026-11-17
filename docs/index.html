@@ -458,7 +458,7 @@
           <p data-only="windows"><b>Windows:</b> if you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it.</p>
           <p data-only="linux macos"><b>Linux and macOS:</b> if you used the install command, run it again. Otherwise download the newest version here and replace the old <span data-only="linux">AppImage</span><span data-only="macos">TMOP in <i>Applications</i></span> with it.</p>
           <p data-only="macos"><b>Installed with Homebrew:</b> run <code>brew upgrade --cask tmop</code> (or just <code>brew upgrade</code>).</p>
-          <p>Your settings are kept either way. TMOP doesn't check for updates by itself.</p>
+          <p>Your settings are kept either way. TMOP can also tell you about new versions: turn on <i>Check for updates when TMOP starts</i> in <i>Settings → General</i>. On Windows it then updates itself with <i>Update now</i>.</p>
         </div>
       </details>
       <details>
@@ -488,7 +488,7 @@
       <details>
         <summary>Does TMOP send my data anywhere?</summary>
         <div class="a">
-          <p>No. On Linux and macOS TMOP itself makes no internet requests at all. On Windows its only requests go to GitHub: downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab).</p>
+          <p>No. On Linux and macOS TMOP itself makes no internet requests unless you turn on the update check (<i>Settings → General</i>, off by default), which asks GitHub for the newest release. On Windows its only requests go to GitHub: that update check if you turn it on, downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab).</p>
         </div>
       </details>
       <details>

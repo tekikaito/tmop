@@ -701,8 +701,7 @@ impl App {
                                     "AMD Ryzen and Intel. Needs the PawnIO driver (pawnio.eu) and TMOP running as administrator. Some anti-cheat software objects to PawnIO; if a game does, switching this off may not be enough, as the driver stays installed.",
                                 );
                             }
-                            let mut never = false;
-                            ui.add_enabled_ui(false, |ui| toggle_row_hint(ui, &pal, &mut never, "Check for updates on app start", "Disabled: TMOP never contacts the network."));
+                            changed |= super::updates::settings_rows(ui, &pal, &mut s.general, &mut self.updates);
                         });
                         section(ui, &pal, &mut sections, SECTIONS[3], |ui| {
                             if caps.window_levels {
