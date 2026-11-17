@@ -1,0 +1,27 @@
+# Weekly dependency updates. Minor and patch versions arrive grouped in one PR per ecosystem;
+# major versions (which usually need code changes, e.g. eframe/egui) get a PR each. Every PR runs
+# CI like any other change and is merged by hand.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "Dependencies"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
