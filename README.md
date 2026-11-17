@@ -187,6 +187,13 @@ TMOP can tell you about new versions: turn on *Check for updates when TMOP start
 when there is a newer version. On Windows, *Update now* downloads it, checks it and restarts TMOP;
 on Linux and macOS TMOP shows the command that updates it. Your settings are kept when you update.
 
+**Using a fork of TMOP?** Its releases take updates from the fork: the release workflow builds
+them with `TMOP_RELEASE_REPO` set to the fork's repository. To follow a fork from another
+copy, enter its GitHub repository (`owner/name`) under *Settings → General → Update source*.
+Only enter a fork you trust, since TMOP installs what it publishes. A fork that keeps the
+release workflow publishes the same files, which the update needs (on Linux and macOS the
+command also expects the fork's GitHub Pages site with `install.sh`).
+
 - **Installed with a command?** Run the same command again to update.
   - Windows: remove TMOP in *Settings → Apps → Installed apps* (that also hands Ctrl+Shift+Esc
     back to Task Manager).

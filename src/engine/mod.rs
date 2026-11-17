@@ -26,8 +26,13 @@ pub const DEFAULT_DISTRO: &str = "tmop-engine";
 pub const DEFAULT_PIPE: &str = "tmop_engine";
 /// Docker CLI context name.
 pub const DEFAULT_CONTEXT: &str = "tmop";
-/// GitHub repository that publishes the engine tarballs.
-pub const RELEASE_REPO: &str = "tekikaito/tmop";
+/// GitHub repository (`owner/name`) whose releases this build comes from: the engine tarballs and,
+/// unless Settings names another, TMOP's own updates. `TMOP_RELEASE_REPO` at build time sets it
+/// (the release workflow passes `github.repository`, so a fork's builds use the fork).
+pub const RELEASE_REPO: &str = match option_env!("TMOP_RELEASE_REPO") {
+    Some(r) if !r.is_empty() => r,
+    _ => "tekikaito/tmop",
+};
 
 /// Test-only overrides read from the environment (see the module doc of each field).
 #[derive(Debug, Clone, PartialEq, Eq)]

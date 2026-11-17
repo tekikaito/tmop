@@ -50,7 +50,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, fd: &FrameData<'_>) {
             &pal,
             Some((Icon::Container, pal.accent)),
             "Set up TMOP engine",
-            "Installs a small Linux system with Docker, run by WSL 2. About 140 MB is downloaded from github.com/tekikaito/tmop.",
+            &format!("Installs a small Linux system with Docker, run by WSL 2. About 140 MB is downloaded from github.com/{}.", crate::engine::RELEASE_REPO),
         );
         ui.add_space(12.0);
         let w = &mut app.docker.ui.engine_wizard;

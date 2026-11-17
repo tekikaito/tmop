@@ -71,6 +71,9 @@ pub struct General {
     pub check_for_updates: bool,
     /// When the last check succeeded, in seconds since 1970 (0: never).
     pub update_last_check: u64,
+    /// GitHub repository (`owner/name`) to take updates from; empty means the one this build was
+    /// released from (see [`crate::update::repo`]).
+    pub update_repo: String,
     /// A release tag the user chose to skip (`v0.8.0`); the start-up check doesn't offer it again.
     pub update_skipped: String,
 }
@@ -222,6 +225,7 @@ impl Default for General {
             benchmark_folder: String::new(),
             check_for_updates: false,
             update_last_check: 0,
+            update_repo: String::new(),
             update_skipped: String::new(),
         }
     }
