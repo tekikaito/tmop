@@ -1044,17 +1044,28 @@ pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> Response {
     let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 0)));
     let inner_w = (width - 20.0).max(60.0);
-    frame
+    let field = frame
         .show(ui, |ui| {
             ui.allocate_ui_with_layout(vec2(inner_w, ButtonSize::Toolbar.height() - 2.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 draw_icon(ui.painter(), Rect::from_center_size(icon.center(), vec2(15.0, 15.0)), Icon::Search, pal.text_faint);
-                ui.add(text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w - 24.0).font(theme::ui(13.0)), false))
+                ui.add(text_edit(egui::TextEdit::singleline(&mut *text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w - 24.0).font(theme::ui(13.0)), false))
             })
             .inner
         })
-        .inner
+        .inner;
+    clear_on_escape(ui, &field, text);
+    field
+}
+
+/// Esc in a search or filter field empties it: call with the field's response and its text right
+/// after showing it. egui takes the keyboard away from a field on Esc; a search that stayed in
+/// force with no cursor in it was easy to forget. Enter leaves the field and keeps the text.
+pub fn clear_on_escape(ui: &Ui, field: &Response, text: &mut String) {
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        text.clear();
+    }
 }
 
 /// Segmented control drawn in one rectangle (layout direction does not matter): 34 px high with
@@ -1953,6 +1964,34 @@ mod tests {
         assert_eq!(spark_visible(200.0, 60, 60), 60);
         // Down to 1 px per sample the whole history fits (a 60 s trend in 84 px).
         assert_eq!(spark_visible(84.0, 60, 60), 60);
+    }
+
+    /// Esc empties a search box that has the keyboard; Enter and Esc elsewhere leave the text.
+    #[test]
+    fn escape_clears_a_focused_search_box() {
+        let pal = theme::DARK;
+        let press = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let after = |focused: bool, key: egui::Key| {
+            let ctx = egui::Context::default();
+            pal.apply(&ctx);
+            theme::install_fonts(&ctx, None);
+            let mut text = String::from("chrome");
+            for events in [vec![], vec![], vec![press(key)]] {
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let field = search_box(ui, &mut text, "Filter", 220.0, &pal);
+                        if focused && ui.ctx().cumulative_frame_nr() == 0 {
+                            field.request_focus();
+                        }
+                    });
+                })
+                .drop_without_applying_deltas();
+            }
+            text
+        };
+        assert_eq!(after(true, egui::Key::Escape), "");
+        assert_eq!(after(true, egui::Key::Enter), "chrome");
+        assert_eq!(after(false, egui::Key::Escape), "chrome", "Esc belongs to the page when the box has no cursor");
     }
 
     fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {

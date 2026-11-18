@@ -106,9 +106,11 @@ impl App {
                 p.rect_filled(search, 6.0, pal.control);
                 p.rect_stroke(search, 6.0, Stroke::new(1.0_f32, pal.control_stroke), egui::StrokeKind::Outside);
                 draw_icon(&p, Rect::from_center_size(pos2(search.left() + 22.0, cy), vec2(16.0, 16.0)), Icon::Search, pal.text_faint);
-                let hint_w = if w >= 300.0 { widgets::key_hint(&p, pos2(search.right() - 14.0 - widgets::text_width(&p, "Ctrl K", theme::mono(11.0)) - 12.0, cy), "Ctrl K", pal).width() + 14.0 } else { 0.0 };
-                let edit = Rect::from_min_max(pos2(search.left() + 38.0, cy - 12.0), pos2(search.right() - 12.0 - hint_w, cy + 12.0));
                 let id = Id::unique("global-search");
+                // The key that matters next: Ctrl+K to get here, Esc to drop the search typed.
+                let key = if ui.memory(|m| m.has_focus(id)) && !self.filter.is_empty() { "Esc" } else { "Ctrl K" };
+                let hint_w = if w >= 300.0 { widgets::key_hint(&p, pos2(search.right() - 14.0 - widgets::text_width(&p, key, theme::mono(11.0)) - 12.0, cy), key, pal).width() + 14.0 } else { 0.0 };
+                let edit = Rect::from_min_max(pos2(search.left() + 38.0, cy - 12.0), pos2(search.right() - 12.0 - hint_w, cy + 12.0));
                 let resp = ui.put(
                     edit,
                     widgets::text_edit(
@@ -124,6 +126,7 @@ impl App {
                 if focus {
                     resp.request_focus();
                 }
+                widgets::clear_on_escape(ui, &resp, &mut self.filter);
                 if resp.changed() && self.page != Page::Processes {
                     self.page = Page::Processes;
                 }
