@@ -119,6 +119,20 @@ pub fn text_fit(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, fon
     rect
 }
 
+/// Text from `pos` (its top-left corner) wrapped at word boundaries to `max_w` points and at most
+/// `max_rows` lines; what does not fit ends in an ellipsis. With one row it is [`text_fit`].
+pub fn text_wrapped(painter: &egui::Painter, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32, max_rows: usize) -> Rect {
+    if max_rows <= 1 {
+        return text_fit(painter, pos, Align2::LEFT_TOP, s, font, color, max_w);
+    }
+    let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping { max_width: max_w.max(8.0), max_rows, break_anywhere: false, overflow_character: Some('\u{2026}') };
+    let galley = painter.layout_job(job);
+    let rect = Rect::from_min_size(pos, galley.size());
+    painter.galley(pos, galley, color);
+    rect
+}
+
 pub fn text_width(painter: &egui::Painter, s: &str, font: FontId) -> f32 {
     painter.layout_no_wrap(s.to_string(), font, Color32::WHITE).size().x
 }

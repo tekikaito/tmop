@@ -10,6 +10,7 @@ use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::pro::bench::{BenchResult, Progress, Test};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, RichText, Sense};
+use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,17 @@ fn clock(d: Duration) -> String {
 
 /// Room the header toolbar needs: the folder field with its label, "Clear history" and "Run all".
 const TOOLBAR_W: f32 = 600.0;
+/// Gaps below the run card and above the history table.
+const RUN_GAP: f32 = 16.0;
+const TABLE_GAP: f32 = 4.0;
+/// Least height of the history table: its header and a few rows.
+const TABLE_MIN_H: f32 = 164.0;
+
+/// Height the page needs with its test cards in `cols` columns; a lower page scrolls.
+fn min_content_height(cols: usize) -> f32 {
+    let rows = Test::ALL.len().div_ceil(cols.max(1));
+    RUN_H + RUN_GAP + rows as f32 * (TEST_H + CARD_GAP) + TABLE_GAP + TABLE_MIN_H
+}
 
 impl App {
     fn bench_dir(&self) -> PathBuf {
@@ -112,56 +124,62 @@ impl App {
             }
             ui.label(RichText::new("Disk test folder").font(theme::ui(12.0)).color(pal.text_faint));
         });
-        let p = ui.painter().clone();
-
-        // Run card.
-        let run_rect = Rect::from_min_size(area.min, vec2(area.width(), RUN_H));
-        self.run_card(&p, run_rect, fd, &prog, (index, total));
-
-        // Test cards: as many columns as fit.
+        // Test cards: as many columns as fit. In a window too low for the run card, the test cards
+        // and a few table rows, the page scrolls instead of pushing the table out of the window.
         let cols = (((area.width() + CARD_GAP) / (TEST_MIN_W + CARD_GAP)).floor() as usize).clamp(1, Test::ALL.len());
-        let mut y = run_rect.bottom() + 16.0;
-        for chunk in Test::ALL.chunks(cols) {
-            let row = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), TEST_H));
-            let mut cells = hsplit(row, &vec![1.0; cols], CARD_GAP);
-            cells.truncate(chunk.len());
-            for (t, r) in chunk.iter().zip(cells) {
-                if let Some(start) = self.test_card(ui, r, fd, &prog, *t, running) {
-                    run = Some(start);
-                }
-            }
-            y += TEST_H + CARD_GAP;
-        }
+        let content_h = area.height().max(min_content_height(cols));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area).id_salt("bench-scroll"), |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
+                let (area, _) = ui.allocate_exact_size(vec2(area.width(), content_h), Sense::hover());
+                let p = ui.painter().clone();
 
-        // History table.
-        let table_rect = Rect::from_min_max(pos2(area.left(), y + 4.0), pos2(area.right(), area.bottom().max(y + 164.0)));
-        let hist: Vec<BenchResult> = self.bench.history.clone();
-        if hist.is_empty() {
-            card(&p, table_rect, &pal);
-            empty_state(&p, table_rect, &pal, "No results yet");
-        } else {
-            let st = &self.bench_ui.table;
-            let mut order: Vec<usize> = (0..hist.len()).collect();
-            st.sort(&hist, &mut order, |a, b, col| match col {
-                0 => a.when.cmp(&b.when),
-                1 => a.test.title().cmp(b.test.title()),
-                2 => cmp_f(a.value, b.value),
-                _ => a.detail.cmp(&b.detail),
-            });
-            let cols = [Col::text("Finished", 170.0), Col::text("Test", 220.0), Col::num("Result", 140.0), Col::text("Details", 400.0)];
-            let key = |i: usize| format!("{}{}", hist[i].when, hist[i].test.id());
-            let cell = |i: usize, col: usize| -> Cell {
-                let r = &hist[i];
-                match col {
-                    0 => Cell::new(&r.when).mono().color(pal.text_faint),
-                    1 => Cell::new(r.test.title()).dot(test_color(fd, r.test)),
-                    2 => Cell::new(format!("{} {}", format_value(r.test, r.value), r.test.unit())),
-                    _ => Cell::new(&r.detail).dim(&pal),
+                // Run card.
+                let run_rect = Rect::from_min_size(area.min, vec2(area.width(), RUN_H));
+                self.run_card(&p, run_rect, fd, &prog, (index, total));
+
+                let mut y = run_rect.bottom() + RUN_GAP;
+                for chunk in Test::ALL.chunks(cols) {
+                    let row = Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), TEST_H));
+                    let mut cells = hsplit(row, &vec![1.0; cols], CARD_GAP);
+                    cells.truncate(chunk.len());
+                    for (t, r) in chunk.iter().zip(cells) {
+                        if let Some(start) = self.test_card(ui, r, fd, &prog, *t, running) {
+                            run = Some(start);
+                        }
+                    }
+                    y += TEST_H + CARD_GAP;
                 }
-            };
-            let icons = &mut self.icons;
-            table::show(ui, table_rect, "bench-table", &pal, &cols, &order, &mut self.bench_ui.table, &key, &cell, icons);
-        }
+
+                // History table.
+                let table_rect = Rect::from_min_max(pos2(area.left(), y + TABLE_GAP), area.max);
+                let hist = &self.bench.history;
+                if hist.is_empty() {
+                    card(&p, table_rect, &pal);
+                    empty_state(&p, table_rect, &pal, "No results yet");
+                } else {
+                    let st = &self.bench_ui.table;
+                    let mut order: Vec<usize> = (0..hist.len()).collect();
+                    st.sort(hist, &mut order, |a, b, col| match col {
+                        0 => a.when.cmp(&b.when),
+                        1 => a.test.title().cmp(b.test.title()),
+                        2 => cmp_f(a.value, b.value),
+                        _ => a.detail.cmp(&b.detail),
+                    });
+                    let cols = [Col::text("Finished", 170.0), Col::text("Test", 220.0), Col::num("Result", 140.0), Col::text("Details", 400.0)];
+                    let key = |i: usize| format!("{}{}", hist[i].when, hist[i].test.id());
+                    let cell = |i: usize, col: usize| -> Cell {
+                        let r = &hist[i];
+                        match col {
+                            0 => Cell::new(&r.when).mono().color(pal.text_faint),
+                            1 => Cell::new(r.test.title()).dot(test_color(fd, r.test)),
+                            2 => Cell::new(format!("{} {}", format_value(r.test, r.value), r.test.unit())),
+                            _ => Cell::new(&r.detail).dim(&pal),
+                        }
+                    };
+                    table::show(ui, table_rect, "bench-table", &pal, &cols, &order, &mut self.bench_ui.table, &key, &cell, &mut self.icons);
+                }
+            });
+        });
         if cancel {
             self.bench.cancel();
         }
@@ -297,10 +315,11 @@ impl App {
             }
             _ => t.description().to_string(),
         };
-        widgets::text_fit(&clip, pos2(x, r.top() + 66.0), Align2::LEFT_TOP, &sub, theme::ui(12.0), pal.text_faint, w);
-
         // Trend: the live samples while running, else the history, oldest to newest.
         let values: Vec<f32> = if is_running { prog.live.clone() } else { hist.iter().map(|h| h.value as f32).collect() };
+        // Without a trend below it, the sub line may take the trend's room as a second line.
+        let sub_rows = if values.len() >= 2 { 1 } else { 2 };
+        widgets::text_wrapped(&clip, pos2(x, r.top() + 66.0), &sub, theme::ui(12.0), pal.text_faint, w, sub_rows);
         if values.len() >= 2 {
             let mut s = Series::new(values.len());
             for v in &values {
