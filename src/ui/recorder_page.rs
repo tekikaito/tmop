@@ -150,8 +150,11 @@ impl App {
             }
         }
         if open_folder {
-            let _ = std::fs::create_dir_all(&self.recorder.dir);
-            let _ = kit::reveal(&self.recorder.dir);
+            // The folder is created on the first recording; open it now all the same.
+            match std::fs::create_dir_all(&self.recorder.dir) {
+                Ok(()) => kit::reveal_or_report(ui.ctx(), &self.recorder.dir),
+                Err(e) => self.status = format!("Could not create {}: {e}", self.recorder.dir.display()),
+            }
         }
 
         // The graph above, process events and saved recordings below. A window too low for both
@@ -179,7 +182,7 @@ impl App {
                 Err(e) => self.status = e,
             },
             Some(RecordingClick::Reveal(path)) => {
-                let _ = kit::reveal(&path);
+                kit::reveal_or_report(ui.ctx(), &path);
             }
             None => {}
         }

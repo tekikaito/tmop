@@ -583,7 +583,7 @@ impl App {
             self.pro.disk_cursor = g;
         }
         if let Some(path) = reveal {
-            let _ = kit::reveal(&path);
+            kit::reveal_or_report(ui.ctx(), &path);
         }
     }
 }

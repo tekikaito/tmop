@@ -1072,6 +1072,10 @@ impl App {
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();
         }
+        // What a part of a page had to tell the user (a file manager that would not open).
+        if let Some(message) = kit::take_report(ctx) {
+            self.status = message;
+        }
         self.poll_palette_dialog();
         self.save_palette_edits(false);
         if self.settings_dirty {

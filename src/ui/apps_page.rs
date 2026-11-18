@@ -90,7 +90,7 @@ impl App {
         if let Some(i) = table::show(ui, table_rect, "apps-table", &pal, &cols, &order, &mut self.pro.apps_table, &key, &cell, icons) {
             let loc = PathBuf::from(&apps[i].location);
             if loc.exists() {
-                let _ = kit::reveal(&loc);
+                kit::reveal_or_report(ui.ctx(), &loc);
             }
         }
     }

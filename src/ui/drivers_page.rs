@@ -202,7 +202,7 @@ pub fn driver_like_page(
     if let Some(i) = table::show(ui, table_rect, if drivers { "drivers-table" } else { "services-table" }, pal, &cols, &order, state, &key, &cell, icons) {
         let path = PathBuf::from(&list[i].path);
         if path.exists() {
-            let _ = kit::reveal(&path);
+            kit::reveal_or_report(ui.ctx(), &path);
         }
     }
 
@@ -249,7 +249,7 @@ fn driver_bar(ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette, driver: Optio
         }
         let open = ui.add_enabled_ui(exists, |ui| Button::new("Open file location").size(ButtonSize::Medium).show(ui, pal).clicked()).inner;
         if open {
-            let _ = kit::reveal(Path::new(&s.path));
+            kit::reveal_or_report(ui.ctx(), Path::new(&s.path));
         }
     });
 }
@@ -363,7 +363,7 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
     super::kit::row_ui(ui, actions, |ui| {
         let open = ui.add_enabled_ui(exists, |ui| Button::new("Open file location").show(ui, pal).clicked()).inner;
         if open {
-            let _ = kit::reveal(Path::new(&s.path));
+            kit::reveal_or_report(ui.ctx(), Path::new(&s.path));
         }
         if Button::ghost("Copy name").show(ui, pal).clicked() {
             ui.ctx().copy_text(s.name.clone());

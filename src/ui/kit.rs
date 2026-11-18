@@ -55,6 +55,30 @@ pub fn empty_state(p: &egui::Painter, rect: Rect, pal: &Palette, text: &str) {
 /// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
 pub use crate::platform::reveal;
 
+/// [`reveal`] for the places that have nothing to do with a failure but tell the user: it goes
+/// to the status bar ([`report`]) instead of being dropped, so "Open file location" never just
+/// does nothing.
+pub fn reveal_or_report(ctx: &egui::Context, path: &std::path::Path) {
+    if let Err(e) = reveal(path) {
+        report(ctx, format!("Could not open {}: {e}", path.display()));
+    }
+}
+
+fn report_id() -> egui::Id {
+    egui::Id::unique("tmop-status-report")
+}
+
+/// Hands `message` to the status bar from code that draws a part of a page and has no access to
+/// the app; the app shows it at the end of the frame ([`take_report`]). The latest one wins.
+pub fn report(ctx: &egui::Context, message: String) {
+    ctx.data_mut(|d| d.insert_temp(report_id(), message));
+}
+
+/// The message last [`report`]ed, once.
+pub fn take_report(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|d| d.remove_temp::<String>(report_id()))
+}
+
 /// What a [`file_dialog`] asks for.
 #[derive(Clone, Debug)]
 pub struct FileDialog {
@@ -615,6 +639,17 @@ mod tests {
         let waker = std::thread::spawn(move || rx.recv().map(|w| w.wake()));
         assert_eq!(block_on(fut), 2);
         assert!(waker.join().unwrap().is_ok());
+    }
+
+    /// A report reaches the app once; the latest one wins.
+    #[test]
+    fn a_report_is_taken_once() {
+        let ctx = egui::Context::default();
+        assert_eq!(take_report(&ctx), None);
+        report(&ctx, "first".into());
+        report(&ctx, "Could not open C:\\x: denied".into());
+        assert_eq!(take_report(&ctx).as_deref(), Some("Could not open C:\\x: denied"));
+        assert_eq!(take_report(&ctx), None);
     }
 
     #[test]
