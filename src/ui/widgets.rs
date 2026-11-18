@@ -1028,16 +1028,19 @@ pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget
     }
 }
 
-/// Text field with a magnifier and a hint, in the application style (36 px high).
+/// Text field with a magnifier at its left and a hint, in the application style: `width` wide
+/// and as high as a toolbar button (36 px), whatever the layout around it (a right-to-left
+/// toolbar included).
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> Response {
-    let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)));
+    let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 0)));
+    let inner_w = (width - 20.0).max(60.0);
     frame
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(vec2(inner_w, ButtonSize::Toolbar.height() - 2.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 draw_icon(ui.painter(), Rect::from_center_size(icon.center(), vec2(15.0, 15.0)), Icon::Search, pal.text_faint);
-                ui.add(text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 46.0 + 8.0).font(theme::ui(13.0)), false))
+                ui.add(text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w - 24.0).font(theme::ui(13.0)), false))
             })
             .inner
         })

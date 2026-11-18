@@ -171,14 +171,16 @@ pub(super) fn tile_rects(rect: Rect, n: usize, min_w: f32) -> (Vec<Rect>, f32) {
 // Controls and small drawings
 // ---------------------------------------------------------------------------
 
-/// Text field in the mono font (36 px high, no icon): folders, drives and paths.
+/// Text field in the mono font (36 px high, no icon) for folders, drives and paths. It is exactly
+/// `width` wide whatever the layout around it, so a toolbar can put more controls after it; pass
+/// the available width to let it take the rest of a row.
 pub(super) fn mono_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
     let frame = widgets::stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 0)));
+    let inner_w = (width - 24.0).max(40.0);
     frame
         .show(ui, |ui| {
-            ui.set_min_height(34.0);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 24.0 + 8.0).font(theme::mono(12.0)), false))
+            ui.allocate_ui_with_layout(vec2(inner_w, TOOLBAR_H - 2.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w).font(theme::mono(12.0)), false))
             })
             .inner
         })

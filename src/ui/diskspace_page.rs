@@ -73,7 +73,9 @@ impl App {
             } else if Button::primary("Scan").icon(Icon::Play).show(ui, &pal).clicked() {
                 start_scan = Some(self.pro.disk_root.clone());
             }
-            let r = mono_input(ui, &mut self.pro.disk_root, "Folder or drive to scan", 260.0, &pal);
+            // The path takes what the row has left.
+            let w = ui.available_width().max(160.0);
+            let r = mono_input(ui, &mut self.pro.disk_root, "Folder or drive to scan", w, &pal);
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 start_scan = Some(self.pro.disk_root.clone());
             }

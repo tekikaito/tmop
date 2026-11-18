@@ -87,8 +87,12 @@ impl App {
         let mut folder = |ui: &mut egui::Ui| {
             open_folder = Button::ghost("Open folder").show(ui, &pal).clicked();
             default_dir = Button::ghost("Default").show(ui, &pal).clicked();
-            apply_dir = mono_input(ui, &mut self.pro.rec_dir_text, "Recording folder", 220.0, &pal).lost_focus();
-            ui.label(RichText::new("Folder").font(theme::ui(12.0)).color(pal.text_faint));
+            // The folder field takes what the row has left, less the room of its label.
+            let label = RichText::new("Folder").font(theme::ui(12.0)).color(pal.text_faint);
+            let label_w = widgets::text_width(ui.painter(), "Folder", theme::ui(12.0)) + ui.spacing().item_spacing.x;
+            let w = (ui.available_width() - label_w).clamp(180.0, 520.0);
+            apply_dir = mono_input(ui, &mut self.pro.rec_dir_text, "Recording folder", w, &pal).lost_focus();
+            ui.label(label);
         };
         if two_rows {
             toolbar(ui, tools, folder);
