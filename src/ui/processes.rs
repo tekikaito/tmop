@@ -720,6 +720,30 @@ impl App {
         let mut menu_pick: Option<(MenuPick, ProcessRow)> = None;
         let mut sort_click: Option<Column> = None;
         let mut resized: Vec<(String, f32)> = Vec::new();
+        // Keys: Up, Down, Page Up, Page Down, Home and End move the selection through the rows
+        // shown and scroll it into view; Right opens the selected group and Left closes it.
+        let mut scroll_to = None;
+        if self.pending.is_none() && table::keys_free(ui.ctx()) {
+            let row_key = |e: &Entry| match e {
+                Entry::Row { idx, .. } => Some((rows[*idx].pid, rows[*idx].create_time)),
+                _ => None,
+            };
+            let at = self.selected.and_then(|s| built.entries.iter().position(|e| row_key(e) == Some(s)));
+            if let Some(nav) = table::nav_key(ui.ctx()) {
+                let shown: Vec<usize> = (0..built.entries.len()).filter(|i| row_key(&built.entries[*i]).is_some()).collect();
+                let current = at.and_then(|a| shown.iter().position(|i| *i == a));
+                let page = ((table_rect.height() - table::HEADER_H) / ROW_H) as usize;
+                if let Some(n) = table::nav_target(current, shown.len(), nav, page.saturating_sub(1)) {
+                    self.selected = row_key(&built.entries[shown[n]]);
+                    scroll_to = Some(shown[n]);
+                }
+            } else if let Some(Entry::Row { kids, open, .. }) = at.map(|a| &built.entries[a]) {
+                let fold = if *open { egui::Key::ArrowLeft } else { egui::Key::ArrowRight };
+                if *kids > 0 && key_once(ui.ctx(), fold) {
+                    toggle = self.selected;
+                }
+            }
+        }
         let selected = self.selected;
         let logical = fd.snap.cpu.logical_count;
         let per_core = self.settings.general.per_core_cpu_statistics;
@@ -750,6 +774,9 @@ impl App {
                     table = table.column(if c.is_trend() { egui_extras::Column::exact(*w) } else { egui_extras::Column::initial(*w).at_least(36.0).clip(true) });
                 }
                 table = table.column(egui_extras::Column::remainder().at_least(10.0));
+                if let Some(row) = scroll_to {
+                    table = table.scroll_to_row(row, None);
+                }
                 table
                     .header(table::HEADER_H, |mut header| {
                         for (k, c) in cols.iter().enumerate() {

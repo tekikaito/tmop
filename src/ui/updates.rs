@@ -217,7 +217,9 @@ impl App {
             ui.add_space(12.0);
             ui.add_enabled_ui(!installing, |ui| kit::dialog_buttons(ui, pal, &buttons)).inner
         })
-        .flatten();
+        .flatten()
+        // Esc is "Later", unless the download is running (its buttons are off then, too).
+        .or_else(|| (!installing && super::processes::key_once(ctx, egui::Key::Escape)).then_some(1));
         let Some(i) = answer else { return };
         match i {
             0 => {

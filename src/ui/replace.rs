@@ -252,7 +252,9 @@ impl App {
             kit::dialog_buttons(ui, pal, &[DialogButton::Ghost("Cancel"), DialogButton::Primary("Continue")])
         })
         .flatten()
-        .map(|i| i == 1);
+        .map(|i| i == 1)
+        // Esc is Cancel.
+        .or_else(|| super::processes::key_once(ctx, egui::Key::Escape).then_some(false));
         if let Some(yes) = answer {
             self.replace.confirm = None;
             if yes {

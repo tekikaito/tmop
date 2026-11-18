@@ -332,6 +332,8 @@ pub fn floating_bar<R>(ui: &egui::Ui, anchor: Rect, id: impl std::hash::Hash + s
 /// A modal-looking dialog window (560 px wide, centred, no title bar, glass fill). `add` draws
 /// the content: [`dialog_header`], [`fact_box`], then [`dialog_buttons`].
 pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let frame_nr = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| d.insert_temp(dialog_frame_id(), frame_nr));
     let frame = widgets::stroke_outside(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin { left: 28, right: 28, top: 28, bottom: 24 }).corner_radius(10));
     egui::Window::new("")
         .id(egui::Id::unique(("dialog", id)))
@@ -345,6 +347,17 @@ pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug
             add(ui)
         })
         .and_then(|r| r.inner)
+}
+
+fn dialog_frame_id() -> egui::Id {
+    egui::Id::unique("tmop-dialog-frame")
+}
+
+/// Whether a [`dialog`] is showing: one was drawn this frame or the one before (dialogs are drawn
+/// after the pages, so a page asks about the previous frame). While one is, the page behind it
+/// leaves the keyboard alone.
+pub fn dialog_open(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<u64>(dialog_frame_id())).is_some_and(|shown| ctx.cumulative_frame_nr() <= shown + 1)
 }
 
 /// Dialog heading: an optional 48 px tinted icon box, the title in Light 22 (text between `**`
@@ -597,6 +610,7 @@ mod tests {
                 dialog_buttons(ui, &pal, &[DialogButton::Ghost("Cancel"), DialogButton::Secondary("End one"), DialogButton::Primary("Keep"), DialogButton::Danger("End all")])
             });
             assert_eq!(shown, Some(None));
+            assert!(dialog_open(ctx), "the pages see that a dialog is showing");
         });
     }
 }

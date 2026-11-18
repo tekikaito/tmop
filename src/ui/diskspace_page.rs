@@ -169,6 +169,10 @@ impl App {
                 ui.add_space(8.0);
                 answer = confirm_row(ui, &pal, "Keep scanning", "Stop scan", ButtonKind::DangerFill, true);
             });
+            // Esc is "Keep scanning".
+            if answer.is_none() && super::processes::key_once(ui.ctx(), egui::Key::Escape) {
+                answer = Some(false);
+            }
             if dont_ask {
                 self.settings.general.disk_space_suppress_stop_confirm = true;
                 self.settings_dirty = true;
