@@ -3,7 +3,7 @@
 
 use super::drivers_page::{driver_like_page, InfoCache};
 use super::hardware::{self, Hardware};
-use super::kit::{self, category_color, empty_state, filter_box, section_card, StatTile, STAT_GAP, STAT_TILE_H};
+use super::kit::{self, category_color, empty_state, section_card, StatTile, STAT_GAP, STAT_TILE_H};
 use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
 use super::theme;
@@ -333,7 +333,7 @@ impl App {
         let (tools, area) = page_layout(body, 290.0);
         toolbar(ui, tools, |ui| {
             reset = Button::new("Reset").show(ui, &pal).clicked();
-            filter_box(ui, &mut self.pro.inv.history_table.filter, "Filter by name", 200.0, &pal);
+            widgets::search_box(ui, &mut self.pro.inv.history_table.filter, "Filter by name", 200.0, &pal);
         });
         if reset {
             self.pro.inv.history.reset();
@@ -422,7 +422,7 @@ impl App {
         let (tools, area) = page_layout(body, 340.0);
         toolbar(ui, tools, |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
-            filter_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
+            widgets::search_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
         });
         let inv = &mut self.pro.inv;
         if refresh || (inv.startup.get().is_none() && !inv.startup.is_loading()) {
@@ -599,7 +599,7 @@ impl App {
         let (tools, area) = page_layout(body, 320.0);
         toolbar(ui, tools, |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
-            filter_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
+            widgets::search_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
         });
         let inv = &mut self.pro.inv;
         if refresh || inv.services.stale(Duration::from_secs(15)) {

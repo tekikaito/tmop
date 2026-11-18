@@ -304,11 +304,6 @@ pub fn tile_strip(p: &egui::Painter, rect: Rect, pal: &Palette, n: usize) -> Vec
         .collect()
 }
 
-/// Filter field: 36 px high with a magnifier and a hint (see [`widgets::search_box`]).
-pub fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
-    widgets::search_box(ui, text, hint, width, pal)
-}
-
 /// Width of the label column of a [`kv_grid`] that shows every one of `labels` in full: the
 /// widest label and the 8 px gap, at least `min` and at most `max` (longer labels are shortened).
 pub fn kv_label_width<'a>(p: &egui::Painter, labels: impl Iterator<Item = &'a str>, min: f32, max: f32) -> f32 {
@@ -616,7 +611,7 @@ mod tests {
             ctx.run_ui(egui::RawInput::default(), |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     assert!(!code_box(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 70.0)), &pal, "Path", "svchost.exe -k netsvcs"));
-                    let r = filter_box(ui, &mut filter, "Filter", 220.0, &pal);
+                    let r = widgets::search_box(ui, &mut filter, "Filter", 220.0, &pal);
                     assert!((r.rect.height() - 20.0).abs() < 40.0);
                     assert!(!menu_item(ui, "End task", Some("Del"), true));
                     menu_header(ui, "chrome.exe \u{b7} PID 4821");

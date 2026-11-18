@@ -350,12 +350,12 @@ impl TerminalView {
             let w = widgets::text_width(painter, &label, label_font.clone());
             let pill = Rect::from_min_size(pos2(inner.max.x - w - 14.0, inner.min.y + 4.0), vec2(w + 10.0, 16.0));
             painter.rect_filled(pill, 4.0, pal.panel);
-            widgets::text(painter, pill.center(), Align2::CENTER_CENTER, &label, label_font, pal.text_dim);
+            painter.text(pill.center(), Align2::CENTER_CENTER, &label, label_font, pal.text_dim);
         }
 
         match transport.state() {
             TransportState::Starting => {
-                widgets::text(painter, inner.center(), Align2::CENTER_CENTER, "Connecting\u{2026}", theme::ui(13.0), pal.text_dim);
+                painter.text(inner.center(), Align2::CENTER_CENTER, "Connecting\u{2026}", theme::ui(13.0), pal.text_dim);
                 ui.ctx().request_repaint_after(STARTING_POLL);
             }
             TransportState::Ended(text) => {
@@ -363,7 +363,7 @@ impl TerminalView {
                 painter.rect_filled(bar, 0.0, pal.panel);
                 painter.line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0_f32, pal.panel_stroke));
                 let msg = format!("Session ended \u{2014} {text}");
-                widgets::text(painter, pos2(bar.min.x + PAD + 2.0, bar.center().y), Align2::LEFT_CENTER, &msg, theme::ui(12.0), pal.warn);
+                painter.text(pos2(bar.min.x + PAD + 2.0, bar.center().y), Align2::LEFT_CENTER, &msg, theme::ui(12.0), pal.warn);
             }
             TransportState::Running => {}
         }

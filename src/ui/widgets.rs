@@ -105,10 +105,6 @@ pub fn accent_card(painter: &egui::Painter, rect: Rect, pal: &Palette, accent: C
     painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(accent, 0.5)), egui::StrokeKind::Outside);
 }
 
-pub fn text(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, font: FontId, color: Color32) -> Rect {
-    painter.text(pos, anchor, s, font, color)
-}
-
 /// Single-line text truncated with an ellipsis to `max_w` points.
 pub fn text_fit(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, font: FontId, color: Color32, max_w: f32) -> Rect {
     let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat::simple(font, color));

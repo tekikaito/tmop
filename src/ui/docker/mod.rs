@@ -514,7 +514,7 @@ impl App {
             if widgets::button(ui, "Refresh", pal, Some(Icon::Refresh)).clicked() {
                 refresh = true;
             }
-            kit::filter_box(ui, filter, "Filter", 150.0, pal);
+            widgets::search_box(ui, filter, "Filter", 150.0, pal);
             let shown = contexts.iter().find(|c| c.name == active).map(context_label).unwrap_or_else(|| active.to_string());
             egui::ComboBox::from_id_salt("docker-host").width(220.0).selected_text(theme::button_text(shown)).show_ui(ui, |ui| {
                 for c in contexts {

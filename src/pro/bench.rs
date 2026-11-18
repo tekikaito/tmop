@@ -53,7 +53,7 @@ impl Test {
         }
     }
 
-    /// Short name for the dot-matrix card title.
+    /// Short name for the heading of the test's card on the Benchmarks page.
     pub fn short(self) -> &'static str {
         match self {
             Test::CpuSingle => "CPU 1 thread",

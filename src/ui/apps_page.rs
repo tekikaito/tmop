@@ -32,7 +32,7 @@ impl App {
         let mut refresh = false;
         toolbar(ui, tools, |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
-            kit::filter_box(ui, &mut self.pro.apps_table.filter, "Filter by name, publisher or version", 240.0, &pal);
+            widgets::search_box(ui, &mut self.pro.apps_table.filter, "Filter by name, publisher or version", 240.0, &pal);
         });
         if refresh || (self.pro.apps.get().is_none() && !self.pro.apps.is_loading()) {
             self.pro.apps.start(crate::pro::apps::read);

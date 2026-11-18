@@ -4,7 +4,7 @@ mod service_info;
 
 pub use service_info::InfoCache;
 
-use super::kit::{self, empty_state, filter_box, GAP};
+use super::kit::{self, empty_state, GAP};
 use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_str, Cell, Col, TableState};
 use super::theme::{self};
@@ -37,7 +37,7 @@ impl App {
         let (tools, area) = page_layout(body, 360.0);
         toolbar(ui, tools, |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
-            filter_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
+            widgets::search_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
         });
         if refresh || (self.pro.drivers.get().is_none() && !self.pro.drivers.is_loading()) {
             self.pro.drivers.start(|| drivers::read(Kind::Drivers));
