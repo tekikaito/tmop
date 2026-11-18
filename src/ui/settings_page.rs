@@ -573,6 +573,8 @@ impl App {
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
         let nav_id = egui::Id::unique("settings-nav");
         let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))), ..Default::default() };
+        // A click in the section list asked for a scroll, which starts with this frame.
+        let scroll_asked = sections.target.is_some();
         // The cards are laid out inside the scroll area (not at fixed screen rects), so the area
         // knows the content height and actually scrolls it.
         let scroll = ui
@@ -779,7 +781,15 @@ impl App {
         let at_end = scroll.state.unclamped_offset().y + scroll.inner_rect.height() >= scroll.content_size.y - 1.0;
         let picked: Option<usize> = ui.data_mut(|d| d.get_temp(nav_id.with("picked")));
         let active = active_section(&sections.tops, scroll.inner_rect.top(), at_end, picked);
-        if !at_end && picked.is_some() {
+        // The click is forgotten once the view rests somewhere short of the end. Not earlier: the
+        // scroll to a clicked section is animated, and forgetting the click on its first frame
+        // made the list light up "About" for every section that cannot reach the top.
+        let offset = scroll.state.unclamped_offset().y;
+        let last_offset: Option<f32> = ui.data_mut(|d| d.get_temp(nav_id.with("offset")));
+        ui.data_mut(|d| d.insert_temp(nav_id.with("offset"), offset));
+        // Any change counts: the animation eases out in steps far below a pixel.
+        let moving = scroll_asked || last_offset != Some(offset);
+        if !at_end && !moving && picked.is_some() {
             ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("picked")));
         }
         ui.data_mut(|d| d.remove_temp::<usize>(nav_id.with("target")));
