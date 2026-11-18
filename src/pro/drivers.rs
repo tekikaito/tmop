@@ -147,7 +147,7 @@ pub fn kind_name(t: u32) -> &'static str {
 /// Turns SCM image paths (`\SystemRoot\...`, `System32\...`, `\??\C:\...`, quoted
 /// command lines) into plain file paths.
 pub fn normalize_image_path(p: &str) -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let root = crate::platform::system_root();
     let mut s = p.trim().to_string();
     if let Some(rest) = s.strip_prefix('"') {
         s = rest.split('"').next().unwrap_or("").to_string();
@@ -239,7 +239,7 @@ pub fn read(kind: Kind) -> Result<Vec<Service>, String> {
                 svc.start = start_name(cfg.dwStartType.0).into();
                 let raw = unsafe { cfg.lpBinaryPathName.to_string() }.unwrap_or_default();
                 svc.path = if raw.is_empty() && kind == Kind::Drivers {
-                    format!(r"{}\System32\drivers\{name}.sys", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+                    format!(r"{}\System32\drivers\{name}.sys", crate::platform::system_root())
                 } else {
                     normalize_image_path(&raw)
                 };
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn image_paths() {
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let root = crate::platform::system_root();
         assert_eq!(normalize_image_path(r"\SystemRoot\System32\drivers\x.sys"), format!(r"{root}\System32\drivers\x.sys"));
         assert_eq!(normalize_image_path(r"System32\drivers\y.sys"), format!(r"{root}\System32\drivers\y.sys"));
         assert_eq!(normalize_image_path(r"\??\C:\a\b.sys"), r"C:\a\b.sys");
@@ -387,7 +387,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn reads_version_of_a_system_file() {
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let root = crate::platform::system_root();
         let v = file_version(&format!(r"{root}\System32\kernel32.dll")).expect("version info");
         assert!(v.company.contains("Microsoft"));
     }

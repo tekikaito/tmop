@@ -115,6 +115,13 @@ pub const fn paging_word() -> &'static str {
     }
 }
 
+/// The Windows folder as text: `%SystemRoot%`, else `C:\Windows`. Here rather than in the Windows
+/// module because the code that makes plain paths of service image paths, and its tests, build
+/// on every OS.
+pub fn system_root() -> String {
+    std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())
+}
+
 /// The soft limit [`raise_open_files_limit`] aims for.
 pub const OPEN_FILES_WANTED: u64 = 8192;
 

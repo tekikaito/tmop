@@ -102,7 +102,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn explorer_has_an_icon() {
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let root = crate::platform::system_root();
         let icon = super::file_icon(&format!(r"{root}\explorer.exe")).expect("icon");
         assert!(icon.size >= 16);
         assert_eq!(icon.rgba.len(), icon.size * icon.size * 4);
