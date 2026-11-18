@@ -405,8 +405,9 @@ pub struct App {
     focus_search: bool,
     pub status: String,
     applied_top: Option<bool>,
-    /// The OS light/dark theme egui reports (winit), read every frame.
-    system_theme: Option<egui::Theme>,
+    /// Whether the OS uses dark mode ([`dark_light_system`]): asked once per frame, then shared
+    /// by that frame's palette lookups (on Windows each ask is a registry read).
+    system_dark: Option<bool>,
     /// TMOP draws the title bar, window buttons and resize edges (see
     /// [`crate::platform::desktop::own_title_bar`]).
     pub own_title_bar: bool,
@@ -480,7 +481,7 @@ impl App {
             o.sync_window_theme = false;
         });
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
-        let app = Self {
+        let mut app = Self {
             caps,
             docker,
             perf_docker: performance::DockerPerfCache::default(),
@@ -506,7 +507,7 @@ impl App {
             focus_search: false,
             status,
             applied_top: None,
-            system_theme: cc.egui_ctx.system_theme(),
+            system_dark: dark_light_system(cc.egui_ctx.system_theme()),
             own_title_bar: !popout_only && crate::platform::desktop::own_title_bar(),
             applied_pal: None,
             display_font,
@@ -528,7 +529,6 @@ impl App {
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
-        let mut app = app;
         if !popout_only {
             crate::update::remove_leftover();
             app.updates.check_on_start(&app.settings.general);
@@ -586,7 +586,7 @@ impl App {
         if id != palette::SYSTEM && self.palettes.get(id).is_some() {
             return id.clone();
         }
-        if matches!(dark_light_system(self.system_theme), Some(true)) { "dark" } else { "light" }.into()
+        if self.system_dark == Some(true) { "dark" } else { "light" }.into()
     }
 
     /// The palette in use, with `appearance.accent` applied.
@@ -714,7 +714,7 @@ impl App {
 
     fn popout_viewport(&mut self, ctx: &egui::Context, fd: &FrameData<'_>) {
         let skin = self.current_skin();
-        let level = match self.popout_mode().as_str() {
+        let level = match self.settings.popout.mode.as_str() {
             _ if !self.caps.window_levels => egui::WindowLevel::Normal,
             "desktop" => egui::WindowLevel::AlwaysOnBottom,
             "normal" => egui::WindowLevel::Normal,
@@ -733,7 +733,7 @@ impl App {
             builder = builder.with_icon(icon);
         }
         let close = ctx.show_viewport_immediate(ViewportId::from_hash_of("tmop-popout"), builder, |ui, _class| {
-            let c = self.popout_ui(ui, fd);
+            let c = self.popout_ui(ui, fd, &skin);
             c || ui.input(|i| i.viewport().close_requested())
         });
         if close {
@@ -741,33 +741,29 @@ impl App {
         }
     }
 
-    /// `popout.mode`: `off`, `desktop`, `normal` or `topMost`.
-    pub fn popout_mode(&self) -> String {
-        self.settings.popout.mode.clone()
-    }
-
-    /// Opens or closes the popout and records it in `popout.mode` (and `popout.lastMode`).
+    /// Opens or closes the popout and records it in `popout.mode` (`off`, `desktop`, `normal` or
+    /// `topMost`) and `popout.lastMode`.
     pub fn set_popout(&mut self, open: bool) {
         self.popout_open = open;
-        let mode = self.popout_mode();
-        let new_mode = match (open, mode.as_str()) {
+        let popout = &mut self.settings.popout;
+        let new_mode = match (open, popout.mode.as_str()) {
             (false, _) => "off".to_string(),
-            (true, "off") => self.settings.popout.last_mode.clone(),
+            (true, "off") => popout.last_mode.clone(),
             (true, m) => m.to_string(),
         };
         if new_mode != "off" {
-            self.settings.popout.last_mode = new_mode.clone();
+            popout.last_mode = new_mode.clone();
         }
-        if new_mode != mode {
-            self.settings.popout.mode = new_mode;
+        if new_mode != popout.mode {
+            popout.mode = new_mode;
             self.settings_dirty = true;
         }
     }
 
-    /// Draws the popout into `root` (the viewport's). Returns true when the user asked to close it.
-    fn popout_ui(&mut self, root: &mut egui::Ui, fd: &FrameData<'_>) -> bool {
+    /// Draws the popout with `skin` (see [`App::current_skin`]) into `root` (the viewport's).
+    /// Returns true when the user asked to close it.
+    fn popout_ui(&mut self, root: &mut egui::Ui, fd: &FrameData<'_>, skin: &skin::Skin) -> bool {
         let ctx = &root.ctx().clone();
-        let skin = self.current_skin();
         let mut close = false;
         let mut new_skin: Option<String> = None;
         let opacity_setting = self.settings.popout.opacity as f32;
@@ -778,7 +774,7 @@ impl App {
             let op = if self.settings.popout.opaque_on_hover && hovered { 1.0 } else { opacity_setting };
             // Registered before the chrome so the close/chevron/drag areas stay on top of it.
             let menu = ui.interact(rect, ui.scope_id().with("popout-menu"), Sense::click());
-            let ev = popout::draw(ui, rect, &skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
+            let ev = popout::draw(ui, rect, skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
             if ev.drag {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }
@@ -841,6 +837,7 @@ pub fn fmt_clock(d: Duration) -> String {
     format!("{:02}:{:02}:{:02}.{:02}", (t / 3600) % 100, (t / 60) % 60, t % 60, d.subsec_millis() / 10)
 }
 
+/// `HH:MM:SS` of a duration, `D:HH:MM:SS` from one day on (up time, recording length).
 pub fn fmt_hms(d: Duration) -> String {
     let t = d.as_secs();
     if t >= 86400 {
@@ -971,7 +968,7 @@ impl App {
 
     fn update_inner(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
-        self.system_theme = ctx.system_theme();
+        self.system_dark = dark_light_system(ctx.system_theme());
         let pal = self.palette();
         widgets::set_ink(&pal);
         widgets::set_spark_smooth(self.settings.graphs.smooth_curves);
@@ -1029,7 +1026,8 @@ impl App {
         let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting, gpus_separated };
 
         if self.popout_only {
-            if self.popout_ui(root, &fd) {
+            let skin = self.current_skin();
+            if self.popout_ui(root, &fd, &skin) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         } else {
