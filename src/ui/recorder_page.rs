@@ -3,7 +3,7 @@
 use super::kit::{self, empty_state, hsplit, section_card, vsplit};
 use super::pro_pages::{clock_of, TOOLBAR_H, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
 use super::theme::{self, with_alpha};
-use super::widgets::{self, draw_graph, Button, ButtonKind, Graph, GraphLine, Icon};
+use super::widgets::{self, draw_graph, Button, ButtonKind, Graph, GraphLine, Icon, ScrollArea029 as _};
 use super::{fmt_hms, App, FrameData};
 use crate::metrics::Series;
 use crate::pro::recorder::{self, EventKind, Record};
@@ -17,6 +17,20 @@ use std::time::Duration;
 const TOOLBAR_W: f32 = 1060.0;
 /// Space left of the graph for the mono percentage labels.
 const LABEL_W: f32 = 38.0;
+/// Gap between the cards of the page.
+const CARD_GAP: f32 = 14.0;
+/// Least height of the graph card (heading, a 100 px graph, time labels and the readout row) and
+/// of the two cards below it; a lower page scrolls.
+const GRAPH_MIN_H: f32 = 210.0;
+const LOW_MIN_H: f32 = 170.0;
+
+/// What a click on a file in the recordings list asks for.
+enum RecordingClick {
+    /// Play it back in the graph.
+    Open(PathBuf),
+    /// Show it in the file manager.
+    Reveal(PathBuf),
+}
 
 impl App {
     pub fn recorder_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
@@ -140,17 +154,45 @@ impl App {
             let _ = kit::reveal(&self.recorder.dir);
         }
 
-        let low_h = (area.height() * 0.36).clamp(170.0, 250.0);
-        let rows = vsplit(area, &[-1.0, low_h], 14.0);
-        let close_playback = self.flight_graph(ui, rows[0], fd);
+        // The graph above, process events and saved recordings below. A window too low for both
+        // scrolls, instead of squeezing the graph until its readout lands on the cards below.
+        let content_h = area.height().max(GRAPH_MIN_H + CARD_GAP + LOW_MIN_H);
+        let mut close_playback = false;
+        let mut click = None;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area).id_salt("recorder-scroll"), |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
+                let (area, _) = ui.allocate_exact_size(vec2(area.width(), content_h), Sense::hover());
+                let low_h = (area.height() * 0.36).clamp(LOW_MIN_H, 250.0);
+                let rows = vsplit(area, &[-1.0, low_h], CARD_GAP);
+                close_playback = self.flight_graph(ui, rows[0], fd);
+                let low = hsplit(rows[1], &[3.0, 2.0], CARD_GAP);
+                self.events_card(ui.painter(), low[0], &pal);
+                click = self.recordings_card(ui, low[1], &pal);
+            });
+        });
+        if close_playback {
+            self.pro.playback = None;
+        }
+        match click {
+            Some(RecordingClick::Open(path)) => match recorder::load(&path) {
+                Ok(recs) => self.pro.playback = Some((path, recs)),
+                Err(e) => self.status = e,
+            },
+            Some(RecordingClick::Reveal(path)) => {
+                let _ = kit::reveal(&path);
+            }
+            None => {}
+        }
+    }
 
-        // Process events and saved recordings.
-        let low = hsplit(rows[1], &[3.0, 2.0], 14.0);
-        let content = section_card(&p, low[0], &pal, "Process events", &self.recorder.events.len().to_string());
+    /// The "Process events" card: the newest starts and exits, as many as fit.
+    fn events_card(&self, p: &egui::Painter, rect: Rect, pal: &theme::Palette) {
+        let st = theme::status(pal);
+        let content = section_card(p, rect, pal, "Process events", &self.recorder.events.len().to_string());
         let row_h = 32.0;
         let max_rows = (content.height() / row_h).floor() as usize;
         if self.recorder.events.is_empty() {
-            empty_state(&p, content, &pal, "Process starts and exits appear here");
+            empty_state(p, content, pal, "Process starts and exits appear here");
         }
         for (i, e) in self.recorder.events.iter().rev().take(max_rows).enumerate() {
             let top = content.top() + i as f32 * row_h;
@@ -163,55 +205,48 @@ impl App {
             p.hline(content.x_range(), top, Stroke::new(1.0_f32, pal.row_rule()));
             p.text(pos2(content.left(), y), Align2::LEFT_CENTER, clock_of(&e.time), theme::mono(12.0), pal.text_faint);
             p.text(pos2(content.left() + 84.0, y), Align2::LEFT_CENTER, tag, theme::ui(13.0), c);
-            widgets::text_fit(&p, pos2(content.left() + 140.0, y), Align2::LEFT_CENTER, &e.text, theme::ui(13.0), pal.text_table(), content.width() - 140.0);
+            widgets::text_fit(p, pos2(content.left() + 140.0, y), Align2::LEFT_CENTER, &e.text, theme::ui(13.0), pal.text_table(), content.width() - 140.0);
         }
+    }
 
-        let content = section_card(&p, low[1], &pal, "Recordings", &format!("{} \u{b7} click to play back", self.pro.recordings.len()));
+    /// The "Recordings" card: the files of the recording folder, as many as fit. Returns what a
+    /// click on one asks for.
+    fn recordings_card(&self, ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette) -> Option<RecordingClick> {
+        let st = theme::status(pal);
+        let p = ui.painter().clone();
+        let content = section_card(&p, rect, pal, "Recordings", &format!("{} \u{b7} click to play back", self.pro.recordings.len()));
         let list = Rect::from_min_max(content.min, pos2(content.right(), content.bottom() - 20.0));
         if self.pro.recordings.is_empty() {
-            empty_state(&p, list, &pal, "No recordings in this folder yet");
+            empty_state(&p, list, pal, "No recordings in this folder yet");
         }
         let writing = self.recorder.recording_path().and_then(|w| w.file_name()).map(|n| n.to_os_string());
         let elapsed = self.recorder.elapsed().map(|d| fmt_span(d.as_secs())).unwrap_or_default();
-        let mut open: Option<PathBuf> = None;
-        let mut reveal: Option<PathBuf> = None;
+        let mut click = None;
         for (i, r) in self.pro.recordings.iter().take((list.height() / 42.0).floor() as usize).enumerate() {
             let rr = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * 42.0), vec2(list.width(), 38.0));
             let resp = ui.interact(rr, ui.scope_id().with(("recording", i)), Sense::click());
             let playing = self.pro.playback.as_ref().map(|(pp, _)| *pp == r.path).unwrap_or(false);
             let live = writing.as_deref().is_some_and(|n| r.path.file_name() == Some(n));
             if live {
-                widgets::tinted_card(&p, rr, &pal, st.danger);
+                widgets::tinted_card(&p, rr, pal, st.danger);
                 if playing {
                     p.rect_stroke(rr, 10.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.8)), egui::StrokeKind::Outside);
                 }
             } else {
-                list_row(&p, rr, &pal, if playing { RowLook::Marked(pal.accent) } else { RowLook::Plain }, resp.hovered());
+                list_row(&p, rr, pal, if playing { RowLook::Marked(pal.accent) } else { RowLook::Plain }, resp.hovered());
             }
             let (right, right_color) = if live { (format!("recording \u{b7} {elapsed}"), st.danger_text) } else { (format_bytes(r.size as f64), pal.text_faint) };
             let rt = p.text(pos2(rr.right() - 12.0, rr.center().y), Align2::RIGHT_CENTER, right, theme::ui(12.0), right_color);
             widgets::text_fit(&p, pos2(rr.left() + 12.0, rr.center().y), Align2::LEFT_CENTER, &r.name, theme::mono(12.0), pal.text, rr.width() - 36.0 - rt.width());
             if resp.clicked() {
-                open = Some(r.path.clone());
-            }
-            if resp.secondary_clicked() {
-                reveal = Some(r.path.clone());
+                click = Some(RecordingClick::Open(r.path.clone()));
+            } else if resp.secondary_clicked() {
+                click = Some(RecordingClick::Reveal(r.path.clone()));
             }
             resp.on_hover_text(format!("Click to play back, right-click to show in {}", crate::platform::file_manager()));
         }
         widgets::text_fit(&p, pos2(content.left(), content.bottom()), Align2::LEFT_BOTTOM, &format!("Right-click shows the file in {}.", crate::platform::file_manager()), theme::ui(11.0), pal.text_faint, content.width());
-        if close_playback {
-            self.pro.playback = None;
-        }
-        if let Some(path) = open {
-            match recorder::load(&path) {
-                Ok(recs) => self.pro.playback = Some((path, recs)),
-                Err(e) => self.status = e,
-            }
-        }
-        if let Some(path) = reveal {
-            let _ = kit::reveal(&path);
-        }
+        click
     }
 
     /// The graph card of the flight ring (or of an opened recording). True when "Close playback"
@@ -236,17 +271,25 @@ impl App {
         } else {
             self.settings.update_speed().interval().map(fmt_interval)
         };
-        let title = match (&self.pro.playback, span_secs) {
-            (Some((path, _)), _) => format!("Playback {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
-            (None, Some(s)) => format!("Flight recorder \u{b7} last {}{}", fmt_span(s), interval.map(|i| format!(" \u{b7} 1 sample / {i}")).unwrap_or_default()),
-            (None, None) => "Flight recorder".to_string(),
+        // The heading, from the fullest wording to the barest.
+        let titles: Vec<String> = match (&self.pro.playback, span_secs) {
+            (Some((path, _)), _) => vec![format!("Playback {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()), "Playback".to_string()],
+            (None, Some(s)) => {
+                let span = format!("Flight recorder \u{b7} last {}", fmt_span(s));
+                let full = interval.map(|i| format!("{span} \u{b7} 1 sample / {i}"));
+                full.into_iter().chain([span, "Flight recorder".to_string()]).collect()
+            }
+            (None, None) => vec!["Flight recorder".to_string()],
         };
-        let content = section_card(&p, rect, &pal, &title, "");
         let mut legend: Vec<(&str, Swatch)> = vec![("CPU", Swatch::Line(fd.metric("cpu"))), ("Memory", Swatch::Line(fd.metric("memory"))), ("Disk", Swatch::Line(fd.metric("disk"))), ("GPU", Swatch::Line(fd.metric("gpu")))];
         if !playing {
             legend.push(("Process event", Swatch::Tick(st.warn)));
         }
         let lw = swatch_legend_width(&p, &legend);
+        // The legend shares the heading's row: the heading is the fullest wording that leaves it room.
+        let room = rect.width() - 2.0 * 22.0 - lw - 24.0;
+        let title = titles.iter().find(|t| kit::section_title_width(&p, t) <= room).or(titles.last()).map(String::as_str).unwrap_or_default();
+        let content = section_card(&p, rect, &pal, title, "");
         swatch_legend(&p, &pal, pos2(rect.right() - 22.0 - lw, rect.top() + 25.0), &legend);
 
         let foot_h = 16.0 + 8.0 + 28.0;

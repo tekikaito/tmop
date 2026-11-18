@@ -1394,13 +1394,23 @@ pub fn tracked_text(p: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, fo
     }
     // One kerned galley at a pixel-snapped origin: glyphs painted one by one were each snapped on
     // their own, so the gaps came out uneven and shifted with the fractional start (hover, weight).
-    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
-    job.wrap.max_width = f32::INFINITY;
-    let galley = p.layout_job(job);
+    let galley = p.layout_job(tracked_job(text, font, color, space));
     let rect = anchor.anchor_size(pos, galley.size());
     let min = egui::emath::GuiRounding::round_to_pixels(rect.min, p.pixels_per_point());
     p.galley(min, galley, color);
     Rect::from_min_size(min, rect.size())
+}
+
+/// Width [`tracked_text`] draws `text` at.
+pub fn tracked_width(p: &egui::Painter, text: &str, font: FontId, em: f32) -> f32 {
+    p.layout_job(tracked_job(text, font.clone(), Color32::WHITE, em.max(0.0) * font.size)).size().x
+}
+
+/// One unwrapped line of `text` with `space` px between its letters.
+fn tracked_job(text: &str, font: FontId, color: Color32, space: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
+    job.wrap.max_width = f32::INFINITY;
+    job
 }
 
 /// Width of a [`chip`] with `text` (and an icon).

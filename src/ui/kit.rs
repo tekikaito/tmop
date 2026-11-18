@@ -176,11 +176,21 @@ pub const STAT_GAP: f32 = 12.0;
 /// Height of a stat tile.
 pub const STAT_TILE_H: f32 = 96.0;
 
+/// Font size and letter-spacing (em) of a [`section_card`] heading.
+const SECTION_TITLE_SIZE: f32 = 11.0;
+const SECTION_TITLE_TRACKING: f32 = 0.16;
+
+/// Width of the heading [`section_card`] draws for `title`, for a page that puts something else
+/// on the heading row (a legend) and must keep the two apart.
+pub fn section_title_width(p: &egui::Painter, title: &str) -> f32 {
+    widgets::tracked_width(p, &title.to_uppercase(), theme::semibold(SECTION_TITLE_SIZE), SECTION_TITLE_TRACKING)
+}
+
 /// Card with a section heading (11 px Medium, uppercase, 0.16 em, faint) and an optional mono
 /// `right` text. Returns the content rect below the 22 px heading row (padding 18 / 22).
 pub fn section_card(p: &egui::Painter, rect: Rect, pal: &Palette, title: &str, right: &str) -> Rect {
     card(p, rect, pal);
-    tracked_text(p, pos2(rect.left() + 22.0, rect.top() + 18.0), Align2::LEFT_TOP, &title.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.16);
+    tracked_text(p, pos2(rect.left() + 22.0, rect.top() + 18.0), Align2::LEFT_TOP, &title.to_uppercase(), theme::semibold(SECTION_TITLE_SIZE), pal.text_faint, SECTION_TITLE_TRACKING);
     if !right.is_empty() {
         let clip = p.with_clip_rect(rect.shrink(2.0));
         clip.text(pos2(rect.right() - 22.0, rect.top() + 18.0), Align2::RIGHT_TOP, right, theme::mono(12.0), pal.text_faint);
