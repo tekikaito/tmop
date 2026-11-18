@@ -1,5 +1,5 @@
 //! Layout pieces shared by the pages: section cards, stat tiles, key/value grids, code boxes,
-//! dialogs and menus, header toolbars and simple row/column splitting.
+//! dialogs and menus, and simple row/column splitting.
 
 use super::hardware::{self, Hardware};
 use super::theme::{self, with_alpha, Palette};
@@ -39,12 +39,6 @@ pub fn vsplit(rect: Rect, heights: &[f32], gap: f32) -> Vec<Rect> {
             r
         })
         .collect()
-}
-
-/// Right-aligned toolbar area on the page header row.
-pub fn header_toolbar<R>(ui: &mut egui::Ui, body: Rect, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = Rect::from_min_max(pos2(body.right() - width, body.top() - super::HEADER_H + 14.0), pos2(body.right() - 16.0, body.top() - 14.0));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), add).inner
 }
 
 /// Interactive child UI in `rect` (left-to-right).

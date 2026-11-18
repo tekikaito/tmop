@@ -1,12 +1,13 @@
 //! Inventory pages: System Info, App history, Startup apps, Users and
 //! Services.
 
-use super::drivers_page::{driver_like_page, page_area, InfoCache};
+use super::drivers_page::{driver_like_page, InfoCache};
 use super::hardware::{self, Hardware};
-use super::kit::{self, category_color, empty_state, filter_box, header_toolbar, section_card, StatTile, STAT_GAP, STAT_TILE_H};
+use super::kit::{self, category_color, empty_state, filter_box, section_card, StatTile, STAT_GAP, STAT_TILE_H};
+use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
 use super::theme;
-use super::widgets::{self, Button};
+use super::widgets::{self, Button, Icon};
 use super::{App, FrameData, Page};
 use crate::metrics::Series;
 use crate::pro::inventory::{keys, Sections, StartupApp};
@@ -249,15 +250,15 @@ impl App {
         let body = self.page_title(ui, &pal, "System Info", &subtitle(&[computer.clone(), read, Page::SystemInfo.shortcut().into()]));
         let mut refresh = false;
         let mut copy = false;
-        header_toolbar(ui, body, 240.0, |ui| {
+        let (tools, area) = page_layout(body, 230.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             copy = Button::ghost("Copy report").show(ui, &pal).clicked();
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
         });
         let inv = &mut self.pro.inv;
         if refresh || (inv.sysinfo.get().is_none() && !inv.sysinfo.is_loading()) {
             inv.sysinfo.start(crate::pro::inventory::system_info);
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let Some(sections) = sections.as_ref() else {
             empty_state(&p, area, &pal, inv.sysinfo.error().unwrap_or("Reading system information\u{2026}"));
@@ -324,14 +325,14 @@ impl App {
         let pal = fd.pal;
         let body = self.page_title(ui, &pal, "App history", &subtitle(&["resource use since TMOP started".into(), Page::AppHistory.shortcut().into()]));
         let mut reset = false;
-        header_toolbar(ui, body, 290.0, |ui| {
+        let (tools, area) = page_layout(body, 290.0);
+        toolbar(ui, tools, |ui| {
             reset = Button::new("Reset").show(ui, &pal).clicked();
             filter_box(ui, &mut self.pro.inv.history_table.filter, "Filter by name", 200.0, &pal);
         });
         if reset {
             self.pro.inv.history.reset();
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let h = &self.pro.inv.history;
         let list: Vec<HistoryEntry> = h.apps.values().cloned().collect();
@@ -413,15 +414,15 @@ impl App {
         let boot = format!("last boot {}", boot_label(crate::platform::local_time(), fd.snap.uptime));
         let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, Page::StartupApps.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 320.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
+        let (tools, area) = page_layout(body, 340.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             filter_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
         });
         let inv = &mut self.pro.inv;
         if refresh || (inv.startup.get().is_none() && !inv.startup.is_loading()) {
             inv.startup.start(crate::pro::inventory::startup_apps);
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let st = theme::status(&pal);
         let list: &[StartupApp] = inv.startup.ok().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -488,11 +489,11 @@ impl App {
         let rows_word = if sessions { "sessions" } else { "accounts" };
         let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} {rows_word}", list.len()), Page::Users.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 100.0, |ui| refresh = Button::new("Refresh").show(ui, &pal).clicked());
+        let (tools, area) = page_layout(body, 110.0);
+        toolbar(ui, tools, |ui| refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked());
         if refresh {
             self.sampler.refresh();
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let interactive = list.iter().filter(|u| u.is_active()).count();
         let top = list.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu));
@@ -588,8 +589,9 @@ impl App {
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
         let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 320.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
+        let (tools, area) = page_layout(body, 320.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             filter_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
         });
         let inv = &mut self.pro.inv;
@@ -597,7 +599,7 @@ impl App {
             inv.services.start(crate::pro::inventory::services);
         }
         let list: &[crate::pro::inventory::Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
-        let open = driver_like_page(ui, page_area(body), fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info);
+        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info);
         if let Some(sel) = open {
             self.selected = Some(sel);
             self.page = Page::Processes;

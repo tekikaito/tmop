@@ -4,6 +4,7 @@
 
 use super::icons::IconCache;
 use super::kit;
+use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, Cell as TableCell, Col, TableState};
 use super::theme::{self, with_alpha, Palette};
 use super::widgets::{self, Button, ButtonKind, ButtonSize, Dot, Icon};
@@ -635,7 +636,8 @@ impl App {
         let mut refresh = false;
         let mut toggle_tree = false;
         let mut end_task = false;
-        kit::header_toolbar(ui, body, 460.0, |ui| {
+        let (tools, area) = page_layout(body, 370.0);
+        toolbar(ui, tools, |ui| {
             ui.add_enabled_ui(sel_row.is_some(), |ui| {
                 end_task = Button::primary("End task").show(ui, &pal).clicked();
             });
@@ -656,7 +658,6 @@ impl App {
         }
 
         // ---- layout: history strip, filter tabs, table
-        let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 2.0), body.max);
         let strip = Rect::from_min_size(area.min, vec2(area.width(), STRIP_H));
         history_strip(ui.painter(), strip, fd, &pal, iv);
         let tabs_rect = Rect::from_min_size(pos2(area.left(), strip.bottom() + 14.0), vec2(area.width(), 36.0));

@@ -4,10 +4,11 @@ mod service_info;
 
 pub use service_info::InfoCache;
 
-use super::kit::{self, empty_state, filter_box, header_toolbar, GAP};
+use super::kit::{self, empty_state, filter_box, GAP};
+use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_str, Cell, Col, TableState};
 use super::theme::{self};
-use super::widgets::{self, Button, ButtonSize};
+use super::widgets::{self, Button, ButtonSize, Icon};
 use super::{App, FrameData};
 use crate::platform::{Os, OS};
 use crate::pro::drivers::{self, Kind, Service};
@@ -22,11 +23,6 @@ const ASIDE_MIN_PAGE_W: f32 = 1100.0;
 /// Height of the selected-driver bar.
 const DRIVER_BAR_H: f32 = 62.0;
 
-/// The rect of a page body: inset to line up with the title (left) and the toolbar (right).
-pub(super) fn page_area(body: Rect) -> Rect {
-    Rect::from_min_max(pos2(body.left() + 12.0, body.top()), pos2(body.right() - 16.0, body.bottom()))
-}
-
 impl App {
     pub fn drivers_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
@@ -38,8 +34,9 @@ impl App {
         };
         let body = self.page_title(ui, &pal, drivers::DRIVERS_TITLE, &subtitle);
         let mut refresh = false;
-        header_toolbar(ui, body, 340.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
+        let (tools, area) = page_layout(body, 360.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             filter_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
         });
         if refresh || (self.pro.drivers.get().is_none() && !self.pro.drivers.is_loading()) {
@@ -47,7 +44,7 @@ impl App {
         }
         let list: &[Service] = self.pro.drivers.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let mut info = InfoCache::default();
-        driver_like_page(ui, page_area(body), fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info);
+        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info);
     }
 }
 

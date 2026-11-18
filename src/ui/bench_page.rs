@@ -2,6 +2,7 @@
 //! result and trend, and the result history.
 
 use super::kit::{empty_state, hsplit};
+use super::pro_pages::{mono_input, page_layout, toolbar};
 use super::table::{self, cmp_f, Cell, Col, TableState};
 use super::theme;
 use super::widgets::{self, card, tracked_text, Button, Icon};
@@ -52,13 +53,8 @@ fn clock(d: Duration) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
-/// A single-line field in the page's mono input style (36 px).
-fn mono_input(ui: &mut egui::Ui, text: &mut String, width: f32, hint: &str, pal: &theme::Palette) -> egui::Response {
-    let frame = egui::Frame::new().fill(pal.control).stroke(egui::Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 9));
-    widgets::stroke_outside(frame)
-        .show(ui, |ui| ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(RichText::new(hint).color(pal.text_faint)).desired_width(width - 26.0 + 8.0).font(theme::mono(12.0)), false)))
-        .inner
-}
+/// Room the header toolbar needs: the folder field with its label, "Clear history" and "Run all".
+const TOOLBAR_W: f32 = 600.0;
 
 impl App {
     fn bench_dir(&self) -> PathBuf {
@@ -102,21 +98,20 @@ impl App {
         let mut run: Option<Vec<Test>> = None;
         let mut cancel = false;
         let mut clear = false;
-        super::kit::header_toolbar(ui, body, 700.0, |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+        let (tools, area) = page_layout(body, TOOLBAR_W);
+        toolbar(ui, tools, |ui| {
             if running {
                 cancel = Button::danger("Cancel").show(ui, &pal).clicked();
             } else if Button::primary("Run all").show(ui, &pal).clicked() {
                 run = Some(Test::ALL.to_vec());
             }
             ui.add_enabled_ui(!running, |ui| clear = Button::ghost("Clear history").show(ui, &pal).clicked());
-            if mono_input(ui, &mut self.bench_ui.folder, 260.0, "Folder for the disk test file", &pal).changed() {
+            if mono_input(ui, &mut self.bench_ui.folder, "Folder for the disk test file", 260.0, &pal).changed() {
                 self.settings.general.benchmark_folder = self.bench_ui.folder.clone();
                 self.settings_dirty = true;
             }
             ui.label(RichText::new("Disk test folder").font(theme::ui(12.0)).color(pal.text_faint));
         });
-        let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top()), pos2(body.right() - 16.0, body.bottom()));
         let p = ui.painter().clone();
 
         // Run card.
