@@ -426,7 +426,7 @@ impl App {
         p.circle_filled(dot_at, 6.5, theme::with_alpha(dot, 0.20));
         p.circle_filled(dot_at, 4.0, dot);
 
-        let area = Rect::from_min_max(pos2(full.left() + 12.0, body.top()), pos2(full.right() - 16.0, body.bottom()));
+        let area = Rect::from_min_max(pos2(full.left() + 12.0, body.top()), pos2(full.right(), body.bottom()));
         // The toolbar shares the title row when there is room, else it gets a row of its own.
         let beside = area.width() >= 1560.0;
         let (bar, tabs_top) = if beside {

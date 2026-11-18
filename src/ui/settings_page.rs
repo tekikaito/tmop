@@ -557,7 +557,7 @@ impl App {
         let caps = self.caps;
         let subtitle = format!("saved automatically \u{b7} {} \u{b7} {}", settings::default_path().display(), Page::Settings.shortcut());
         let body = self.page_title(ui, &pal, "Settings", &subtitle);
-        let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right() - 16.0, body.bottom()));
+        let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right(), body.bottom()));
         let nav = Rect::from_min_size(area.min, vec2(NAV_W, area.height()));
         let column = Rect::from_min_max(pos2(nav.right() + 20.0, area.top()), area.max);
         let mut changed = false;

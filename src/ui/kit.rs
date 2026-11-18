@@ -46,11 +46,16 @@ pub fn row_ui<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
 }
 
-/// Centered hint text (empty states, loading).
+/// Hint text in the middle of `rect` (empty states, loading). Every line is centred on its own,
+/// so a second line reads as the explanation of the first, and a text wider than `rect` wraps
+/// inside it instead of running over its neighbours.
 pub fn empty_state(p: &egui::Painter, rect: Rect, pal: &Palette, text: &str) {
-    p.text(rect.center(), Align2::CENTER_CENTER, text, theme::ui(13.0), pal.text_faint);
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::ui(13.0), pal.text_faint, rect.width().max(120.0));
+    job.halign = Align::Center;
+    let galley = p.layout_job(job);
+    // A centred galley is laid out around x = 0.
+    p.galley(pos2(rect.center().x, rect.center().y - galley.size().y / 2.0), galley, pal.text_faint);
 }
-
 
 /// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
 pub use crate::platform::reveal;
