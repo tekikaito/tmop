@@ -280,6 +280,13 @@ pub fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, 
     widgets::search_box(ui, text, hint, width, pal)
 }
 
+/// Width of the label column of a [`kv_grid`] that shows every one of `labels` in full: the
+/// widest label and the 8 px gap, at least `min` and at most `max` (longer labels are shortened).
+pub fn kv_label_width<'a>(p: &egui::Painter, labels: impl Iterator<Item = &'a str>, min: f32, max: f32) -> f32 {
+    let widest = labels.map(|l| widgets::text_width(p, l, theme::ui(13.0))).fold(0.0_f32, f32::max);
+    (widest.ceil() + 8.0).max(min).min(max.max(min))
+}
+
 /// Label / value grid inside `rect` for the design's `dl` lists: dim labels `label_w` wide, values
 /// in 13 px or mono, optionally coloured. Returns the bottom y.
 pub fn kv_grid(p: &egui::Painter, rect: Rect, pal: &Palette, items: &[(String, String, bool, Option<Color32>)], label_w: f32, row_h: f32) -> f32 {

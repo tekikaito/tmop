@@ -24,6 +24,8 @@ const BLOCK_GAP: f32 = 16.0;
 const CARD_GAP: f32 = 14.0;
 /// Narrowest System Info card; the page has as many columns as fit.
 const CARD_MIN_W: f32 = 300.0;
+/// Least width of the label column of a System Info card.
+const KV_LABEL_W: f32 = 130.0;
 
 pub struct InventoryState {
     pub sysinfo: Loader<Sections>,
@@ -307,14 +309,17 @@ impl App {
                             (k.clone(), v.clone(), is_mono(title, k), good.then_some(st.ok))
                         })
                         .collect();
+                    // The label column is as wide as the card's longest label needs ("Domain /
+                    // workgroup"), within bounds: adapter names are labels too.
+                    let label_w = kit::kv_label_width(&p, rows.iter().map(|row| row.0.as_str()), KV_LABEL_W, content.width() * 0.45);
                     if *title == keys::DEVICE {
                         hardware::draw(&p, Rect::from_min_size(pos2(r.right() - 22.0 - 96.0, r.top() + 14.0), vec2(96.0, 64.0)), Hardware::Mainboard, pal.text_rail());
                         // The first rows sit beside the drawing.
                         let near = rows.len().min(2);
-                        let y = kit::kv_grid(&p, Rect::from_min_max(content.min, pos2(content.right() - 108.0, content.bottom())), &pal, &rows[..near], 130.0, 22.0);
-                        kit::kv_grid(&p, Rect::from_min_max(pos2(content.left(), y), content.max), &pal, &rows[near..], 130.0, 22.0);
+                        let y = kit::kv_grid(&p, Rect::from_min_max(content.min, pos2(content.right() - 108.0, content.bottom())), &pal, &rows[..near], label_w, 22.0);
+                        kit::kv_grid(&p, Rect::from_min_max(pos2(content.left(), y), content.max), &pal, &rows[near..], label_w, 22.0);
                     } else {
-                        kit::kv_grid(&p, content, &pal, &rows, 130.0, 22.0);
+                        kit::kv_grid(&p, content, &pal, &rows, label_w, 22.0);
                     }
                 }
             });

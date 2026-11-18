@@ -282,11 +282,17 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
     let facts = info.get(&s.name, &s.path).clone();
     let mut goto = None;
 
-    // Heading: the display name in Light 20 and the service name in mono beside it.
+    // Heading: the display name in Light 20 and the service name in mono, beside it when both
+    // fit on one line and below it otherwise (the display name is what the user knows it by, so
+    // it is not the one to be cut short).
     let title = if s.display.is_empty() { &s.name } else { &s.display };
     let name_w = if title.eq_ignore_ascii_case(&s.name) { 0.0 } else { widgets::text_width(&p, &s.name, theme::mono(13.0)) + 10.0 };
-    let head = widgets::text_fit(&p, content.left_top(), Align2::LEFT_TOP, title, theme::light(20.0), pal.text, (content.width() - name_w).max(60.0));
-    if name_w > 0.0 {
+    let below = name_w > 0.0 && widgets::text_width(&p, title, theme::light(20.0)) + name_w > content.width();
+    let title_w = if below { content.width() } else { (content.width() - name_w).max(60.0) };
+    let mut head = widgets::text_fit(&p, content.left_top(), Align2::LEFT_TOP, title, theme::light(20.0), pal.text, title_w);
+    if below {
+        head = head.union(widgets::text_fit(&p, pos2(content.left(), head.bottom() + 2.0), Align2::LEFT_TOP, &s.name, theme::mono(13.0), pal.text_faint, content.width()));
+    } else if name_w > 0.0 {
         widgets::text_fit(&p, pos2(head.right() + 10.0, head.bottom() - 4.0), Align2::LEFT_BOTTOM, &s.name, theme::mono(13.0), pal.text_faint, (content.right() - head.right() - 10.0).max(20.0));
     }
 
