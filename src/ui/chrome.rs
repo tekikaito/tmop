@@ -386,7 +386,7 @@ impl App {
 
     /// Ctrl+K focuses the header search on the next frame.
     pub(super) fn search_shortcut(ctx: &egui::Context) -> bool {
-        ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::K))
+        ctx.input(|i| super::ctrl_pressed(i, Key::K))
     }
 }
 

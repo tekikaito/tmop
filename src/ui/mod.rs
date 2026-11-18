@@ -223,22 +223,25 @@ impl Page {
             Page::Settings => "Settings",
         }
     }
-    /// Keyboard shortcut of the page (empty when it has none).
+    /// The pages with a keyboard shortcut: the key that opens the page when pressed with Ctrl
+    /// (Cmd on macOS), and how the shortcut reads in tooltips and subtitles.
+    pub const SHORTCUTS: [(Page, Key, &'static str); 11] = [
+        (Page::Summary, Key::Num1, "Ctrl+1"),
+        (Page::Performance, Key::Num2, "Ctrl+2"),
+        (Page::Processes, Key::Num3, "Ctrl+3"),
+        (Page::SystemInfo, Key::Num4, "Ctrl+4"),
+        (Page::AppHistory, Key::Num5, "Ctrl+5"),
+        (Page::StartupApps, Key::Num6, "Ctrl+6"),
+        (Page::Users, Key::Num7, "Ctrl+7"),
+        (Page::Services, Key::Num8, "Ctrl+8"),
+        (Page::Benchmarks, Key::Num9, "Ctrl+9"),
+        (Page::DiskSpace, Key::Num0, "Ctrl+0"),
+        (Page::Settings, Key::Comma, "Ctrl+,"),
+    ];
+
+    /// Keyboard shortcut of the page as text (empty when it has none).
     pub fn shortcut(self) -> &'static str {
-        match self {
-            Page::Summary => "Ctrl+1",
-            Page::Performance => "Ctrl+2",
-            Page::Processes => "Ctrl+3",
-            Page::SystemInfo => "Ctrl+4",
-            Page::AppHistory => "Ctrl+5",
-            Page::StartupApps => "Ctrl+6",
-            Page::Users => "Ctrl+7",
-            Page::Services => "Ctrl+8",
-            Page::Benchmarks => "Ctrl+9",
-            Page::DiskSpace => "Ctrl+0",
-            Page::Settings => "Ctrl+,",
-            _ => "",
-        }
+        Page::SHORTCUTS.iter().find(|(p, ..)| *p == self).map_or("", |(_, _, text)| text)
     }
 }
 
@@ -664,25 +667,8 @@ impl App {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let mut go = None;
         ctx.input(|i| {
-            if i.modifiers.ctrl || i.modifiers.command {
-                for (k, p) in [
-                    (Key::Num1, Page::Summary),
-                    (Key::Num2, Page::Performance),
-                    (Key::Num3, Page::Processes),
-                    (Key::Num4, Page::SystemInfo),
-                    (Key::Num5, Page::AppHistory),
-                    (Key::Num6, Page::StartupApps),
-                    (Key::Num7, Page::Users),
-                    (Key::Num8, Page::Services),
-                    (Key::Num9, Page::Benchmarks),
-                    (Key::Num0, Page::DiskSpace),
-                    (Key::Comma, Page::Settings),
-                ] {
-                    if i.key_pressed(k) {
-                        go = Some(p);
-                    }
-                }
-            }
+            // A page this OS does not have keeps its key unused rather than landing on Summary.
+            go = Page::SHORTCUTS.iter().filter(|(p, ..)| p.supported(&self.caps)).find(|(_, k, _)| ctrl_pressed(i, *k)).map(|(p, ..)| *p);
             if i.key_pressed(Key::F5) {
                 self.sampler.refresh();
             }
@@ -829,6 +815,13 @@ fn install_display_font(ctx: &egui::Context, name: &str) -> (String, bool) {
     let (file, missing) = crate::fonts::resolve(name, crate::fonts::load);
     theme::install_fonts(ctx, file);
     (name.to_string(), missing)
+}
+
+/// Whether `key` went down with Ctrl (Cmd on macOS) held. The key event's own modifiers decide:
+/// the input's `modifiers` are those after the frame's last event, so a quick tap, a macro key or
+/// a remote session that presses and releases Ctrl within one frame would be missed by them.
+pub(crate) fn ctrl_pressed(i: &egui::InputState, key: Key) -> bool {
+    i.events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && (modifiers.ctrl || modifiers.command)))
 }
 
 /// `HH:MM:SS.cc` stopwatch text.
@@ -1109,6 +1102,39 @@ mod tests {
         let expect = [Page::Summary, Page::Performance, Page::Processes, Page::Docker, Page::AppHistory, Page::Users, Page::FlightRecorder, Page::DiskSpace, Page::Benchmarks];
         assert_eq!(shown, expect);
         assert!(Page::NAV.iter().all(|p| shown.contains(p) == p.supported(&fake)));
+    }
+
+    /// One table feeds the key handling and the shortcut texts: no page or key is in it twice.
+    #[test]
+    fn page_shortcuts_are_unique_and_named() {
+        let all = Page::SHORTCUTS;
+        for (i, (page, key, text)) in all.iter().enumerate() {
+            assert_eq!(page.shortcut(), *text);
+            assert!(text.starts_with("Ctrl+"), "{text}");
+            assert!(all[..i].iter().all(|(p, k, _)| p != page && k != key), "{text} is listed twice");
+        }
+        assert_eq!(Page::Docker.shortcut(), "", "a page without a shortcut has no text");
+    }
+
+    /// A shortcut whose Ctrl is already released when the frame ends still counts; the bare key
+    /// and the key's release do not.
+    #[test]
+    fn ctrl_shortcuts_go_by_the_key_events_modifiers() {
+        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        let seen = |events: Vec<egui::Event>| {
+            let ctx = egui::Context::default();
+            let mut hit = false;
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| hit = ui.input(|i| ctrl_pressed(i, Key::Num2))).drop_without_applying_deltas();
+            hit
+        };
+        let ctrl = egui::Modifiers::CTRL;
+        let none = egui::Modifiers::NONE;
+        let ctrl_up = key(Key::ControlLeft, false, none);
+        assert!(seen(vec![key(Key::Num2, true, ctrl), key(Key::Num2, false, ctrl), ctrl_up]), "Ctrl released within the frame");
+        assert!(seen(vec![key(Key::Num2, true, egui::Modifiers::COMMAND)]));
+        assert!(!seen(vec![key(Key::Num2, true, none)]), "the bare key");
+        assert!(!seen(vec![key(Key::Num2, false, ctrl)]), "a release is not a press");
+        assert!(!seen(vec![key(Key::Num3, true, ctrl)]));
     }
 
     #[test]
