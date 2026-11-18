@@ -3,10 +3,9 @@
 
 use super::hardware::{self, Hardware};
 use super::theme::{self, with_alpha, Palette};
-use super::widgets::{self, card, led_panel, led_row, tracked_text, Button, ButtonKind, ButtonSize, Icon, LedStyle, LED_PANEL_H};
+use super::widgets::{self, card, tracked_text, Button, ButtonKind, ButtonSize, Icon};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, Sense, Stroke};
 
-pub const MARGIN: f32 = 12.0;
 pub const GAP: f32 = 10.0;
 
 /// Splits `rect` horizontally into parts proportional to `weights`.
@@ -42,39 +41,6 @@ pub fn vsplit(rect: Rect, heights: &[f32], gap: f32) -> Vec<Rect> {
         .collect()
 }
 
-/// Card with a dot-matrix title strip. Returns the content rect below the strip.
-pub fn titled_card(p: &egui::Painter, rect: Rect, pal: &Palette, bloom: f32, title: &str, right: &str) -> Rect {
-    card(p, rect, pal);
-    let inner = rect.shrink(8.0);
-    led_panel(p, Rect::from_min_size(inner.min, vec2(inner.width(), LED_PANEL_H)), &title.to_uppercase(), &right.to_uppercase(), pal, bloom);
-    Rect::from_min_max(pos2(inner.left(), inner.top() + LED_PANEL_H + 8.0), inner.max)
-}
-
-/// Stat card: dot-matrix title, big value, a dim sub line and an optional LED bar.
-#[allow(clippy::too_many_arguments)]
-pub fn stat_card(p: &egui::Painter, rect: Rect, pal: &Palette, bloom: f32, title: &str, value: &str, sub: &str, color: Color32, frac: Option<f32>) {
-    let body = titled_card(p, rect, pal, bloom, title, "");
-    let clip = p.with_clip_rect(body);
-    clip.text(pos2(body.left() + 2.0, body.top() + 2.0), Align2::LEFT_TOP, value, theme::display(20.0), color);
-    if bloom > 0.0 {
-        clip.text(pos2(body.left() + 2.0, body.top() + 2.0), Align2::LEFT_TOP, value, theme::display(20.0), with_alpha(color, 0.10 * bloom));
-    }
-    clip.text(pos2(body.left() + 2.0, body.top() + 34.0), Align2::LEFT_TOP, sub, theme::ui(12.0), pal.text_dim);
-    if let Some(f) = frac {
-        let bar = Rect::from_min_max(pos2(body.left(), body.bottom() - 12.0), pos2(body.right(), body.bottom()));
-        let segs = ((bar.width() / 9.0).floor() as usize).clamp(8, 80);
-        led_row(p, bar, segs, f, &LedStyle { unlit_factor: 0.18, rim: false, rounding: 1.0, ..LedStyle::new(color, bloom) });
-    }
-}
-
-/// Lays out a row of stat tiles from `(title, value, sub, colour, bar fraction)`: the colour tints the bar.
-pub fn stat_row(p: &egui::Painter, rect: Rect, pal: &Palette, _bloom: f32, cards: &[(String, String, String, Color32, Option<f32>)]) {
-    let w: Vec<f32> = vec![1.0; cards.len()];
-    for (r, (t, v, s, c, f)) in hsplit(rect, &w, STAT_GAP).into_iter().zip(cards) {
-        stat_tile(p, r, pal, t, v, s, f.map(|f| (f, *c)), None);
-    }
-}
-
 /// Right-aligned toolbar area on the page header row.
 pub fn header_toolbar<R>(ui: &mut egui::Ui, body: Rect, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let r = Rect::from_min_max(pos2(body.right() - width, body.top() - super::HEADER_H + 14.0), pos2(body.right() - 16.0, body.top() - 14.0));
@@ -91,20 +57,6 @@ pub fn empty_state(p: &egui::Painter, rect: Rect, pal: &Palette, text: &str) {
     p.text(rect.center(), Align2::CENTER_CENTER, text, theme::ui(13.0), pal.text_faint);
 }
 
-/// Label/value grid inside `rect`; returns the bottom y.
-pub fn kv_list(p: &egui::Painter, rect: Rect, pal: &Palette, items: &[(String, String)], label_w: f32, row_h: f32) -> f32 {
-    let mut y = rect.top();
-    for (k, v) in items {
-        if y + row_h > rect.bottom() + 1.0 {
-            break;
-        }
-        super::widgets::text_fit(p, pos2(rect.left(), y + row_h / 2.0), Align2::LEFT_CENTER, &format!("{k}:"), theme::ui(12.0), pal.text_dim, label_w - 8.0);
-        let clip = p.with_clip_rect(Rect::from_min_max(pos2(rect.left() + label_w, y), pos2(rect.right(), y + row_h)));
-        clip.text(pos2(rect.left() + label_w, y + row_h / 2.0), Align2::LEFT_CENTER, v, theme::ui(12.0), pal.text);
-        y += row_h;
-    }
-    y
-}
 
 /// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
 pub use crate::platform::reveal;

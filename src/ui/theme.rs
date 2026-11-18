@@ -517,11 +517,6 @@ impl Palette {
         ROLES.iter().filter_map(|r| self.worst_contrast(r.key).filter(|c| *c < MIN_CONTRAST).map(|c| (r.key, c))).collect()
     }
 
-    /// Process-row heat shading (busy rows tinted towards it).
-    pub fn heat(&self) -> Color32 {
-        mix(self.ok, self.body, 0.4)
-    }
-
     /// Tuned so Dark reproduces the old fixed LCD (#0A1626, rim #1A2C44, lit #9CB8D8, unlit #16263A).
     pub fn lcd(&self) -> Lcd {
         let tint = |t: f32, haze: f32| lighten(mix(self.led_bg, self.led_dim, t), haze);

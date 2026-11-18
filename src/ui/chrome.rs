@@ -369,12 +369,6 @@ impl App {
         });
     }
 
-    /// Page title row inside the content area (the title only; `icon` is not drawn any more).
-    /// Returns the rect left for the page body.
-    pub fn page_header(&self, ui: &mut egui::Ui, pal: &Palette, title: &str, _icon: Icon) -> Rect {
-        self.page_title(ui, pal, title, "")
-    }
-
     /// Page title block: the title in Light 30 and, below it, a mono 12 `subtitle` (live facts such
     /// as "312 services . Ctrl+8"). Returns the rect left for the page body.
     pub fn page_title(&self, ui: &mut egui::Ui, pal: &Palette, title: &str, subtitle: &str) -> Rect {

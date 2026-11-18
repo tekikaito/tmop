@@ -41,7 +41,7 @@ use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
-use eframe::egui::{self, Color32, Key, Sense, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
+use eframe::egui::{self, Color32, Key, Sense, ViewportBuilder, ViewportCommand, ViewportId};
 use std::time::{Duration, Instant};
 use theme::{MetricColors, Palette};
 use widgets::{Graph, GraphLine, Icon};
@@ -275,17 +275,6 @@ impl Device {
             Device::Gpu => "GPU",
             Device::Thermal => "Thermals",
             Device::Docker => "Docker",
-        }
-    }
-    pub fn icon(self) -> Icon {
-        match self {
-            Device::Cpu => Icon::Cpu,
-            Device::Memory => Icon::Memory,
-            Device::Disk => Icon::Disk,
-            Device::Network => Icon::Network,
-            Device::Gpu => Icon::Gpu,
-            Device::Thermal => Icon::Thermal,
-            Device::Docker => Icon::Container,
         }
     }
 }
@@ -984,7 +973,6 @@ impl App {
         let ctx = &root.ctx().clone();
         self.system_theme = ctx.system_theme();
         let pal = self.palette();
-        widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
         widgets::set_ink(&pal);
         widgets::set_spark_smooth(self.settings.graphs.smooth_curves);
         widgets::set_spark_neutral(!self.settings.graphs.color_keyed);
@@ -1107,9 +1095,6 @@ impl App {
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: Vec2) {}
 
 #[cfg(test)]
 mod tests {

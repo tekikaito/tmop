@@ -919,21 +919,6 @@ pub fn net_total(hist: &History) -> Series {
     net
 }
 
-/// Min/max of the newest `n` values with a little headroom; a flat series gets a window.
-pub fn visible_range(s: &Series, n: usize) -> (f32, f32) {
-    let it = s.values.iter().rev().take(n);
-    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-    for v in it {
-        lo = lo.min(*v);
-        hi = hi.max(*v);
-    }
-    if lo == f32::MAX {
-        return (0.0, 1.0);
-    }
-    let span = (hi - lo).max(hi.abs() * 0.01).max(1.0);
-    (lo - span * 0.1, hi + span * 0.1)
-}
-
 /// Small generic process glyph: a window for apps, a cog-like square for background work.
 pub fn proc_icon(p: &egui::Painter, r: Rect, app: bool) {
     let c = Color32::from_rgb(if app { 0x4C } else { 0x8A }, if app { 0x9E } else { 0x8A }, if app { 0xF7 } else { 0x8A });
