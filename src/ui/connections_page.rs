@@ -143,10 +143,10 @@ impl App {
         let cols = [
             Col::text("Process", 220.0),
             Col::num("PID", 70.0),
-            Col::text("Protocol", 80.0),
+            Col::text("Protocol", 80.0).rigid(),
             Col::text("Local address", 230.0),
             Col::text("Remote address", 250.0),
-            Col::text("State", 120.0),
+            Col::text("State", 120.0).rigid(),
             Col::text("Scope", 120.0),
         ];
         let key = |i: usize| {

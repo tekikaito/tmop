@@ -166,9 +166,9 @@ pub fn driver_like_page(
     });
     let h = headings(drivers);
     let cols: Vec<Col> = if drivers {
-        vec![Col::text(h[0], 170.0), Col::text(h[1], 280.0), Col::text(h[2], 100.0), Col::text(h[3], 90.0), Col::text(h[4], 100.0), Col::text(h[5], 200.0), Col::text(h[6], 150.0), Col::text(h[7], 320.0)]
+        vec![Col::text(h[0], 170.0), Col::text(h[1], 280.0), Col::text(h[2], 100.0).rigid(), Col::text(h[3], 90.0).rigid(), Col::text(h[4], 100.0), Col::text(h[5], 200.0), Col::text(h[6], 150.0), Col::text(h[7], 320.0)]
     } else {
-        vec![Col::text(h[0], 190.0), Col::text(h[1], 330.0), Col::text(h[2], 100.0), Col::text(h[3], 100.0), Col::text(h[4], 120.0), Col::num(h[5], 70.0), Col::text(h[6], 360.0)]
+        vec![Col::text(h[0], 190.0), Col::text(h[1], 330.0), Col::text(h[2], 100.0).rigid(), Col::text(h[3], 100.0).rigid(), Col::text(h[4], 120.0), Col::num(h[5], 70.0), Col::text(h[6], 360.0)]
     };
     let purple = theme::darken_for(pal, theme::PURPLE);
     let cell = |i: usize, col: usize| -> Cell {

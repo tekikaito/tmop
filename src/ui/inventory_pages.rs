@@ -451,7 +451,7 @@ impl App {
             3 => a.location.cmp(&b.location),
             _ => cmp_str(&a.command, &b.command),
         });
-        let cols = [Col::text("Name", 240.0), Col::text("Publisher", 220.0), Col::text("Status", 110.0), Col::text("Location", 220.0), Col::text("Command", 500.0)];
+        let cols = [Col::text("Name", 240.0), Col::text("Publisher", 220.0), Col::text("Status", 110.0).rigid(), Col::text("Location", 220.0), Col::text("Command", 500.0)];
         let windir = std::env::var("windir").unwrap_or_default().to_lowercase();
         let key = |i: usize| format!("{}|{}", list[i].location, list[i].name);
         let cell = |i: usize, col: usize| -> Cell {
@@ -529,7 +529,9 @@ impl App {
         let table_bottom = if shown.is_some() { area.bottom() - card_h - BLOCK_GAP } else { area.bottom() };
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), pos2(area.right(), table_bottom.max(area.top() + used + BLOCK_GAP + 120.0)));
 
-        let all_cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        // With full account names, a name that differs from its short form shows below it.
+        let two_line = full && list.iter().any(|u| short_account(&u.user) != u.user);
+        let all_cols = [Col::text("User", 280.0).two_line(two_line), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
         let cols: Vec<Col> = all_cols.into_iter().enumerate().filter(|(n, _)| sessions || *n != 1).map(|(_, c)| c).collect();
         let spark_color = pal.accent;
         let cell = |i: usize, col: usize| -> Cell {

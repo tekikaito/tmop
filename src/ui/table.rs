@@ -18,21 +18,37 @@ pub struct Col {
     pub title: &'static str,
     pub width: f32,
     pub numeric: bool,
-    /// Holds a sparkline ([`Cell::spark`]).
-    pub spark: bool,
+    /// Keeps its width when the table is too narrow for all columns (see [`fit_widths`]).
+    pub rigid: bool,
+    /// The cells may carry a second line ([`Cell::sub`]); on the first column this makes every
+    /// row [`TALL_ROW_H`] high.
+    pub two_line: bool,
 }
 
 impl Col {
+    /// Text that may be shortened with an ellipsis when the table is narrow (names, paths).
     pub const fn text(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: false, spark: false }
+        Self { title, width, numeric: false, rigid: false, two_line: false }
     }
-    /// Right-aligned numbers in mono; the first click sorts descending.
+    /// Right-aligned numbers in mono; the first click sorts descending. Keeps its width: a
+    /// number cut off reads as another.
     pub const fn num(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: true, spark: false }
+        Self { title, width, numeric: true, rigid: true, two_line: false }
     }
-    /// A trend column: the cells' [`Spark`] drawn 84 x 24.
+    /// A trend column: the cells' [`Spark`] drawn 84 x 24. Keeps its width.
     pub const fn spark(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: false, spark: true }
+        Self { title, width, numeric: false, rigid: true, two_line: false }
+    }
+    /// A text column that keeps its width: a short word from a fixed set ("Running", "Manual"),
+    /// which says nothing once it is cut to "Runn…".
+    pub const fn rigid(mut self) -> Self {
+        self.rigid = true;
+        self
+    }
+    /// See [`Col::two_line`].
+    pub const fn two_line(mut self, on: bool) -> Self {
+        self.two_line = on;
+        self
     }
 }
 
@@ -174,14 +190,14 @@ const MIN_COL_SHARE: f32 = 0.6;
 
 /// Initial column widths: the widths asked for, with text columns shrunk in proportion when they
 /// and the minimum of the last column do not fit into `avail`, but not below [`MIN_COL_SHARE`] of
-/// each (nor 36). Numeric columns keep their width: a number cut off on the left reads as another.
+/// each (nor 36). Rigid columns (numbers, trends, short status words) keep their width.
 fn fit_widths(cols: &[Col], avail: f32) -> Vec<f32> {
     let Some((last, rest)) = cols.split_last() else { return Vec::new() };
-    let numeric: f32 = rest.iter().filter(|c| c.numeric).map(|c| c.width).sum();
-    let wanted: f32 = rest.iter().filter(|c| !c.numeric).map(|c| c.width).sum();
-    let room = (avail - last.width.min(120.0) - numeric).max(0.0);
+    let rigid: f32 = rest.iter().filter(|c| c.rigid).map(|c| c.width).sum();
+    let wanted: f32 = rest.iter().filter(|c| !c.rigid).map(|c| c.width).sum();
+    let room = (avail - last.width.min(120.0) - rigid).max(0.0);
     let scale = if wanted > room && wanted > 0.0 { room / wanted } else { 1.0 };
-    let mut w: Vec<f32> = rest.iter().map(|c| if c.numeric { c.width } else { (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0) }).collect();
+    let mut w: Vec<f32> = rest.iter().map(|c| if c.rigid { c.width } else { (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0) }).collect();
     w.push(last.width);
     w
 }
@@ -207,8 +223,9 @@ pub fn show_with_menu(
     let mut activated = None;
     let selected = state.selected.clone();
     let (sort_col, desc) = (state.sort, state.desc);
-    // Rows are taller when any row has a second line (only the first column carries one).
-    let row_h = if !cols.is_empty() && order.iter().any(|i| cell(*i, 0).sub.is_some()) { TALL_ROW_H } else { ROW_H };
+    // Rows are taller when the first column carries a second line. The column says so: asking
+    // every row's cell for it here would build a cell per row and frame, shown or not.
+    let row_h = if cols.first().is_some_and(|c| c.two_line) { TALL_ROW_H } else { ROW_H };
     // The table sits in a rounded box with a faint wash and a hairline.
     ui.painter().rect_filled(rect, 8.0, with_alpha(pal.text, 0.03));
     let inner = rect.shrink(1.0);
@@ -388,8 +405,11 @@ pub fn matches(filter: &str, fields: &[&str]) -> bool {
     f.split_whitespace().all(|w| fields.iter().any(|s| s.to_lowercase().contains(w)))
 }
 
+/// Case-insensitive order: that of the two strings in lower case (character by character, so
+/// without the final-sigma rule of `str::to_lowercase`), compared without building
+/// them (a sort calls this thousands of times per frame).
 pub fn cmp_str(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
+    a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
 }
 
 pub fn cmp_f(a: f64, b: f64) -> std::cmp::Ordering {
@@ -421,6 +441,24 @@ mod tests {
         // Numbers stay whole; the text columns give up the room.
         let w = fit_widths(&[Col::text("a", 400.0), Col::num("b", 90.0), Col::text("c", 100.0)], 390.0);
         assert!((w[0] - 240.0).abs() < 0.01 && w[1] == 90.0);
+        // So do trends and the text columns marked rigid ("Running" must not become "Runn…").
+        let w = fit_widths(&[Col::text("name", 300.0), Col::text("status", 100.0).rigid(), Col::spark("trend", 120.0), Col::text("path", 300.0)], 520.0);
+        assert_eq!((w[1], w[2]), (100.0, 120.0));
+        assert!((w[0] - 180.0).abs() < 0.01, "the name gives up the room: {}", w[0]);
+    }
+
+    /// `cmp_str` orders like the lower-cased strings, without allocating them.
+    #[test]
+    fn cmp_str_ignores_case() {
+        use std::cmp::Ordering::*;
+        assert_eq!(cmp_str("alpha", "Beta"), Less);
+        assert_eq!(cmp_str("Zeta", "alpha"), Greater);
+        assert_eq!(cmp_str("SvcHost", "svchost"), Equal);
+        assert_eq!(cmp_str("app", "apple"), Less);
+        assert_eq!(cmp_str("", "a"), Less);
+        for (a, b) in [("Ärger", "zebra"), ("ǅ", "ǆ"), ("İstanbul", "istanbul"), ("straße", "STRASSE"), ("a-b", "A_b")] {
+            assert_eq!(cmp_str(a, b), a.to_lowercase().cmp(&b.to_lowercase()), "{a} / {b}");
+        }
     }
 
     /// Cells with every decoration draw in a table, and a second line makes the rows taller.
@@ -431,11 +469,11 @@ mod tests {
         pal.apply(&ctx);
         theme::install_fonts(&ctx, None);
         let mut icons = super::super::icons::IconCache::new(&ctx);
-        let cols = [Col::text("Name", 200.0), Col::num("CPU", 100.0), Col::spark("CPU 60s", 120.0), Col::text("Status", 100.0)];
         let order = [0usize, 1, 2];
         let mut state = TableState::sorted_by(1, true);
         state.selected = Some("1".into());
         for tall in [false, true] {
+            let cols = [Col::text("Name", 200.0).two_line(tall), Col::num("CPU", 100.0), Col::spark("CPU 60s", 120.0), Col::text("Status", 100.0).rigid()];
             let cell = |i: usize, c: usize| -> Cell {
                 match c {
                     0 => {
