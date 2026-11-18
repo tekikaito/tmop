@@ -378,6 +378,8 @@ pub const TEXT_ROLES: [&str; 2] = ["text", "textDim"];
 pub const SURFACE_ROLES: [&str; 7] = ["chrome", "body", "sidebar", "card", "panel", "hover", "control"];
 /// Minimum text contrast (WCAG AA).
 pub const MIN_CONTRAST: f32 = 4.5;
+/// Share of `text` washed over a light card for [`Palette::well`].
+const WELL_WASH_LIGHT: f32 = 0.05;
 
 /// The recorder's seven-segment display (status bar and Flight Recorder page).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -471,9 +473,16 @@ impl Palette {
         mix(self.text, self.text_dim, 0.5)
     }
 
-    /// Inset boxes (paths, command lines, per-core cells, log panes).
+    /// Inset boxes (paths, command lines, per-core cells, log panes, the facts of a dialog): a
+    /// little darker than the card they sit in. On a dark palette that is a wash of `led_bg`; a
+    /// light palette keeps `led_bg` dark for the status bar's LCD, and the same wash would turn
+    /// the box mid-grey under text made for a light surface, so there it is a faint wash of `text`.
     pub fn well(&self) -> Color32 {
-        with_alpha(self.led_bg, 0.3)
+        if self.dark {
+            with_alpha(self.led_bg, 0.3)
+        } else {
+            with_alpha(self.text, WELL_WASH_LIGHT)
+        }
     }
 
     /// A hairline wash of `text` over whatever is below: secondary buttons (0.06), their border
@@ -814,6 +823,23 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Text in an inset box (per-core cells, code boxes, dialog facts) reads about as well as on
+    /// the card around it, on every built-in palette. Light's box used to be a 30 % wash of its
+    /// dark `led_bg`: mid-grey, with the faint labels at 2.2:1.
+    #[test]
+    fn wells_stay_readable() {
+        for p in crate::palette::built_in() {
+            let pal = p.palette;
+            let well = pal.well();
+            let ground = mix(pal.card, Color32::from_rgb(well.r(), well.g(), well.b()), well.a() as f32 / 255.0);
+            let on_well = |c: Color32| contrast(c, ground);
+            assert!(on_well(pal.text_dim) >= MIN_CONTRAST, "{}: textDim on a well is {:.2}:1", p.id, on_well(pal.text_dim));
+            assert!(on_well(pal.text_faint) >= 2.5, "{}: textFaint on a well is {:.2}:1", p.id, on_well(pal.text_faint));
+            let lost = contrast(pal.text_faint, pal.card) - on_well(pal.text_faint);
+            assert!(lost < 0.6, "{}: a well costs faint text {lost:.2} of contrast", p.id);
+        }
+    }
 
     /// The recorder's LCD stays readable on every built-in look: lit segments against the glass.
     #[test]
