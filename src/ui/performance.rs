@@ -25,6 +25,9 @@ const DEVICE_CARD_H: f32 = 76.0;
 const TOP_SPAN_SECS: f32 = 60.0;
 /// Width kept free at the right of the CPU graph for the exploded CPU and its labels.
 const FIGURE_W: f32 = 410.0;
+/// Narrowest tile of the strip of other devices in which a value ("13.7 / 31.1 GB", both network
+/// rates) still fits beside its label; in narrower tiles it goes below it.
+const STRIP_INLINE_MIN_W: f32 = 240.0;
 
 /// How the per-core block of the CPU page shows the logical processors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -714,7 +717,12 @@ impl App {
         if others.is_empty() {
             return 0.0;
         }
-        let strip = Rect::from_min_size(pos2(x, y), vec2(w, 80.0));
+        // Label and value share the first line only where the longest pair ("NETWORK" and both
+        // rates) fits; in narrower tiles the value gets a line of its own instead of running
+        // into the label. The width decides for the whole strip, so the tiles stay alike and the
+        // layout does not flip when a value grows by a digit.
+        let stacked = strip_stacked(w, others.len());
+        let strip = Rect::from_min_size(pos2(x, y), vec2(w, if stacked { 90.0 } else { 80.0 }));
         let tiles = kit::tile_strip(&p, strip, &pal, others.len());
         for (d, t) in others.iter().zip(tiles) {
             let resp = ui.interact(t, ui.scope_id().with(("other", d.key())), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -723,8 +731,13 @@ impl App {
             }
             let view = self.dev_view(*d, fd);
             widgets::tracked_text(&p, pos2(t.left() + 14.0, t.top() + 10.0), Align2::LEFT_TOP, &d.title().to_uppercase(), theme::ui(11.0), pal.text_faint, 0.14);
-            widgets::text_fit(&p, pos2(t.right() - 14.0, t.top() + 9.0), Align2::RIGHT_TOP, &view.value, theme::mono(12.0), pal.text, t.width() * 0.6);
-            let spark = Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0));
+            let spark = if stacked {
+                widgets::text_fit(&p, pos2(t.left() + 14.0, t.top() + 27.0), Align2::LEFT_TOP, &view.value, theme::mono(12.0), pal.text, t.width() - 28.0);
+                Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 46.0), vec2(t.width() - 28.0, 34.0))
+            } else {
+                widgets::text_fit(&p, pos2(t.right() - 14.0, t.top() + 9.0), Align2::RIGHT_TOP, &view.value, theme::mono(12.0), pal.text, t.width() * 0.6);
+                Rect::from_min_size(pos2(t.left() + 14.0, t.top() + 28.0), vec2(t.width() - 28.0, 40.0))
+            };
             if *d == Device::Docker {
                 widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
             } else {
@@ -1256,6 +1269,11 @@ pub(super) fn bytes_pair(used: u64, total: u64) -> String {
     format!("{:.1} / {t:.1} {}", used as f64 / 1024f64.powi(i as i32), U[i])
 }
 
+/// Whether a strip `w` wide with `tiles` tiles puts each value below its label.
+fn strip_stacked(w: f32, tiles: usize) -> bool {
+    w / (tiles.max(1) as f32) < STRIP_INLINE_MIN_W
+}
+
 /// "\u{2193}1.2 \u{2191}0.2 MB/s": both rates in the unit of the larger.
 fn rate_pair(rx: f64, tx: f64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -1345,6 +1363,15 @@ mod tests {
         assert_eq!(bytes_pair(19 << 30, 32 << 30), "19.0 / 32.0 GB");
         assert_eq!(rate_pair(1.2 * 1024.0 * 1024.0, 0.2 * 1024.0 * 1024.0), "\u{2193}1.2 \u{2191}0.2 MB/s");
         assert_eq!(rate_pair(0.0, 0.0), "\u{2193}0.0 \u{2191}0.0 B/s");
+    }
+
+    /// The strip stacks label and value when its tiles are too narrow for both on one line.
+    #[test]
+    fn narrow_strip_tiles_stack_the_value() {
+        assert!(strip_stacked(945.0, 5), "the default window: 189 px tiles");
+        assert!(!strip_stacked(1500.0, 5));
+        assert!(!strip_stacked(945.0, 3));
+        assert!(!strip_stacked(300.0, 0), "no tiles, nothing to stack");
     }
 
     #[test]
