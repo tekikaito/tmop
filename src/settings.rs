@@ -89,6 +89,8 @@ pub struct Window {
     pub performance_cpus_expanded: bool,
     /// Show each GPU on its own instead of the grouped view.
     pub gpus_separated: bool,
+    /// Show each physical disk on its own instead of the grouped view.
+    pub disks_separated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -241,6 +243,7 @@ impl Default for Window {
             process_table_column_widths: BTreeMap::new(),
             performance_cpus_expanded: true,
             gpus_separated: false,
+            disks_separated: false,
         }
     }
 }
@@ -739,6 +742,18 @@ mod tests {
         assert!(Settings::from_json(r#"{"schemaVersion":12,"alwaysOnTop":"yes"}"#).is_err());
         assert!(Settings::from_json("{}").is_err());
         assert!(Settings::from_json("[]").is_err());
+    }
+
+    /// A key added without a migration: a file written before it loads with the default, and the
+    /// key is known once written.
+    #[test]
+    fn disks_separated_is_off_until_set() {
+        let old = parse(r#"{"version":1,"window":{"gpusSeparated":true}}"#);
+        assert!(old.settings.window.gpus_separated && !old.settings.window.disks_separated);
+        let set = parse(r#"{"version":1,"window":{"disksSeparated":true}}"#);
+        assert!(set.settings.window.disks_separated && !set.settings.window.gpus_separated);
+        assert!(set.unknown_keys.is_empty(), "{:?}", set.unknown_keys);
+        assert!(parse(&set.settings.to_json()).settings.window.disks_separated);
     }
 
     #[test]

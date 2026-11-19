@@ -72,7 +72,8 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
             aux: if s.gpu.dedicated_used > 0 { format!("{:.1} GB", s.gpu.dedicated_used as f64 / 1073741824.0) } else { String::new() },
         },
         Quadrant::Disk if !s.disk_known() => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
-        Quadrant::Disk => Reading { quadrant: q, fraction: pct(sm.disk), text: format!("{:.0}%", s.disk.active_pct), aux: format!("R {}  W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) },
+        // Separated disks share the tile like separated GPUs: "12% / 3%".
+        Quadrant::Disk => Reading { quadrant: q, fraction: pct(sm.disk), text: if fd.disks_separated { super::disk_drives::active_times(&s.disk.drives) } else { format!("{:.0}%", s.disk.active_pct) }, aux: format!("R {}  W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) },
         Quadrant::Network if !s.net_known() => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
         Quadrant::Network => Reading {
             quadrant: q,
@@ -1066,7 +1067,7 @@ mod tests {
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |root| {
                 egui::CentralPanel::default().show(root, |ui| {
-                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default(), gpus_separated: false };
+                    let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default(), gpus_separated: false, disks_separated: false };
                     let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
                     assert!(!ev.close && !ev.menu);
                 });
