@@ -1,7 +1,8 @@
 //! Start-up failures that would otherwise go unseen: a Windows GUI program has no console, so
 //! an error from creating the window, or a panic on the UI thread, ended TMOP without a word
 //! (#46). They are now shown in a message box (on Linux and macOS printed to stderr) and
-//! appended to `startup-error.log` in TMOP's data folder, for bug reports.
+//! appended to `startup-error.log` in TMOP's data folder, for bug reports. Without a graphics
+//! driver Windows has no usable OpenGL; the server package brings Mesa's (see [`SERVER_ASSET`]).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,12 +12,45 @@ pub fn log_path() -> PathBuf {
     crate::platform::data_dir().join("startup-error.log")
 }
 
-/// The OpenGL hint, when `error` looks like the window's OpenGL context failed.
-fn opengl_hint(error: &str) -> Option<&'static str> {
+/// The server package for Windows x64: `TMOP.exe` with Mesa's software OpenGL (`opengl32.dll`
+/// and `libgallium_wgl.dll`) next to it, for machines without a graphics driver (#46).
+pub const SERVER_ASSET: &str = "TMOP-windows-x64-server.zip";
+
+/// Whether Mesa's `opengl32.dll` sits next to TMOP.exe, as in the server package. Windows loads
+/// it from there in place of its own OpenGL 1.1.
+#[cfg(windows)]
+fn mesa_beside_exe() -> bool {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("libgallium_wgl.dll").is_file())).unwrap_or(false)
+}
+
+/// In the server package, makes Mesa draw with llvmpipe, its software renderer. Mesa would
+/// otherwise try its Direct3D 12 driver first, which needs `dxil.dll` and ended TMOP on a test
+/// machine. Must run before the window is created; a `GALLIUM_DRIVER` the user set wins.
+pub fn software_opengl() {
+    #[cfg(windows)]
+    if std::env::var_os("GALLIUM_DRIVER").is_none() && mesa_beside_exe() {
+        std::env::set_var("GALLIUM_DRIVER", "llvmpipe");
+    }
+}
+
+/// The OpenGL hint, when `error` looks like the window's OpenGL context failed. On Windows x64
+/// it points to the server package, unless this is it.
+fn opengl_hint(error: &str) -> Option<String> {
     let e = error.to_ascii_lowercase();
-    ["opengl", "glutin", "wgl", "glsl", "shader", "gl context", "pixel format", "egui_glow"].iter().any(|k| e.contains(k)).then_some(
-        "TMOP draws its window with OpenGL 2.0 or newer. Without a graphics driver (for example Windows Server or a virtual machine with the Microsoft Basic Display Adapter), Windows offers only OpenGL 1.1. Install the graphics driver, or turn on GPU acceleration for the virtual machine, and start TMOP again.",
-    )
+    if !["opengl", "glutin", "wgl", "glsl", "shader", "gl context", "pixel format", "egui_glow"].iter().any(|k| e.contains(k)) {
+        return None;
+    }
+    let mut hint = String::from("TMOP draws its window with OpenGL 2.0 or newer. Without a graphics driver (for example a server without a graphics card, or a virtual machine with the Microsoft Basic Display Adapter), Windows offers only OpenGL 1.1.");
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if !mesa_beside_exe() {
+        hint.push_str(&format!(
+            "\n\nUse the server package of TMOP instead. It brings its own OpenGL that draws on the CPU, so it also works without a graphics driver:\nhttps://github.com/{}/releases/latest/download/{SERVER_ASSET}\n\nOr install the graphics driver, or turn on GPU acceleration for the virtual machine.",
+            crate::engine::RELEASE_REPO
+        ));
+        return Some(hint);
+    }
+    hint.push_str(" Install the graphics driver, or turn on GPU acceleration for the virtual machine, and start TMOP again.");
+    Some(hint)
 }
 
 /// The message for a failure: what went wrong, the OpenGL hint if it applies, and the log file.
@@ -24,7 +58,7 @@ pub fn message(error: &str) -> String {
     let mut m = format!("TMOP could not start.\n\n{error}");
     if let Some(h) = opengl_hint(error) {
         m.push_str("\n\n");
-        m.push_str(h);
+        m.push_str(&h);
     }
     m.push_str(&format!("\n\nThis message is also saved in {}.", log_path().display()));
     m
@@ -91,6 +125,8 @@ mod tests {
     fn opengl_failures_get_the_driver_hint() {
         assert!(message("Glutin error: Could not create OpenGL context").contains("OpenGL 2.0 or newer"));
         assert!(message("egui_glow requires a GLSL version of at least 1.20").contains("graphics driver"));
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        assert!(message("Could not create OpenGL context").contains(SERVER_ASSET));
         let other = message("Settings folder is not writable");
         assert!(other.starts_with("TMOP could not start.") && !other.contains("OpenGL") && other.contains("startup-error.log"));
     }

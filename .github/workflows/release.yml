@@ -97,6 +97,36 @@ jobs:
           $hash = (Get-FileHash "dist\$exe" -Algorithm SHA256).Hash.ToLower()
           "$hash  $exe" | Out-File -Encoding ascii "dist\$exe.sha256"
 
+      # The server package (#46): the same TMOP.exe with Mesa's software OpenGL (llvmpipe) next
+      # to it, for machines without a graphics driver, where Windows offers only OpenGL 1.1.
+      # TMOP selects llvmpipe when it finds the DLLs (src/startup.rs). The MinGW build of
+      # mesa-dist-win, because its MSVC build currently ships without OpenGL; pinned by hash.
+      - name: Package server
+        if: matrix.name == 'windows-x64'
+        shell: pwsh
+        env:
+          MESA_VERSION: '26.2.7'
+          MESA_SHA256: '19c74aad7b09e682473b8de4c35b47e6498de97b71cae5511a231b8eb02f2b22'
+        run: |
+          $archive = "$env:RUNNER_TEMP\mesa.7z"
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-mingw.7z" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:MESA_SHA256) { Write-Error "Mesa archive checksum mismatch"; exit 1 }
+          7z x -y "-o$env:RUNNER_TEMP\mesa" $archive x64\opengl32.dll x64\libgallium_wgl.dll | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $name = "TMOP-${{ needs.meta.outputs.tag }}-windows-x64-server"
+          $dir = "dist\$name"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "dist\TMOP-${{ needs.meta.outputs.tag }}-windows-x64\*" $dir
+          Copy-Item "$env:RUNNER_TEMP\mesa\x64\opengl32.dll", "$env:RUNNER_TEMP\mesa\x64\libgallium_wgl.dll" $dir
+          (Get-Content packaging\windows\Mesa-NOTICE.txt -Raw).Replace('@MESA_VERSION@', $env:MESA_VERSION) | Set-Content -Encoding utf8 "$dir\Mesa-NOTICE.txt"
+          Compress-Archive -Path "$dir\*" -DestinationPath "dist\$name.zip"
+          $hash = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist\$name.zip.sha256"
+          # Version-less, for the download link in TMOP's OpenGL error message and the website.
+          $zip = "TMOP-windows-x64-server.zip"
+          Copy-Item "dist\$name.zip" "dist\$zip"
+          "$hash  $zip" | Out-File -Encoding ascii "dist\$zip.sha256"
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
@@ -279,6 +309,7 @@ jobs:
             expected+=("TMOP-$TAG-linux-$arch.AppImage" "TMOP-linux-$arch.AppImage")
             expected+=("tmop-engine-$TAG-$arch.tar.gz")
           done
+          expected+=("TMOP-$TAG-windows-x64-server.zip" "TMOP-windows-x64-server.zip")
           expected+=("TMOP-$TAG-macos-universal.zip" "TMOP-macos-universal.zip")
           expected+=("TMOP-$TAG-macos-universal.dmg" "TMOP-macos-universal.dmg")
           status=0

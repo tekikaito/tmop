@@ -43,9 +43,12 @@ once.
 
 **TMOP doesn't open?** It shows a message saying why and saves it in
 `%LOCALAPPDATA%\TMOP\startup-error.log`; please add that file to a bug report. TMOP draws its
-window with OpenGL 2.0 or newer, which needs a graphics driver: on Windows Server or in a virtual
-machine with only the *Microsoft Basic Display Adapter*, install the driver or turn on GPU
-acceleration for the virtual machine.
+window with OpenGL 2.0 or newer, which needs a graphics driver.
+
+**On a server or virtual machine without a graphics driver** (only the *Microsoft Basic Display
+Adapter*), take **`TMOP-windows-x64-server.zip`** from the release page instead and unpack it.
+It is the same TMOP with Mesa's software OpenGL next to it, which draws on the CPU, so it uses
+more processor time than on a graphics card. Its updates replace only `TMOP.exe`.
 
 ### Linux (x86_64 and ARM64)
 

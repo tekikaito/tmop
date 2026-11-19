@@ -244,6 +244,7 @@ fn main() -> eframe::Result<()> {
     }
     // From here on TMOP opens a window: make failures visible (#46).
     tmop::startup::install_panic_hook();
+    tmop::startup::software_opengl();
     let value = |names: &[&str]| args.iter().find_map(|a| names.iter().find_map(|n| a.strip_prefix(n)).map(|v| v.to_string()));
     let popout_only = args.iter().any(|a| a == "--popout");
     let launch = Launch {
