@@ -12,9 +12,9 @@
 //! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
 //! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
-use super::common::{cpu_brand, net_delta, tick_delta_pct, NetMark, Ticks};
+use super::common::{cpu_brand, disk_model, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::nvml::Nvml;
-use super::procfs::{self, DiskTotals, GpuDev, HwmonChip, NetIf};
+use super::procfs::{self, DiskStat, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
 use crate::process::{Enumerator, ProcessRow};
 use std::collections::{HashMap, HashSet};
@@ -77,6 +77,10 @@ pub struct Collector {
     prev_sys: Option<Ticks>,
     prev_cores: Vec<(u32, Ticks)>,
     prev_disk: Option<(Instant, DiskTotals)>,
+    /// The disks of the last reading, for each disk's own rates.
+    prev_disk_stats: Vec<DiskStat>,
+    /// The model of each disk listed (device -> model), read when the disk first shows.
+    disk_models: HashMap<String, String>,
     prev_net: Option<NetMark>,
     /// Static cpufreq figures (kHz) read once: max, base.
     freq_max: Option<u64>,
@@ -113,6 +117,8 @@ impl Collector {
             prev_sys: None,
             prev_cores: Vec::new(),
             prev_disk: None,
+            prev_disk_stats: Vec::new(),
+            disk_models: HashMap::new(),
             prev_net: None,
             freq_max: read_u64(cpu0.join("cpuinfo_max_freq")),
             freq_base: read_u64(cpu0.join("base_frequency")).or_else(|| read_u64(cpu0.join("amd_pstate_nominal_freq"))),
@@ -211,8 +217,21 @@ impl Collector {
         let stats = if block.is_empty() { procfs::parse_diskstats(&text, procfs::looks_whole) } else { procfs::parse_diskstats(&text, |n| block.contains(n)) };
         let now = Instant::now();
         let cur = DiskTotals::of(&stats);
-        snap.disk = procfs::disk_delta(self.prev_disk.as_ref().map(|p| &p.1), &cur, self.prev_disk.as_ref().map_or(Duration::ZERO, |p| now.duration_since(p.0)));
+        let dt = self.prev_disk.as_ref().map_or(Duration::ZERO, |p| now.duration_since(p.0));
+        snap.disk = procfs::disk_delta(self.prev_disk.as_ref().map(|p| &p.1), &cur, dt);
         self.prev_disk = Some((now, cur));
+        // Each disk on its own. A device name may pass to another disk once its own is gone.
+        self.disk_models.retain(|dev, _| stats.iter().any(|d| d.name == *dev));
+        let mut drives = procfs::disk_drives(&self.prev_disk_stats, &stats, dt);
+        for d in &mut drives {
+            if !self.disk_models.contains_key(&d.id) {
+                let of = |file: &str| read(format!("/sys/block/{}/device/{file}", d.id)).unwrap_or_default();
+                self.disk_models.insert(d.id.clone(), disk_model(&of("vendor"), &of("model")));
+            }
+            d.model.clone_from(&self.disk_models[&d.id]);
+        }
+        snap.disk.drives = drives;
+        self.prev_disk_stats = stats;
     }
 
     fn network(&mut self, snap: &mut Snapshot) {

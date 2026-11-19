@@ -3,7 +3,7 @@
 //! `kern.boottime`. No FFI here, so it compiles and its tests run on every host and CI.
 
 use super::common::Ticks;
-use super::{GpuAdapter, GpuSample};
+use super::{DiskDrive, GpuAdapter, GpuSample};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -156,6 +156,29 @@ pub fn disk_rates(prev: &HashMap<u64, DiskCounters>, cur: &HashMap<u64, DiskCoun
     (pct, rd as f64 / secs, wr as f64 / secs)
 }
 
+/// Each disk of `cur` on its own, measured as in [`disk_rates`]. In registry-ID order, which is
+/// the order they were attached in, and named "Disk 0", "Disk 1" by it; a disk not in `prev` is
+/// listed at zero. Models are the caller's to fill in.
+pub fn disk_drives(prev: &HashMap<u64, DiskCounters>, cur: &HashMap<u64, DiskCounters>, dt: Duration) -> Vec<DiskDrive> {
+    let secs = dt.as_secs_f64().max(1e-3);
+    let mut ids: Vec<&u64> = cur.keys().collect();
+    ids.sort();
+    ids.into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let name = format!("Disk {i}");
+            let mut d = DiskDrive { id: id.to_string(), title: name.clone(), name, ..Default::default() };
+            if let Some(p) = prev.get(id) {
+                let c = &cur[id];
+                d.read_bps = c.read_bytes.saturating_sub(p.read_bytes) as f64 / secs;
+                d.write_bps = c.write_bytes.saturating_sub(p.write_bytes) as f64 / secs;
+                d.active_pct = (c.busy_ns.saturating_sub(p.busy_ns) as f64 / 1e9 / secs * 100.0).clamp(0.0, 100.0) as f32;
+            }
+            d
+        })
+        .collect()
+}
+
 /// One IOAccelerator's "PerformanceStatistics": "Device Utilization %", "vramUsedBytes"
 /// (discrete GPUs) and "In use system memory" (Apple Silicon, unified memory).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -295,6 +318,12 @@ mod tests {
         assert!((act - 75.0).abs() < 1e-4, "{act}");
         assert_eq!((r, w), (2000.0, 1000.0));
         assert_eq!(disk_rates(&prev, &HashMap::new(), Duration::from_secs(1)), (0.0, 0.0, 0.0));
+        // The same readings, each disk on its own: in ID order, the new disk 4 at zero.
+        let drives = disk_drives(&prev, &cur, Duration::from_secs(1));
+        let got: Vec<(&str, &str, f32, f64, f64)> = drives.iter().map(|d| (d.id.as_str(), d.name.as_str(), d.active_pct, d.read_bps, d.write_bps)).collect();
+        assert_eq!(got, [("1", "Disk 0", 50.0, 2000.0, 1000.0), ("2", "Disk 1", 100.0, 0.0, 0.0), ("4", "Disk 2", 0.0, 0.0, 0.0)]);
+        assert!(drives.iter().all(|d| d.title == d.name && d.model.is_empty()));
+        assert!(disk_drives(&prev, &HashMap::new(), Duration::from_secs(1)).is_empty());
     }
 
     #[test]

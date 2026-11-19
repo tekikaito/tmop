@@ -45,6 +45,9 @@ fn dump() {
         println!("Swap     {:?} / {:?} bytes  commit {:?} / {:?}", s.memory.swap_used, s.memory.swap_total, s.memory.commit_used, s.memory.commit_limit);
     }
     println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
+    for d in &s.disk.drives {
+        println!("  {}  [{}]  {:5.1}%  read {:.0} B/s  write {:.0} B/s", d.title, d.model, d.active_pct, d.read_bps, d.write_bps);
+    }
     println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
     println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
     for (i, a) in s.gpu.adapters.iter().enumerate() {
