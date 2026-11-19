@@ -1,6 +1,6 @@
 //! Connections page: TCP and UDP endpoints.
 
-use super::kit::{self, empty_state, stat_tile};
+use super::kit::{empty_state, stat_tile};
 use super::pro_pages::{page_layout, tile_rects, toolbar};
 use super::table::{self, cmp_str, Cell, Col};
 use super::theme::{self, lighten};
@@ -39,7 +39,7 @@ impl App {
             if let Some(i) = widgets::segmented(ui, &VIEWS, self.pro.conns_view, &pal, false) {
                 self.pro.conns_view = i;
             }
-            kit::filter_box(ui, &mut self.pro.conns_table.filter, "Filter by process, address, port or state", 280.0, &pal);
+            widgets::search_box(ui, &mut self.pro.conns_table.filter, "Filter by process, address, port or state", 280.0, &pal);
         });
         if refresh || self.pro.conns.stale(Duration::from_secs(3)) {
             self.pro.conns.start(crate::pro::connections::read);
@@ -143,10 +143,10 @@ impl App {
         let cols = [
             Col::text("Process", 220.0),
             Col::num("PID", 70.0),
-            Col::text("Protocol", 80.0),
+            Col::text("Protocol", 80.0).rigid(),
             Col::text("Local address", 230.0),
             Col::text("Remote address", 250.0),
-            Col::text("State", 120.0),
+            Col::text("State", 120.0).rigid(),
             Col::text("Scope", 120.0),
         ];
         let key = |i: usize| {

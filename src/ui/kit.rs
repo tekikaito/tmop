@@ -1,12 +1,11 @@
 //! Layout pieces shared by the pages: section cards, stat tiles, key/value grids, code boxes,
-//! dialogs and menus, header toolbars and simple row/column splitting.
+//! dialogs and menus, and simple row/column splitting.
 
 use super::hardware::{self, Hardware};
 use super::theme::{self, with_alpha, Palette};
-use super::widgets::{self, card, led_panel, led_row, tracked_text, Button, ButtonKind, ButtonSize, Icon, LedStyle, LED_PANEL_H};
+use super::widgets::{self, card, tracked_text, Button, ButtonKind, ButtonSize, Icon};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, Sense, Stroke};
 
-pub const MARGIN: f32 = 12.0;
 pub const GAP: f32 = 10.0;
 
 /// Splits `rect` horizontally into parts proportional to `weights`.
@@ -42,72 +41,48 @@ pub fn vsplit(rect: Rect, heights: &[f32], gap: f32) -> Vec<Rect> {
         .collect()
 }
 
-/// Card with a dot-matrix title strip. Returns the content rect below the strip.
-pub fn titled_card(p: &egui::Painter, rect: Rect, pal: &Palette, bloom: f32, title: &str, right: &str) -> Rect {
-    card(p, rect, pal);
-    let inner = rect.shrink(8.0);
-    led_panel(p, Rect::from_min_size(inner.min, vec2(inner.width(), LED_PANEL_H)), &title.to_uppercase(), &right.to_uppercase(), pal, bloom);
-    Rect::from_min_max(pos2(inner.left(), inner.top() + LED_PANEL_H + 8.0), inner.max)
-}
-
-/// Stat card: dot-matrix title, big value, a dim sub line and an optional LED bar.
-#[allow(clippy::too_many_arguments)]
-pub fn stat_card(p: &egui::Painter, rect: Rect, pal: &Palette, bloom: f32, title: &str, value: &str, sub: &str, color: Color32, frac: Option<f32>) {
-    let body = titled_card(p, rect, pal, bloom, title, "");
-    let clip = p.with_clip_rect(body);
-    clip.text(pos2(body.left() + 2.0, body.top() + 2.0), Align2::LEFT_TOP, value, theme::display(20.0), color);
-    if bloom > 0.0 {
-        clip.text(pos2(body.left() + 2.0, body.top() + 2.0), Align2::LEFT_TOP, value, theme::display(20.0), with_alpha(color, 0.10 * bloom));
-    }
-    clip.text(pos2(body.left() + 2.0, body.top() + 34.0), Align2::LEFT_TOP, sub, theme::ui(12.0), pal.text_dim);
-    if let Some(f) = frac {
-        let bar = Rect::from_min_max(pos2(body.left(), body.bottom() - 12.0), pos2(body.right(), body.bottom()));
-        let segs = ((bar.width() / 9.0).floor() as usize).clamp(8, 80);
-        led_row(p, bar, segs, f, &LedStyle { unlit_factor: 0.18, rim: false, rounding: 1.0, ..LedStyle::new(color, bloom) });
-    }
-}
-
-/// Lays out a row of stat tiles from `(title, value, sub, colour, bar fraction)`: the colour tints the bar.
-pub fn stat_row(p: &egui::Painter, rect: Rect, pal: &Palette, _bloom: f32, cards: &[(String, String, String, Color32, Option<f32>)]) {
-    let w: Vec<f32> = vec![1.0; cards.len()];
-    for (r, (t, v, s, c, f)) in hsplit(rect, &w, STAT_GAP).into_iter().zip(cards) {
-        stat_tile(p, r, pal, t, v, s, f.map(|f| (f, *c)), None);
-    }
-}
-
-/// Right-aligned toolbar area on the page header row.
-pub fn header_toolbar<R>(ui: &mut egui::Ui, body: Rect, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let r = Rect::from_min_max(pos2(body.right() - width, body.top() - super::HEADER_H + 14.0), pos2(body.right() - 16.0, body.top() - 14.0));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(r).layout(Layout::right_to_left(Align::Center)), add).inner
-}
-
 /// Interactive child UI in `rect` (left-to-right).
 pub fn row_ui<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
 }
 
-/// Centered hint text (empty states, loading).
+/// Hint text in the middle of `rect` (empty states, loading). Every line is centred on its own,
+/// so a second line reads as the explanation of the first, and a text wider than `rect` wraps
+/// inside it instead of running over its neighbours.
 pub fn empty_state(p: &egui::Painter, rect: Rect, pal: &Palette, text: &str) {
-    p.text(rect.center(), Align2::CENTER_CENTER, text, theme::ui(13.0), pal.text_faint);
-}
-
-/// Label/value grid inside `rect`; returns the bottom y.
-pub fn kv_list(p: &egui::Painter, rect: Rect, pal: &Palette, items: &[(String, String)], label_w: f32, row_h: f32) -> f32 {
-    let mut y = rect.top();
-    for (k, v) in items {
-        if y + row_h > rect.bottom() + 1.0 {
-            break;
-        }
-        super::widgets::text_fit(p, pos2(rect.left(), y + row_h / 2.0), Align2::LEFT_CENTER, &format!("{k}:"), theme::ui(12.0), pal.text_dim, label_w - 8.0);
-        let clip = p.with_clip_rect(Rect::from_min_max(pos2(rect.left() + label_w, y), pos2(rect.right(), y + row_h)));
-        clip.text(pos2(rect.left() + label_w, y + row_h / 2.0), Align2::LEFT_CENTER, v, theme::ui(12.0), pal.text);
-        y += row_h;
-    }
-    y
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), theme::ui(13.0), pal.text_faint, rect.width().max(120.0));
+    job.halign = Align::Center;
+    let galley = p.layout_job(job);
+    // A centred galley is laid out around x = 0.
+    p.galley(pos2(rect.center().x, rect.center().y - galley.size().y / 2.0), galley, pal.text_faint);
 }
 
 /// Opens a folder (or selects a file) in the file manager (Explorer, Finder, FileManager1).
 pub use crate::platform::reveal;
+
+/// [`reveal`] for the places that have nothing to do with a failure but tell the user: it goes
+/// to the status bar ([`report`]) instead of being dropped, so "Open file location" never just
+/// does nothing.
+pub fn reveal_or_report(ctx: &egui::Context, path: &std::path::Path) {
+    if let Err(e) = reveal(path) {
+        report(ctx, format!("Could not open {}: {e}", path.display()));
+    }
+}
+
+fn report_id() -> egui::Id {
+    egui::Id::unique("tmop-status-report")
+}
+
+/// Hands `message` to the status bar from code that draws a part of a page and has no access to
+/// the app; the app shows it at the end of the frame ([`take_report`]). The latest one wins.
+pub fn report(ctx: &egui::Context, message: String) {
+    ctx.data_mut(|d| d.insert_temp(report_id(), message));
+}
+
+/// The message last [`report`]ed, once.
+pub fn take_report(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|d| d.remove_temp::<String>(report_id()))
+}
 
 /// What a [`file_dialog`] asks for.
 #[derive(Clone, Debug)]
@@ -230,11 +205,21 @@ pub const STAT_GAP: f32 = 12.0;
 /// Height of a stat tile.
 pub const STAT_TILE_H: f32 = 96.0;
 
+/// Font size and letter-spacing (em) of a [`section_card`] heading.
+const SECTION_TITLE_SIZE: f32 = 11.0;
+const SECTION_TITLE_TRACKING: f32 = 0.16;
+
+/// Width of the heading [`section_card`] draws for `title`, for a page that puts something else
+/// on the heading row (a legend) and must keep the two apart.
+pub fn section_title_width(p: &egui::Painter, title: &str) -> f32 {
+    widgets::tracked_width(p, &title.to_uppercase(), theme::semibold(SECTION_TITLE_SIZE), SECTION_TITLE_TRACKING)
+}
+
 /// Card with a section heading (11 px Medium, uppercase, 0.16 em, faint) and an optional mono
 /// `right` text. Returns the content rect below the 22 px heading row (padding 18 / 22).
 pub fn section_card(p: &egui::Painter, rect: Rect, pal: &Palette, title: &str, right: &str) -> Rect {
     card(p, rect, pal);
-    tracked_text(p, pos2(rect.left() + 22.0, rect.top() + 18.0), Align2::LEFT_TOP, &title.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.16);
+    tracked_text(p, pos2(rect.left() + 22.0, rect.top() + 18.0), Align2::LEFT_TOP, &title.to_uppercase(), theme::semibold(SECTION_TITLE_SIZE), pal.text_faint, SECTION_TITLE_TRACKING);
     if !right.is_empty() {
         let clip = p.with_clip_rect(rect.shrink(2.0));
         clip.text(pos2(rect.right() - 22.0, rect.top() + 18.0), Align2::RIGHT_TOP, right, theme::mono(12.0), pal.text_faint);
@@ -319,9 +304,11 @@ pub fn tile_strip(p: &egui::Painter, rect: Rect, pal: &Palette, n: usize) -> Vec
         .collect()
 }
 
-/// Filter field: 36 px high with a magnifier and a hint (see [`widgets::search_box`]).
-pub fn filter_box(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
-    widgets::search_box(ui, text, hint, width, pal)
+/// Width of the label column of a [`kv_grid`] that shows every one of `labels` in full: the
+/// widest label and the 8 px gap, at least `min` and at most `max` (longer labels are shortened).
+pub fn kv_label_width<'a>(p: &egui::Painter, labels: impl Iterator<Item = &'a str>, min: f32, max: f32) -> f32 {
+    let widest = labels.map(|l| widgets::text_width(p, l, theme::ui(13.0))).fold(0.0_f32, f32::max);
+    (widest.ceil() + 8.0).max(min).min(max.max(min))
 }
 
 /// Label / value grid inside `rect` for the design's `dl` lists: dim labels `label_w` wide, values
@@ -386,6 +373,8 @@ pub fn floating_bar<R>(ui: &egui::Ui, anchor: Rect, id: impl std::hash::Hash + s
 /// A modal-looking dialog window (560 px wide, centred, no title bar, glass fill). `add` draws
 /// the content: [`dialog_header`], [`fact_box`], then [`dialog_buttons`].
 pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
+    let frame_nr = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| d.insert_temp(dialog_frame_id(), frame_nr));
     let frame = widgets::stroke_outside(egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin { left: 28, right: 28, top: 28, bottom: 24 }).corner_radius(10));
     egui::Window::new("")
         .id(egui::Id::unique(("dialog", id)))
@@ -399,6 +388,17 @@ pub fn dialog<R>(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug
             add(ui)
         })
         .and_then(|r| r.inner)
+}
+
+fn dialog_frame_id() -> egui::Id {
+    egui::Id::unique("tmop-dialog-frame")
+}
+
+/// Whether a [`dialog`] is showing: one was drawn this frame or the one before (dialogs are drawn
+/// after the pages, so a page asks about the previous frame). While one is, the page behind it
+/// leaves the keyboard alone.
+pub fn dialog_open(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<u64>(dialog_frame_id())).is_some_and(|shown| ctx.cumulative_frame_nr() <= shown + 1)
 }
 
 /// Dialog heading: an optional 48 px tinted icon box, the title in Light 22 (text between `**`
@@ -611,7 +611,7 @@ mod tests {
             ctx.run_ui(egui::RawInput::default(), |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     assert!(!code_box(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 70.0)), &pal, "Path", "svchost.exe -k netsvcs"));
-                    let r = filter_box(ui, &mut filter, "Filter", 220.0, &pal);
+                    let r = widgets::search_box(ui, &mut filter, "Filter", 220.0, &pal);
                     assert!((r.rect.height() - 20.0).abs() < 40.0);
                     assert!(!menu_item(ui, "End task", Some("Del"), true));
                     menu_header(ui, "chrome.exe \u{b7} PID 4821");
@@ -641,6 +641,17 @@ mod tests {
         assert!(waker.join().unwrap().is_ok());
     }
 
+    /// A report reaches the app once; the latest one wins.
+    #[test]
+    fn a_report_is_taken_once() {
+        let ctx = egui::Context::default();
+        assert_eq!(take_report(&ctx), None);
+        report(&ctx, "first".into());
+        report(&ctx, "Could not open C:\\x: denied".into());
+        assert_eq!(take_report(&ctx).as_deref(), Some("Could not open C:\\x: denied"));
+        assert_eq!(take_report(&ctx), None);
+    }
+
     #[test]
     fn dialog_pieces_draw() {
         frame(|ctx, _| {
@@ -651,6 +662,7 @@ mod tests {
                 dialog_buttons(ui, &pal, &[DialogButton::Ghost("Cancel"), DialogButton::Secondary("End one"), DialogButton::Primary("Keep"), DialogButton::Danger("End all")])
             });
             assert_eq!(shown, Some(None));
+            assert!(dialog_open(ctx), "the pages see that a dialog is showing");
         });
     }
 }

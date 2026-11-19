@@ -571,7 +571,6 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         let cell = Rect::from_min_size(pos2(meters.left() + 8.0 + col as f32 * l.tile.x, meters.top() + 7.0 + row as f32 * l.tile.y), l.tile);
         let (acc, lit, unlit) = accent(skin, r.quadrant, opacity, &fd.metric_colors);
         let mut led = LedStyle::new(lit, bloom);
-        led.unlit_factor = 1.0;
         led.rim = true;
         led.rounding = 1.5;
         led.gap = 2.5;
@@ -844,7 +843,7 @@ fn led_bar(painter: &egui::Painter, bar: Rect, n: usize, frac: f32, style: &LedS
     if lit_n > 0 && style.bloom > 0.0 {
         let right = bar.left() + lit_n as f32 * (seg_w + style.gap) - style.gap;
         let span = Rect::from_min_max(bar.min, pos2(right, bar.bottom()));
-        let c = led_color_at(style, 0.0);
+        let c = style.color_at(0.0);
         painter.rect_filled(span.expand(5.0 * style.bloom), 5.0, with_alpha(c, 0.06 * style.bloom));
         painter.rect_filled(span.expand(2.5 * style.bloom), 3.0, with_alpha(c, 0.12 * style.bloom));
     }
@@ -852,7 +851,7 @@ fn led_bar(painter: &egui::Painter, bar: Rect, n: usize, frac: f32, style: &LedS
         let x0 = bar.left() + i as f32 * (seg_w + style.gap);
         let r = Rect::from_min_max(pos2(x0, bar.top()), pos2(x0 + seg_w, bar.bottom()));
         if i < lit_n {
-            let c = led_color_at(style, (i as f32 + 0.5) / n as f32);
+            let c = style.color_at((i as f32 + 0.5) / n as f32);
             painter.rect_filled(r, style.rounding, c);
             if style.rim && r.height() >= 4.0 {
                 painter.line_segment([pos2(r.left() + 1.0, r.top() + 0.5), pos2(r.right() - 1.0, r.top() + 0.5)], Stroke::new(1.0_f32, lighten(c, 0.45)));
@@ -895,24 +894,11 @@ fn draw_vertical(skin: &Skin, painter: &egui::Painter, cell: Rect, r: &Reading, 
             let y1 = col.bottom() - s as f32 * (seg_h + 2.0);
             let rr = Rect::from_min_max(pos2(col.left(), y1 - seg_h), pos2(col.right(), y1));
             let t = (s as f32 + 0.5) / segs as f32;
-            let color = if s < lit_n { led.positional.map(|_| led_color_at(led, t)).unwrap_or(lit) } else { unlit };
+            let color = if s < lit_n { led.positional.map(|_| led.color_at(t)).unwrap_or(lit) } else { unlit };
             painter.rect_filled(rr, 0.0, color);
         }
     }
     painter.text(pos2(well.center().x, inner.bottom()), Align2::CENTER_BOTTOM, &r.text, label_f.clone(), p.primary);
-}
-
-fn led_color_at(led: &LedStyle, t: f32) -> Color32 {
-    match led.positional {
-        Some([a, b, c]) => {
-            if t < 0.5 {
-                mix(a, b, t * 2.0)
-            } else {
-                mix(b, c, (t - 0.5) * 2.0)
-            }
-        }
-        None => led.lit,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

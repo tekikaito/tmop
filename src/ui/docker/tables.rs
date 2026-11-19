@@ -32,7 +32,7 @@ const PRIORITY_NETWORKS: [usize; 6] = [0, 4, 1, 3, 2, 5];
 
 const COLS_CONTAINERS: [Col; 9] = [
     Col::text("Name", 160.0),
-    Col::text("State", 90.0),
+    Col::text("State", 90.0).rigid(),
     Col::text("Image", 170.0),
     Col::num("CPU %", 60.0),
     Col::num("Memory", 80.0),

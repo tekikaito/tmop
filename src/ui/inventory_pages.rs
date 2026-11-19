@@ -1,12 +1,13 @@
 //! Inventory pages: System Info, App history, Startup apps, Users and
 //! Services.
 
-use super::drivers_page::{driver_like_page, page_area, InfoCache};
+use super::drivers_page::{driver_like_page, InfoCache};
 use super::hardware::{self, Hardware};
-use super::kit::{self, category_color, empty_state, filter_box, header_toolbar, section_card, StatTile, STAT_GAP, STAT_TILE_H};
+use super::kit::{self, category_color, empty_state, section_card, StatTile, STAT_GAP, STAT_TILE_H};
+use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_f, cmp_str, Cell, Col, TableState};
 use super::theme;
-use super::widgets::{self, Button};
+use super::widgets::{self, Button, Icon};
 use super::{App, FrameData, Page};
 use crate::metrics::Series;
 use crate::pro::inventory::{keys, Sections, StartupApp};
@@ -23,6 +24,8 @@ const BLOCK_GAP: f32 = 16.0;
 const CARD_GAP: f32 = 14.0;
 /// Narrowest System Info card; the page has as many columns as fit.
 const CARD_MIN_W: f32 = 300.0;
+/// Least width of the label column of a System Info card.
+const KV_LABEL_W: f32 = 130.0;
 
 pub struct InventoryState {
     pub sysinfo: Loader<Sections>,
@@ -249,15 +252,15 @@ impl App {
         let body = self.page_title(ui, &pal, "System Info", &subtitle(&[computer.clone(), read, Page::SystemInfo.shortcut().into()]));
         let mut refresh = false;
         let mut copy = false;
-        header_toolbar(ui, body, 240.0, |ui| {
+        let (tools, area) = page_layout(body, 230.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             copy = Button::ghost("Copy report").show(ui, &pal).clicked();
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
         });
         let inv = &mut self.pro.inv;
         if refresh || (inv.sysinfo.get().is_none() && !inv.sysinfo.is_loading()) {
             inv.sysinfo.start(crate::pro::inventory::system_info);
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let Some(sections) = sections.as_ref() else {
             empty_state(&p, area, &pal, inv.sysinfo.error().unwrap_or("Reading system information\u{2026}"));
@@ -306,14 +309,17 @@ impl App {
                             (k.clone(), v.clone(), is_mono(title, k), good.then_some(st.ok))
                         })
                         .collect();
+                    // The label column is as wide as the card's longest label needs ("Domain /
+                    // workgroup"), within bounds: adapter names are labels too.
+                    let label_w = kit::kv_label_width(&p, rows.iter().map(|row| row.0.as_str()), KV_LABEL_W, content.width() * 0.45);
                     if *title == keys::DEVICE {
                         hardware::draw(&p, Rect::from_min_size(pos2(r.right() - 22.0 - 96.0, r.top() + 14.0), vec2(96.0, 64.0)), Hardware::Mainboard, pal.text_rail());
                         // The first rows sit beside the drawing.
                         let near = rows.len().min(2);
-                        let y = kit::kv_grid(&p, Rect::from_min_max(content.min, pos2(content.right() - 108.0, content.bottom())), &pal, &rows[..near], 130.0, 22.0);
-                        kit::kv_grid(&p, Rect::from_min_max(pos2(content.left(), y), content.max), &pal, &rows[near..], 130.0, 22.0);
+                        let y = kit::kv_grid(&p, Rect::from_min_max(content.min, pos2(content.right() - 108.0, content.bottom())), &pal, &rows[..near], label_w, 22.0);
+                        kit::kv_grid(&p, Rect::from_min_max(pos2(content.left(), y), content.max), &pal, &rows[near..], label_w, 22.0);
                     } else {
-                        kit::kv_grid(&p, content, &pal, &rows, 130.0, 22.0);
+                        kit::kv_grid(&p, content, &pal, &rows, label_w, 22.0);
                     }
                 }
             });
@@ -324,14 +330,14 @@ impl App {
         let pal = fd.pal;
         let body = self.page_title(ui, &pal, "App history", &subtitle(&["resource use since TMOP started".into(), Page::AppHistory.shortcut().into()]));
         let mut reset = false;
-        header_toolbar(ui, body, 290.0, |ui| {
+        let (tools, area) = page_layout(body, 290.0);
+        toolbar(ui, tools, |ui| {
             reset = Button::new("Reset").show(ui, &pal).clicked();
-            filter_box(ui, &mut self.pro.inv.history_table.filter, "Filter by name", 200.0, &pal);
+            widgets::search_box(ui, &mut self.pro.inv.history_table.filter, "Filter by name", 200.0, &pal);
         });
         if reset {
             self.pro.inv.history.reset();
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let h = &self.pro.inv.history;
         let list: Vec<HistoryEntry> = h.apps.values().cloned().collect();
@@ -413,15 +419,15 @@ impl App {
         let boot = format!("last boot {}", boot_label(crate::platform::local_time(), fd.snap.uptime));
         let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, Page::StartupApps.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 320.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
-            filter_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
+        let (tools, area) = page_layout(body, 340.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
+            widgets::search_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
         });
         let inv = &mut self.pro.inv;
         if refresh || (inv.startup.get().is_none() && !inv.startup.is_loading()) {
             inv.startup.start(crate::pro::inventory::startup_apps);
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let st = theme::status(&pal);
         let list: &[StartupApp] = inv.startup.ok().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -450,7 +456,7 @@ impl App {
             3 => a.location.cmp(&b.location),
             _ => cmp_str(&a.command, &b.command),
         });
-        let cols = [Col::text("Name", 240.0), Col::text("Publisher", 220.0), Col::text("Status", 110.0), Col::text("Location", 220.0), Col::text("Command", 500.0)];
+        let cols = [Col::text("Name", 240.0), Col::text("Publisher", 220.0), Col::text("Status", 110.0).rigid(), Col::text("Location", 220.0), Col::text("Command", 500.0)];
         let windir = std::env::var("windir").unwrap_or_default().to_lowercase();
         let key = |i: usize| format!("{}|{}", list[i].location, list[i].name);
         let cell = |i: usize, col: usize| -> Cell {
@@ -488,11 +494,11 @@ impl App {
         let rows_word = if sessions { "sessions" } else { "accounts" };
         let body = self.page_title(ui, &pal, "Users", &subtitle(&[format!("{} {rows_word}", list.len()), Page::Users.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 100.0, |ui| refresh = Button::new("Refresh").show(ui, &pal).clicked());
+        let (tools, area) = page_layout(body, 110.0);
+        toolbar(ui, tools, |ui| refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked());
         if refresh {
             self.sampler.refresh();
         }
-        let area = page_area(body);
         let p = ui.painter().clone();
         let interactive = list.iter().filter(|u| u.is_active()).count();
         let top = list.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu));
@@ -528,7 +534,9 @@ impl App {
         let table_bottom = if shown.is_some() { area.bottom() - card_h - BLOCK_GAP } else { area.bottom() };
         let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), pos2(area.right(), table_bottom.max(area.top() + used + BLOCK_GAP + 120.0)));
 
-        let all_cols = [Col::text("User", 280.0), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
+        // With full account names, a name that differs from its short form shows below it.
+        let two_line = full && list.iter().any(|u| short_account(&u.user) != u.user);
+        let all_cols = [Col::text("User", 280.0).two_line(two_line), Col::num("Session", 80.0), Col::num("Processes", 90.0), Col::num("CPU", 80.0), Col::num("Memory", 100.0), Col::num("Disk", 100.0), Col::spark("CPU \u{b7} 60s", 120.0), Col::text("Status", 180.0)];
         let cols: Vec<Col> = all_cols.into_iter().enumerate().filter(|(n, _)| sessions || *n != 1).map(|(_, c)| c).collect();
         let spark_color = pal.accent;
         let cell = |i: usize, col: usize| -> Cell {
@@ -588,16 +596,17 @@ impl App {
         let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
         let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
         let mut refresh = false;
-        header_toolbar(ui, body, 320.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
-            filter_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
+        let (tools, area) = page_layout(body, 320.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
+            widgets::search_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
         });
         let inv = &mut self.pro.inv;
         if refresh || inv.services.stale(Duration::from_secs(15)) {
             inv.services.start(crate::pro::inventory::services);
         }
         let list: &[crate::pro::inventory::Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
-        let open = driver_like_page(ui, page_area(body), fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info);
+        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info);
         if let Some(sel) = open {
             self.selected = Some(sel);
             self.page = Page::Processes;

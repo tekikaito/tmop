@@ -142,7 +142,7 @@ fn system_account(os: Os, user: Option<&str>) -> bool {
 /// Folders of the operating system's own programs: `%SystemRoot%` (lower case) on Windows.
 fn os_roots(os: Os) -> Vec<String> {
     match os {
-        Os::Windows => vec![std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()).trim_end_matches('\\').to_lowercase()],
+        Os::Windows => vec![crate::platform::system_root().trim_end_matches('\\').to_lowercase()],
         Os::Linux => ["/usr/lib/systemd", "/lib/systemd", "/usr/libexec", "/usr/sbin", "/sbin"].map(String::from).to_vec(),
         Os::MacOs => ["/System", "/usr/libexec", "/usr/sbin", "/sbin"].map(String::from).to_vec(),
         Os::Other => Vec::new(),

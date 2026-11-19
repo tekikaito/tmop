@@ -41,7 +41,7 @@ use crate::pro::{bench::Bench, recorder::Recorder};
 use crate::process::{Column, ProcessRow};
 use crate::settings::{self, Settings};
 use crate::skin::{self, SkinCatalog};
-use eframe::egui::{self, Color32, Key, Sense, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
+use eframe::egui::{self, Color32, Key, Sense, ViewportBuilder, ViewportCommand, ViewportId};
 use std::time::{Duration, Instant};
 use theme::{MetricColors, Palette};
 use widgets::{Graph, GraphLine, Icon};
@@ -223,22 +223,25 @@ impl Page {
             Page::Settings => "Settings",
         }
     }
-    /// Keyboard shortcut of the page (empty when it has none).
+    /// The pages with a keyboard shortcut: the key that opens the page when pressed with Ctrl
+    /// (Cmd on macOS), and how the shortcut reads in tooltips and subtitles.
+    pub const SHORTCUTS: [(Page, Key, &'static str); 11] = [
+        (Page::Summary, Key::Num1, "Ctrl+1"),
+        (Page::Performance, Key::Num2, "Ctrl+2"),
+        (Page::Processes, Key::Num3, "Ctrl+3"),
+        (Page::SystemInfo, Key::Num4, "Ctrl+4"),
+        (Page::AppHistory, Key::Num5, "Ctrl+5"),
+        (Page::StartupApps, Key::Num6, "Ctrl+6"),
+        (Page::Users, Key::Num7, "Ctrl+7"),
+        (Page::Services, Key::Num8, "Ctrl+8"),
+        (Page::Benchmarks, Key::Num9, "Ctrl+9"),
+        (Page::DiskSpace, Key::Num0, "Ctrl+0"),
+        (Page::Settings, Key::Comma, "Ctrl+,"),
+    ];
+
+    /// Keyboard shortcut of the page as text (empty when it has none).
     pub fn shortcut(self) -> &'static str {
-        match self {
-            Page::Summary => "Ctrl+1",
-            Page::Performance => "Ctrl+2",
-            Page::Processes => "Ctrl+3",
-            Page::SystemInfo => "Ctrl+4",
-            Page::AppHistory => "Ctrl+5",
-            Page::StartupApps => "Ctrl+6",
-            Page::Users => "Ctrl+7",
-            Page::Services => "Ctrl+8",
-            Page::Benchmarks => "Ctrl+9",
-            Page::DiskSpace => "Ctrl+0",
-            Page::Settings => "Ctrl+,",
-            _ => "",
-        }
+        Page::SHORTCUTS.iter().find(|(p, ..)| *p == self).map_or("", |(_, _, text)| text)
     }
 }
 
@@ -275,17 +278,6 @@ impl Device {
             Device::Gpu => "GPU",
             Device::Thermal => "Thermals",
             Device::Docker => "Docker",
-        }
-    }
-    pub fn icon(self) -> Icon {
-        match self {
-            Device::Cpu => Icon::Cpu,
-            Device::Memory => Icon::Memory,
-            Device::Disk => Icon::Disk,
-            Device::Network => Icon::Network,
-            Device::Gpu => Icon::Gpu,
-            Device::Thermal => Icon::Thermal,
-            Device::Docker => Icon::Container,
         }
     }
 }
@@ -416,8 +408,9 @@ pub struct App {
     focus_search: bool,
     pub status: String,
     applied_top: Option<bool>,
-    /// The OS light/dark theme egui reports (winit), read every frame.
-    system_theme: Option<egui::Theme>,
+    /// Whether the OS uses dark mode ([`dark_light_system`]): asked once per frame, then shared
+    /// by that frame's palette lookups (on Windows each ask is a registry read).
+    system_dark: Option<bool>,
     /// TMOP draws the title bar, window buttons and resize edges (see
     /// [`crate::platform::desktop::own_title_bar`]).
     pub own_title_bar: bool,
@@ -491,7 +484,7 @@ impl App {
             o.sync_window_theme = false;
         });
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
-        let app = Self {
+        let mut app = Self {
             caps,
             docker,
             perf_docker: performance::DockerPerfCache::default(),
@@ -517,7 +510,7 @@ impl App {
             focus_search: false,
             status,
             applied_top: None,
-            system_theme: cc.egui_ctx.system_theme(),
+            system_dark: dark_light_system(cc.egui_ctx.system_theme()),
             own_title_bar: !popout_only && crate::platform::desktop::own_title_bar(),
             applied_pal: None,
             display_font,
@@ -539,7 +532,6 @@ impl App {
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
         };
-        let mut app = app;
         if !popout_only {
             crate::update::remove_leftover();
             app.updates.check_on_start(&app.settings.general);
@@ -597,7 +589,7 @@ impl App {
         if id != palette::SYSTEM && self.palettes.get(id).is_some() {
             return id.clone();
         }
-        if matches!(dark_light_system(self.system_theme), Some(true)) { "dark" } else { "light" }.into()
+        if self.system_dark == Some(true) { "dark" } else { "light" }.into()
     }
 
     /// The palette in use, with `appearance.accent` applied.
@@ -675,25 +667,8 @@ impl App {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let mut go = None;
         ctx.input(|i| {
-            if i.modifiers.ctrl || i.modifiers.command {
-                for (k, p) in [
-                    (Key::Num1, Page::Summary),
-                    (Key::Num2, Page::Performance),
-                    (Key::Num3, Page::Processes),
-                    (Key::Num4, Page::SystemInfo),
-                    (Key::Num5, Page::AppHistory),
-                    (Key::Num6, Page::StartupApps),
-                    (Key::Num7, Page::Users),
-                    (Key::Num8, Page::Services),
-                    (Key::Num9, Page::Benchmarks),
-                    (Key::Num0, Page::DiskSpace),
-                    (Key::Comma, Page::Settings),
-                ] {
-                    if i.key_pressed(k) {
-                        go = Some(p);
-                    }
-                }
-            }
+            // A page this OS does not have keeps its key unused rather than landing on Summary.
+            go = Page::SHORTCUTS.iter().filter(|(p, ..)| p.supported(&self.caps)).find(|(_, k, _)| ctrl_pressed(i, *k)).map(|(p, ..)| *p);
             if i.key_pressed(Key::F5) {
                 self.sampler.refresh();
             }
@@ -725,7 +700,7 @@ impl App {
 
     fn popout_viewport(&mut self, ctx: &egui::Context, fd: &FrameData<'_>) {
         let skin = self.current_skin();
-        let level = match self.popout_mode().as_str() {
+        let level = match self.settings.popout.mode.as_str() {
             _ if !self.caps.window_levels => egui::WindowLevel::Normal,
             "desktop" => egui::WindowLevel::AlwaysOnBottom,
             "normal" => egui::WindowLevel::Normal,
@@ -744,7 +719,7 @@ impl App {
             builder = builder.with_icon(icon);
         }
         let close = ctx.show_viewport_immediate(ViewportId::from_hash_of("tmop-popout"), builder, |ui, _class| {
-            let c = self.popout_ui(ui, fd);
+            let c = self.popout_ui(ui, fd, &skin);
             c || ui.input(|i| i.viewport().close_requested())
         });
         if close {
@@ -752,33 +727,29 @@ impl App {
         }
     }
 
-    /// `popout.mode`: `off`, `desktop`, `normal` or `topMost`.
-    pub fn popout_mode(&self) -> String {
-        self.settings.popout.mode.clone()
-    }
-
-    /// Opens or closes the popout and records it in `popout.mode` (and `popout.lastMode`).
+    /// Opens or closes the popout and records it in `popout.mode` (`off`, `desktop`, `normal` or
+    /// `topMost`) and `popout.lastMode`.
     pub fn set_popout(&mut self, open: bool) {
         self.popout_open = open;
-        let mode = self.popout_mode();
-        let new_mode = match (open, mode.as_str()) {
+        let popout = &mut self.settings.popout;
+        let new_mode = match (open, popout.mode.as_str()) {
             (false, _) => "off".to_string(),
-            (true, "off") => self.settings.popout.last_mode.clone(),
+            (true, "off") => popout.last_mode.clone(),
             (true, m) => m.to_string(),
         };
         if new_mode != "off" {
-            self.settings.popout.last_mode = new_mode.clone();
+            popout.last_mode = new_mode.clone();
         }
-        if new_mode != mode {
-            self.settings.popout.mode = new_mode;
+        if new_mode != popout.mode {
+            popout.mode = new_mode;
             self.settings_dirty = true;
         }
     }
 
-    /// Draws the popout into `root` (the viewport's). Returns true when the user asked to close it.
-    fn popout_ui(&mut self, root: &mut egui::Ui, fd: &FrameData<'_>) -> bool {
+    /// Draws the popout with `skin` (see [`App::current_skin`]) into `root` (the viewport's).
+    /// Returns true when the user asked to close it.
+    fn popout_ui(&mut self, root: &mut egui::Ui, fd: &FrameData<'_>, skin: &skin::Skin) -> bool {
         let ctx = &root.ctx().clone();
-        let skin = self.current_skin();
         let mut close = false;
         let mut new_skin: Option<String> = None;
         let opacity_setting = self.settings.popout.opacity as f32;
@@ -789,7 +760,7 @@ impl App {
             let op = if self.settings.popout.opaque_on_hover && hovered { 1.0 } else { opacity_setting };
             // Registered before the chrome so the close/chevron/drag areas stay on top of it.
             let menu = ui.interact(rect, ui.scope_id().with("popout-menu"), Sense::click());
-            let ev = popout::draw(ui, rect, &skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
+            let ev = popout::draw(ui, rect, skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
             if ev.drag {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }
@@ -846,12 +817,20 @@ fn install_display_font(ctx: &egui::Context, name: &str) -> (String, bool) {
     (name.to_string(), missing)
 }
 
+/// Whether `key` went down with Ctrl (Cmd on macOS) held. The key event's own modifiers decide:
+/// the input's `modifiers` are those after the frame's last event, so a quick tap, a macro key or
+/// a remote session that presses and releases Ctrl within one frame would be missed by them.
+pub(crate) fn ctrl_pressed(i: &egui::InputState, key: Key) -> bool {
+    i.events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && (modifiers.ctrl || modifiers.command)))
+}
+
 /// `HH:MM:SS.cc` stopwatch text.
 pub fn fmt_clock(d: Duration) -> String {
     let t = d.as_secs();
     format!("{:02}:{:02}:{:02}.{:02}", (t / 3600) % 100, (t / 60) % 60, t % 60, d.subsec_millis() / 10)
 }
 
+/// `HH:MM:SS` of a duration, `D:HH:MM:SS` from one day on (up time, recording length).
 pub fn fmt_hms(d: Duration) -> String {
     let t = d.as_secs();
     if t >= 86400 {
@@ -982,9 +961,8 @@ impl App {
 
     fn update_inner(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
-        self.system_theme = ctx.system_theme();
+        self.system_dark = dark_light_system(ctx.system_theme());
         let pal = self.palette();
-        widgets::set_led_ground(if pal.dark { None } else { Some(pal.card) });
         widgets::set_ink(&pal);
         widgets::set_spark_smooth(self.settings.graphs.smooth_curves);
         widgets::set_spark_neutral(!self.settings.graphs.color_keyed);
@@ -1041,7 +1019,8 @@ impl App {
         let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: self.metric_colors(), bloom: self.bloom(), phase, glide: hf && interval.is_some(), time: ctx.input(|i| i.time), show_self: self.settings.general.show_self_in_reports, lasting, gpus_separated };
 
         if self.popout_only {
-            if self.popout_ui(root, &fd) {
+            let skin = self.current_skin();
+            if self.popout_ui(root, &fd, &skin) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         } else {
@@ -1093,6 +1072,10 @@ impl App {
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();
         }
+        // What a part of a page had to tell the user (a file manager that would not open).
+        if let Some(message) = kit::take_report(ctx) {
+            self.status = message;
+        }
         self.poll_palette_dialog();
         self.save_palette_edits(false);
         if self.settings_dirty {
@@ -1107,9 +1090,6 @@ impl App {
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: Vec2) {}
 
 #[cfg(test)]
 mod tests {
@@ -1126,6 +1106,39 @@ mod tests {
         let expect = [Page::Summary, Page::Performance, Page::Processes, Page::Docker, Page::AppHistory, Page::Users, Page::FlightRecorder, Page::DiskSpace, Page::Benchmarks];
         assert_eq!(shown, expect);
         assert!(Page::NAV.iter().all(|p| shown.contains(p) == p.supported(&fake)));
+    }
+
+    /// One table feeds the key handling and the shortcut texts: no page or key is in it twice.
+    #[test]
+    fn page_shortcuts_are_unique_and_named() {
+        let all = Page::SHORTCUTS;
+        for (i, (page, key, text)) in all.iter().enumerate() {
+            assert_eq!(page.shortcut(), *text);
+            assert!(text.starts_with("Ctrl+"), "{text}");
+            assert!(all[..i].iter().all(|(p, k, _)| p != page && k != key), "{text} is listed twice");
+        }
+        assert_eq!(Page::Docker.shortcut(), "", "a page without a shortcut has no text");
+    }
+
+    /// A shortcut whose Ctrl is already released when the frame ends still counts; the bare key
+    /// and the key's release do not.
+    #[test]
+    fn ctrl_shortcuts_go_by_the_key_events_modifiers() {
+        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        let seen = |events: Vec<egui::Event>| {
+            let ctx = egui::Context::default();
+            let mut hit = false;
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| hit = ui.input(|i| ctrl_pressed(i, Key::Num2))).drop_without_applying_deltas();
+            hit
+        };
+        let ctrl = egui::Modifiers::CTRL;
+        let none = egui::Modifiers::NONE;
+        let ctrl_up = key(Key::ControlLeft, false, none);
+        assert!(seen(vec![key(Key::Num2, true, ctrl), key(Key::Num2, false, ctrl), ctrl_up]), "Ctrl released within the frame");
+        assert!(seen(vec![key(Key::Num2, true, egui::Modifiers::COMMAND)]));
+        assert!(!seen(vec![key(Key::Num2, true, none)]), "the bare key");
+        assert!(!seen(vec![key(Key::Num2, false, ctrl)]), "a release is not a press");
+        assert!(!seen(vec![key(Key::Num3, true, ctrl)]));
     }
 
     #[test]

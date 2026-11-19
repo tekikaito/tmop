@@ -198,7 +198,7 @@ pub fn file_target(t: &Tree, idx: usize) -> Option<Target> {
 pub fn item_menu(ui: &mut egui::Ui, t: &Target, rules: Option<&Rules>, delete_safe: bool, out: &mut MenuOut) {
     out.want_rules = delete_safe;
     if ui.button(theme::button_text(format!("Show in {}", file_manager()))).clicked() {
-        let _ = kit::reveal(&t.path);
+        kit::reveal_or_report(ui.ctx(), &t.path);
         ui.close();
     }
     if ui.button(theme::button_text("Copy path")).clicked() {

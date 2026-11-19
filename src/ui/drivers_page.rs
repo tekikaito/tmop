@@ -4,10 +4,11 @@ mod service_info;
 
 pub use service_info::InfoCache;
 
-use super::kit::{self, empty_state, filter_box, header_toolbar, GAP};
+use super::kit::{self, empty_state, GAP};
+use super::pro_pages::{page_layout, toolbar};
 use super::table::{self, cmp_str, Cell, Col, TableState};
 use super::theme::{self};
-use super::widgets::{self, Button, ButtonSize};
+use super::widgets::{self, Button, ButtonSize, Icon};
 use super::{App, FrameData};
 use crate::platform::{Os, OS};
 use crate::pro::drivers::{self, Kind, Service};
@@ -22,11 +23,6 @@ const ASIDE_MIN_PAGE_W: f32 = 1100.0;
 /// Height of the selected-driver bar.
 const DRIVER_BAR_H: f32 = 62.0;
 
-/// The rect of a page body: inset to line up with the title (left) and the toolbar (right).
-pub(super) fn page_area(body: Rect) -> Rect {
-    Rect::from_min_max(pos2(body.left() + 12.0, body.top()), pos2(body.right() - 16.0, body.bottom()))
-}
-
 impl App {
     pub fn drivers_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
@@ -38,16 +34,17 @@ impl App {
         };
         let body = self.page_title(ui, &pal, drivers::DRIVERS_TITLE, &subtitle);
         let mut refresh = false;
-        header_toolbar(ui, body, 340.0, |ui| {
-            refresh = Button::new("Refresh").show(ui, &pal).clicked();
-            filter_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
+        let (tools, area) = page_layout(body, 360.0);
+        toolbar(ui, tools, |ui| {
+            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
+            widgets::search_box(ui, &mut self.pro.drivers_table.filter, "Filter by name, company or path", 240.0, &pal);
         });
         if refresh || (self.pro.drivers.get().is_none() && !self.pro.drivers.is_loading()) {
             self.pro.drivers.start(|| drivers::read(Kind::Drivers));
         }
         let list: &[Service] = self.pro.drivers.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let mut info = InfoCache::default();
-        driver_like_page(ui, page_area(body), fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info);
+        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info);
     }
 }
 
@@ -169,9 +166,9 @@ pub fn driver_like_page(
     });
     let h = headings(drivers);
     let cols: Vec<Col> = if drivers {
-        vec![Col::text(h[0], 170.0), Col::text(h[1], 280.0), Col::text(h[2], 100.0), Col::text(h[3], 90.0), Col::text(h[4], 100.0), Col::text(h[5], 200.0), Col::text(h[6], 150.0), Col::text(h[7], 320.0)]
+        vec![Col::text(h[0], 170.0), Col::text(h[1], 280.0), Col::text(h[2], 100.0).rigid(), Col::text(h[3], 90.0).rigid(), Col::text(h[4], 100.0), Col::text(h[5], 200.0), Col::text(h[6], 150.0), Col::text(h[7], 320.0)]
     } else {
-        vec![Col::text(h[0], 190.0), Col::text(h[1], 330.0), Col::text(h[2], 100.0), Col::text(h[3], 100.0), Col::text(h[4], 120.0), Col::num(h[5], 70.0), Col::text(h[6], 360.0)]
+        vec![Col::text(h[0], 190.0), Col::text(h[1], 330.0), Col::text(h[2], 100.0).rigid(), Col::text(h[3], 100.0).rigid(), Col::text(h[4], 120.0), Col::num(h[5], 70.0), Col::text(h[6], 360.0)]
     };
     let purple = theme::darken_for(pal, theme::PURPLE);
     let cell = |i: usize, col: usize| -> Cell {
@@ -205,7 +202,7 @@ pub fn driver_like_page(
     if let Some(i) = table::show(ui, table_rect, if drivers { "drivers-table" } else { "services-table" }, pal, &cols, &order, state, &key, &cell, icons) {
         let path = PathBuf::from(&list[i].path);
         if path.exists() {
-            let _ = kit::reveal(&path);
+            kit::reveal_or_report(ui.ctx(), &path);
         }
     }
 
@@ -252,7 +249,7 @@ fn driver_bar(ui: &mut egui::Ui, rect: Rect, pal: &theme::Palette, driver: Optio
         }
         let open = ui.add_enabled_ui(exists, |ui| Button::new("Open file location").size(ButtonSize::Medium).show(ui, pal).clicked()).inner;
         if open {
-            let _ = kit::reveal(Path::new(&s.path));
+            kit::reveal_or_report(ui.ctx(), Path::new(&s.path));
         }
     });
 }
@@ -285,11 +282,17 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
     let facts = info.get(&s.name, &s.path).clone();
     let mut goto = None;
 
-    // Heading: the display name in Light 20 and the service name in mono beside it.
+    // Heading: the display name in Light 20 and the service name in mono, beside it when both
+    // fit on one line and below it otherwise (the display name is what the user knows it by, so
+    // it is not the one to be cut short).
     let title = if s.display.is_empty() { &s.name } else { &s.display };
     let name_w = if title.eq_ignore_ascii_case(&s.name) { 0.0 } else { widgets::text_width(&p, &s.name, theme::mono(13.0)) + 10.0 };
-    let head = widgets::text_fit(&p, content.left_top(), Align2::LEFT_TOP, title, theme::light(20.0), pal.text, (content.width() - name_w).max(60.0));
-    if name_w > 0.0 {
+    let below = name_w > 0.0 && widgets::text_width(&p, title, theme::light(20.0)) + name_w > content.width();
+    let title_w = if below { content.width() } else { (content.width() - name_w).max(60.0) };
+    let mut head = widgets::text_fit(&p, content.left_top(), Align2::LEFT_TOP, title, theme::light(20.0), pal.text, title_w);
+    if below {
+        head = head.union(widgets::text_fit(&p, pos2(content.left(), head.bottom() + 2.0), Align2::LEFT_TOP, &s.name, theme::mono(13.0), pal.text_faint, content.width()));
+    } else if name_w > 0.0 {
         widgets::text_fit(&p, pos2(head.right() + 10.0, head.bottom() - 4.0), Align2::LEFT_BOTTOM, &s.name, theme::mono(13.0), pal.text_faint, (content.right() - head.right() - 10.0).max(20.0));
     }
 
@@ -360,7 +363,7 @@ fn service_panel(ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>, svc: Option<
     super::kit::row_ui(ui, actions, |ui| {
         let open = ui.add_enabled_ui(exists, |ui| Button::new("Open file location").show(ui, pal).clicked()).inner;
         if open {
-            let _ = kit::reveal(Path::new(&s.path));
+            kit::reveal_or_report(ui.ctx(), Path::new(&s.path));
         }
         if Button::ghost("Copy name").show(ui, pal).clicked() {
             ui.ctx().copy_text(s.name.clone());

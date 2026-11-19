@@ -1,9 +1,9 @@
 //! Custom-painted widgets: scrolling history graphs with compressed time, glow and
-//! smoothed curves; sparklines, rings and bars; segmented LED meters; dot-matrix LED panels;
+//! smoothed curves; sparklines, rings and bars; the LED style of the popout meters;
 //! cards; buttons, tabs and chips; toggles; icons.
 
 use super::hardware::Iso;
-use super::theme::{self, dim, lighten, mix, with_alpha, Palette};
+use super::theme::{self, lighten, mix, with_alpha, Palette};
 use crate::metrics::Series;
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2};
 use eframe::egui::epaint::CornerRadiusF32;
@@ -79,18 +79,6 @@ pub fn fill_vertical_gradient(painter: &egui::Painter, pts: &[Pos2], top: Color3
     painter.add(Shape::mesh(mesh));
 }
 
-/// Fills `rect` with a left-to-right gradient.
-pub fn fill_horizontal_gradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
-    let mut mesh = Mesh::default();
-    mesh.colored_vertex(rect.left_top(), left);
-    mesh.colored_vertex(rect.right_top(), right);
-    mesh.colored_vertex(rect.right_bottom(), right);
-    mesh.colored_vertex(rect.left_bottom(), left);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(Shape::mesh(mesh));
-}
-
 /// Glass card: rounded panel (radius 10) with a 1 px border.
 pub fn card(painter: &egui::Painter, rect: Rect, pal: &Palette) {
     painter.rect_filled(rect, 10.0, pal.card);
@@ -117,10 +105,6 @@ pub fn accent_card(painter: &egui::Painter, rect: Rect, pal: &Palette, accent: C
     painter.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(accent, 0.5)), egui::StrokeKind::Outside);
 }
 
-pub fn text(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, font: FontId, color: Color32) -> Rect {
-    painter.text(pos, anchor, s, font, color)
-}
-
 /// Single-line text truncated with an ellipsis to `max_w` points.
 pub fn text_fit(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, font: FontId, color: Color32, max_w: f32) -> Rect {
     let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat::simple(font, color));
@@ -128,6 +112,20 @@ pub fn text_fit(painter: &egui::Painter, pos: Pos2, anchor: Align2, s: &str, fon
     let galley = painter.layout_job(job);
     let rect = anchor.anchor_size(pos, galley.size());
     painter.galley(rect.min, galley, color);
+    rect
+}
+
+/// Text from `pos` (its top-left corner) wrapped at word boundaries to `max_w` points and at most
+/// `max_rows` lines; what does not fit ends in an ellipsis. With one row it is [`text_fit`].
+pub fn text_wrapped(painter: &egui::Painter, pos: Pos2, s: &str, font: FontId, color: Color32, max_w: f32, max_rows: usize) -> Rect {
+    if max_rows <= 1 {
+        return text_fit(painter, pos, Align2::LEFT_TOP, s, font, color, max_w);
+    }
+    let mut job = egui::text::LayoutJob::single_section(s.to_string(), egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping { max_width: max_w.max(8.0), max_rows, break_anywhere: false, overflow_character: Some('\u{2026}') };
+    let galley = painter.layout_job(job);
+    let rect = Rect::from_min_size(pos, galley.size());
+    painter.galley(pos, galley, color);
     rect
 }
 
@@ -475,11 +473,6 @@ pub fn eased(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, ta
     ctx.animate_value_with_time(egui::Id::unique(("tmop-eased-scale", id)), target, 0.5)
 }
 
-/// [`eased`] for a (low, high) range.
-pub fn eased_range(ctx: &egui::Context, id: impl std::hash::Hash + Copy + std::fmt::Debug, (lo, hi): (f32, f32)) -> (f32, f32) {
-    (eased(ctx, (id, 0u8), lo), eased(ctx, (id, 1u8), hi))
-}
-
 /// Number of compressed regions for a history multiplier (1, 3, 7, 15 -> 1..4).
 pub fn regions_for(multiplier: u32, compressed: bool) -> u32 {
     if !compressed {
@@ -688,14 +681,12 @@ fn cut_at_x(pts: &mut Vec<Pos2>, x_max: f32) {
 }
 
 // ---------------------------------------------------------------------------
-// LED meters
+// LED meter style (the popout skins draw the meters)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 pub struct LedStyle {
     pub lit: Color32,
-    /// Brightness of unlit segments relative to `lit` (0..1).
-    pub unlit_factor: f32,
     /// Colour by position (bottom/left, middle, top/right) instead of `lit`.
     pub positional: Option<[Color32; 3]>,
     pub bloom: f32,
@@ -707,14 +698,10 @@ pub struct LedStyle {
 
 impl LedStyle {
     pub fn new(lit: Color32, bloom: f32) -> Self {
-        Self { lit, unlit_factor: 0.22, positional: None, bloom, rounding: 1.5, gap: 2.0, rim: true }
+        Self { lit, positional: None, bloom, rounding: 1.5, gap: 2.0, rim: true }
     }
-    /// Green → yellow → red by position (CPU load meters). A severity ramp, so it keeps fixed
-    /// colours whatever the metric colours are.
-    pub fn traffic(bloom: f32) -> Self {
-        Self { positional: Some([theme::GREEN, theme::YELLOW, theme::RED]), ..Self::new(theme::GREEN, bloom) }
-    }
-    fn color_at(&self, t: f32) -> Color32 {
+    /// The colour at `t` (0..1 along the meter): `positional` blended low to high, else `lit`.
+    pub fn color_at(&self, t: f32) -> Color32 {
         match self.positional {
             Some([a, b, c]) => {
                 if t < 0.5 {
@@ -726,218 +713,6 @@ impl LedStyle {
             None => self.lit,
         }
     }
-}
-
-/// Background unlit LED segments blend into: 0 = black (dark theme), otherwise an
-/// RGBA-packed colour (light theme). Set once per frame by the app.
-static LED_GROUND: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-pub fn set_led_ground(ground: Option<Color32>) {
-    let v = ground.map(|c| u32::from_be_bytes([c.r(), c.g(), c.b(), 255])).unwrap_or(0);
-    LED_GROUND.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Colour of an unlit segment of colour `c`.
-pub fn unlit(c: Color32, factor: f32) -> Color32 {
-    match LED_GROUND.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => dim(c, factor),
-        v => {
-            let [r, g, b, _] = v.to_be_bytes();
-            mix(Color32::from_rgb(r, g, b), c, (factor * 1.4).min(1.0))
-        }
-    }
-}
-
-fn led_segment(painter: &egui::Painter, r: Rect, c: Color32, lit: bool, style: &LedStyle) {
-    if lit {
-        painter.rect_filled(r, style.rounding, c);
-        if style.rim && r.height() >= 4.0 && r.width() >= 4.0 {
-            painter.rect_stroke(r.shrink(0.5), style.rounding, Stroke::new(1.0_f32, lighten(c, 0.38)), egui::StrokeKind::Outside);
-        }
-    } else {
-        painter.rect_filled(r, style.rounding, unlit(c, style.unlit_factor));
-    }
-}
-
-/// Vertical LED column filling from the bottom. Returns the number of lit segments.
-pub fn led_column(painter: &egui::Painter, rect: Rect, segments: usize, fraction: f32, style: &LedStyle) -> usize {
-    let n = segments.max(1);
-    let seg_h = (rect.height() - style.gap * (n as f32 - 1.0)) / n as f32;
-    let lit_n = ((fraction.clamp(0.0, 1.0) * n as f32).round() as usize).min(n);
-    if lit_n > 0 && style.bloom > 0.0 {
-        let top = rect.bottom() - lit_n as f32 * (seg_h + style.gap) + style.gap;
-        let span = Rect::from_min_max(pos2(rect.left(), top), rect.right_bottom());
-        let c = style.color_at((lit_n as f32 / n as f32) * 0.5);
-        painter.rect_filled(span.expand(7.0 * style.bloom), 6.0, with_alpha(c, 0.07 * style.bloom));
-        painter.rect_filled(span.expand(3.0 * style.bloom), 4.0, with_alpha(c, 0.14 * style.bloom));
-    }
-    for i in 0..n {
-        let y1 = rect.bottom() - i as f32 * (seg_h + style.gap);
-        let r = Rect::from_min_max(pos2(rect.left(), y1 - seg_h), pos2(rect.right(), y1));
-        let t = (i as f32 + 0.5) / n as f32;
-        led_segment(painter, r, style.color_at(t), i < lit_n, style);
-    }
-    lit_n
-}
-
-/// Horizontal LED row filling from the left. Returns the number of lit segments.
-pub fn led_row(painter: &egui::Painter, rect: Rect, segments: usize, fraction: f32, style: &LedStyle) -> usize {
-    let n = segments.max(1);
-    let seg_w = (rect.width() - style.gap * (n as f32 - 1.0)) / n as f32;
-    let lit_n = ((fraction.clamp(0.0, 1.0) * n as f32).round() as usize).min(n);
-    if lit_n > 0 && style.bloom > 0.0 {
-        let right = rect.left() + lit_n as f32 * (seg_w + style.gap) - style.gap;
-        let span = Rect::from_min_max(rect.left_top(), pos2(right, rect.bottom()));
-        let c = style.color_at((lit_n as f32 / n as f32) * 0.5);
-        painter.rect_filled(span.expand(6.0 * style.bloom), 5.0, with_alpha(c, 0.07 * style.bloom));
-        painter.rect_filled(span.expand(2.5 * style.bloom), 3.0, with_alpha(c, 0.14 * style.bloom));
-    }
-    for i in 0..n {
-        let x0 = rect.left() + i as f32 * (seg_w + style.gap);
-        let r = Rect::from_min_max(pos2(x0, rect.top()), pos2(x0 + seg_w, rect.bottom()));
-        let t = (i as f32 + 0.5) / n as f32;
-        led_segment(painter, r, style.color_at(t), i < lit_n, style);
-    }
-    lit_n
-}
-
-/// Horizontal bar whose segments shade from `left` to `right` colour along the bar
-/// (the Performance page utilization bar).
-pub fn led_gradient_row(painter: &egui::Painter, rect: Rect, segments: usize, fraction: f32, colors: [Color32; 3], bloom: f32) -> usize {
-    let style = LedStyle { positional: Some(colors), unlit_factor: 0.2, gap: 2.0, rounding: 1.0, rim: false, ..LedStyle::new(colors[0], bloom) };
-    led_row(painter, rect, segments, fraction, &style)
-}
-
-// ---------------------------------------------------------------------------
-// Dot-matrix LED panel
-// ---------------------------------------------------------------------------
-
-/// 5x7 glyphs, one byte per row (bit 4 = leftmost column).
-fn glyph(c: char) -> [u8; 7] {
-    match c.to_ascii_uppercase() {
-        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-        '3' => [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        'D' => [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'I' => [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        'J' => [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
-        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        'S' => [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
-        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
-        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        '%' => [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
-        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
-        ':' => [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
-        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        '/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
-        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
-        '\u{b0}' => [0x0C, 0x12, 0x12, 0x0C, 0x00, 0x00, 0x00],
-        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        _ => [0; 7],
-    }
-}
-
-pub const LED_PITCH: f32 = 2.5;
-pub const LED_PANEL_H: f32 = 7.0 * LED_PITCH + 6.0;
-
-/// Width in points of a dot-matrix string.
-pub fn led_text_width(s: &str) -> f32 {
-    s.chars().count() as f32 * 6.0 * LED_PITCH
-}
-
-/// Black dot-matrix panel: `left` text left-aligned, `right` text right-aligned, dim dots
-/// filling the rest ("CPU OVERVIEW ........ 9.8%").
-pub fn led_panel(painter: &egui::Painter, rect: Rect, left: &str, right: &str, pal: &Palette, bloom: f32) {
-    painter.rect_filled(rect, 2.0, pal.led_bg);
-    painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, with_alpha(pal.card_stroke, 0.6)), egui::StrokeKind::Outside);
-    let inner = rect.shrink2(vec2(5.0, 3.0));
-    let cols = (inner.width() / LED_PITCH).floor() as usize;
-    let rows = 7usize;
-    let dot = LED_PITCH - 0.7;
-    let origin = pos2(inner.left(), inner.center().y - rows as f32 * LED_PITCH / 2.0);
-    let mut lit = vec![false; cols * rows];
-    let mut stamp = |s: &str, col0: usize| {
-        for (ci, ch) in s.chars().enumerate() {
-            let g = glyph(ch);
-            for (r, bits) in g.iter().enumerate() {
-                for b in 0..5 {
-                    if bits & (0x10 >> b) != 0 {
-                        let c = col0 + ci * 6 + b;
-                        if c < cols {
-                            lit[r * cols + c] = true;
-                        }
-                    }
-                }
-            }
-        }
-    };
-    stamp(left, 1);
-    if !right.is_empty() {
-        let w = right.chars().count() * 6;
-        if cols > w + 1 {
-            stamp(right, cols - w);
-        }
-    }
-    // Dim lattice + lit dots.
-    let mut mesh = Mesh::default();
-    let mut glow = Mesh::default();
-    for r in 0..rows {
-        for c in 0..cols {
-            let p = pos2(origin.x + c as f32 * LED_PITCH, origin.y + r as f32 * LED_PITCH);
-            let on = lit[r * cols + c];
-            let color = if on { pal.led_lit } else { pal.led_dim };
-            add_rect(&mut mesh, Rect::from_min_size(p, vec2(dot, dot)), color);
-            if on && bloom > 0.0 {
-                add_rect(&mut glow, Rect::from_min_size(p, vec2(dot, dot)).expand(1.6), with_alpha(pal.led_lit, 0.18 * bloom));
-            }
-        }
-    }
-    painter.add(Shape::mesh(glow));
-    painter.add(Shape::mesh(mesh));
-}
-
-/// Small dot-matrix readout without the lattice (status bar clock).
-pub fn led_digits(painter: &egui::Painter, pos: Pos2, s: &str, color: Color32, pitch: f32) {
-    let dot = pitch - 0.6;
-    let mut mesh = Mesh::default();
-    for (ci, ch) in s.chars().enumerate() {
-        let g = glyph(ch);
-        for (r, bits) in g.iter().enumerate() {
-            for b in 0..5 {
-                let on = bits & (0x10 >> b) != 0;
-                let p = pos2(pos.x + (ci * 6 + b) as f32 * pitch, pos.y + r as f32 * pitch);
-                add_rect(&mut mesh, Rect::from_min_size(p, vec2(dot, dot)), if on { color } else { with_alpha(color, 0.12) });
-            }
-        }
-    }
-    painter.add(Shape::mesh(mesh));
 }
 
 /// Seven-segment readout (digits, `:` and `.`) with dim unlit segments, like a stopwatch
@@ -1201,21 +976,6 @@ pub fn button(ui: &mut Ui, label: &str, pal: &Palette, icon: Option<Icon>) -> Re
     Button::new(label).icon(icon).show(ui, pal)
 }
 
-/// The one main action: `text` fill, `body` text.
-pub fn primary_button(ui: &mut Ui, label: &str, pal: &Palette) -> Response {
-    Button::primary(label).show(ui, pal)
-}
-
-/// Transparent button for the least important action.
-pub fn ghost_button(ui: &mut Ui, label: &str, pal: &Palette) -> Response {
-    Button::ghost(label).show(ui, pal)
-}
-
-/// Red outline button for destructive actions.
-pub fn danger_button(ui: &mut Ui, label: &str, pal: &Palette) -> Response {
-    Button::danger(label).show(ui, pal)
-}
-
 /// `ScrollArea::show` and `show_rows` as in egui 0.29: the content is clipped 3 px outside the
 /// visible area along the scrolled `axes` ([horizontal, vertical]), so that strokes drawn on its
 /// edge (card borders) stay whole (0.36 removed that margin, `Visuals::clip_rect_margin`), and
@@ -1278,20 +1038,34 @@ pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget
     }
 }
 
-/// Text field with a magnifier and a hint, in the application style (36 px high).
+/// Text field with a magnifier at its left and a hint, in the application style: `width` wide
+/// and as high as a toolbar button (36 px), whatever the layout around it (a right-to-left
+/// toolbar included).
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> Response {
-    let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)));
-    frame
+    let frame = stroke_outside(egui::Frame::new().fill(pal.control).stroke(Stroke::new(1.0_f32, pal.control_stroke)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 0)));
+    let inner_w = (width - 20.0).max(60.0);
+    let field = frame
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(vec2(inner_w, ButtonSize::Toolbar.height() - 2.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
                 draw_icon(ui.painter(), Rect::from_center_size(icon.center(), vec2(15.0, 15.0)), Icon::Search, pal.text_faint);
-                ui.add(text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(width - 46.0 + 8.0).font(theme::ui(13.0)), false))
+                ui.add(text_edit(egui::TextEdit::singleline(&mut *text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w - 24.0).font(theme::ui(13.0)), false))
             })
             .inner
         })
-        .inner
+        .inner;
+    clear_on_escape(ui, &field, text);
+    field
+}
+
+/// Esc in a search or filter field empties it: call with the field's response and its text right
+/// after showing it. egui takes the keyboard away from a field on Esc; a search that stayed in
+/// force with no cursor in it was easy to forget. Enter leaves the field and keeps the text.
+pub fn clear_on_escape(ui: &Ui, field: &Response, text: &mut String) {
+    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        text.clear();
+    }
 }
 
 /// Segmented control drawn in one rectangle (layout direction does not matter): 34 px high with
@@ -1627,13 +1401,23 @@ pub fn tracked_text(p: &egui::Painter, pos: Pos2, anchor: Align2, text: &str, fo
     }
     // One kerned galley at a pixel-snapped origin: glyphs painted one by one were each snapped on
     // their own, so the gaps came out uneven and shifted with the fractional start (hover, weight).
-    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
-    job.wrap.max_width = f32::INFINITY;
-    let galley = p.layout_job(job);
+    let galley = p.layout_job(tracked_job(text, font, color, space));
     let rect = anchor.anchor_size(pos, galley.size());
     let min = egui::emath::GuiRounding::round_to_pixels(rect.min, p.pixels_per_point());
     p.galley(min, galley, color);
     Rect::from_min_size(min, rect.size())
+}
+
+/// Width [`tracked_text`] draws `text` at.
+pub fn tracked_width(p: &egui::Painter, text: &str, font: FontId, em: f32) -> f32 {
+    p.layout_job(tracked_job(text, font.clone(), Color32::WHITE, em.max(0.0) * font.size)).size().x
+}
+
+/// One unwrapped line of `text` with `space` px between its letters.
+fn tracked_job(text: &str, font: FontId, color: Color32, space: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat { font_id: font, color, extra_letter_spacing: space, ..Default::default() });
+    job.wrap.max_width = f32::INFINITY;
+    job
 }
 
 /// Width of a [`chip`] with `text` (and an icon).
@@ -2180,6 +1964,34 @@ mod tests {
         assert_eq!(spark_visible(200.0, 60, 60), 60);
         // Down to 1 px per sample the whole history fits (a 60 s trend in 84 px).
         assert_eq!(spark_visible(84.0, 60, 60), 60);
+    }
+
+    /// Esc empties a search box that has the keyboard; Enter and Esc elsewhere leave the text.
+    #[test]
+    fn escape_clears_a_focused_search_box() {
+        let pal = theme::DARK;
+        let press = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let after = |focused: bool, key: egui::Key| {
+            let ctx = egui::Context::default();
+            pal.apply(&ctx);
+            theme::install_fonts(&ctx, None);
+            let mut text = String::from("chrome");
+            for events in [vec![], vec![], vec![press(key)]] {
+                ctx.run_ui(egui::RawInput { events, ..Default::default() }, |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let field = search_box(ui, &mut text, "Filter", 220.0, &pal);
+                        if focused && ui.ctx().cumulative_frame_nr() == 0 {
+                            field.request_focus();
+                        }
+                    });
+                })
+                .drop_without_applying_deltas();
+            }
+            text
+        };
+        assert_eq!(after(true, egui::Key::Escape), "");
+        assert_eq!(after(true, egui::Key::Enter), "chrome");
+        assert_eq!(after(false, egui::Key::Escape), "chrome", "Esc belongs to the page when the box has no cursor");
     }
 
     fn run(add: impl Fn(&egui::Painter, &mut Ui, &Palette)) {

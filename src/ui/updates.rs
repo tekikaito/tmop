@@ -2,7 +2,7 @@
 //! version" dialog. The network and file work is in [`crate::update`].
 
 use super::kit::{self, DialogButton};
-use super::settings_page::{note, toggle_row_hint};
+use super::settings_page::{hint, note, toggle_row_hint};
 use super::theme::{self, Palette};
 use super::widgets::{self, Button, ButtonSize, Icon};
 use super::App;
@@ -119,7 +119,7 @@ fn update_source_row(ui: &mut egui::Ui, pal: &Palette, general: &mut General) ->
     } else {
         format!("Not a GitHub repository (owner/name), so updates come from {}.", update::RELEASE_REPO)
     };
-    note(ui, pal, &text);
+    hint(ui, pal, &text);
     if changed {
         // Another repository has other releases: the daily check starts over, and a version
         // skipped in the old one isn't hidden in the new one.
@@ -217,7 +217,9 @@ impl App {
             ui.add_space(12.0);
             ui.add_enabled_ui(!installing, |ui| kit::dialog_buttons(ui, pal, &buttons)).inner
         })
-        .flatten();
+        .flatten()
+        // Esc is "Later", unless the download is running (its buttons are off then, too).
+        .or_else(|| (!installing && super::processes::key_once(ctx, egui::Key::Escape)).then_some(1));
         let Some(i) = answer else { return };
         match i {
             0 => {

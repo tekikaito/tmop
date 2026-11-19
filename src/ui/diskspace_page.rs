@@ -73,7 +73,9 @@ impl App {
             } else if Button::primary("Scan").icon(Icon::Play).show(ui, &pal).clicked() {
                 start_scan = Some(self.pro.disk_root.clone());
             }
-            let r = mono_input(ui, &mut self.pro.disk_root, "Folder or drive to scan", 260.0, &pal);
+            // The path takes what the row has left.
+            let w = ui.available_width().max(160.0);
+            let r = mono_input(ui, &mut self.pro.disk_root, "Folder or drive to scan", w, &pal);
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 start_scan = Some(self.pro.disk_root.clone());
             }
@@ -167,6 +169,10 @@ impl App {
                 ui.add_space(8.0);
                 answer = confirm_row(ui, &pal, "Keep scanning", "Stop scan", ButtonKind::DangerFill, true);
             });
+            // Esc is "Keep scanning".
+            if answer.is_none() && super::processes::key_once(ui.ctx(), egui::Key::Escape) {
+                answer = Some(false);
+            }
             if dont_ask {
                 self.settings.general.disk_space_suppress_stop_confirm = true;
                 self.settings_dirty = true;
@@ -577,7 +583,7 @@ impl App {
             self.pro.disk_cursor = g;
         }
         if let Some(path) = reveal {
-            let _ = kit::reveal(&path);
+            kit::reveal_or_report(ui.ctx(), &path);
         }
     }
 }

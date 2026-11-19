@@ -18,21 +18,37 @@ pub struct Col {
     pub title: &'static str,
     pub width: f32,
     pub numeric: bool,
-    /// Holds a sparkline ([`Cell::spark`]).
-    pub spark: bool,
+    /// Keeps its width when the table is too narrow for all columns (see [`fit_widths`]).
+    pub rigid: bool,
+    /// The cells may carry a second line ([`Cell::sub`]); on the first column this makes every
+    /// row [`TALL_ROW_H`] high.
+    pub two_line: bool,
 }
 
 impl Col {
+    /// Text that may be shortened with an ellipsis when the table is narrow (names, paths).
     pub const fn text(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: false, spark: false }
+        Self { title, width, numeric: false, rigid: false, two_line: false }
     }
-    /// Right-aligned numbers in mono; the first click sorts descending.
+    /// Right-aligned numbers in mono; the first click sorts descending. Keeps its width: a
+    /// number cut off reads as another.
     pub const fn num(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: true, spark: false }
+        Self { title, width, numeric: true, rigid: true, two_line: false }
     }
-    /// A trend column: the cells' [`Spark`] drawn 84 x 24.
+    /// A trend column: the cells' [`Spark`] drawn 84 x 24. Keeps its width.
     pub const fn spark(title: &'static str, width: f32) -> Self {
-        Self { title, width, numeric: false, spark: true }
+        Self { title, width, numeric: false, rigid: true, two_line: false }
+    }
+    /// A text column that keeps its width: a short word from a fixed set ("Running", "Manual"),
+    /// which says nothing once it is cut to "Runn…".
+    pub const fn rigid(mut self) -> Self {
+        self.rigid = true;
+        self
+    }
+    /// See [`Col::two_line`].
+    pub const fn two_line(mut self, on: bool) -> Self {
+        self.two_line = on;
+        self
     }
 }
 
@@ -174,20 +190,70 @@ const MIN_COL_SHARE: f32 = 0.6;
 
 /// Initial column widths: the widths asked for, with text columns shrunk in proportion when they
 /// and the minimum of the last column do not fit into `avail`, but not below [`MIN_COL_SHARE`] of
-/// each (nor 36). Numeric columns keep their width: a number cut off on the left reads as another.
+/// each (nor 36). Rigid columns (numbers, trends, short status words) keep their width.
 fn fit_widths(cols: &[Col], avail: f32) -> Vec<f32> {
     let Some((last, rest)) = cols.split_last() else { return Vec::new() };
-    let numeric: f32 = rest.iter().filter(|c| c.numeric).map(|c| c.width).sum();
-    let wanted: f32 = rest.iter().filter(|c| !c.numeric).map(|c| c.width).sum();
-    let room = (avail - last.width.min(120.0) - numeric).max(0.0);
+    let rigid: f32 = rest.iter().filter(|c| c.rigid).map(|c| c.width).sum();
+    let wanted: f32 = rest.iter().filter(|c| !c.rigid).map(|c| c.width).sum();
+    let room = (avail - last.width.min(120.0) - rigid).max(0.0);
     let scale = if wanted > room && wanted > 0.0 { room / wanted } else { 1.0 };
-    let mut w: Vec<f32> = rest.iter().map(|c| if c.numeric { c.width } else { (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0) }).collect();
+    let mut w: Vec<f32> = rest.iter().map(|c| if c.rigid { c.width } else { (c.width * scale).max(c.width * MIN_COL_SHARE).max(36.0) }).collect();
     w.push(last.width);
     w
 }
 
+/// A key that moves the selection of a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+/// Whether plain keys belong to the page's table: no widget has the keyboard (a filter box), no
+/// modifier is held, and no dialog or menu is open.
+pub fn keys_free(ctx: &egui::Context) -> bool {
+    !ctx.egui_wants_keyboard_input() && !super::kit::dialog_open(ctx) && !egui::Popup::is_any_open(ctx) && ctx.input(|i| !i.modifiers.any())
+}
+
+/// The selection key pressed this frame (key repeat counts), if the keys are free ([`keys_free`]).
+pub fn nav_key(ctx: &egui::Context) -> Option<Nav> {
+    const KEYS: [(egui::Key, Nav); 6] =
+        [(egui::Key::ArrowUp, Nav::Up), (egui::Key::ArrowDown, Nav::Down), (egui::Key::PageUp, Nav::PageUp), (egui::Key::PageDown, Nav::PageDown), (egui::Key::Home, Nav::Home), (egui::Key::End, Nav::End)];
+    if !keys_free(ctx) {
+        return None;
+    }
+    ctx.input(|i| KEYS.iter().find(|(k, _)| i.key_pressed(*k)).map(|(_, nav)| *nav))
+}
+
+/// The row `nav` moves the selection to from row `current`, in a list of `len` rows of which
+/// `page` fit the view. Without a selection, the keys that go down start at the first row and
+/// those that go up at the last. `None` for an empty list.
+pub fn nav_target(current: Option<usize>, len: usize, nav: Nav, page: usize) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let page = page.max(1);
+    Some(match (nav, current) {
+        (Nav::Home, _) | (Nav::Down | Nav::PageDown, None) => 0,
+        (Nav::End, _) | (Nav::Up | Nav::PageUp, None) => last,
+        (Nav::Up, Some(c)) => c.min(last).saturating_sub(1),
+        (Nav::Down, Some(c)) => (c + 1).min(last),
+        (Nav::PageUp, Some(c)) => c.min(last).saturating_sub(page),
+        (Nav::PageDown, Some(c)) => (c + page).min(last),
+    })
+}
+
+/// Where the id of the table the selection keys act on is kept: the table clicked last, so that
+/// two tables on one page (GPU activity, Docker files) do not both move.
+fn active_table() -> egui::Id {
+    egui::Id::unique("tmop-active-table")
+}
+
 /// Like [`show`], and `menu(item, ui)` fills the context menu of each row. A right click
-/// selects the row before the menu opens.
+/// selects the row before the menu opens. Once a row was clicked, Up, Down, Page Up, Page Down,
+/// Home and End move the selection (see [`nav_key`]) and scroll it into view.
 #[allow(clippy::too_many_arguments)]
 pub fn show_with_menu(
     ui: &mut egui::Ui,
@@ -205,10 +271,24 @@ pub fn show_with_menu(
     let mut sort_click = None;
     let mut clicked: Option<String> = None;
     let mut activated = None;
-    let selected = state.selected.clone();
     let (sort_col, desc) = (state.sort, state.desc);
-    // Rows are taller when any row has a second line (only the first column carries one).
-    let row_h = if !cols.is_empty() && order.iter().any(|i| cell(*i, 0).sub.is_some()) { TALL_ROW_H } else { ROW_H };
+    // Rows are taller when the first column carries a second line. The column says so: asking
+    // every row's cell for it here would build a cell per row and frame, shown or not.
+    let row_h = if cols.first().is_some_and(|c| c.two_line) { TALL_ROW_H } else { ROW_H };
+    // The selection keys, for the table that was clicked last.
+    let table_id = egui::Id::unique(("tmop-table", id));
+    let mut scroll_to = None;
+    if ui.data(|d| d.get_temp::<egui::Id>(active_table())) == Some(table_id) {
+        if let Some(nav) = nav_key(ui.ctx()) {
+            let current = state.selected.as_ref().and_then(|k| order.iter().position(|i| key(*i) == *k));
+            let page = (((rect.height() - HEADER_H) / row_h) as usize).saturating_sub(1);
+            if let Some(row) = nav_target(current, order.len(), nav, page) {
+                state.selected = Some(key(order[row]));
+                scroll_to = Some(row);
+            }
+        }
+    }
+    let selected = state.selected.clone();
     // The table sits in a rounded box with a faint wash and a hairline.
     ui.painter().rect_filled(rect, 8.0, with_alpha(pal.text, 0.03));
     let inner = rect.shrink(1.0);
@@ -232,6 +312,9 @@ pub fn show_with_menu(
             for (i, c) in cols.iter().enumerate() {
                 let col = if i + 1 == cols.len() { egui_extras::Column::remainder().at_least(c.width.min(120.0)) } else { egui_extras::Column::initial(widths[i]).at_least(36.0) };
                 table = table.column(col.clip(true));
+            }
+            if let Some(row) = scroll_to {
+                table = table.scroll_to_row(row, None);
             }
             let last = cols.len().saturating_sub(1);
             table
@@ -375,6 +458,7 @@ pub fn show_with_menu(
     }
     if let Some(k) = clicked {
         state.selected = Some(k);
+        ui.data_mut(|d| d.insert_temp(active_table(), table_id));
     }
     activated
 }
@@ -388,8 +472,11 @@ pub fn matches(filter: &str, fields: &[&str]) -> bool {
     f.split_whitespace().all(|w| fields.iter().any(|s| s.to_lowercase().contains(w)))
 }
 
+/// Case-insensitive order: that of the two strings in lower case (character by character, so
+/// without the final-sigma rule of `str::to_lowercase`), compared without building
+/// them (a sort calls this thousands of times per frame).
 pub fn cmp_str(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
+    a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
 }
 
 pub fn cmp_f(a: f64, b: f64) -> std::cmp::Ordering {
@@ -421,6 +508,24 @@ mod tests {
         // Numbers stay whole; the text columns give up the room.
         let w = fit_widths(&[Col::text("a", 400.0), Col::num("b", 90.0), Col::text("c", 100.0)], 390.0);
         assert!((w[0] - 240.0).abs() < 0.01 && w[1] == 90.0);
+        // So do trends and the text columns marked rigid ("Running" must not become "Runn…").
+        let w = fit_widths(&[Col::text("name", 300.0), Col::text("status", 100.0).rigid(), Col::spark("trend", 120.0), Col::text("path", 300.0)], 520.0);
+        assert_eq!((w[1], w[2]), (100.0, 120.0));
+        assert!((w[0] - 180.0).abs() < 0.01, "the name gives up the room: {}", w[0]);
+    }
+
+    /// `cmp_str` orders like the lower-cased strings, without allocating them.
+    #[test]
+    fn cmp_str_ignores_case() {
+        use std::cmp::Ordering::*;
+        assert_eq!(cmp_str("alpha", "Beta"), Less);
+        assert_eq!(cmp_str("Zeta", "alpha"), Greater);
+        assert_eq!(cmp_str("SvcHost", "svchost"), Equal);
+        assert_eq!(cmp_str("app", "apple"), Less);
+        assert_eq!(cmp_str("", "a"), Less);
+        for (a, b) in [("Ärger", "zebra"), ("ǅ", "ǆ"), ("İstanbul", "istanbul"), ("straße", "STRASSE"), ("a-b", "A_b")] {
+            assert_eq!(cmp_str(a, b), a.to_lowercase().cmp(&b.to_lowercase()), "{a} / {b}");
+        }
     }
 
     /// Cells with every decoration draw in a table, and a second line makes the rows taller.
@@ -431,11 +536,11 @@ mod tests {
         pal.apply(&ctx);
         theme::install_fonts(&ctx, None);
         let mut icons = super::super::icons::IconCache::new(&ctx);
-        let cols = [Col::text("Name", 200.0), Col::num("CPU", 100.0), Col::spark("CPU 60s", 120.0), Col::text("Status", 100.0)];
         let order = [0usize, 1, 2];
         let mut state = TableState::sorted_by(1, true);
         state.selected = Some("1".into());
         for tall in [false, true] {
+            let cols = [Col::text("Name", 200.0).two_line(tall), Col::num("CPU", 100.0), Col::spark("CPU 60s", 120.0), Col::text("Status", 100.0).rigid()];
             let cell = |i: usize, c: usize| -> Cell {
                 match c {
                     0 => {
@@ -461,6 +566,52 @@ mod tests {
             }
         }
         assert_eq!((state.sort, state.desc), (1, true));
+    }
+
+    /// The selection keys stay inside the list, and start at the matching end without a selection.
+    #[test]
+    fn selection_keys_move_within_the_list() {
+        let go = |cur, nav| nav_target(cur, 10, nav, 4);
+        assert_eq!((go(Some(3), Nav::Up), go(Some(3), Nav::Down)), (Some(2), Some(4)));
+        assert_eq!((go(Some(0), Nav::Up), go(Some(9), Nav::Down)), (Some(0), Some(9)), "no wrap at the ends");
+        assert_eq!((go(Some(5), Nav::PageUp), go(Some(5), Nav::PageDown)), (Some(1), Some(9)));
+        assert_eq!((go(Some(5), Nav::Home), go(Some(5), Nav::End)), (Some(0), Some(9)));
+        assert_eq!((go(None, Nav::Down), go(None, Nav::PageDown), go(None, Nav::Up), go(None, Nav::PageUp)), (Some(0), Some(0), Some(9), Some(9)));
+        assert_eq!(go(Some(42), Nav::Up), Some(8), "a stale row (the list shrank) counts as the last");
+        assert_eq!(nav_target(Some(0), 0, Nav::Down, 4), None, "nothing to select");
+        assert_eq!(nav_target(Some(2), 10, Nav::PageDown, 0), Some(3), "a view of less than a row still moves");
+    }
+
+    /// Down moves the selection of the table that was clicked, and only of that one.
+    #[test]
+    fn arrow_keys_move_the_clicked_tables_selection() {
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut icons = super::super::icons::IconCache::new(&ctx);
+        let cols = [Col::text("Name", 200.0), Col::text("Kind", 100.0)];
+        let order = [0usize, 1, 2];
+        let (mut a, mut b) = (TableState::default(), TableState::default());
+        a.selected = Some("0".into());
+        b.selected = Some("0".into());
+        let down = egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut frame = |events: Vec<egui::Event>, a: &mut TableState, b: &mut TableState| {
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let cell = |i: usize, _: usize| Cell::new(format!("row {i}"));
+                    show(ui, Rect::from_min_size(pos2(10.0, 10.0), vec2(400.0, 200.0)), "a", &pal, &cols, &order, a, &|i| i.to_string(), &cell, &mut icons);
+                    show(ui, Rect::from_min_size(pos2(10.0, 220.0), vec2(400.0, 200.0)), "b", &pal, &cols, &order, b, &|i| i.to_string(), &cell, &mut icons);
+                });
+            })
+            .drop_without_applying_deltas();
+        };
+        frame(vec![down.clone()], &mut a, &mut b);
+        assert_eq!((a.selected.as_deref(), b.selected.as_deref()), (Some("0"), Some("0")), "no table was clicked yet");
+        ctx.data_mut(|d| d.insert_temp(active_table(), egui::Id::unique(("tmop-table", "b"))));
+        frame(vec![down.clone()], &mut a, &mut b);
+        frame(vec![down], &mut a, &mut b);
+        assert_eq!((a.selected.as_deref(), b.selected.as_deref()), (Some("0"), Some("2")));
     }
 
     #[test]
