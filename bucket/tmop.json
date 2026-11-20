@@ -1,0 +1,43 @@
+{
+    "version": "0.11.0",
+    "description": "Task Manager OverPowered: a skinnable task manager and system monitor",
+    "homepage": "https://tekikaito.github.io/tmop/",
+    "license": "GPL-3.0-only",
+    "notes": [
+        "TMOP keeps its settings in %LOCALAPPDATA%\\TMOP, so they survive updates and uninstalls.",
+        "TMOP is not code-signed; Windows SmartScreen may warn the first time it starts."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-x64.zip",
+            "hash": "e288accdcbf4e8053414bb2d6aa76e7fc6f7d32ef104d10c9f21f39cf6827d7d"
+        },
+        "arm64": {
+            "url": "https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-arm64.zip",
+            "hash": "f630fc58f945c91acb36a7962b950c172e10a8028958e9395edb1a71f6fbdbf8"
+        }
+    },
+    "bin": "TMOP.exe",
+    "shortcuts": [
+        [
+            "TMOP.exe",
+            "TMOP"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/tekikaito/tmop"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/tekikaito/tmop/releases/download/v$version/TMOP-v$version-windows-x64.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/tekikaito/tmop/releases/download/v$version/TMOP-v$version-windows-arm64.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}

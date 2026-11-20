@@ -394,6 +394,23 @@
             <li>Use either Homebrew or the command above, not both: each installs its own copy</li>
           </ul>
         </div>
+        <div class="cmd-card" data-only="windows">
+          <div class="os-tag">Windows</div>
+          <h3 style="margin:0 0 4px; font-size:17px;">Or install with Scoop</h3>
+          <p style="margin:0; color:var(--muted); font-size:15px;">If you use <a href="https://scoop.sh">Scoop</a>, paste these into <b>PowerShell</b>:</p>
+          <div class="cmd">
+            <code><span class="p">PS&gt; </span>scoop bucket add tmop https://github.com/tekikaito/tmop</code>
+            <button class="copy" data-copy="scoop bucket add tmop https://github.com/tekikaito/tmop">Copy</button>
+          </div>
+          <div class="cmd">
+            <code><span class="p">PS&gt; </span>scoop install tmop</code>
+            <button class="copy" data-copy="scoop install tmop">Copy</button>
+          </div>
+          <ul>
+            <li><code class="inline">scoop update tmop</code> keeps it up to date</li>
+            <li>Use either Scoop or the command above, not both: each installs its own copy</li>
+          </ul>
+        </div>
         <div class="cmd-card" data-only="linux macos">
           <div class="os-tag">Linux and macOS</div>
           <h3 style="margin:0 0 4px; font-size:17px;">Good to know</h3>

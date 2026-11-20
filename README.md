@@ -65,6 +65,16 @@ irm https://tekikaito.github.io/tmop/install.ps1 | iex
 That puts TMOP in the Start menu, and you remove it in *Settings → Apps*. No administrator
 permission is needed.
 
+Or, if you use [Scoop](https://scoop.sh):
+
+```powershell
+scoop bucket add tmop https://github.com/tekikaito/tmop
+scoop install tmop
+```
+
+`scoop update tmop` keeps it up to date. Use either Scoop or the command above, not both: each
+installs its own copy.
+
 To download it by hand instead:
 
 1. Open the **[release page](https://github.com/tekikaito/tmop/releases/latest)**.
