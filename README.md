@@ -84,7 +84,9 @@ window with OpenGL 2.0 or newer, which needs a graphics driver.
 **On a server or virtual machine without a graphics driver** (only the *Microsoft Basic Display
 Adapter*), take **`TMOP-windows-x64-server.zip`** from the release page instead and unpack it.
 It is the same TMOP with Mesa's software OpenGL next to it, which draws on the CPU, so it uses
-more processor time than on a graphics card. Its updates replace only `TMOP.exe`.
+more processor time than on a graphics card. To keep that low, TMOP turns off high frequency
+visuals there (it redraws when new data arrives) and lets Mesa use at most 4 threads (set
+`LP_NUM_THREADS` to choose another number). Its updates replace only `TMOP.exe`.
 
 ### Linux (x86_64 and ARM64)
 
