@@ -10,7 +10,10 @@ TMOP shows what your computer is doing: how busy the processor, memory, disk, ne
 graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
 macOS**, is free and open source, and needs no installation.
 
-![TMOP overview](docs/screenshots/summary.png)
+![TMOP's Performance page: the CPU graph, one graph per logical processor and the top CPU consumers moving live](docs/screenshots/performance.gif)
+
+*Still images of the same pages:
+[Summary](docs/screenshots/summary.png) · [Performance](docs/screenshots/performance.png).*
 
 **[Download TMOP](https://tekikaito.github.io/tmop/)** · [All install options](#get-tmop) ·
 [Release notes](https://github.com/tekikaito/tmop/releases)
@@ -155,11 +158,17 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 
 ## What you can do with it
 
-| See your computer's performance live | Find and close programs |
+| See your computer's overview | See your processor live |
 |---|---|
-| ![Performance graphs](docs/screenshots/performance.png) | ![List of running programs](docs/screenshots/processes.png) |
-| **Test how fast your computer is** | **Keep a small monitor on your desktop** |
-| ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
+| ![Summary page with health status, CPU, memory, disk, GPU and network monitors, top consumers and a timeline](docs/screenshots/summary.png) | ![Performance page for the CPU with its graph, logical processors and top consumers](docs/screenshots/performance.png) |
+| **Watch your disk** | **Watch your memory** |
+| ![Performance page for the disk: active time, read and write graphs and how much storage is used](docs/screenshots/performance-disk.png) | ![Performance page for memory: usage graph, composition bar, speed, page file and committed memory](docs/screenshots/performance-memory.png) |
+| **See the Windows services** | **Find out what fills your disk** |
+| ![Services page with running and stopped counts and a table of services](docs/screenshots/services.png) | ![Disk Space page with a treemap of folder sizes and a list of the largest folders](docs/screenshots/disk-space.png) |
+| **Find and close programs** | **Test how fast your computer is** |
+| ![List of running programs](docs/screenshots/processes.png) | ![Speed test results](docs/screenshots/benchmarks.png) |
+| **Keep a small monitor on your desktop** | **Choose the colour of each graph** |
+| ![Small monitor window](docs/screenshots/popout.png) | ![Settings page, Graphs section, with a colour and hex field for each metric](docs/screenshots/settings-graphs.png) |
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
