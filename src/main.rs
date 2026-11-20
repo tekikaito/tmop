@@ -9,6 +9,9 @@
 //!   TMOP --docker-tab=<tab>    open the Docker page on engine (local)|containers|stacks|images|volumes|networks (test-only)
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
+//!   TMOP --screenshot=<file.png> [--page=<id>] [--device=<id>] [--window-size=WxH] [--theme=dark|light]
+//!        [--settings-section=<name>] [--wait=<s>] [--frames=<n> --every=<ms>] [--shot-home=<dir>]
+//!                         render the window's own frames to PNG files and exit (see src/shot.rs)
 //!   TMOP --popout         only the skinned popout window
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
@@ -275,6 +278,17 @@ fn main() -> eframe::Result<()> {
     tmop::startup::software_opengl();
     let value = |names: &[&str]| args.iter().find_map(|a| names.iter().find_map(|n| a.strip_prefix(n)).map(|v| v.to_string()));
     let popout_only = args.iter().any(|a| a == "--popout");
+    let shot = match tmop::shot::Plan::parse(&args) {
+        Ok(plan) => plan,
+        Err(e) => {
+            tmop::startup::report(&e);
+            std::process::exit(2);
+        }
+    };
+    // Before anything reads the settings: a screenshot run never touches the user's.
+    if let Some(plan) = &shot {
+        tmop::shot::private_home(plan);
+    }
     let launch = Launch {
         start_page: value(&["--page=", "--start-page="]).map(|p| Page::from_id(&p)).or_else(|| taskmgr.as_ref().and_then(|l| l.page).map(Page::from_id)),
         start_device: value(&["--device=", "--start-device="]),
@@ -300,6 +314,8 @@ fn main() -> eframe::Result<()> {
         }),
         docker_tab: value(&["--docker-tab="]),
         engine_test: value(&["--engine-test="]),
+        settings_section: value(&["--settings-section="]),
+        shot,
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;
@@ -320,6 +336,12 @@ fn main() -> eframe::Result<()> {
         // The main window opens as it was closed, unless a size is asked for; the pop-out alone
         // has its own fixed size.
         .with_maximized(args.iter().any(|a| a == "--maximized") || (!popout_only && size.is_none() && settings.window.maximized));
+    if let Some(plan) = &launch.shot {
+        settings.appearance.theme = plan.theme.clone();
+        settings.popout.mode = "off".into();
+        // The window renders its own frames; it need not take the focus from what the user is doing.
+        viewport = viewport.with_active(false);
+    }
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
     }

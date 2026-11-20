@@ -453,6 +453,11 @@ fn accent_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, ba
 // Rows and section cards
 // ---------------------------------------------------------------------------
 
+/// Index of the section titled `name` (any case, e.g. `graphs`).
+pub(super) fn section_index(name: &str) -> Option<usize> {
+    SECTIONS.iter().position(|s| s.eq_ignore_ascii_case(name.trim()))
+}
+
 /// Where the section list and the cards meet: the card tops of this frame and a pending jump.
 #[derive(Default)]
 struct Sections {
@@ -571,7 +576,7 @@ impl App {
         let docker_found = self.docker.found();
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
         let nav_id = egui::Id::unique("settings-nav");
-        let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))), ..Default::default() };
+        let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))).or(self.pending_section.take()), ..Default::default() };
         // A click in the section list asked for a scroll, which starts with this frame.
         let scroll_asked = sections.target.is_some();
         // The cards are laid out inside the scroll area (not at fixed screen rects), so the area
@@ -1029,6 +1034,13 @@ mod tests {
         assert!(!changed && on);
         assert_eq!(sections.tops.len(), 2);
         assert!(sections.tops[0] < sections.tops[1]);
+    }
+
+    #[test]
+    fn sections_are_found_by_name() {
+        assert_eq!(section_index("graphs"), Some(1));
+        assert_eq!(section_index(" About "), Some(7));
+        assert_eq!(section_index("nope"), None);
     }
 
     /// The accent swatches lay out and change nothing until clicked; the active entry follows the
