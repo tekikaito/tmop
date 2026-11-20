@@ -269,10 +269,30 @@ fn code(r: Result<(), ApplyError>) -> i32 {
     }
 }
 
+/// Shown when the setting is not in place after the change, or is gone again later.
+pub const BLOCKED_TEXT: &str = "Windows or your security software blocked or undid this change. Registering a program in place of Task Manager looks like malware behaviour to some security products. Allow the change in your security software (it may list a blocked registry change under Image File Execution Options\\taskmgr.exe) and try again, or leave this setting off.";
+
+/// Checks the registry state read back after a change. Some security software lets the write
+/// succeed and reverts it a moment later, or blocks it with an access error.
+pub fn verify(on: bool, after: &State) -> Result<(), String> {
+    let ok = if on { *after == State::Ours } else { !after.is_tmop() };
+    if ok {
+        Ok(())
+    } else {
+        Err(BLOCKED_TEXT.to_string())
+    }
+}
+
+/// True when TMOP turned the replacement on in this session but the value is gone now.
+pub fn reverted(turned_on: bool, now: &State) -> bool {
+    turned_on && *now == State::Default
+}
+
 /// Text for a helper exit code.
 pub fn describe_exit(code: i32) -> String {
     match code {
         0 => "done".into(),
+        5 => BLOCKED_TEXT.into(),
         EXIT_NOT_OURS => "another program replaces Task Manager, so TMOP left it alone".into(),
         c => std::io::Error::from_raw_os_error(c).to_string(),
     }
@@ -312,13 +332,21 @@ pub fn set(on: bool) -> Result<(), String> {
         win::clear_admin_flag(&this_exe(), AdminFlag::User).map_err(describe_exit)?;
     }
     if crate::platform::is_elevated() {
-        return apply(on).map_err(|e| describe_exit(code(Err(e))));
+        apply(on).map_err(|e| describe_exit(code(Err(e))))?;
+    } else {
+        let arg = format!("{HELPER_ARG}{}", if on { "on" } else { "off" });
+        match win::run_elevated(&arg, true)? {
+            0 => {}
+            c => return Err(describe_exit(c)),
+        }
     }
-    let arg = format!("{HELPER_ARG}{}", if on { "on" } else { "off" });
-    match win::run_elevated(&arg, true)? {
-        0 => Ok(()),
-        c => Err(describe_exit(c)),
+    // Read the value back: a write can succeed and be undone at once by security software.
+    verify(on, &state())?;
+    if on {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        verify(on, &state())?;
     }
+    Ok(())
 }
 
 /// Why registering this exe is a bad idea, if it is.
@@ -794,6 +822,24 @@ mod tests {
         let foreign = classify(Some(r#""C:\Sys\procexp64.exe""#), cur, none);
         assert_eq!(foreign, State::Foreign(r#""C:\Sys\procexp64.exe""#.into()));
         assert!(!foreign.is_tmop());
+    }
+
+    #[test]
+    fn detects_blocked_or_reverted_changes() {
+        let other = State::OtherTmop { path: r"C:\Old\TMOP.exe".into(), exists: true };
+        assert!(verify(true, &State::Ours).is_ok());
+        assert_eq!(verify(true, &State::Default).unwrap_err(), BLOCKED_TEXT);
+        assert!(verify(true, &other).is_err());
+        assert!(verify(true, &State::Foreign("x.exe".into())).is_err());
+        assert!(verify(false, &State::Default).is_ok());
+        assert!(verify(false, &State::Foreign("x.exe".into())).is_ok());
+        assert!(verify(false, &State::Ours).is_err());
+        assert!(verify(false, &other).is_err());
+        assert!(reverted(true, &State::Default));
+        assert!(!reverted(true, &State::Ours));
+        assert!(!reverted(false, &State::Default));
+        // Access denied from the helper gets the same plain explanation.
+        assert_eq!(describe_exit(5), BLOCKED_TEXT);
     }
 
     #[test]

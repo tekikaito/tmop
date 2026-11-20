@@ -27,6 +27,11 @@ pub struct ReplaceUi {
     /// Text of the "turn on" confirmation while it is open.
     confirm: Option<String>,
     banner_dismissed: bool,
+    /// TMOP turned the replacement on in this session (and it was in place then).
+    turned_on: bool,
+    /// The running job is a change of the replacement (`pending_on`: to on), not another task.
+    pending_change: bool,
+    pending_on: bool,
     /// Task Manager launches handed over by later copies.
     inbox: Option<taskmgr::Inbox>,
 }
@@ -40,7 +45,7 @@ impl ReplaceUi {
         } else {
             None
         };
-        Self { state: taskmgr::state(), admin_flag: taskmgr::admin_flag(), read_at: Instant::now(), job: Loader::default(), confirm: None, banner_dismissed: false, inbox }
+        Self { state: taskmgr::state(), admin_flag: taskmgr::admin_flag(), read_at: Instant::now(), job: Loader::default(), confirm: None, banner_dismissed: false, turned_on: false, pending_change: false, pending_on: false, inbox }
     }
 
     fn refresh(&mut self) {
@@ -50,6 +55,10 @@ impl ReplaceUi {
     }
 
     fn start(&mut self, on: bool) {
+        // Decided when the result comes in (see `replace_poll`).
+        self.turned_on = false;
+        self.pending_on = on;
+        self.pending_change = true;
         self.job.start(move || {
             taskmgr::set(on)
                 .map(|()| if on { "TMOP now opens in place of Windows Task Manager".to_string() } else { "Windows Task Manager is restored".to_string() })
@@ -73,6 +82,10 @@ impl App {
             return;
         }
         if self.replace.job.poll() {
+            if self.replace.pending_change {
+                self.replace.turned_on = self.replace.pending_on && matches!(self.replace.job.get(), Some(Ok(_)));
+                self.replace.pending_change = false;
+            }
             self.status = match self.replace.job.get() {
                 Some(Ok(m)) | Some(Err(m)) => m.clone(),
                 None => String::new(),
@@ -192,6 +205,7 @@ impl App {
             note(ui, pal, "Waiting for administrator permission\u{2026}");
         }
         match &self.replace.state {
+            State::Default if taskmgr::reverted(self.replace.turned_on, &self.replace.state) => note(ui, pal, taskmgr::BLOCKED_TEXT),
             State::Default | State::Ours => {}
             State::OtherTmop { path, exists: true } => note(ui, pal, &format!("Task Manager currently opens another copy of TMOP: {}", path.display())),
             State::OtherTmop { path, exists: false } => note(ui, pal, &format!("Task Manager is set to open {}, which no longer exists.", path.display())),
