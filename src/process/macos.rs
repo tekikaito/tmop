@@ -381,6 +381,8 @@ impl Enumerator {
                 status: if short.pbsi_status == libc::SSTOP { Status::Suspended } else { Status::Running },
                 read_bps,
                 write_bps,
+                net_send_bps: 0.0,
+                net_recv_bps: 0.0,
                 peak_working_set: ri.as_ref().map(|r| r.ri_lifetime_max_phys_footprint).unwrap_or(0).max(footprint),
                 page_faults: all.as_ref().map(|a| a.ptinfo.pti_faults.max(0) as u32).unwrap_or(0),
                 threads,

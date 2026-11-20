@@ -147,6 +147,7 @@ struct Prev {
     cpu_time: u64,
     read: u64,
     write: u64,
+    net: super::netio::NetBytes,
 }
 
 /// Facts about a process that do not change while it runs.
@@ -189,6 +190,8 @@ impl Enumerator {
         let mut guard = 0;
         let efficiency = super::efficiency_marks();
         let windowed = windowed_pids();
+        // Counters of the processes seen last time; the others are forgotten.
+        let net_totals = super::netio::totals(&|pid| self.prev.contains_key(&pid));
         loop {
             guard += 1;
             if guard > 100_000 || offset + std::mem::size_of::<SystemProcessInformation>() > buf.len() {
@@ -214,15 +217,17 @@ impl Enumerator {
             let cpu_time = (spi.user_time.max(0) + spi.kernel_time.max(0)) as u64;
             let read = (spi.read_transfer_count.max(0) + spi.other_transfer_count.max(0) / 2) as u64;
             let write = (spi.write_transfer_count.max(0) + spi.other_transfer_count.max(0) / 2) as u64;
-            let (cpu_pct, read_bps, write_bps) = match self.prev.get(&pid) {
+            let net = net_totals.get(&pid).copied().unwrap_or_default();
+            let (cpu_pct, read_bps, write_bps, (net_send_bps, net_recv_bps)) = match self.prev.get(&pid) {
                 Some(p) if p.create_time == spi.create_time && elapsed_100ns > 0.0 && pid != 0 => (
                     ((cpu_time.saturating_sub(p.cpu_time)) as f64 / elapsed_100ns / logical_cpus.max(1) as f64 * 100.0) as f32,
                     read.saturating_sub(p.read) as f64 / elapsed_s.max(1e-3),
                     write.saturating_sub(p.write) as f64 / elapsed_s.max(1e-3),
+                    super::netio::rates(p.net, net, elapsed_s.max(1e-3)),
                 ),
-                _ => (0.0, 0.0, 0.0),
+                _ => (0.0, 0.0, 0.0, (0.0, 0.0)),
             };
-            next_prev.insert(pid, Prev { create_time: spi.create_time, cpu_time, read, write });
+            next_prev.insert(pid, Prev { create_time: spi.create_time, cpu_time, read, write, net });
             let threads_at = offset + std::mem::size_of::<SystemProcessInformation>();
             let suspended = pid > 4 && all_threads_suspended(&buf, threads_at, spi.number_of_threads as usize);
             let hung = windowed.get(&pid).copied().unwrap_or(false);
@@ -244,6 +249,8 @@ impl Enumerator {
                 status: if suspended { super::Status::Suspended } else if hung { super::Status::NotResponding } else { super::Status::Running },
                 read_bps,
                 write_bps,
+                net_send_bps,
+                net_recv_bps,
                 peak_working_set: spi.peak_working_set_size as u64,
                 page_faults: spi.page_fault_count,
                 threads: spi.number_of_threads,
