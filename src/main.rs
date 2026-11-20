@@ -289,7 +289,9 @@ fn main() -> eframe::Result<()> {
         .with_app_id(tmop::APP_ID)
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
-        .with_maximized(args.iter().any(|a| a == "--maximized"));
+        // The main window opens as it was closed, unless a size is asked for; the pop-out alone
+        // has its own fixed size.
+        .with_maximized(args.iter().any(|a| a == "--maximized") || (!popout_only && size.is_none() && settings.window.maximized));
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
     }
