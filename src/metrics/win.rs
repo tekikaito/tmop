@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_space, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
+use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -296,7 +296,8 @@ fn read_disk(h: windows::Win32::Foundation::HANDLE) -> Option<DiskCounters> {
 
 /// The drive letters on each physical disk, as (disk number, "C: D:"): what PDH puts in its
 /// instance names, read from the volumes for when PDH has no disk counters. A volume that spans
-/// disks is listed on each.
+/// disks is listed on each (and so counted on none when the space is added up, see
+/// [`volumes_storage`]).
 fn disk_volumes() -> Vec<(u32, String)> {
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows::Win32::System::IO::DeviceIoControl;
@@ -412,26 +413,34 @@ fn volume_space(volume: &str) -> Option<(u64, u64)> {
 /// Used and total bytes, when they can be asked.
 type Space = Option<(u64, u64)>;
 
-/// How full the volumes of each disk are together, asked now and then rather than with every
-/// sample.
+/// How full the volumes are, asked now and then rather than with every sample: per disk those
+/// wholly on it, and all of them once.
 #[derive(Default)]
 struct DiskSpaces {
     at: Option<Instant>,
-    /// (disk number, its volumes as asked, used and total bytes).
-    known: Vec<(u32, String, Space)>,
+    /// (disk number, its volumes) as asked.
+    asked: Vec<(u32, String)>,
+    storage: Storage,
 }
 
 impl DiskSpaces {
     /// Asks again when the figures are old or `disks` has a disk or a volume they lack.
     fn refresh(&mut self, disks: &[DiskUse]) {
-        if self.at.is_none_or(|t| t.elapsed() >= DISK_SPACE_PERIOD) || disks.iter().any(|d| !self.known.iter().any(|k| k.0 == d.0 && k.1 == d.1)) {
-            self.known = disks.iter().map(|d| (d.0, d.1.clone(), volumes_space(&d.1, volume_space))).collect();
+        if self.at.is_none_or(|t| t.elapsed() >= DISK_SPACE_PERIOD) || disks.iter().any(|d| !self.asked.iter().any(|k| k.0 == d.0 && k.1 == d.1)) {
+            self.asked = disks.iter().map(|d| (d.0, d.1.clone())).collect();
+            self.storage = volumes_storage(disks, volume_space);
             self.at = Some(Instant::now());
         }
     }
 
+    /// The volumes wholly on `disk`.
     fn of(&self, disk: u32) -> Space {
-        self.known.iter().find(|k| k.0 == disk).and_then(|k| k.2)
+        self.storage.each.get(&disk.to_string()).copied()
+    }
+
+    /// All the volumes, each once.
+    fn all(&self) -> Space {
+        self.storage.all
     }
 }
 
@@ -610,6 +619,7 @@ impl Collector {
         }
         self.disk_models.refresh(&each);
         self.disk_spaces.refresh(&each);
+        snap.disk.space = self.disk_spaces.all();
         snap.disk.drives = each.iter().map(|d| DiskDrive { space: self.disk_spaces.of(d.0), ..windows_drive(d, self.disk_models.of(d.0)) }).collect();
         if self.pdh.is_none() {
             let what = if disk.is_some() { "GPU and thermal" } else { "disk, GPU and thermal" };
@@ -990,7 +1000,8 @@ mod tests {
             assert_eq!(d.model, storage_model(d.id.parse().unwrap()));
             // A disk with drive letters says how full they are; used space moves between two
             // readings, the total does not.
-            assert_eq!(d.space.map(|s| s.1), volumes_space(&d.volumes, volume_space).map(|s| s.1), "{d:?}");
+            // A volume on several disks is on none of them; a disk without letters has no figure.
+            assert!(!d.volumes.is_empty() || d.space.is_none(), "{d:?}");
             assert!(d.space.is_none_or(|(used, total)| used <= total && total > 0), "{d:?}");
         }
         if !direct.is_empty() && !s.disk.drives.is_empty() {

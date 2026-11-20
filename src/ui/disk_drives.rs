@@ -35,11 +35,6 @@ pub fn space_text((used, total): (u64, u64)) -> String {
     format!("{} / {}", format_bytes(used as f64), format_bytes(total as f64))
 }
 
-/// The volumes of all the disks together (used, total), `None` when no disk says.
-pub fn total_space(drives: &[DiskDrive]) -> Option<(u64, u64)> {
-    drives.iter().filter_map(|d| d.space).reduce(|a, b| (a.0.saturating_add(b.0), a.1.saturating_add(b.1)))
-}
-
 /// The line under a disk's Summary card: how full its volumes are, as the Memory card shows its
 /// figure (the rates are on the Performance page), else its rates; then what tells it from the
 /// other disks. Drive letters go first, as they are short and the line is cut where the card
@@ -118,8 +113,5 @@ mod tests {
         assert_eq!(drive_footer(&full), "1.0 GB / 4.0 GB \u{b7} C:");
         assert_eq!(drive_footer(&DiskDrive { volumes: String::new(), ..full.clone() }), "1.0 GB / 4.0 GB \u{b7} Samsung SSD 990 PRO 2TB");
         assert_eq!(drive_footer(&DiskDrive { volumes: String::new(), model: String::new(), ..full.clone() }), "1.0 GB / 4.0 GB");
-        let other = DiskDrive { space: Some((gb, 2 * gb)), ..Default::default() };
-        assert_eq!(total_space(&[full, other.clone(), drives[1].clone()]), Some((2 * gb, 6 * gb)));
-        assert_eq!(total_space(&drives[1..]), None);
     }
 }

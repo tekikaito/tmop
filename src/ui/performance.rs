@@ -655,10 +655,10 @@ impl App {
                 legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Read", c, false), ("Write", write, false)], hover.as_deref(), ix + iw);
                 cy += 24.0;
                 let mut facts = vec![("Active time".to_string(), format!("{active:.1}%")), ("Read speed".to_string(), format_rate(read_bps)), ("Write speed".to_string(), format_rate(write_bps))];
-                // How full the volumes are: of this disk, or of all the disks together.
+                // How full the volumes are: those wholly on this disk, or all of them once.
                 let space = match one {
                     Some((d, _)) => d.space,
-                    None => disk_drives::total_space(&s.disk.drives),
+                    None => s.disk.space,
                 };
                 if let Some(space) = space {
                     facts.push(("Storage used".to_string(), disk_drives::space_text(space)));

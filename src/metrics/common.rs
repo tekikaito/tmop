@@ -164,12 +164,55 @@ pub fn disk_title(name: &str, volumes: &str) -> String {
     }
 }
 
-/// Used and total bytes of the volumes in `volumes` ("C: D:") together, each asked of `space_of`
-/// as (used, total). A volume that does not answer (locked, no medium) is left out; `None` when
-/// none answers.
+/// How full the file systems (Windows: volumes) are: those wholly on one disk per disk, and all
+/// of them together.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Storage {
+    /// Per disk id, the (used, total) of the file systems lying on that disk alone. A disk whose
+    /// file systems are all shared with other disks has no entry.
+    pub each: HashMap<String, (u64, u64)>,
+    /// Every file system once, whether it lies on one disk or several; `None` without any.
+    pub all: Option<(u64, u64)>,
+}
+
+/// Splits file systems into [`Storage`]. `volumes` has, for each file system, the disks it lies
+/// on and its (used, total). One on several disks (RAID, LVM, a spanned or mirrored volume) is
+/// counted once in the total and on no single disk: its size is no disk's own, and adding it to
+/// each would count it again.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn split_storage(volumes: &[(Vec<String>, (u64, u64))]) -> Storage {
+    let mut s = Storage::default();
+    let add = |sum: &mut (u64, u64), (used, total): (u64, u64)| *sum = (sum.0.saturating_add(used), sum.1.saturating_add(total));
+    for (disks, space) in volumes {
+        add(s.all.get_or_insert((0, 0)), *space);
+        let mut disks = disks.clone();
+        disks.sort();
+        disks.dedup();
+        if let [only] = disks.as_slice() {
+            add(s.each.entry(only.clone()).or_default(), *space);
+        }
+    }
+    s
+}
+
+/// The drive letters of Windows disks as [`Storage`]. Each letter is asked of `space_of` once
+/// as (used, total); a letter that does not answer (locked, no medium) is left out. A letter
+/// that more than one disk lists (a spanned or mirrored volume, Storage Spaces) is shared.
+/// Disks are keyed by their number as text, as [`windows_drive`] does.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn volumes_space(volumes: &str, space_of: impl Fn(&str) -> Option<(u64, u64)>) -> Option<(u64, u64)> {
-    volumes.split_whitespace().filter_map(space_of).reduce(|a, b| (a.0.saturating_add(b.0), a.1.saturating_add(b.1)))
+pub fn volumes_storage(disks: &[DiskUse], space_of: impl Fn(&str) -> Option<(u64, u64)>) -> Storage {
+    let mut letters: Vec<(&str, Vec<String>)> = Vec::new();
+    for d in disks {
+        for letter in d.1.split_whitespace() {
+            match letters.iter_mut().find(|(l, _)| *l == letter) {
+                Some((_, on)) => on.push(d.0.to_string()),
+                None => letters.push((letter, vec![d.0.to_string()])),
+            }
+        }
+    }
+    let volumes: Vec<_> = letters.into_iter().filter_map(|(l, on)| space_of(l).map(|s| (on, s))).collect();
+    split_storage(&volumes)
 }
 
 /// A Windows disk for the snapshot.
@@ -402,17 +445,44 @@ mod tests {
     }
 
     #[test]
-    fn a_disks_space_is_the_sum_of_its_volumes() {
+    fn a_volume_on_several_disks_counts_once_and_on_none() {
         let space = |v: &str| match v {
             "C:" => Some((300, 1000)),
             "D:" => Some((50, 500)),
+            "S:" => Some((10, 2000)),
             _ => None,
         };
-        assert_eq!(volumes_space("C: D:", space), Some((350, 1500)));
+        let disk = |n: u32, v: &str| (n, v.to_string(), 0.0, 0.0, 0.0);
+        // Disk 0 holds C: and D:; S: is spread over disks 1 and 2.
+        let s = volumes_storage(&[disk(0, "C: D:"), disk(1, "S:"), disk(2, "S:")], space);
+        assert_eq!(s.each.get("0"), Some(&(350, 1500)));
+        assert_eq!(s.each.get("1"), None);
+        assert_eq!(s.each.get("2"), None);
+        assert_eq!(s.all, Some((360, 3500)));
         // A locked volume is left out; a disk without a volume that answers has no figure.
-        assert_eq!(volumes_space("E: D:", space), Some((50, 500)));
-        assert_eq!(volumes_space("E:", space), None);
-        assert_eq!(volumes_space("", space), None);
+        let s = volumes_storage(&[disk(0, "E: D:"), disk(1, "E:"), disk(2, "")], space);
+        assert_eq!((s.each.get("0").copied(), s.each.get("1"), s.each.get("2"), s.all), (Some((50, 500)), None, None, Some((50, 500))));
+        assert_eq!(volumes_storage(&[disk(0, "E:")], space), Storage::default());
+        assert_eq!(volumes_storage(&[], space), Storage::default());
+    }
+
+    #[test]
+    fn storage_counts_each_file_system_once() {
+        let on = |disks: &[&str], used, total| (disks.iter().map(|d| d.to_string()).collect::<Vec<_>>(), (used, total));
+        let tb = 1u64 << 40;
+        // RAID1 of two 4 TB disks with one 4 TB file system 1 TB full: df says 1 / 4 TB.
+        let s = split_storage(&[on(&["sda", "sdb"], tb, 4 * tb)]);
+        assert_eq!(s.all, Some((tb, 4 * tb)));
+        assert!(s.each.is_empty());
+        // RAID0 / LVM over two 1 TB disks: 2 TB on neither disk.
+        let s = split_storage(&[on(&["sda", "sdb"], tb, 2 * tb), on(&["sdc"], 5, 10), on(&["sdc"], 1, 2)]);
+        assert_eq!(s.all, Some((tb + 6, 2 * tb + 12)));
+        assert_eq!(s.each.get("sdc"), Some(&(6, 12)));
+        assert_eq!((s.each.get("sda"), s.each.get("sdb")), (None, None));
+        // A disk listed twice for one file system is still one disk.
+        let s = split_storage(&[on(&["sda", "sda"], 1, 2)]);
+        assert_eq!(s.each.get("sda"), Some(&(1, 2)));
+        assert_eq!(split_storage(&[]), Storage::default());
     }
 
     #[test]

@@ -5,7 +5,6 @@
 use super::common::{pick_cpu_temp, Ticks, HWMON_CPU_LABELS};
 use super::{DiskDrive, DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
 use crate::pro::mounts::Mount;
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// One `cpu`/`cpuN` line of `/proc/stat` as [`Ticks`]: idle = idle + iowait; kernel = system + irq
@@ -242,17 +241,15 @@ pub fn block_mounts(mounts: &[Mount]) -> Vec<&Mount> {
     out
 }
 
-/// Used and total bytes of the file systems on each disk. `volumes` has, for each file system,
-/// the disks it lies on and its (used, total); one on several disks (LVM, RAID) counts on each.
-pub fn disk_spaces(volumes: &[(Vec<String>, (u64, u64))]) -> HashMap<String, (u64, u64)> {
-    let mut out: HashMap<String, (u64, u64)> = HashMap::new();
-    for (disks, (used, total)) in volumes {
-        for disk in disks {
-            let sum = out.entry(disk.clone()).or_default();
-            *sum = (sum.0.saturating_add(*used), sum.1.saturating_add(*total));
-        }
+/// The disks a file system lies on, for [`super::common::split_storage`]: the physical ones when
+/// it has any (an LVM or RAID volume names its own device and the disks below it, of which only
+/// the disks are drives of their own), else the stacked device itself.
+pub fn physical_disks(disks: Vec<String>) -> Vec<String> {
+    if disks.iter().any(|d| !stacked(d)) {
+        disks.into_iter().filter(|d| !stacked(d)).collect()
+    } else {
+        disks
     }
-    out
 }
 
 /// One interface under `/sys/class/net`.
@@ -623,7 +620,7 @@ HugePages_Total:       0
     }
 
     #[test]
-    fn a_disks_space_is_the_sum_of_its_file_systems() {
+    fn file_systems_are_traced_to_their_disks() {
         let mounts = crate::pro::mounts::parse_mountinfo(
             "\
 22 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw
@@ -639,13 +636,20 @@ HugePages_Total:       0
         );
         let points: Vec<&str> = block_mounts(&mounts).iter().map(|m| m.point.as_str()).collect();
         assert_eq!(points, ["/", "/boot/efi", "/home", "/var"]);
-        // The LVM volume spans both disks and counts on each, and on its own device.
-        let on = |disks: &[&str], used, total| (disks.iter().map(|d| d.to_string()).collect::<Vec<_>>(), (used, total));
-        let spaces = disk_spaces(&[on(&["nvme0n1"], 40, 100), on(&["nvme0n1"], 1, 2), on(&["sda"], 500, 1000), on(&["dm-0", "nvme0n1", "sda"], 7, 10)]);
-        assert_eq!(spaces.get("nvme0n1"), Some(&(48, 112)));
-        assert_eq!(spaces.get("sda"), Some(&(507, 1010)));
-        assert_eq!(spaces.get("dm-0"), Some(&(7, 10)));
-        assert_eq!(spaces.get("sdb"), None);
+        // An LVM volume names its own device and the disks below it; only the disks are drives.
+        let names = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        assert_eq!(physical_disks(names(&["dm-0", "nvme0n1", "sda"])), names(&["nvme0n1", "sda"]));
+        assert_eq!(physical_disks(names(&["md0", "sda", "sdb"])), names(&["sda", "sdb"]));
+        assert_eq!(physical_disks(names(&["nvme0n1"])), names(&["nvme0n1"]));
+        // With no physical disk named, the stacked device is the drive.
+        assert_eq!(physical_disks(names(&["dm-0"])), names(&["dm-0"]));
+        // Mounts: the file systems on the LVM volume, a RAID1 and a plain disk count once each.
+        let on = |disks: &[&str], used, total| (physical_disks(names(disks)), (used, total));
+        let s = crate::metrics::common::split_storage(&[on(&["nvme0n1"], 40, 100), on(&["nvme0n1"], 1, 2), on(&["sda"], 500, 1000), on(&["dm-0", "nvme0n1", "sda"], 7, 10), on(&["md0", "sdb", "sdc"], 20, 80)]);
+        assert_eq!(s.each.get("nvme0n1"), Some(&(41, 102)));
+        assert_eq!(s.each.get("sda"), Some(&(500, 1000)));
+        assert_eq!((s.each.get("dm-0"), s.each.get("sdb"), s.each.get("sdc")), (None, None, None));
+        assert_eq!(s.all, Some((568, 1192)));
     }
 
     #[test]

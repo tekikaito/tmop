@@ -12,7 +12,7 @@
 //! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
 //! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
-use super::common::{cpu_brand, disk_model, net_delta, tick_delta_pct, NetMark, Ticks};
+use super::common::{cpu_brand, disk_model, net_delta, split_storage, tick_delta_pct, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::procfs::{self, DiskStat, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
@@ -67,19 +67,20 @@ fn whole_disks(name: &str, depth: u32) -> Vec<String> {
     out
 }
 
-/// Used and total bytes of the mounted file systems on each disk, as the Disk Space page counts
-/// them. Only local block devices are asked, so no unreachable share can hold this up.
-fn disk_spaces() -> HashMap<String, (u64, u64)> {
-    let Some(text) = read("/proc/self/mountinfo") else { return HashMap::new() };
+/// Used and total bytes of the mounted file systems, as the Disk Space page counts them: on each
+/// disk the ones wholly on it, and all of them once (a RAID or LVM volume on several disks is on
+/// none of them). Only local block devices are asked, so no unreachable share can hold this up.
+fn disk_spaces() -> Storage {
+    let Some(text) = read("/proc/self/mountinfo") else { return Storage::default() };
     let mounts = crate::pro::mounts::parse_mountinfo(&text);
     let mut seen = HashSet::new();
     let mut volumes = Vec::new();
     for m in procfs::block_mounts(&mounts) {
         let Some(dev) = block_name(m).filter(|d| seen.insert(d.clone())) else { continue };
         let Some((total, free)) = crate::pro::mounts::space(Path::new(&m.point)).filter(|s| s.0 > 0) else { continue };
-        volumes.push((whole_disks(&dev, 0), (total.saturating_sub(free), total)));
+        volumes.push((procfs::physical_disks(whole_disks(&dev, 0)), (total.saturating_sub(free), total)));
     }
-    procfs::disk_spaces(&volumes)
+    split_storage(&volumes)
 }
 
 fn read_u64(path: impl AsRef<Path>) -> Option<u64> {
@@ -125,7 +126,7 @@ pub struct Collector {
     /// The model of each disk listed (device -> model), read when the disk first shows.
     disk_models: HashMap<String, String>,
     /// Used and total bytes of the file systems on each disk (device -> bytes), and when asked.
-    disk_spaces: HashMap<String, (u64, u64)>,
+    disk_spaces: Storage,
     disk_spaces_at: Option<Instant>,
     prev_net: Option<NetMark>,
     /// Static cpufreq figures (kHz) read once: max, base.
@@ -165,7 +166,7 @@ impl Collector {
             prev_disk: None,
             prev_disk_stats: Vec::new(),
             disk_models: HashMap::new(),
-            disk_spaces: HashMap::new(),
+            disk_spaces: Storage::default(),
             disk_spaces_at: None,
             prev_net: None,
             freq_max: read_u64(cpu0.join("cpuinfo_max_freq")),
@@ -283,8 +284,9 @@ impl Collector {
             self.disk_spaces_at = Some(now);
         }
         for d in &mut drives {
-            d.space = self.disk_spaces.get(&d.id).copied();
+            d.space = self.disk_spaces.each.get(&d.id).copied();
         }
+        snap.disk.space = self.disk_spaces.all;
         snap.disk.drives = drives;
         self.prev_disk_stats = stats;
     }
@@ -453,20 +455,22 @@ mod tests {
     use super::*;
 
     /// Runs on the Linux CI runners: the file system at `/` is traced to whole disks of
-    /// `/sys/block`, and each of them says how full it is.
+    /// `/sys/block`, and counts on its disk, or on none when it spans several.
     #[test]
     fn the_root_file_system_counts_on_its_disk() {
         let mounts = crate::pro::mounts::parse_mountinfo(&read("/proc/self/mountinfo").unwrap());
         // In a container `/` is an overlay, on no block device.
         let Some(root) = procfs::block_mounts(&mounts).into_iter().find(|m| m.point == "/") else { return };
         let dev = block_name(root).unwrap_or_else(|| panic!("no block device for {root:?}"));
-        let disks = whole_disks(&dev, 0);
+        let disks = procfs::physical_disks(whole_disks(&dev, 0));
         let spaces = disk_spaces();
         eprintln!("{} is {dev} on {disks:?}: {spaces:?}", root.source);
         assert!(!disks.is_empty() && disks.iter().all(|d| Path::new("/sys/block").join(d).exists()), "{disks:?}");
+        let (used, total) = spaces.all.expect("no space");
+        assert!(total > 0 && used <= total, "{used} / {total}");
+        // On one disk it counts there; on several (RAID, LVM) on none of them.
         for d in &disks {
-            let (used, total) = spaces[d];
-            assert!(total > 0 && used <= total, "{d}: {used} / {total}");
+            assert_eq!(spaces.each.contains_key(d), disks.len() == 1, "{d}");
         }
     }
 }

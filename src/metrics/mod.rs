@@ -105,6 +105,9 @@ pub struct DiskSample {
     pub active_pct: f32,
     pub read_bps: f64,
     pub write_bps: f64,
+    /// Used and total bytes of all the mounted file systems / volumes, each counted once (one that
+    /// spans disks is not counted per disk). `None` when none can be asked.
+    pub space: Option<(u64, u64)>,
     /// Each physical disk on its own; the fields above stay the grouped view.
     pub drives: Vec<DiskDrive>,
 }
@@ -123,8 +126,10 @@ pub struct DiskDrive {
     pub title: String,
     /// Empty when the system names none.
     pub model: String,
-    /// Used and total bytes of the mounted volumes on it (Windows: those with a drive letter):
-    /// their sum, not the size of the disk. `None` when it has none or they cannot be asked.
+    /// Used and total bytes of the mounted volumes lying wholly on this disk (Windows: those with a
+    /// drive letter): their sum, not the size of the disk. A volume shared with other disks (RAID,
+    /// LVM, spanned or mirrored) is left out, as its size is not this disk's. `None` when it has
+    /// none or they cannot be asked.
     pub space: Option<(u64, u64)>,
     pub active_pct: f32,
     pub read_bps: f64,
