@@ -134,10 +134,48 @@ fn icon() -> Result<Icon, String> {
     Icon::from_rgba(data.rgba.clone(), data.width, data.height).map_err(|e| e.to_string())
 }
 
+/// Cloaks or uncloaks a window (DWM keeps a cloaked window off the screen). eframe shows the
+/// window after its first frame whatever the app asks; a `--tray` start cloaks it so that
+/// frame never shows before the window is hidden.
+pub fn cloak(hwnd: isize, on: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    if hwnd == 0 {
+        return;
+    }
+    let value = i32::from(on);
+    // SAFETY: `hwnd` is the main window; DWMWA_CLOAK takes a BOOL.
+    unsafe {
+        let _ = DwmSetWindowAttribute(HWND(hwnd as *mut _), DWMWA_CLOAK, (&raw const value).cast(), std::mem::size_of::<i32>() as u32);
+    }
+}
+
 /// Whether a Windows key is held down (egui reports no Windows key). Reads the key state, as
 /// every program may; no hook.
 pub fn win_key_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
     // SAFETY: plain key state queries.
     unsafe { (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows gives a combination to one window only: the second registration is refused with
+    /// the "taken" message, and works once the first lets go. An odd combination nobody uses,
+    /// held for a moment.
+    #[test]
+    fn a_taken_combination_is_reported() {
+        let s = Shortcut::parse("Ctrl+Alt+Shift+F24").unwrap();
+        let (mut first, mut second) = (Tray::new(|| {}), Tray::new(|| {}));
+        if first.set_shortcut(Some(&s)).is_err() {
+            return; // something on this machine holds it already
+        }
+        let e = second.set_shortcut(Some(&s)).unwrap_err();
+        assert_eq!(e, "Ctrl + Alt + Shift + F24 is taken: another program or Windows itself uses it. Choose another combination.");
+        first.set_shortcut(None).unwrap();
+        second.set_shortcut(Some(&s)).unwrap();
+        second.set_shortcut(None).unwrap();
+    }
 }

@@ -10,6 +10,8 @@
 //!   TMOP --engine-test=<op>    setup|wizard|start|stop|restart|remove|update the TMOP engine at start-up (test-only)
 //!   TMOP --disk-root=<path>    start on Disk Space and scan <path> (alias --disk-scan=)
 //!   TMOP --popout         only the skinned popout window
+//!   TMOP --tray           start hidden in the notification area when tray mode is on (alias --hidden; Windows)
+//!   TMOP --exit           ask the running TMOP (in the notification area or not) to exit (Windows)
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (Windows, built with `--features screensaver`; a no-op elsewhere)
@@ -261,6 +263,13 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    if args.iter().any(|a| a == "--exit") {
+        if tmop::taskmgr::hand_off(tmop::tray::EXIT_REQUEST) {
+            std::process::exit(0);
+        }
+        eprintln!("no TMOP window is running");
+        std::process::exit(1);
+    }
     if args.iter().any(|a| a == "--engine-relay") {
         std::process::exit(engine_relay());
     }
@@ -300,6 +309,7 @@ fn main() -> eframe::Result<()> {
         }),
         docker_tab: value(&["--docker-tab="]),
         engine_test: value(&["--engine-test="]),
+        tray: args.iter().any(|a| a == tmop::tray::FLAG || a == tmop::tray::FLAG_ALIAS),
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;
@@ -309,6 +319,15 @@ fn main() -> eframe::Result<()> {
     tmop::platform::raise_open_files_limit();
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
+    // In tray mode one TMOP runs: a second start brings the running one to the front (a
+    // `--tray` start at sign-in only tells it that it is there), over the Task Manager pipe.
+    let replacing = args.iter().any(|a| a == tmop::tray::REPLACING_FLAG);
+    if settings.tray.keep_running && !popout_only && !replacing && tmop::platform::Caps::get().tray {
+        let message = if launch.tray { tmop::tray::ALREADY_RUNNING } else { "" };
+        if tmop::taskmgr::hand_off(message) {
+            return Ok(());
+        }
+    }
     if let Some(skin) = value(&["--popout-skin="]) {
         settings.popout.skin = skin;
     }

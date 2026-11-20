@@ -10,7 +10,10 @@
 //!   `--set-taskmgr-replacement=on|off`, which makes the change and exits without a window.
 //! * TMOP only removes values that point at a TMOP.exe; another program's value is left alone.
 //! * A Task Manager launch is handed to an already running main window over a named pipe, the
-//!   way Task Manager brings its own window back instead of opening a second one.
+//!   way Task Manager brings its own window back instead of opening a second one. Tray mode
+//!   uses the same pipe for a second start and `--exit` (see [`crate::tray`]). The test
+//!   override `TMOP_TASKMGR_PIPE` names another pipe, so a test copy never reaches a TMOP the
+//!   user is running.
 //! * [`open_real`] starts the real Task Manager past the replacement, as a debuggee that is
 //!   detached at once (Windows skips the `Debugger` value for processes started under a debugger).
 //!   It does so from an elevated copy, because a non-elevated Task Manager restarts itself
@@ -643,6 +646,9 @@ mod win {
     }
 
     fn pipe_name() -> String {
+        if let Some(name) = std::env::var_os("TMOP_TASKMGR_PIPE").and_then(|n| n.into_string().ok()).filter(|n| !n.is_empty()) {
+            return format!(r"\\.\pipe\{name}");
+        }
         let mut session = 0u32;
         // SAFETY: writes the session id of this process.
         unsafe {

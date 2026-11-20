@@ -491,7 +491,7 @@ fn row(ui: &mut egui::Ui, pal: &Palette, label: &str, controls: impl FnOnce(&mut
 
 /// A settings row: a hairline, the label (and a faint hint line under it) at the left and the
 /// controls at the right. Controls are added right to left: the first one added is the rightmost.
-fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls: impl FnOnce(&mut egui::Ui)) {
     let w = ui.available_width();
     let text_w = if hint.is_empty() { w } else { (w * 0.62).clamp(160.0, 560.0) };
     let label_g = ui.painter().layout(label.to_string(), theme::ui(13.0), pal.text, text_w);

@@ -31,6 +31,7 @@ pub mod table;
 pub mod terminal;
 pub mod theme;
 pub mod titlebar;
+pub mod tray;
 pub mod updates;
 pub mod widgets;
 
@@ -379,6 +380,8 @@ pub struct Launch {
     pub docker_tab: Option<String>,
     /// Test-only engine operation at start-up: setup, wizard, start, stop, restart, remove or update.
     pub engine_test: Option<String>,
+    /// Start hidden in the notification area (`--tray`), when tray mode is on.
+    pub tray: bool,
 }
 
 /// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
@@ -476,6 +479,8 @@ pub struct App {
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
     pub replace: replace::ReplaceUi,
+    /// The notification area icon, the shortcut and the window hidden in the tray.
+    pub tray_ui: tray::TrayUi,
     pub updates: updates::UpdateUi,
     pub docker: docker::DockerState,
     /// Docker series for the Performance page, refreshed when the backend has new stats.
@@ -531,6 +536,7 @@ impl App {
         });
         let software_gl = gl_renderer(cc).is_some_and(|r| crate::startup::is_software_renderer(&r));
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
+        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, !popout_only && caps.tray, launch.tray);
         let mut app = Self {
             caps,
             software_gl,
@@ -576,6 +582,7 @@ impl App {
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
             replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
+            tray_ui,
             updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
@@ -714,6 +721,10 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // The keys belong to the shortcut field of Settings while it listens.
+        if self.tray_ui.capturing() {
+            return;
+        }
         let mut go = None;
         ctx.input(|i| {
             // A page this OS does not have keeps its key unused rather than landing on Summary.
@@ -936,14 +947,22 @@ impl eframe::App for App {
         }
     }
 
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe 0.37 skips `ui` while the window is minimized or hidden (0.29 still ran `update`
         // then): new samples are taken in here, so recording and App history go on meanwhile.
         let (snap, _, rows) = self.snapshot();
         self.take_sample(&snap, &rows, Instant::now());
+        if !self.popout_only {
+            self.window_logic(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Hidden in the notification area: eframe still calls this for a window that is hidden
+        // but not minimized, so draw nothing and ask for no repaint (see `ui::tray`).
+        if self.tray_ui.vis.hidden && !self.popout_open {
+            return;
+        }
         let t_update = Instant::now();
         self.update_inner(ui);
         if let Some(p) = &mut self.profile {
@@ -970,6 +989,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.tray_ui.shut_down();
         self.recorder.stop();
         crate::process::netio::set_wanted(false);
         self.save_palette_edits(true);
@@ -1090,7 +1110,15 @@ impl App {
             if self.popout_ui(root, &fd, &skin) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+        } else if self.tray_ui.vis.hidden {
+            // Hidden in the notification area: only the popout is drawn.
+            if self.popout_open {
+                self.popout_viewport(ctx, &fd);
+            }
         } else {
+            if self.page != Page::Settings {
+                self.tray_ui.end_capture(&self.settings.tray);
+            }
             // Remembered for the next start (window.maximized). A minimized window keeps what
             // it was before.
             let (maximized, minimized, time) = ctx.input(|i| (i.viewport().maximized, i.viewport().minimized, i.time));
@@ -1152,7 +1180,7 @@ impl App {
         }
         // The network counters run while the Processes table shows their column (a popout-only
         // TMOP has no table).
-        crate::process::netio::set_wanted(!self.popout_only && self.caps.proc.network && self.column_visible(Column::Network));
+        crate::process::netio::set_wanted(!self.popout_only && !self.tray_ui.vis.hidden && self.caps.proc.network && self.column_visible(Column::Network));
         // What a part of a page had to tell the user (a file manager that would not open).
         if let Some(message) = kit::take_report(ctx) {
             self.status = message;

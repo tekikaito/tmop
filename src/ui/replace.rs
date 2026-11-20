@@ -6,10 +6,10 @@ use super::kit::{self, DialogButton};
 use super::settings_page::{note, toggle_row_hint};
 use super::theme::{self, Palette};
 use super::widgets::{self, Button, ButtonSize, Icon};
-use super::{App, Page};
+use super::App;
 use crate::pro::Loader;
 use crate::taskmgr::{self, AdminFlag, State};
-use eframe::egui::{self, RichText, ViewportCommand};
+use eframe::egui::{self, RichText};
 use std::time::{Duration, Instant};
 
 /// Why Task Manager launches fail while TMOP.exe is set to run as administrator.
@@ -66,6 +66,13 @@ impl ReplaceUi {
         });
     }
 
+    /// The latest launch handed over by a later copy: a page id, empty for "just come to the
+    /// front", or [`crate::tray::ALREADY_RUNNING`]. Handled in `App::window_logic`, which runs
+    /// while the window is hidden too.
+    pub fn take_request(&self) -> Option<String> {
+        self.inbox.as_ref().and_then(|i| i.take())
+    }
+
     fn start_clear_admin_flag(&mut self) {
         self.job.start(|| {
             taskmgr::clear_admin_flag()
@@ -76,7 +83,7 @@ impl ReplaceUi {
 }
 
 impl App {
-    /// Per-frame work: finished changes and handed-over Task Manager launches.
+    /// Per-frame work: finished changes. Handed-over launches are read in `App::window_logic`.
     pub fn replace_poll(&mut self, ctx: &egui::Context) {
         if !self.caps.taskmgr_replace {
             return;
@@ -94,15 +101,6 @@ impl App {
         }
         if self.replace.job.is_loading() {
             ctx.request_repaint_after(Duration::from_millis(200));
-        }
-        let request = self.replace.inbox.as_ref().and_then(|i| i.take());
-        if let Some(page) = request {
-            if !page.is_empty() {
-                self.page = Page::from_id_on(&page, &self.caps);
-            }
-            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
     }
 

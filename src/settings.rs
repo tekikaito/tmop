@@ -839,8 +839,7 @@ mod tests {
         let load = parse(r#"{"version":1,"tray":{"keepRunning":true}}"#);
         assert!(matches!(load.outcome, LoadOutcome::Loaded));
         assert!(load.settings.tray.keep_running && !load.settings.tray.shortcut_enabled);
-        let mut s = Settings::default();
-        s.tray = Tray { keep_running: true, shortcut_enabled: true, shortcut: "Ctrl+Alt+T".into() };
+        let s = Settings { tray: Tray { keep_running: true, shortcut_enabled: true, shortcut: "Ctrl+Alt+T".into() }, ..Default::default() };
         let out: Value = serde_json::from_str(&s.to_json()).unwrap();
         assert_eq!(out["tray"], serde_json::json!({"keepRunning": true, "shortcutEnabled": true, "shortcut": "Ctrl+Alt+T"}));
         let load = parse(&s.to_json());

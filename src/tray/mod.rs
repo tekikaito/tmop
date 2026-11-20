@@ -8,7 +8,9 @@
 //!   and TMOP says so.
 //! * [`autostart`] is the per-user Run entry that starts TMOP hidden in the tray (`--tray`).
 //! * A second start while tray mode is on hands over to the running TMOP over the pipe of
-//!   [`crate::taskmgr::hand_off`], which brings its window to the front.
+//!   [`crate::taskmgr::hand_off`], which brings its window to the front. `TMOP --exit` asks it
+//!   to exit over the same pipe (for scripts and installers, which otherwise could only kill
+//!   it and leave a dead icon behind).
 //!
 //! The window side is [`Visibility`], a plain state machine; the icon and the shortcut are in
 //! [`Tray`] (a stub off Windows).
@@ -22,6 +24,9 @@ pub use shortcut::{Capture, Shortcut};
 pub const FLAG: &str = "--tray";
 /// Also accepted for [`FLAG`].
 pub const FLAG_ALIAS: &str = "--hidden";
+/// Given by TMOP to a copy it starts in its own place (after an update, as administrator)
+/// just before it exits: that copy does not hand over to the one that is exiting.
+pub const REPLACING_FLAG: &str = "--replacing";
 
 /// What happened to the window, the icon or the shortcut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +117,23 @@ impl Visibility {
     }
 }
 
+/// What a `--tray` start sends to a TMOP that is already running: "I am here", which changes
+/// nothing (any other message brings the window to the front).
+pub const ALREADY_RUNNING: &str = "tray-start";
+/// What `TMOP --exit` sends: the running TMOP exits, as with Exit in the icon's menu.
+pub const EXIT_REQUEST: &str = "tray-exit";
+
+/// The sampling interval while the window is hidden in the tray with no popout open:
+/// `configured` while the flight recorder writes a recording (it needs every sample), else
+/// none. Everything else the samples feed is on screen only.
+pub fn hidden_interval(configured: Option<std::time::Duration>, recording: bool) -> Option<std::time::Duration> {
+    configured.filter(|_| recording)
+}
+
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::{win_key_down, Tray};
+pub use win::{cloak, win_key_down, Tray};
 
 #[cfg(not(windows))]
 mod stub {
@@ -145,9 +163,11 @@ mod stub {
     pub fn win_key_down() -> bool {
         false
     }
+
+    pub fn cloak(_hwnd: isize, _on: bool) {}
 }
 #[cfg(not(windows))]
-pub use stub::{win_key_down, Tray};
+pub use stub::{cloak, win_key_down, Tray};
 
 #[cfg(test)]
 mod tests {
@@ -201,6 +221,14 @@ mod tests {
         let mut v = Visibility::new(true);
         assert_eq!(v.on(Event::Exit, true), Action::Exit);
         assert_eq!(v.on(Event::CloseRequested, true), Action::Close);
+    }
+
+    #[test]
+    fn hidden_sampling_runs_only_for_a_recording() {
+        let second = Some(std::time::Duration::from_secs(1));
+        assert_eq!(hidden_interval(second, false), None);
+        assert_eq!(hidden_interval(second, true), second);
+        assert_eq!(hidden_interval(None, true), None, "paused stays paused");
     }
 
     #[test]

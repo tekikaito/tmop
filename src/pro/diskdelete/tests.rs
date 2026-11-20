@@ -235,10 +235,10 @@ fn log_line_format() {
 
 #[test]
 fn relaunch_args_quote_the_root() {
-    assert_eq!(relaunch_args(Path::new(r"C:\Program Files")), r#"--page=disk-space --disk-root="C:\Program Files""#);
+    assert_eq!(relaunch_args(Path::new(r"C:\Program Files")), r#"--replacing --page=disk-space --disk-root="C:\Program Files""#);
     // A trailing backslash would escape the closing quote: it is doubled.
-    assert_eq!(relaunch_args(Path::new(r"C:\")), r#"--page=disk-space --disk-root="C:\\""#);
-    assert_eq!(relaunch_args(Path::new(r"\\srv\share\")), r#"--page=disk-space --disk-root="\\srv\share\\""#);
+    assert_eq!(relaunch_args(Path::new(r"C:\")), r#"--replacing --page=disk-space --disk-root="C:\\""#);
+    assert_eq!(relaunch_args(Path::new(r"\\srv\share\")), r#"--replacing --page=disk-space --disk-root="\\srv\share\\""#);
 }
 
 fn target(p: &Path, size: u64, is_dir: bool) -> Target {

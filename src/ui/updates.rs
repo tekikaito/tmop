@@ -9,7 +9,7 @@ use super::App;
 use crate::pro::Loader;
 use crate::settings::General;
 use crate::update::{self, Method, Release};
-use eframe::egui::{self, RichText, ViewportCommand};
+use eframe::egui::{self, RichText};
 use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -163,8 +163,8 @@ impl App {
         let installed = if u.install.poll() { u.install.ok().cloned() } else { None };
         if let Some(exe) = installed {
             self.save_settings();
-            match std::process::Command::new(&exe).spawn() {
-                Ok(_) => ctx.send_viewport_cmd(ViewportCommand::Close),
+            match std::process::Command::new(&exe).arg(crate::tray::REPLACING_FLAG).spawn() {
+                Ok(_) => self.quit(ctx),
                 Err(e) => {
                     self.updates.offer = None;
                     self.status = format!("TMOP is updated; start it again to use the new version ({e})");
