@@ -186,7 +186,7 @@ fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool
             ui.label(RichText::new(format!("\u{26a0} {w:.1}:1")).font(theme::ui(12.0)).color(pal.warn))
                 .on_hover_text(format!("Text contrast is below {MIN_CONTRAST}:1 (WCAG AA). The palette is still saved."));
         }
-        changed = widgets::color_edit(ui, pal, c);
+        changed = widgets::color_edit(ui, pal, r.key, c);
     });
     changed
 }
@@ -209,7 +209,7 @@ fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs)
                     g.metric_colors.remove(key);
                     changed = true;
                 }
-                if widgets::color_edit(ui, pal, &mut c) {
+                if widgets::color_edit(ui, pal, ("metric", key), &mut c) {
                     g.metric_colors.insert(key.into(), theme::to_skin(c).to_string());
                     changed = true;
                 }
