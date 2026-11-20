@@ -21,13 +21,14 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 
 /// Width of the section list, and the sections it lists (in page order).
 const NAV_W: f32 = 180.0;
-const SECTIONS: [&str; 8] = ["Appearance", "Graphs", "General", "Window management", "Other options", TASK_MANAGER, "Skins and files", "About"];
-/// The section only Windows has (see [`shown_sections`]).
+const SECTIONS: [&str; 9] = ["Appearance", "Graphs", "General", "Window management", "Other options", TRAY, TASK_MANAGER, "Skins and files", "About"];
+/// The sections only Windows has (see [`shown_sections`]).
+const TRAY: &str = "Notification area";
 const TASK_MANAGER: &str = "Task Manager";
 
 /// [`SECTIONS`] this OS shows. A hidden section's settings keep their values in the file.
 fn shown_sections(caps: &Caps) -> Vec<&'static str> {
-    SECTIONS.into_iter().filter(|s| *s != TASK_MANAGER || caps.taskmgr_replace).collect()
+    SECTIONS.into_iter().filter(|s| (*s != TASK_MANAGER || caps.taskmgr_replace) && (*s != TRAY || caps.tray)).collect()
 }
 
 /// The accent swatches after "Palette default": (name, `appearance.accent`).
@@ -738,10 +739,13 @@ impl App {
                                 }
                             }
                         });
+                        if caps.tray {
+                            section(ui, &pal, &mut sections, TRAY, |ui| self.tray_section(ui, &pal));
+                        }
                         if caps.taskmgr_replace {
                             section(ui, &pal, &mut sections, TASK_MANAGER, |ui| self.replace_section(ui, &pal));
                         }
-                        section(ui, &pal, &mut sections, SECTIONS[6], |ui| {
+                        section(ui, &pal, &mut sections, SECTIONS[7], |ui| {
                             ui.add_space(2.0);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -947,13 +951,15 @@ fn title_case(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The Task Manager section is Windows-only; the others stay in page order.
+    /// The notification area and Task Manager sections are Windows-only; the others stay in
+    /// page order.
     #[test]
     fn sections_follow_caps() {
         assert_eq!(shown_sections(&Caps::WINDOWS), SECTIONS.to_vec());
         let linux = shown_sections(&Caps::LINUX);
-        assert_eq!(linux.len(), SECTIONS.len() - 1);
-        assert!(!linux.contains(&TASK_MANAGER) && linux.last() == Some(&"About"));
+        assert_eq!(linux.len(), SECTIONS.len() - 2);
+        assert!(!linux.contains(&TASK_MANAGER) && !linux.contains(&TRAY) && linux.last() == Some(&"About"));
+        assert_eq!(shown_sections(&Caps { tray: false, ..Caps::WINDOWS }).len(), SECTIONS.len() - 1);
     }
 
     /// Without window levels (Wayland) the popout offers no desktop or topmost mode, and a saved
