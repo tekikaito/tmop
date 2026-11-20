@@ -11,6 +11,7 @@ pub mod pro;
 pub mod process;
 pub mod screensaver;
 pub mod settings;
+pub mod shot;
 pub mod skin;
 pub mod startup;
 pub mod taskmgr;

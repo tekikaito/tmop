@@ -379,6 +379,10 @@ pub struct Launch {
     pub docker_tab: Option<String>,
     /// Test-only engine operation at start-up: setup, wizard, start, stop, restart, remove or update.
     pub engine_test: Option<String>,
+    /// Settings section to scroll to (`graphs`, `general`, ...), see [`settings_page::section_index`].
+    pub settings_section: Option<String>,
+    /// `--screenshot=`: render frames to PNG files and exit, see [`crate::shot`].
+    pub shot: Option<crate::shot::Plan>,
 }
 
 /// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
@@ -488,6 +492,10 @@ pub struct App {
     status_seen: (String, Instant),
     ip: (Option<String>, Option<Instant>),
     profile: Option<Profile>,
+    /// Settings section the Settings page scrolls to on its next frame.
+    pending_section: Option<usize>,
+    /// A `--screenshot=` run.
+    shot: Option<crate::shot::Run>,
 }
 
 /// The main window's HWND (0 if unknown): the owner of the palette file dialogs, so they open
@@ -555,7 +563,7 @@ impl App {
             selected: None,
             pending: None,
             elevated_job: None,
-            machine: chrome::machine_line(),
+            machine: if launch.shot.is_some() { crate::shot::MACHINE.into() } else { chrome::machine_line() },
             focus_search: false,
             status,
             applied_top: None,
@@ -580,6 +588,8 @@ impl App {
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
+            pending_section: launch.settings_section.as_deref().and_then(settings_page::section_index),
+            shot: launch.shot.map(crate::shot::Run::new),
         };
         if !popout_only {
             crate::update::remove_leftover();
@@ -946,6 +956,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t_update = Instant::now();
         self.update_inner(ui);
+        if let Some(run) = &mut self.shot {
+            run.step(ui.ctx());
+        }
         if let Some(p) = &mut self.profile {
             p.frames += 1;
             p.busy += t_update.elapsed();
