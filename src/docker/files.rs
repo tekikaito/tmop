@@ -5,15 +5,21 @@
 //! own, so they are mounted into a throwaway busybox helper container (labelled
 //! `tmop.helper=1`) that is removed when the operation ends.
 //!
+//! A helper keeps its volume in use, and the engine refuses to remove a volume that a
+//! container mounts, running or not. So helpers are not listed as containers,
+//! [`remove_volume`] removes them before the volume, the engine removes them itself when
+//! they stop (`AutoRemove`), and [`remove_stopped_helpers`] clears the stopped ones an
+//! earlier TMOP left behind. A helper is recognised by its label, never by its name.
+//!
 //! Paths in [`Entry`] and in the public functions are absolute POSIX paths in the
 //! target's own view: for a volume, `/` is the root of the volume.
 
 use bollard::container::LogOutput;
 use bollard::exec::{CreateExecOptions, StartExecResults};
-use bollard::models::{ContainerCreateBody, HostConfig, VolumeCreateRequest};
+use bollard::models::{ContainerCreateBody, ContainerSummary, ContainerSummaryStateEnum, HostConfig, VolumeCreateRequest};
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptions, RemoveContainerOptionsBuilder,
-    UploadToContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptions, ListContainersOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveVolumeOptions, UploadToContainerOptionsBuilder,
 };
 use bollard::{body_full, body_try_stream, Docker};
 use bytes::Bytes;
@@ -29,6 +35,11 @@ use super::backend::err_text;
 
 /// Image used for the helper container that gives access to volumes.
 pub const HELPER_IMAGE: &str = "busybox:stable";
+/// Label that marks a helper container; its value is [`HELPER_LABEL_VALUE`].
+pub const HELPER_LABEL: &str = "tmop.helper";
+pub const HELPER_LABEL_VALUE: &str = "1";
+/// How long a helper runs when nothing removes it.
+pub const HELPER_LIFETIME_SECS: u32 = 86_400;
 /// Where a volume is mounted inside the helper container.
 pub const VOLUME_MOUNT: &str = "/volume";
 /// Maximum number of archive bytes read when listing a stopped container's directory.
@@ -67,32 +78,121 @@ pub struct Helper {
 }
 
 /// A helper kept alive for several operations on one volume.
+///
+/// The helper may be removed under the browser, by [`remove_volume`] or because its
+/// lifetime ended; [`VolumeBrowser::list`] then starts a new one.
 pub struct VolumeBrowser {
-    pub helper: Helper,
+    volume: String,
+    helper: tokio::sync::Mutex<Helper>,
 }
 
 impl VolumeBrowser {
     /// Starts a helper for `volume`. The volume must exist.
     pub async fn open(docker: &Docker, volume: &str) -> Result<VolumeBrowser, String> {
-        Ok(VolumeBrowser { helper: create_helper(docker, volume).await? })
+        let helper = create_helper(docker, volume).await?;
+        Ok(VolumeBrowser { volume: volume.to_string(), helper: tokio::sync::Mutex::new(helper) })
     }
 
     /// Lists `path` (volume-relative) through the helper.
     pub async fn list(&self, docker: &Docker, path: &str) -> Result<Vec<Entry>, String> {
-        let entries = list_dir_in(docker, &self.helper.id, true, &volume_path(path)).await?;
-        Ok(to_volume_entries(entries))
+        let mut helper = self.helper.lock().await;
+        let path = volume_path(path);
+        let mut result = list_dir_in(docker, &helper.id, true, &path).await;
+        if result.is_err() && !is_running(docker, &helper.id).await {
+            // The helper is gone. So may be the volume, which `create_helper` reports.
+            remove_helper(docker, &helper).await;
+            *helper = create_helper(docker, &self.volume).await?;
+            result = list_dir_in(docker, &helper.id, true, &path).await;
+        }
+        Ok(to_volume_entries(result?))
     }
 
     /// Removes the helper container.
-    pub async fn close(self, docker: &Docker) {
-        remove_helper(docker, &self.helper).await;
+    pub async fn close(&self, docker: &Docker) {
+        let helper = self.helper.lock().await;
+        remove_helper(docker, &helper).await;
     }
+}
+
+/// Whether `labels` are those of a helper container.
+pub fn is_helper(labels: Option<&HashMap<String, String>>) -> bool {
+    labels.and_then(|l| l.get(HELPER_LABEL)).is_some_and(|v| v == HELPER_LABEL_VALUE)
+}
+
+/// Whether the container mounts the volume called `volume`.
+pub fn mounts_volume(container: &ContainerSummary, volume: &str) -> bool {
+    container.mounts.iter().flatten().any(|m| m.name.as_deref() == Some(volume))
+}
+
+/// Whether a helper in this state has stopped for good. A stopped helper still keeps its
+/// volume in use. One that is only created is about to be started, so it does not count.
+pub fn is_stopped(state: Option<&ContainerSummaryStateEnum>) -> bool {
+    matches!(state, Some(ContainerSummaryStateEnum::EXITED | ContainerSummaryStateEnum::DEAD))
+}
+
+/// All helper containers, running or not. Only the label decides: a container that is
+/// merely named like a helper is not TMOP's.
+async fn list_helpers(docker: &Docker) -> Result<Vec<ContainerSummary>, String> {
+    let mut filters = HashMap::new();
+    filters.insert("label".to_string(), vec![format!("{HELPER_LABEL}={HELPER_LABEL_VALUE}")]);
+    let options = ListContainersOptionsBuilder::default().all(true).filters(&filters).build();
+    let found = docker.list_containers(Some(options)).await.map_err(|e| err_text(&e))?;
+    // The engine filtered already; the check keeps other containers safe if it ever does not.
+    Ok(found.into_iter().filter(|c| is_helper(c.labels.as_ref())).collect())
+}
+
+/// Force-removes the helpers that `wanted` selects. Returns how many were removed.
+async fn remove_helpers(docker: &Docker, wanted: impl Fn(&ContainerSummary) -> bool) -> Result<usize, String> {
+    let mut removed = 0;
+    for c in list_helpers(docker).await?.iter().filter(|c| wanted(c)) {
+        let Some(id) = c.id.as_deref() else { continue };
+        let options = RemoveContainerOptionsBuilder::default().force(true).v(true).build();
+        if docker.remove_container(id, Some(options)).await.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Removes every helper that mounts `volume`, running or not. Returns how many were removed.
+pub async fn remove_helpers_of(docker: &Docker, volume: &str) -> Result<usize, String> {
+    remove_helpers(docker, |c| mounts_volume(c, volume)).await
+}
+
+/// Removes the helpers that have stopped. They come from a TMOP version that did not let
+/// the engine remove them, and stayed when TMOP or the engine ended while a volume was
+/// browsed. Running helpers are kept; another TMOP may be using them. Returns how many
+/// were removed.
+pub async fn remove_stopped_helpers(docker: &Docker) -> Result<usize, String> {
+    remove_helpers(docker, |c| is_stopped(c.state.as_ref())).await
+}
+
+/// Removes `volume`. TMOP's own helpers do not count as users of a volume, so those that
+/// mount it are removed first; a volume that another container uses is still refused.
+pub async fn remove_volume(docker: &Docker, volume: &str, force: bool) -> Result<(), String> {
+    let mut result = Ok(());
+    // A second round covers a helper that was starting while the first one ran.
+    for _ in 0..2 {
+        remove_helpers_of(docker, volume).await?;
+        result = docker.remove_volume(volume, Some(RemoveVolumeOptions { force })).await;
+        if !matches!(&result, Err(bollard::errors::Error::DockerResponseServerError { status_code: 409, .. })) {
+            break;
+        }
+    }
+    result.map_err(|e| err_text(&e))
+}
+
+async fn is_running(docker: &Docker, container_id: &str) -> bool {
+    let state = docker.inspect_container(container_id, None).await.ok().and_then(|i| i.state);
+    state.and_then(|s| s.running).unwrap_or(false)
 }
 
 /// Starts a helper container with `volume` mounted at [`VOLUME_MOUNT`].
 ///
 /// The image is pulled through the engine when it is not present. The volume must
-/// already exist, so that browsing never creates one by accident.
+/// already exist, so that browsing never creates one by accident. The helper ends after
+/// [`HELPER_LIFETIME_SECS`] and the engine removes it when it ends, so a helper that TMOP
+/// could not remove itself (TMOP was killed) does not stay.
 pub async fn create_helper(docker: &Docker, volume: &str) -> Result<Helper, String> {
     docker.inspect_volume(volume).await.map_err(|e| err_text(&e))?;
     ensure_image(docker, HELPER_IMAGE).await?;
@@ -100,13 +200,14 @@ pub async fn create_helper(docker: &Docker, volume: &str) -> Result<Helper, Stri
     let name = format!("tmop-helper-{}", unique_token());
     let options = CreateContainerOptionsBuilder::default().name(&name).build();
     let mut labels = HashMap::new();
-    labels.insert("tmop.helper".to_string(), "1".to_string());
+    labels.insert(HELPER_LABEL.to_string(), HELPER_LABEL_VALUE.to_string());
     let body = ContainerCreateBody {
         image: Some(HELPER_IMAGE.to_string()),
-        cmd: Some(vec!["sleep".to_string(), "86400".to_string()]),
+        cmd: Some(vec!["sleep".to_string(), HELPER_LIFETIME_SECS.to_string()]),
         labels: Some(labels),
         host_config: Some(HostConfig {
             binds: Some(vec![format!("{volume}:{VOLUME_MOUNT}")]),
+            auto_remove: Some(true),
             ..Default::default()
         }),
         ..Default::default()
@@ -756,6 +857,44 @@ lrwxrwxrwx 1 root root    7 2026-10-15 10:00 link -> hello.txt
         assert_eq!(entries[0].modified, "2026-10-14 08:30");
         assert_eq!(entries[1].size, 12);
         assert_eq!(entries[2].link_target.as_deref(), Some("hello.txt"));
+    }
+
+    fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn helper_is_known_by_its_label_only() {
+        assert!(is_helper(Some(&labels(&[("tmop.helper", "1"), ("other", "x")]))));
+        assert!(!is_helper(Some(&labels(&[("tmop.helper", "0")]))));
+        assert!(!is_helper(Some(&labels(&[("name", "tmop-helper-1")]))));
+        assert!(!is_helper(Some(&labels(&[]))));
+        assert!(!is_helper(None));
+    }
+
+    #[test]
+    fn mounts_volume_compares_the_volume_name() {
+        let mount = |name: Option<&str>| bollard::models::MountPoint {
+            name: name.map(str::to_string),
+            destination: Some(VOLUME_MOUNT.to_string()),
+            ..Default::default()
+        };
+        let c = ContainerSummary { mounts: Some(vec![mount(None), mount(Some("data"))]), ..Default::default() };
+        assert!(mounts_volume(&c, "data"));
+        assert!(!mounts_volume(&c, "dat"));
+        assert!(!mounts_volume(&c, "/volume"));
+        assert!(!mounts_volume(&ContainerSummary::default(), "data"));
+    }
+
+    #[test]
+    fn only_exited_and_dead_helpers_are_stopped() {
+        use ContainerSummaryStateEnum as S;
+        assert!(is_stopped(Some(&S::EXITED)));
+        assert!(is_stopped(Some(&S::DEAD)));
+        for state in [S::CREATED, S::RUNNING, S::PAUSED, S::RESTARTING, S::REMOVING, S::EMPTY] {
+            assert!(!is_stopped(Some(&state)), "{state}");
+        }
+        assert!(!is_stopped(None));
     }
 
     #[test]
