@@ -3,6 +3,7 @@
 //! what is going on and where the memory went.
 
 use super::hardware::Hardware;
+use super::disk_drives::{self, disk_menu};
 use super::gpu_activity::{gpu_menu, GpuMenu};
 use super::health::{self, app_groups, level_of, AppGroup, Bottleneck, Health, Level, CPU_LEVELS, DISK_LEVELS, GPU_LEVELS, MEMORY_LEVELS};
 use super::theme::{self, lighten, mix, with_alpha, Status};
@@ -47,6 +48,10 @@ enum Go {
     /// Open Performance on this GPU.
     Gpu(String),
     GpuMenu(GpuMenu),
+    /// Open Performance on this disk.
+    Disk(String),
+    /// Show the disks separately, or grouped.
+    DisksSeparated(bool),
     Processes,
     /// Open Processes with this process selected.
     Select(u32, i64),
@@ -149,6 +154,12 @@ impl App {
                 self.page = Page::Performance;
             }
             Go::GpuMenu(m) => self.apply_gpu_menu(m),
+            Go::Disk(id) => {
+                self.device = Device::Disk;
+                self.perf.disk_selected = Some(id);
+                self.page = Page::Performance;
+            }
+            Go::DisksSeparated(on) => self.apply_disk_menu(on),
             Go::Processes => self.page = Page::Processes,
             Go::Select(pid, created) => {
                 self.selected = Some((pid, created));
@@ -330,7 +341,7 @@ impl App {
                         hardware: Hardware::Gpu,
                         lines: vec![(series, color, (0.0, 100.0))],
                         footer: format!("{vram}{}", a.name),
-                        gpu: Some(a.id.clone()),
+                        one: Some(a.id.clone()),
                     })
                 })
                 .collect()
@@ -344,7 +355,40 @@ impl App {
                 hardware: Hardware::Gpu,
                 lines: vec![(&fd.hist.gpu, lc(fd.metric("gpu"), v.levels[3]), (0.0, 100.0))],
                 footer: gpu_footer,
-                gpu: None,
+                one: None,
+            }]
+        };
+        let disk_cards: Vec<Res<'_>> = if fd.disks_separated {
+            s.disk
+                .drives
+                .iter()
+                .filter_map(|d| {
+                    let series = fd.hist.disk_drive(&d.id)?;
+                    let color = lc(fd.metric("disk"), level_of(d.active_pct, DISK_LEVELS));
+                    Some(Res {
+                        label: d.name.clone(),
+                        device: Device::Disk,
+                        frac: frac(d.active_pct),
+                        color,
+                        value: (format!("{:.0}", d.active_pct), "%".to_string()),
+                        hardware: Hardware::Disk,
+                        lines: vec![(&series.active, color, (0.0, 100.0))],
+                        footer: disk_drives::drive_footer(d),
+                        one: Some(d.id.clone()),
+                    })
+                })
+                .collect()
+        } else {
+            vec![Res {
+                label: "Disk".into(),
+                device: Device::Disk,
+                frac: frac(fd.smooth.disk),
+                color: lc(fd.metric("disk"), v.levels[2]),
+                value: disk_value,
+                hardware: Hardware::Disk,
+                lines: vec![(&fd.hist.disk, lc(fd.metric("disk"), v.levels[2]), (0.0, 100.0))],
+                footer: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)),
+                one: None,
             }]
         };
         let mut cards = vec![
@@ -357,7 +401,7 @@ impl App {
                 hardware: Hardware::Cpu,
                 lines: vec![(&fd.hist.cpu, lc(pal.accent, v.levels[0]), (0.0, 100.0))],
                 footer: cpu_footer,
-                gpu: None,
+                one: None,
             },
             Res {
                 label: "Memory".into(),
@@ -368,18 +412,7 @@ impl App {
                 hardware: Hardware::Memory,
                 lines: vec![(&fd.hist.memory, lc(fd.metric("memory"), v.levels[1]), (0.0, 100.0))],
                 footer: format!("{} / {}", format_bytes(s.memory.total.saturating_sub(s.memory.available) as f64), format_bytes(s.memory.total as f64)),
-                gpu: None,
-            },
-            Res {
-                label: "Disk".into(),
-                device: Device::Disk,
-                frac: frac(fd.smooth.disk),
-                color: lc(fd.metric("disk"), v.levels[2]),
-                value: disk_value,
-                hardware: Hardware::Disk,
-                lines: vec![(&fd.hist.disk, lc(fd.metric("disk"), v.levels[2]), (0.0, 100.0))],
-                footer: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)),
-                gpu: None,
+                one: None,
             },
             Res {
                 label: "Network".into(),
@@ -390,11 +423,11 @@ impl App {
                 hardware: Hardware::Network,
                 lines: vec![(&net, fd.metric("network"), (0.0, net_peak))],
                 footer: format!("\u{2193} {} \u{b7} \u{2191} {}", format_rate(s.network.rx_bps), format_rate(s.network.tx_bps)),
-                gpu: None,
+                one: None,
             },
         ];
-        // Between Disk and Network, where the GPU card has always been.
-        cards.splice(3..3, gpu_cards);
+        // Between Memory and Network, where the Disk and GPU cards have always been.
+        cards.splice(2..2, disk_cards.into_iter().chain(gpu_cards));
         let cols = (((w + GAP_X) / (200.0 + GAP_X)).floor() as usize).clamp(1, cards.len());
         let cw = (w - GAP_X * (cols - 1) as f32) / cols as f32;
         let rows = cards.len().div_ceil(cols);
@@ -406,6 +439,13 @@ impl App {
                 kit::context_menu(&resp, |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
                         *go = Some(Go::GpuMenu(m));
+                    }
+                });
+            }
+            if c.device == Device::Disk && disk_drives::offers_menu(fd) {
+                kit::context_menu(&resp, |ui| {
+                    if let Some(on) = disk_menu(ui, fd) {
+                        *go = Some(Go::DisksSeparated(on));
                     }
                 });
             }
@@ -434,7 +474,8 @@ impl App {
             }
             widgets::text_fit(&p, pos2(r.left() + 20.0, spark.bottom() + 10.0), Align2::LEFT_TOP, &c.footer, theme::mono(12.0), pal.text_faint, r.width() - 40.0);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                *go = Some(match &c.gpu {
+                *go = Some(match &c.one {
+                    Some(id) if c.device == Device::Disk => Go::Disk(id.clone()),
                     Some(id) => Go::Gpu(id.clone()),
                     None => Go::Device(c.device),
                 });
@@ -747,6 +788,13 @@ impl App {
                     }
                 });
             }
+            if *dev == Device::Disk && disk_drives::offers_menu(fd) {
+                kit::context_menu(&resp, |ui| {
+                    if let Some(on) = disk_menu(ui, fd) {
+                        *go = Some(Go::DisksSeparated(on));
+                    }
+                });
+            }
             if level == Level::Critical {
                 widgets::tinted_card(&p, r, &pal, st.danger);
             } else {
@@ -798,8 +846,8 @@ struct Res<'a> {
     hardware: Hardware,
     lines: Vec<(&'a Series, Color32, (f32, f32))>,
     footer: String,
-    /// The GPU this card shows on its own.
-    gpu: Option<String>,
+    /// The GPU or the disk this card shows on its own.
+    one: Option<String>,
 }
 
 /// The app group most responsible for `b` (memory by bytes, disk by transfer rate, else CPU).

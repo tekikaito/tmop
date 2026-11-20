@@ -1038,6 +1038,63 @@ pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget
     }
 }
 
+/// An opaque colour typed as `#RRGGBB` or `#RGB`: the `#` is optional, case and surrounding
+/// spaces don't matter. Anything else (a colour with alpha too) is `None`.
+pub fn parse_hex_color(text: &str) -> Option<Color32> {
+    let t = text.trim();
+    let hex = t.strip_prefix('#').unwrap_or(t);
+    // Checked here: `from_str_radix` would take a sign.
+    if !matches!(hex.len(), 3 | 6) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    crate::skin::Color::parse(hex).map(theme::from_skin)
+}
+
+/// A colour to edit: its hex value as a text field and the colour button that opens egui's
+/// picker (in a right-to-left row the button is at the left of the field). The field takes what
+/// [`parse_hex_color`] reads, typed or pasted: `#RRGGBB` as soon as it is complete, the `#RGB`
+/// short form when the field is left (Enter or click away; applied while typing, `#123` on the
+/// way to `#123456` would flash through `#112233`). While it reads nothing the text is drawn in
+/// the warning colour and `color` stays as it was, and when the field loses focus it shows
+/// `color` again. `key` tells the field apart from the page's other colours and gives it a
+/// stable id. Returns whether `color` changed.
+pub fn color_edit(ui: &mut Ui, pal: &Palette, key: impl std::hash::Hash + std::fmt::Debug, color: &mut Color32) -> bool {
+    // Not an auto id: those count the widgets before the field, and a warning appearing in front
+    // of it (typing `#123` can trigger one) would change the id and drop focus and the text.
+    let id = color_hex_id(ui, key);
+    let mut changed = false;
+    // What is being typed, kept while the field has focus.
+    let typed: Option<String> = ui.data(|d| d.get_temp(id));
+    let mut text = typed.clone().unwrap_or_else(|| theme::to_skin(*color).to_string());
+    let ink = if typed.is_some() && parse_hex_color(&text).is_none() { pal.warn } else { pal.text_dim };
+    let edit = egui::TextEdit::singleline(&mut text).id(id).desired_width(68.0 + 8.0).font(theme::mono(12.0)).text_color(ink);
+    let resp = ui.add(text_edit(edit, true)).on_hover_text("Hex colour, such as #5EEAD4 or 5eead4");
+    if (resp.changed() && is_full_hex(&text)) || resp.lost_focus() {
+        if let Some(c) = parse_hex_color(&text).filter(|c| c != color) {
+            *color = c;
+            changed = true;
+        }
+    }
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else if typed.is_some() {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    changed |= ui.push_id(id, |ui| egui::color_picker::color_edit_button_srgba(ui, color, egui::color_picker::Alpha::Opaque).changed()).inner;
+    changed
+}
+
+/// The id of the hex field of the colour `key` (what the caller passes to [`color_edit`]).
+fn color_hex_id(ui: &Ui, key: impl std::hash::Hash + std::fmt::Debug) -> egui::Id {
+    ui.make_persistent_id(("color-hex", key))
+}
+
+/// Whether `text` is a complete `#RRGGBB`, not the `#RGB` short form.
+fn is_full_hex(text: &str) -> bool {
+    let t = text.trim();
+    t.strip_prefix('#').unwrap_or(t).len() == 6 && parse_hex_color(t).is_some()
+}
+
 /// Text field with a magnifier at its left and a hint, in the application style: `width` wide
 /// and as high as a toolbar button (36 px), whatever the layout around it (a right-to-left
 /// toolbar included).
@@ -1954,6 +2011,75 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 mod tests {
     use super::*;
     use crate::metrics::Series;
+
+    #[test]
+    fn hex_colours_are_read_leniently_and_strictly() {
+        let teal = Color32::from_rgb(0x5E, 0xEA, 0xD4);
+        for s in ["#5EEAD4", "5eead4", " #5eEaD4 ", "#5eead4\n"] {
+            assert_eq!(parse_hex_color(s), Some(teal), "{s:?}");
+        }
+        assert_eq!(parse_hex_color("#fff"), Some(Color32::WHITE));
+        assert_eq!(parse_hex_color("0a0"), Some(Color32::from_rgb(0, 0xAA, 0)));
+        for s in ["", "#", "#12345", "#1234567", "#5EEAD4FF", "#GGGGGG", "+5eead4", "##5eead4", "#5e ead4", "-12345"] {
+            assert_eq!(parse_hex_color(s), None, "{s:?}");
+        }
+    }
+
+    /// Typing `#123456` char by char: a widget (the contrast warning) appearing in front of the
+    /// field halfway must not cost the field its focus or the text; `#123` is not applied until
+    /// the field is left, six digits apply at once.
+    #[test]
+    fn hex_field_keeps_focus_while_a_widget_appears_before_it() {
+        let pal = theme::DARK;
+        let ctx = egui::Context::default();
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut color = Color32::from_rgb(1, 2, 3);
+        let id = Cell::new(None);
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>, warning: bool, color: &mut Color32| {
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.horizontal(|ui| {
+                        if warning {
+                            ui.label("warning");
+                        }
+                        let field = color_hex_id(ui, "text");
+                        if id.get().is_none() {
+                            id.set(Some(field));
+                            ui.memory_mut(|m| m.request_focus(field));
+                        }
+                        color_edit(ui, &pal, "text", color);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+        };
+        frame(&ctx, vec![], false, &mut color);
+        frame(&ctx, vec![], false, &mut color);
+        let id = id.get().unwrap();
+        assert!(ctx.memory(|m| m.has_focus(id)));
+        let typed = |ctx: &egui::Context| ctx.data(|d| d.get_temp::<String>(id));
+        // Select the whole field so the typing replaces its text.
+        let select_all = egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        frame(&ctx, vec![select_all], false, &mut color);
+        let original = color;
+        for (n, ch) in "#123456".char_indices() {
+            // The warning shows from the fourth character on, as it would for `#123`.
+            frame(&ctx, vec![egui::Event::Text(ch.to_string())], n >= 3, &mut color);
+            assert!(ctx.memory(|m| m.has_focus(id)), "focus lost after {n} characters");
+            assert_eq!(typed(&ctx).as_deref(), Some(&"#123456"[..=n]));
+            if n < 5 {
+                assert_eq!(color, original, "applied early after {n} characters");
+            }
+        }
+        assert_eq!(color, Color32::from_rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn short_hex_applies_when_the_field_is_left() {
+        assert!(is_full_hex(" #5eead4 ") && is_full_hex("5eead4"));
+        assert!(!is_full_hex("#123") && !is_full_hex("#12345") && !is_full_hex("#12345g"));
+    }
 
     #[test]
     fn live_sparklines_keep_a_fixed_scale() {

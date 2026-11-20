@@ -119,16 +119,17 @@ pub fn system_info() -> Result<Sections, String> {
     let meminfo = read("/proc/meminfo");
     let mem = installed_memory().or_else(|| parse::meminfo_bytes(&meminfo, "MemTotal"));
     let base_label = if Path::new("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency").exists() { "Rated speed" } else { "Maximum speed" };
-    out.push((
-        keys::CPU_MEM,
-        vec![
-            (keys::PROCESSOR.into(), if cpu.model.is_empty() { machine } else { cpu.model.clone() }),
-            ("Identifier".into(), cpu.identifier()),
-            (base_label.into(), base_khz.map(|k| format!("{:.2} GHz", k as f64 / 1e6)).unwrap_or_default()),
-            ("Logical processors".into(), if logical > 0 { logical.to_string() } else { String::new() }),
-            (keys::INSTALLED_MEM.into(), mem.map(|b| crate::process::format_bytes(b as f64)).unwrap_or_default()),
-        ],
-    ));
+    let mut cpu_mem = vec![
+        (keys::PROCESSOR.into(), if cpu.model.is_empty() { machine } else { cpu.model.clone() }),
+        ("Identifier".into(), cpu.identifier()),
+        (base_label.into(), base_khz.map(|k| format!("{:.2} GHz", k as f64 / 1e6)).unwrap_or_default()),
+        ("Logical processors".into(), if logical > 0 { logical.to_string() } else { String::new() }),
+        (keys::INSTALLED_MEM.into(), mem.map(|b| crate::process::format_bytes(b as f64)).unwrap_or_default()),
+    ];
+    if let Some(mhz) = crate::pro::smbios::memory_speed_mhz() {
+        cpu_mem.push(("Memory speed".into(), crate::pro::smbios::format_speed(mhz)));
+    }
+    out.push((keys::CPU_MEM, cpu_mem));
 
     let gpus = display_adapters();
     if !gpus.is_empty() {

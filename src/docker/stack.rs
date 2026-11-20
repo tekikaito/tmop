@@ -5,7 +5,7 @@ use super::backend::err_text;
 use super::model::{Container, Network, Stack, Volume};
 use crate::platform::hide_console;
 use bollard::errors::Error as BollardError;
-use bollard::query_parameters::{RemoveContainerOptions, RemoveVolumeOptions};
+use bollard::query_parameters::RemoveContainerOptions;
 use bollard::Docker;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -81,8 +81,7 @@ pub async fn stack_action(
     let mut removed_volumes = 0;
     if with_volumes {
         for vol in volumes.iter().filter(|v| label_is(&v.labels, &stack.name)) {
-            let opts = RemoveVolumeOptions { force: false };
-            docker.remove_volume(&vol.name, Some(opts)).await.map_err(|e| err_text(&e))?;
+            super::files::remove_volume(docker, &vol.name, false).await?;
             removed_volumes += 1;
         }
     }

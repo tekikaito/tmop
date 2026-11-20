@@ -3,7 +3,8 @@
 //! every host.
 
 use super::common::{pick_cpu_temp, Ticks, HWMON_CPU_LABELS};
-use super::{DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
+use super::{DiskDrive, DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
+use crate::pro::mounts::Mount;
 use std::time::Duration;
 
 /// One `cpu`/`cpuN` line of `/proc/stat` as [`Ticks`]: idle = idle + iowait; kernel = system + irq
@@ -209,6 +210,46 @@ pub fn disk_delta(prev: Option<&DiskTotals>, cur: &DiskTotals, dt: Duration) -> 
     let busy_ms = cur.io_ms.saturating_sub(p.io_ms) as f64;
     d.active_pct = (busy_ms / (secs * 1000.0 * cur.disks.len() as f64) * 100.0).clamp(0.0, 100.0) as f32;
     d
+}
+
+/// Each disk of `cur` on its own over `dt`, named after its device and without a model. A disk
+/// that was not in `prev` (the first reading, one just plugged in) is listed at zero.
+pub fn disk_drives(prev: &[DiskStat], cur: &[DiskStat], dt: Duration) -> Vec<DiskDrive> {
+    let secs = dt.as_secs_f64();
+    cur.iter()
+        .map(|c| {
+            let mut d = DiskDrive { id: c.name.clone(), name: c.name.clone(), title: c.name.clone(), ..Default::default() };
+            if let Some(p) = prev.iter().find(|p| p.name == c.name).filter(|_| secs > 0.0) {
+                d.read_bps = c.sectors_read.saturating_sub(p.sectors_read) as f64 * 512.0 / secs;
+                d.write_bps = c.sectors_written.saturating_sub(p.sectors_written) as f64 * 512.0 / secs;
+                d.active_pct = (c.io_ms.saturating_sub(p.io_ms) as f64 / (secs * 1000.0) * 100.0).clamp(0.0, 100.0) as f32;
+            }
+            d
+        })
+        .collect()
+}
+
+/// The mounts to ask how full the disks are: one per block device (`/dev/...`), however often it
+/// is mounted and however many btrfs subvolumes of it. Loop devices are files, not disks.
+pub fn block_mounts(mounts: &[Mount]) -> Vec<&Mount> {
+    let mut out: Vec<&Mount> = Vec::new();
+    for m in mounts {
+        if m.source.starts_with("/dev/") && !m.source.starts_with("/dev/loop") && !out.iter().any(|o| o.source == m.source) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// The disks a file system lies on, for [`super::common::split_storage`]: the physical ones when
+/// it has any (an LVM or RAID volume names its own device and the disks below it, of which only
+/// the disks are drives of their own), else the stacked device itself.
+pub fn physical_disks(disks: Vec<String>) -> Vec<String> {
+    if disks.iter().any(|d| !stacked(d)) {
+        disks.into_iter().filter(|d| !stacked(d)).collect()
+    } else {
+        disks
+    }
 }
 
 /// One interface under `/sys/class/net`.
@@ -554,6 +595,61 @@ HugePages_Total:       0
         assert_eq!(disk_delta(Some(&a), &other, Duration::from_secs(1)).read_bps, 0.0);
         let busy = DiskTotals { io_ms: 100_000, ..b };
         assert_eq!(disk_delta(Some(&a), &busy, Duration::from_secs(1)).active_pct, 100.0);
+    }
+
+    #[test]
+    fn each_disk_has_its_own_rates_and_active_time() {
+        let d = |name: &str, r, w, ms| DiskStat { name: name.into(), sectors_read: r, sectors_written: w, io_ms: ms };
+        let prev = [d("sda", 1000, 0, 0), d("nvme0n1", 0, 500, 100)];
+        // sda read 2000 sectors and was busy 1 s of 2; nvme0n1 wrote 4000 and was busy throughout;
+        // sdb was plugged in since.
+        let cur = [d("sda", 3000, 0, 1000), d("nvme0n1", 0, 4500, 2100), d("sdb", 77, 77, 77)];
+        let drives = disk_drives(&prev, &cur, Duration::from_secs(2));
+        let got: Vec<(&str, f32, f64, f64)> = drives.iter().map(|d| (d.id.as_str(), d.active_pct, d.read_bps, d.write_bps)).collect();
+        assert_eq!(got, [("sda", 50.0, 512_000.0, 0.0), ("nvme0n1", 100.0, 0.0, 1_024_000.0), ("sdb", 0.0, 0.0, 0.0)]);
+        assert!(drives.iter().all(|d| d.name == d.id && d.title == d.id && d.model.is_empty()));
+        // The disks add up to the grouped view: summed rates, averaged active time.
+        let both = disk_delta(Some(&DiskTotals::of(&prev)), &DiskTotals::of(&cur[..2]), Duration::from_secs(2));
+        assert_eq!((both.read_bps, both.write_bps, both.active_pct), (512_000.0, 1_024_000.0, 75.0));
+        // The first reading, and one with no time passed: listed, at zero.
+        for first in [disk_drives(&[], &cur, Duration::from_secs(2)), disk_drives(&prev, &cur, Duration::ZERO)] {
+            assert_eq!(first.len(), 3);
+            assert!(first.iter().all(|d| d.active_pct == 0.0 && d.read_bps == 0.0 && d.write_bps == 0.0));
+        }
+        assert!(disk_drives(&prev, &[], Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn file_systems_are_traced_to_their_disks() {
+        let mounts = crate::pro::mounts::parse_mountinfo(
+            "\
+22 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw
+23 22 0:21 / /proc rw - proc proc rw
+27 22 259:1 / /boot/efi rw - vfat /dev/nvme0n1p1 rw
+28 22 0:40 /@home /home rw - btrfs /dev/sda1 rw,subvol=/@home
+29 22 0:41 /@data /srv/data rw - btrfs /dev/sda1 rw,subvol=/@data
+30 22 259:2 /var/www /srv/www rw - ext4 /dev/nvme0n1p2 rw
+31 22 253:0 / /var rw - xfs /dev/mapper/vg-var rw
+34 22 7:3 / /snap/core22/1380 ro - squashfs /dev/loop3 ro
+36 22 0:61 / /tmp rw - tmpfs tmpfs rw
+",
+        );
+        let points: Vec<&str> = block_mounts(&mounts).iter().map(|m| m.point.as_str()).collect();
+        assert_eq!(points, ["/", "/boot/efi", "/home", "/var"]);
+        // An LVM volume names its own device and the disks below it; only the disks are drives.
+        let names = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        assert_eq!(physical_disks(names(&["dm-0", "nvme0n1", "sda"])), names(&["nvme0n1", "sda"]));
+        assert_eq!(physical_disks(names(&["md0", "sda", "sdb"])), names(&["sda", "sdb"]));
+        assert_eq!(physical_disks(names(&["nvme0n1"])), names(&["nvme0n1"]));
+        // With no physical disk named, the stacked device is the drive.
+        assert_eq!(physical_disks(names(&["dm-0"])), names(&["dm-0"]));
+        // Mounts: the file systems on the LVM volume, a RAID1 and a plain disk count once each.
+        let on = |disks: &[&str], used, total| (physical_disks(names(disks)), (used, total));
+        let s = crate::metrics::common::split_storage(&[on(&["nvme0n1"], 40, 100), on(&["nvme0n1"], 1, 2), on(&["sda"], 500, 1000), on(&["dm-0", "nvme0n1", "sda"], 7, 10), on(&["md0", "sdb", "sdc"], 20, 80)]);
+        assert_eq!(s.each.get("nvme0n1"), Some(&(41, 102)));
+        assert_eq!(s.each.get("sda"), Some(&(500, 1000)));
+        assert_eq!((s.each.get("dm-0"), s.each.get("sdb"), s.each.get("sdc")), (None, None, None));
+        assert_eq!(s.all, Some((568, 1192)));
     }
 
     #[test]

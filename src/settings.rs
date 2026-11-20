@@ -96,6 +96,10 @@ pub struct Window {
     pub performance_cpus_expanded: bool,
     /// Show each GPU on its own instead of the grouped view.
     pub gpus_separated: bool,
+    /// The main window was maximized when it was last shown; it opens maximized again.
+    pub maximized: bool,
+    /// Show each physical disk on its own instead of the grouped view.
+    pub disks_separated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -250,6 +254,8 @@ impl Default for Window {
             table_column_order: BTreeMap::new(),
             performance_cpus_expanded: true,
             gpus_separated: false,
+            maximized: false,
+            disks_separated: false,
         }
     }
 }
@@ -718,6 +724,23 @@ mod tests {
         assert!(Settings::from_json(r#"{"version":1,"window":{"tableColumnOrder":{"apps-table":"Name"}}}"#).is_err());
     }
 
+    /// `window.maximized` is new: files without it load as not maximized, and it round-trips.
+    #[test]
+    fn maximized_is_optional() {
+        let load = parse(r#"{"version":1,"window":{"alwaysOnTop":true}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty());
+        assert!(load.settings.window.always_on_top && !load.settings.window.maximized);
+        let mut s = Settings::default();
+        s.window.maximized = true;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["window"]["maximized"], true);
+        assert!(parse(&s.to_json()).settings.window.maximized);
+        assert!(Settings::from_json(r#"{"version":1,"window":{"maximized":"yes"}}"#).is_err());
+        // TMOG's format has no such key (its `mainWindowPlacement` is dropped).
+        assert!(!parse(SAMPLE).settings.window.maximized);
+    }
+
     #[test]
     fn v1_round_trips() {
         let mut s = Settings::default();
@@ -770,6 +793,18 @@ mod tests {
         assert!(Settings::from_json(r#"{"schemaVersion":12,"alwaysOnTop":"yes"}"#).is_err());
         assert!(Settings::from_json("{}").is_err());
         assert!(Settings::from_json("[]").is_err());
+    }
+
+    /// A key added without a migration: a file written before it loads with the default, and the
+    /// key is known once written.
+    #[test]
+    fn disks_separated_is_off_until_set() {
+        let old = parse(r#"{"version":1,"window":{"gpusSeparated":true}}"#);
+        assert!(old.settings.window.gpus_separated && !old.settings.window.disks_separated);
+        let set = parse(r#"{"version":1,"window":{"disksSeparated":true}}"#);
+        assert!(set.settings.window.disks_separated && !set.settings.window.gpus_separated);
+        assert!(set.unknown_keys.is_empty(), "{:?}", set.unknown_keys);
+        assert!(parse(&set.settings.to_json()).settings.window.disks_separated);
     }
 
     #[test]
