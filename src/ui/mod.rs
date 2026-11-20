@@ -998,6 +998,8 @@ impl App {
         if self.settings.appearance.display_font != self.display_font.0 {
             self.display_font = install_display_font(ctx, &self.settings.appearance.display_font);
         }
+        // The tables read their column orders from the context (see `table::sync_orders`).
+        table::sync_orders(ctx, &mut self.settings.window.table_column_order);
         self.shortcuts(ctx);
         self.icons.poll(ctx);
         self.engine_poll();
@@ -1110,6 +1112,9 @@ impl App {
         }
         self.poll_palette_dialog();
         self.save_palette_edits(false);
+        if table::sync_orders(ctx, &mut self.settings.window.table_column_order) {
+            self.settings_dirty = true;
+        }
         if self.settings_dirty {
             self.save_settings();
         }

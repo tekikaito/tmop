@@ -313,7 +313,7 @@ impl Column {
         Column::Description,
     ];
 
-    /// Stable id used in `processTableHiddenColumns` / `processTableColumnWidths`.
+    /// Stable id used in `processTableHiddenColumns`, `processTableColumnWidths` and `processTableColumnOrder`.
     pub fn id(self) -> &'static str {
         match self {
             Column::Name => "name",
