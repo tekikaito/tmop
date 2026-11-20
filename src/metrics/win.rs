@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
+use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_space, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -202,6 +202,7 @@ pub struct Collector {
     /// PDH's PhysicalDisk counters reported traffic once, so they work and the fallback is off.
     pdh_disk_proven: bool,
     disk_models: DiskModels,
+    disk_spaces: DiskSpaces,
 }
 
 /// How often the physical disks are listed again (one plugged in or removed).
@@ -394,6 +395,46 @@ impl DiskModels {
     }
 }
 
+/// How often the volumes are asked how full they are.
+const DISK_SPACE_PERIOD: Duration = Duration::from_secs(10);
+
+/// Used and total bytes of the volume with drive letter `volume` ("C:"), as the Disk Space page
+/// counts them; `None` while it does not answer (locked by BitLocker, no medium).
+fn volume_space(volume: &str) -> Option<(u64, u64)> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let root = wide(&format!(r"{volume}\"));
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: a NUL-terminated root path; the outputs are plain integers.
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(root.as_ptr()), Some(&mut free), Some(&mut total), None) }.ok()?;
+    (total > 0).then(|| (total.saturating_sub(free), total))
+}
+
+/// Used and total bytes, when they can be asked.
+type Space = Option<(u64, u64)>;
+
+/// How full the volumes of each disk are together, asked now and then rather than with every
+/// sample.
+#[derive(Default)]
+struct DiskSpaces {
+    at: Option<Instant>,
+    /// (disk number, its volumes as asked, used and total bytes).
+    known: Vec<(u32, String, Space)>,
+}
+
+impl DiskSpaces {
+    /// Asks again when the figures are old or `disks` has a disk or a volume they lack.
+    fn refresh(&mut self, disks: &[DiskUse]) {
+        if self.at.is_none_or(|t| t.elapsed() >= DISK_SPACE_PERIOD) || disks.iter().any(|d| !self.known.iter().any(|k| k.0 == d.0 && k.1 == d.1)) {
+            self.known = disks.iter().map(|d| (d.0, d.1.clone(), volumes_space(&d.1, volume_space))).collect();
+            self.at = Some(Instant::now());
+        }
+    }
+
+    fn of(&self, disk: u32) -> Space {
+        self.known.iter().find(|k| k.0 == disk).and_then(|k| k.2)
+    }
+}
+
 /// How often the GPU list is taken again.
 const DXGI_PERIOD: Duration = Duration::from_secs(30);
 
@@ -455,6 +496,7 @@ impl Collector {
             disk_ioctl: None,
             pdh_disk_proven: false,
             disk_models: DiskModels::default(),
+            disk_spaces: DiskSpaces::default(),
         }
     }
 
@@ -567,7 +609,8 @@ impl Collector {
             snap.disk.write_bps = write;
         }
         self.disk_models.refresh(&each);
-        snap.disk.drives = each.iter().map(|d| windows_drive(d, self.disk_models.of(d.0))).collect();
+        self.disk_spaces.refresh(&each);
+        snap.disk.drives = each.iter().map(|d| DiskDrive { space: self.disk_spaces.of(d.0), ..windows_drive(d, self.disk_models.of(d.0)) }).collect();
         if self.pdh.is_none() {
             let what = if disk.is_some() { "GPU and thermal" } else { "disk, GPU and thermal" };
             snap.errors.push(format!("PDH unavailable: {what} readings disabled"));
@@ -945,6 +988,10 @@ mod tests {
             assert_eq!(d.name, format!("Disk {}", d.id));
             assert!(d.title.starts_with(&d.name) && (0.0..=100.0).contains(&d.active_pct), "{d:?}");
             assert_eq!(d.model, storage_model(d.id.parse().unwrap()));
+            // A disk with drive letters says how full they are; used space moves between two
+            // readings, the total does not.
+            assert_eq!(d.space.map(|s| s.1), volumes_space(&d.volumes, volume_space).map(|s| s.1), "{d:?}");
+            assert!(d.space.is_none_or(|(used, total)| used <= total && total > 0), "{d:?}");
         }
         if !direct.is_empty() && !s.disk.drives.is_empty() {
             let titles: Vec<String> = direct.iter().map(|d| windows_drive(d, "").title).collect();

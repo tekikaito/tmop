@@ -4,6 +4,8 @@
 
 use super::common::{pick_cpu_temp, Ticks, HWMON_CPU_LABELS};
 use super::{DiskDrive, DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
+use crate::pro::mounts::Mount;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// One `cpu`/`cpuN` line of `/proc/stat` as [`Ticks`]: idle = idle + iowait; kernel = system + irq
@@ -226,6 +228,31 @@ pub fn disk_drives(prev: &[DiskStat], cur: &[DiskStat], dt: Duration) -> Vec<Dis
             d
         })
         .collect()
+}
+
+/// The mounts to ask how full the disks are: one per block device (`/dev/...`), however often it
+/// is mounted and however many btrfs subvolumes of it. Loop devices are files, not disks.
+pub fn block_mounts(mounts: &[Mount]) -> Vec<&Mount> {
+    let mut out: Vec<&Mount> = Vec::new();
+    for m in mounts {
+        if m.source.starts_with("/dev/") && !m.source.starts_with("/dev/loop") && !out.iter().any(|o| o.source == m.source) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// Used and total bytes of the file systems on each disk. `volumes` has, for each file system,
+/// the disks it lies on and its (used, total); one on several disks (LVM, RAID) counts on each.
+pub fn disk_spaces(volumes: &[(Vec<String>, (u64, u64))]) -> HashMap<String, (u64, u64)> {
+    let mut out: HashMap<String, (u64, u64)> = HashMap::new();
+    for (disks, (used, total)) in volumes {
+        for disk in disks {
+            let sum = out.entry(disk.clone()).or_default();
+            *sum = (sum.0.saturating_add(*used), sum.1.saturating_add(*total));
+        }
+    }
+    out
 }
 
 /// One interface under `/sys/class/net`.
@@ -593,6 +620,32 @@ HugePages_Total:       0
             assert!(first.iter().all(|d| d.active_pct == 0.0 && d.read_bps == 0.0 && d.write_bps == 0.0));
         }
         assert!(disk_drives(&prev, &[], Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn a_disks_space_is_the_sum_of_its_file_systems() {
+        let mounts = crate::pro::mounts::parse_mountinfo(
+            "\
+22 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw
+23 22 0:21 / /proc rw - proc proc rw
+27 22 259:1 / /boot/efi rw - vfat /dev/nvme0n1p1 rw
+28 22 0:40 /@home /home rw - btrfs /dev/sda1 rw,subvol=/@home
+29 22 0:41 /@data /srv/data rw - btrfs /dev/sda1 rw,subvol=/@data
+30 22 259:2 /var/www /srv/www rw - ext4 /dev/nvme0n1p2 rw
+31 22 253:0 / /var rw - xfs /dev/mapper/vg-var rw
+34 22 7:3 / /snap/core22/1380 ro - squashfs /dev/loop3 ro
+36 22 0:61 / /tmp rw - tmpfs tmpfs rw
+",
+        );
+        let points: Vec<&str> = block_mounts(&mounts).iter().map(|m| m.point.as_str()).collect();
+        assert_eq!(points, ["/", "/boot/efi", "/home", "/var"]);
+        // The LVM volume spans both disks and counts on each, and on its own device.
+        let on = |disks: &[&str], used, total| (disks.iter().map(|d| d.to_string()).collect::<Vec<_>>(), (used, total));
+        let spaces = disk_spaces(&[on(&["nvme0n1"], 40, 100), on(&["nvme0n1"], 1, 2), on(&["sda"], 500, 1000), on(&["dm-0", "nvme0n1", "sda"], 7, 10)]);
+        assert_eq!(spaces.get("nvme0n1"), Some(&(48, 112)));
+        assert_eq!(spaces.get("sda"), Some(&(507, 1010)));
+        assert_eq!(spaces.get("dm-0"), Some(&(7, 10)));
+        assert_eq!(spaces.get("sdb"), None);
     }
 
     #[test]

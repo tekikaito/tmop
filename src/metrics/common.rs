@@ -164,11 +164,19 @@ pub fn disk_title(name: &str, volumes: &str) -> String {
     }
 }
 
+/// Used and total bytes of the volumes in `volumes` ("C: D:") together, each asked of `space_of`
+/// as (used, total). A volume that does not answer (locked, no medium) is left out; `None` when
+/// none answers.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn volumes_space(volumes: &str, space_of: impl Fn(&str) -> Option<(u64, u64)>) -> Option<(u64, u64)> {
+    volumes.split_whitespace().filter_map(space_of).reduce(|a, b| (a.0.saturating_add(b.0), a.1.saturating_add(b.1)))
+}
+
 /// A Windows disk for the snapshot.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn windows_drive(d: &DiskUse, model: &str) -> DiskDrive {
     let name = format!("Disk {}", d.0);
-    DiskDrive { id: d.0.to_string(), title: disk_title(&name, &d.1), name, volumes: d.1.clone(), model: model.to_string(), active_pct: d.2, read_bps: d.3, write_bps: d.4 }
+    DiskDrive { id: d.0.to_string(), title: disk_title(&name, &d.1), name, volumes: d.1.clone(), model: model.to_string(), active_pct: d.2, read_bps: d.3, write_bps: d.4, space: None }
 }
 
 /// A disk's model from the vendor and product its device reports, either of which may be empty
@@ -391,6 +399,20 @@ mod tests {
         assert_eq!(disk_model("Msft", ""), "Msft");
         assert_eq!(disk_model("ATA", ""), "");
         assert_eq!(disk_model("", ""), "");
+    }
+
+    #[test]
+    fn a_disks_space_is_the_sum_of_its_volumes() {
+        let space = |v: &str| match v {
+            "C:" => Some((300, 1000)),
+            "D:" => Some((50, 500)),
+            _ => None,
+        };
+        assert_eq!(volumes_space("C: D:", space), Some((350, 1500)));
+        // A locked volume is left out; a disk without a volume that answers has no figure.
+        assert_eq!(volumes_space("E: D:", space), Some((50, 500)));
+        assert_eq!(volumes_space("E:", space), None);
+        assert_eq!(volumes_space("", space), None);
     }
 
     #[test]
