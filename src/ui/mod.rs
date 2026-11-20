@@ -971,6 +971,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.recorder.stop();
+        crate::process::netio::set_wanted(false);
         self.save_palette_edits(true);
         if self.settings_dirty {
             self.save_settings();
@@ -1149,6 +1150,9 @@ impl App {
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();
         }
+        // The network counters run while the Processes table shows their column (a popout-only
+        // TMOP has no table).
+        crate::process::netio::set_wanted(!self.popout_only && self.caps.proc.network && self.column_visible(Column::Network));
         // What a part of a page had to tell the user (a file manager that would not open).
         if let Some(message) = kit::take_report(ctx) {
             self.status = message;

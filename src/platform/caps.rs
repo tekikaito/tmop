@@ -29,6 +29,8 @@ pub struct ProcCaps {
     pub gpu: bool,
     /// Which process owns a top-level window (the Apps grouping).
     pub window_owner: bool,
+    /// A Network column (sent and received per process; see [`crate::process::netio`]).
+    pub network: bool,
 }
 
 /// What this build can do; see the module docs. Fields are plain flags so a test can build any
@@ -87,7 +89,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true },
+        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true, network: true },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -106,7 +108,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -126,7 +128,7 @@ impl Caps {
         clocks: cfg!(target_arch = "x86_64"),
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -146,7 +148,7 @@ impl Caps {
         clocks: false,
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false },
+        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false, network: false },
         trash: false,
         delete_safe: false,
         window_levels: false,
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn windows_only_features_are_off_elsewhere_and_delete_needs_a_classifier() {
         for c in [Caps::LINUX, Caps::MACOS, Caps::OTHER] {
-            assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver || c.pawnio));
+            assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver || c.pawnio || c.proc.network));
         }
         // Disk Space deletes where the protected-paths classifier, the Trash and the clean up
         // categories exist (Windows, Linux, macOS); never on a target without them.
