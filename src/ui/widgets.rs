@@ -2063,7 +2063,7 @@ mod tests {
         let select_all = egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
         frame(&ctx, vec![select_all], false, &mut color);
         let original = color;
-        for (n, ch) in "#123456".chars().enumerate() {
+        for (n, ch) in "#123456".char_indices() {
             // The warning shows from the fourth character on, as it would for `#123`.
             frame(&ctx, vec![egui::Event::Text(ch.to_string())], n >= 3, &mut color);
             assert!(ctx.memory(|m| m.has_focus(id)), "focus lost after {n} characters");
