@@ -9,7 +9,7 @@
 //!
 //! Where the table can't be read, or says nothing, there is no speed and the pages leave the row out.
 
-/// The speed the installed memory runs at, in MHz. Read once.
+/// The speed the installed memory runs at, in MT/s (SMBIOS 3.1.1+ defines the field as MT/s: DDR4-3200 is 3200). Read once.
 pub fn memory_speed_mhz() -> Option<u32> {
     static SPEED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     *SPEED.get_or_init(|| parse_memory_speed(&read_table()?))
@@ -17,7 +17,7 @@ pub fn memory_speed_mhz() -> Option<u32> {
 
 /// The row the pages show for [`memory_speed_mhz`].
 pub fn format_speed(mhz: u32) -> String {
-    format!("{mhz} MHz")
+    format!("{mhz} MT/s")
 }
 
 /// The raw structure table, without an entry point or header.
@@ -51,7 +51,7 @@ pub fn raw_smbios_table(raw: &[u8]) -> Option<&[u8]> {
     raw.get(8..)?.get(..len)
 }
 
-/// The speed of the installed modules in an SMBIOS structure table, in MHz: the slowest one,
+/// The speed of the installed modules in an SMBIOS structure table, in MT/s: the slowest one,
 /// as modules of different speeds run at the lowest. `None` when no populated Memory Device
 /// reports a speed.
 pub fn parse_memory_speed(table: &[u8]) -> Option<u32> {
@@ -82,7 +82,7 @@ fn structures(table: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// only have the module's own speed.
 fn device_speed(s: &[u8]) -> Option<u32> {
     let word = |at: usize| s.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    // Speeds of 65535 MHz and more are in the extended fields (SMBIOS 3.3), bit 31 reserved.
+    // Speeds of 65535 and more are in the extended fields (SMBIOS 3.3), bit 31 reserved.
     let speed = |at: usize, extended: usize| match word(at)? {
         0 => None,
         0xFFFF => s.get(extended..extended + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x7FFF_FFFF).filter(|v| *v != 0),
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn speed_text() {
-        assert_eq!(format_speed(3200), "3200 MHz");
+        assert_eq!(format_speed(3200), "3200 MT/s");
     }
 
     /// What this machine reports; a speed, when there is one, is plausible.
