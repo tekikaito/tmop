@@ -133,7 +133,7 @@ pub fn hidden_interval(configured: Option<std::time::Duration>, recording: bool)
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::{cloak, win_key_down, Tray};
+pub use win::{bring_to_front, cloak, win_key_down, Tray};
 
 #[cfg(not(windows))]
 mod stub {
@@ -165,9 +165,13 @@ mod stub {
     }
 
     pub fn cloak(_hwnd: isize, _on: bool) {}
+
+    pub fn bring_to_front(_hwnd: isize) -> bool {
+        false
+    }
 }
 #[cfg(not(windows))]
-pub use stub::{cloak, win_key_down, Tray};
+pub use stub::{bring_to_front, cloak, win_key_down, Tray};
 
 #[cfg(test)]
 mod tests {

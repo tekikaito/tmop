@@ -150,6 +150,17 @@ pub fn cloak(hwnd: isize, on: bool) {
     }
 }
 
+/// Brings the shown window to the front with `SetForegroundWindow`. Windows allows that right
+/// after the shortcut, a click on the icon, or a second start (which calls
+/// `AllowSetForegroundWindow`); otherwise the taskbar button flashes. Used instead of
+/// `ViewportCommand::Focus`, whose winit implementation injects an Alt key press to force it.
+pub fn bring_to_front(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    // SAFETY: `hwnd` is the main window (or 0, which the call rejects).
+    hwnd != 0 && unsafe { SetForegroundWindow(HWND(hwnd as *mut _)).as_bool() }
+}
+
 /// Whether a Windows key is held down (egui reports no Windows key). Reads the key state, as
 /// every program may; no hook.
 pub fn win_key_down() -> bool {

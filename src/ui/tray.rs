@@ -34,6 +34,8 @@ pub struct TrayUi {
     /// The shortcut field is waiting for keys.
     capturing: bool,
     was_minimized: bool,
+    /// The window was just shown and is brought to the front in the next pass.
+    focus_pending: bool,
     autostart: autostart::State,
     autostart_read_at: Instant,
     autostart_message: Option<String>,
@@ -69,6 +71,7 @@ impl TrayUi {
             shortcut_message: None,
             capturing: false,
             was_minimized: false,
+            focus_pending: false,
             autostart: autostart::State::Off,
             autostart_read_at: Instant::now(),
             autostart_message: None,
@@ -162,6 +165,12 @@ impl App {
     /// Per pass, shown or hidden: the window's close and minimize, the tray icon and the
     /// shortcut, and launches handed over by later copies.
     pub fn window_logic(&mut self, ctx: &egui::Context) {
+        if self.tray_ui.focus_pending && !self.tray_ui.vis.hidden {
+            self.tray_ui.focus_pending = false;
+            if !tray::bring_to_front(self.tray_ui.hwnd) {
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
+        }
         let mut events = self.tray_ui.tray.as_ref().map(|t| t.events()).unwrap_or_default();
         match self.replace.take_request().as_deref() {
             None | Some(tray::ALREADY_RUNNING) => {}
@@ -223,7 +232,8 @@ impl App {
                 }
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
+                // The window is shown at the end of this pass; it comes to the front in the next.
+                self.tray_ui.focus_pending = true;
                 self.sampler.set_interval(self.settings.update_speed().interval());
                 self.sampler.refresh();
                 ctx.request_repaint();
