@@ -658,6 +658,10 @@ impl App {
                 legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Read", c, false), ("Write", write, false)], hover.as_deref(), ix + iw);
                 cy += 24.0;
                 let mut facts = vec![("Active time".to_string(), format!("{active:.1}%")), ("Read speed".to_string(), format_rate(read_bps)), ("Write speed".to_string(), format_rate(write_bps))];
+                // Only when the disk reports one.
+                if let Some((d, _)) = one.filter(|(d, _)| !d.firmware.is_empty()) {
+                    facts.push(("Firmware".to_string(), d.firmware.clone()));
+                }
                 // How full the volumes are: those wholly on this disk, or all of them once.
                 let space = match one {
                     Some((d, _)) => d.space,

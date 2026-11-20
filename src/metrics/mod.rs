@@ -126,6 +126,8 @@ pub struct DiskDrive {
     pub title: String,
     /// Empty when the system names none.
     pub model: String,
+    /// The firmware revision the disk reports; empty when the system gives none.
+    pub firmware: String,
     /// Used and total bytes of the mounted volumes lying wholly on this disk (Windows: those with a
     /// drive letter): their sum, not the size of the disk. A volume shared with other disks (RAID,
     /// LVM, spanned or mirrored) is left out, as its size is not this disk's. `None` when it has

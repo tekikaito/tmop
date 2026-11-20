@@ -12,7 +12,7 @@
 //! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
 //! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
-use super::common::{cpu_brand, disk_model, net_delta, split_storage, tick_delta_pct, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, disk_firmware, disk_model, net_delta, split_storage, tick_delta_pct, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::procfs::{self, DiskStat, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
@@ -37,6 +37,12 @@ const CPU_DIR: &str = "/sys/devices/system/cpu";
 
 fn read(path: impl AsRef<Path>) -> Option<String> {
     fs::read_to_string(path).ok()
+}
+
+/// The firmware revision of the disk whose `device` directory of `/sys/block` is `dir`: `rev`
+/// (SATA, SCSI), else `firmware_rev` (NVMe); empty when it has neither.
+fn firmware_rev(dir: &Path) -> String {
+    ["rev", "firmware_rev"].iter().map(|f| disk_firmware(&read(dir.join(f)).unwrap_or_default())).find(|s| !s.is_empty()).unwrap_or_default()
 }
 
 /// How often the file systems are asked how full they are.
@@ -123,8 +129,8 @@ pub struct Collector {
     prev_disk: Option<(Instant, DiskTotals)>,
     /// The disks of the last reading, for each disk's own rates.
     prev_disk_stats: Vec<DiskStat>,
-    /// The model of each disk listed (device -> model), read when the disk first shows.
-    disk_models: HashMap<String, String>,
+    /// The model and firmware revision of each disk listed (device -> both), read when the disk first shows.
+    disk_models: HashMap<String, (String, String)>,
     /// Used and total bytes of the file systems on each disk (device -> bytes), and when asked.
     disk_spaces: Storage,
     disk_spaces_at: Option<Instant>,
@@ -274,10 +280,13 @@ impl Collector {
         let mut drives = procfs::disk_drives(&self.prev_disk_stats, &stats, dt);
         for d in &mut drives {
             if !self.disk_models.contains_key(&d.id) {
-                let of = |file: &str| read(format!("/sys/block/{}/device/{file}", d.id)).unwrap_or_default();
-                self.disk_models.insert(d.id.clone(), disk_model(&of("vendor"), &of("model")));
+                let dir = Path::new("/sys/block").join(&d.id).join("device");
+                let of = |file: &str| read(dir.join(file)).unwrap_or_default();
+                self.disk_models.insert(d.id.clone(), (disk_model(&of("vendor"), &of("model")), firmware_rev(&dir)));
             }
-            d.model.clone_from(&self.disk_models[&d.id]);
+            let (model, firmware) = &self.disk_models[&d.id];
+            d.model.clone_from(model);
+            d.firmware.clone_from(firmware);
         }
         if self.disk_spaces_at.is_none_or(|t| now.duration_since(t) >= DISK_SPACE_PERIOD) {
             self.disk_spaces = disk_spaces();
@@ -453,6 +462,25 @@ fn thermal_fold(chips: &[HwmonChip]) -> super::ThermalSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firmware_revision_from_sysfs_files() {
+        let root = std::env::temp_dir().join(format!("tmop-fw-{}", std::process::id()));
+        let dev = |name: &str, files: &[(&str, &str)]| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            for (f, text) in files {
+                fs::write(dir.join(f), text).unwrap();
+            }
+            dir
+        };
+        assert_eq!(firmware_rev(&dev("sata", &[("rev", "3B6Q\n"), ("model", "x")])), "3B6Q");
+        assert_eq!(firmware_rev(&dev("nvme", &[("firmware_rev", "4B2QJXD7\n")])), "4B2QJXD7");
+        assert_eq!(firmware_rev(&dev("blank", &[("rev", " \n")])), "");
+        assert_eq!(firmware_rev(&dev("none", &[])), "");
+        assert_eq!(firmware_rev(&root.join("missing")), "");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// Runs on the Linux CI runners: the file system at `/` is traced to whole disks of
     /// `/sys/block`, and counts on its disk, or on none when it spans several.
