@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -344,12 +344,12 @@ fn disk_volumes() -> Vec<(u32, String)> {
     out
 }
 
-/// The model the disk itself reports (`IOCTL_STORAGE_QUERY_PROPERTY`), as Task Manager shows
-/// under the disk's name; empty when it cannot be asked.
-fn storage_model(disk: u32) -> String {
+/// The model and firmware revision the disk itself reports (`IOCTL_STORAGE_QUERY_PROPERTY`), the model as Task Manager shows
+/// under the disk's name; each empty when it cannot be asked.
+fn storage_model(disk: u32) -> (String, String) {
     use windows::Win32::System::Ioctl::{PropertyStandardQuery, StorageDeviceProperty, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY};
     use windows::Win32::System::IO::DeviceIoControl;
-    let Some(h) = open_device(&format!(r"\\.\PhysicalDrive{disk}")) else { return String::new() };
+    let Some(h) = open_device(&format!(r"\\.\PhysicalDrive{disk}")) else { return Default::default() };
     let query = STORAGE_PROPERTY_QUERY { PropertyId: StorageDeviceProperty, QueryType: PropertyStandardQuery, ..Default::default() };
     // u64 backing keeps the descriptor aligned.
     let mut buf = [0u64; 128];
@@ -362,24 +362,21 @@ fn storage_model(disk: u32) -> String {
     close_device(h);
     let len = (ret as usize).min(std::mem::size_of_val(&buf));
     if !ok || len < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
-        return String::new();
+        return Default::default();
     }
     // SAFETY: the buffer is aligned and at least a descriptor long; only `len` bytes are read.
     let (d, bytes) = unsafe { (&*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR), std::slice::from_raw_parts(buf.as_ptr() as *const u8, len)) };
     // An offset of 0 means the device has no such string.
-    let text = |offset: u32| {
-        let tail = bytes.get(offset as usize..).filter(|_| offset > 0).unwrap_or_default();
-        String::from_utf8_lossy(&tail[..tail.iter().position(|b| *b == 0).unwrap_or(tail.len())]).into_owned()
-    };
-    disk_model(&text(d.VendorIdOffset), &text(d.ProductIdOffset))
+    let text = |offset: u32| descriptor_text(bytes, offset);
+    (disk_model(&text(d.VendorIdOffset), &text(d.ProductIdOffset)), disk_firmware(&text(d.ProductRevisionOffset)))
 }
 
 /// Each disk's model, asked of the disks now and then rather than with every sample.
 #[derive(Default)]
 struct DiskModels {
     at: Option<Instant>,
-    /// (disk number, model).
-    known: Vec<(u32, String)>,
+    /// (disk number, (model, firmware revision)).
+    known: Vec<(u32, (String, String))>,
 }
 
 impl DiskModels {
@@ -391,8 +388,12 @@ impl DiskModels {
         }
     }
 
-    fn of(&self, disk: u32) -> &str {
-        self.known.iter().find(|k| k.0 == disk).map_or("", |k| k.1.as_str())
+    fn model(&self, disk: u32) -> &str {
+        self.known.iter().find(|k| k.0 == disk).map_or("", |k| k.1 .0.as_str())
+    }
+
+    fn firmware(&self, disk: u32) -> &str {
+        self.known.iter().find(|k| k.0 == disk).map_or("", |k| k.1 .1.as_str())
     }
 }
 
@@ -620,7 +621,7 @@ impl Collector {
         self.disk_models.refresh(&each);
         self.disk_spaces.refresh(&each);
         snap.disk.space = self.disk_spaces.all();
-        snap.disk.drives = each.iter().map(|d| DiskDrive { space: self.disk_spaces.of(d.0), ..windows_drive(d, self.disk_models.of(d.0)) }).collect();
+        snap.disk.drives = each.iter().map(|d| DiskDrive { space: self.disk_spaces.of(d.0), ..windows_drive(d, self.disk_models.model(d.0), self.disk_models.firmware(d.0)) }).collect();
         if self.pdh.is_none() {
             let what = if disk.is_some() { "GPU and thermal" } else { "disk, GPU and thermal" };
             snap.errors.push(format!("PDH unavailable: {what} readings disabled"));
@@ -997,7 +998,7 @@ mod tests {
         for d in &s.disk.drives {
             assert_eq!(d.name, format!("Disk {}", d.id));
             assert!(d.title.starts_with(&d.name) && (0.0..=100.0).contains(&d.active_pct), "{d:?}");
-            assert_eq!(d.model, storage_model(d.id.parse().unwrap()));
+            assert_eq!((d.model.clone(), d.firmware.clone()), storage_model(d.id.parse().unwrap()));
             // A disk with drive letters says how full they are; used space moves between two
             // readings, the total does not.
             // A volume on several disks is on none of them; a disk without letters has no figure.
@@ -1005,7 +1006,7 @@ mod tests {
             assert!(d.space.is_none_or(|(used, total)| used <= total && total > 0), "{d:?}");
         }
         if !direct.is_empty() && !s.disk.drives.is_empty() {
-            let titles: Vec<String> = direct.iter().map(|d| windows_drive(d, "").title).collect();
+            let titles: Vec<String> = direct.iter().map(|d| windows_drive(d, "", "").title).collect();
             assert_eq!(titles, s.disk.drives.iter().map(|d| d.title.clone()).collect::<Vec<_>>());
         }
     }

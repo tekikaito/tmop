@@ -217,9 +217,9 @@ pub fn volumes_storage(disks: &[DiskUse], space_of: impl Fn(&str) -> Option<(u64
 
 /// A Windows disk for the snapshot.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn windows_drive(d: &DiskUse, model: &str) -> DiskDrive {
+pub fn windows_drive(d: &DiskUse, model: &str, firmware: &str) -> DiskDrive {
     let name = format!("Disk {}", d.0);
-    DiskDrive { id: d.0.to_string(), title: disk_title(&name, &d.1), name, volumes: d.1.clone(), model: model.to_string(), active_pct: d.2, read_bps: d.3, write_bps: d.4, space: None }
+    DiskDrive { id: d.0.to_string(), title: disk_title(&name, &d.1), name, volumes: d.1.clone(), model: model.to_string(), firmware: firmware.to_string(), active_pct: d.2, read_bps: d.3, write_bps: d.4, space: None }
 }
 
 /// A disk's model from the vendor and product its device reports, either of which may be empty
@@ -238,6 +238,19 @@ pub fn disk_model(vendor: &str, product: &str) -> String {
     } else {
         format!("{vendor} {product}")
     }
+}
+
+/// The NUL-terminated string at `offset` of a storage descriptor's bytes, trimmed. An offset of 0
+/// means the device has none; one past the end of what was returned gives nothing, not a panic.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn descriptor_text(bytes: &[u8], offset: u32) -> String {
+    let tail = bytes.get(offset as usize..).filter(|_| offset > 0).unwrap_or_default();
+    String::from_utf8_lossy(&tail[..tail.iter().position(|b| *b == 0).unwrap_or(tail.len())]).trim().to_string()
+}
+
+/// A disk's firmware revision as its device reports it: trimmed, inner runs of blanks kept as one.
+pub fn disk_firmware(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One engine reading: (pid, adapter, engine type, %).
@@ -424,10 +437,10 @@ mod tests {
         let disks = pdh_disks(&idle, &read, &write);
         assert_eq!(disks, [(0, "C: D:".to_string(), 0.0, 10.0, 0.0), (1, "E:".to_string(), 60.0, 2000.0, 300.0), (2, String::new(), 1.0, 0.0, 0.0)]);
         assert!(pdh_disks(&[], &read, &write).is_empty());
-        let d = windows_drive(&disks[1], "Samsung SSD 990 PRO 2TB");
+        let d = windows_drive(&disks[1], "Samsung SSD 990 PRO 2TB", "4B2QJXD7");
         assert_eq!((d.id.as_str(), d.name.as_str(), d.volumes.as_str(), d.title.as_str(), d.model.as_str()), ("1", "Disk 1", "E:", "Disk 1 (E:)", "Samsung SSD 990 PRO 2TB"));
         assert_eq!((d.active_pct, d.read_bps, d.write_bps), (60.0, 2000.0, 300.0));
-        assert_eq!(windows_drive(&disks[2], "").title, "Disk 2");
+        assert_eq!(windows_drive(&disks[2], "", "").title, "Disk 2");
     }
 
     #[test]
@@ -442,6 +455,19 @@ mod tests {
         assert_eq!(disk_model("Msft", ""), "Msft");
         assert_eq!(disk_model("ATA", ""), "");
         assert_eq!(disk_model("", ""), "");
+    }
+
+    #[test]
+    fn firmware_text() {
+        assert_eq!(disk_firmware("  4B2QJXD7\n"), "4B2QJXD7");
+        assert_eq!(disk_firmware(""), "");
+        let d = b"hdr\0ABC \0xyz";
+        assert_eq!(descriptor_text(d, 4), "ABC");
+        assert_eq!(descriptor_text(d, 0), "");
+        assert_eq!(descriptor_text(d, 99), "");
+        assert_eq!(descriptor_text(d, 12), "");
+        assert_eq!(descriptor_text(b"RV01", 0), "");
+        assert_eq!(descriptor_text(b"x\0RV01", 2), "RV01");
     }
 
     #[test]

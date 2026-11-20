@@ -70,7 +70,8 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps)?;
     for d in &s.disk.drives {
         let space = d.space.map(|(used, total)| format!("  {used} / {total} bytes")).unwrap_or_default();
-        writeln!(out, "  {}  [{}]  {:5.1}%  read {:.0} B/s  write {:.0} B/s{space}", d.title, d.model, d.active_pct, d.read_bps, d.write_bps)?;
+        let firmware = if d.firmware.is_empty() { String::new() } else { format!("  firmware {}", d.firmware) };
+        writeln!(out, "  {}  [{}]{firmware}  {:5.1}%  read {:.0} B/s  write {:.0} B/s{space}", d.title, d.model, d.active_pct, d.read_bps, d.write_bps)?;
     }
     writeln!(out, "Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps)?;
     writeln!(out, "GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines)?;
