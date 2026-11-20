@@ -654,7 +654,15 @@ impl App {
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Read", c, false), ("Write", write, false)], hover.as_deref(), ix + iw);
                 cy += 24.0;
-                let facts = vec![("Active time".to_string(), format!("{active:.1}%")), ("Read speed".to_string(), format_rate(read_bps)), ("Write speed".to_string(), format_rate(write_bps))];
+                let mut facts = vec![("Active time".to_string(), format!("{active:.1}%")), ("Read speed".to_string(), format_rate(read_bps)), ("Write speed".to_string(), format_rate(write_bps))];
+                // How full the volumes are: of this disk, or of all the disks together.
+                let space = match one {
+                    Some((d, _)) => d.space,
+                    None => disk_drives::total_space(&s.disk.drives),
+                };
+                if let Some(space) = space {
+                    facts.push(("Storage used".to_string(), disk_drives::space_text(space)));
+                }
                 cy += dl(&p, &pal, ix, cy, iw, &facts);
             }
             Device::Network => {
