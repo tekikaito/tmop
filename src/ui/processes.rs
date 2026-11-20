@@ -59,6 +59,11 @@ const ORDER: [Column; 23] = [
     Column::Description,
 ];
 
+/// The process table, for [`table::request_relayout`] (its widths come from the settings).
+fn proc_table_id() -> egui::Id {
+    egui::Id::unique("tmop-proc-table")
+}
+
 /// Columns not shown until the user enables them.
 fn default_hidden(c: Column) -> bool {
     !matches!(c, Column::Name | Column::Pid | Column::Status | Column::Cpu | Column::Memory | Column::Disk | Column::Gpu | Column::Description)
@@ -684,6 +689,13 @@ impl App {
                             self.set_column_visible(c, shown);
                         }
                     }
+                    // Columns are moved by dragging their header, or from its context menu.
+                    if !self.settings.window.process_table_column_order.is_empty() {
+                        ui.separator();
+                        if kit::menu_item(ui, "Reset column order", None, false) {
+                            self.set_column_order(ui.ctx(), Vec::new());
+                        }
+                    }
                 });
             });
         });
@@ -694,15 +706,27 @@ impl App {
         let max_io = visible.iter().map(|i| rows[*i].read_bps.max(rows[*i].write_bps)).fold(0.0f64, f64::max).max(1.0) as f32;
         let span = samples_text(SPARK_LEN, iv);
         let proc_caps = self.caps.proc;
+        // The columns in the order the user chose (Name stays first, it carries the tree); hidden
+        // ones keep their place for when they return. `shown[place]` indexes `ORDER`, and each
+        // trend column travels with its data column (`places`).
+        let order_ids = ORDER.map(Column::id);
+        let saved_order = self.settings.window.process_table_column_order.clone();
+        let shown: Vec<usize> = table::column_order(&order_ids, &saved_order, 1).into_iter().filter(|i| self.column_visible(ORDER[*i])).collect();
         let mut cols: Vec<PCol> = Vec::new();
-        for c in ORDER.into_iter().filter(|c| self.column_visible(*c)) {
+        let mut places: Vec<usize> = Vec::new();
+        for (place, c) in shown.iter().map(|i| ORDER[*i]).enumerate() {
             cols.push(PCol::Data(c));
+            places.push(place);
             if c == Column::Cpu {
                 cols.push(PCol::CpuTrend);
+                places.push(place);
             } else if c == Column::Memory {
                 cols.push(PCol::MemTrend);
+                places.push(place);
             }
         }
+        let mut reorder = table::HeaderReorder::new(shown.len(), 1, !saved_order.is_empty());
+        let relayout = table::take_relayout(ui.ctx(), proc_table_id()).is_some();
         let titles: Vec<String> = cols.iter().map(|c| c.title(&span)).collect();
         let widths: Vec<f32> = cols.iter().map(|c| c.width(&self.settings.window.process_table_column_widths)).collect();
         let heights: Vec<f32> = built
@@ -765,7 +789,9 @@ impl App {
                     // Mouse drags scroll the rows, as in egui 0.29 (since 0.35 only on touch screens).
                     .drag_to_scroll(egui::scroll_area::DragScroll::Always)
                     .striped(false)
-                    .resizable(true)
+                    // Right after a move egui would keep the widths by place: once, it takes the
+                    // saved widths instead.
+                    .resizable(!relayout)
                     .sense(Sense::click())
                     .cell_layout(Layout::left_to_right(Align::Center))
                     .min_scrolled_height(0.0)
@@ -799,13 +825,14 @@ impl App {
                                 } else {
                                     widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                                 }
-                                let resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), Sense::click());
+                                let resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), reorder.sense(places[k]));
                                 if resp.hovered() {
                                     ui.painter().rect_filled(r, rounding, pal.raise(0.04));
                                 }
                                 if resp.clicked() {
                                     sort_click = Some(c.base());
                                 }
+                                reorder.cell(ui, &pal, &resp, places[k], r);
                             });
                         }
                         header.col(|ui| {
@@ -897,6 +924,9 @@ impl App {
             kit::empty_state(&p, table_rect.shrink2(vec2(0.0, 40.0)), &pal, "No matching processes");
         }
         p.rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
+        if let Some(order) = reorder.finish(ui, table_inner, &pal).and_then(|change| table::reordered(&order_ids, &saved_order, &shown, change)) {
+            self.set_column_order(ui.ctx(), order);
+        }
         for (id, w) in resized {
             self.settings.window.process_table_column_widths.insert(id, w.round() as u32);
             self.settings_dirty = true;
@@ -1289,6 +1319,13 @@ impl App {
         } else {
             !hidden.iter().any(|h| h == c.id())
         }
+    }
+
+    /// Keeps `order` as the column order of the table (empty: the default order).
+    fn set_column_order(&mut self, ctx: &egui::Context, order: Vec<String>) {
+        self.settings.window.process_table_column_order = order;
+        self.settings_dirty = true;
+        table::request_relayout(ctx, proc_table_id(), Vec::new());
     }
 
     /// Default-hidden columns are enabled with a `+id` entry (design choice).
@@ -1752,6 +1789,10 @@ mod tests {
         let set: HashSet<Column> = ORDER.into_iter().collect();
         assert_eq!(set.len(), ORDER.len());
         assert!(Column::ALL.into_iter().all(|c| set.contains(&c)));
+        // The saved column order names columns by id: one per column, and Name (with the tree) first.
+        let ids: HashSet<&str> = ORDER.into_iter().map(Column::id).collect();
+        assert_eq!(ids.len(), ORDER.len());
+        assert_eq!(ORDER[0], Column::Name);
         assert!(!default_hidden(Column::Cpu) && !default_hidden(Column::Description) && default_hidden(Column::Threads));
     }
 
