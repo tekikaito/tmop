@@ -695,8 +695,12 @@ impl App {
                     for c in ORDER.into_iter().filter(|c| *c != Column::Name && c.supported(&caps)) {
                         let mut shown = self.column_visible(c);
                         let mut resp = ui.checkbox(&mut shown, theme::button_text(c.title()));
-                        if c == Column::Network && !crate::platform::is_elevated() {
-                            resp = resp.on_hover_text(process::netio::State::NeedsAdmin.reason().unwrap_or_default());
+                        if c == Column::Network {
+                            let state = if crate::platform::is_elevated() { process::netio::state() } else { process::netio::State::NeedsAdmin };
+                            // Off: the column is hidden, nothing to tell.
+                            if let Some(why) = (state != process::netio::State::Off).then(|| state.reason()).flatten() {
+                                resp = resp.on_hover_text(why);
+                            }
                         }
                         if resp.changed() {
                             self.set_column_visible(c, shown);
@@ -715,6 +719,8 @@ impl App {
         // Why the Network column has no figures, while it has none.
         let net_reason = process::netio::state().reason();
         let net_off = net_reason.is_some();
+        // While it has: whether the session dropped events.
+        let net_note = net_reason.or_else(|| process::netio::events_lost().note());
         let mut cols: Vec<PCol> = Vec::new();
         for c in ORDER.into_iter().filter(|c| self.column_visible(*c)) {
             cols.push(PCol::Data(c));
@@ -821,7 +827,7 @@ impl App {
                                     widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                                 }
                                 let mut resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), Sense::click());
-                                if let (PCol::Data(Column::Network), Some(why)) = (c, &net_reason) {
+                                if let (PCol::Data(Column::Network), Some(why)) = (c, &net_note) {
                                     resp = resp.on_hover_text(why.as_str());
                                 }
                                 if resp.hovered() {
