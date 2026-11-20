@@ -176,7 +176,7 @@ fn display_font_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearan
     changed
 }
 
-/// One colour role: label, colour button, hex value and a contrast warning.
+/// One colour role: label, colour button, hex field and a contrast warning.
 fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool {
     let warning = p.worst_contrast(r.key).filter(|c| *c < MIN_CONTRAST);
     let mut changed = false;
@@ -186,8 +186,7 @@ fn color_row(ui: &mut egui::Ui, pal: &Palette, p: &mut Palette, r: Role) -> bool
             ui.label(RichText::new(format!("\u{26a0} {w:.1}:1")).font(theme::ui(12.0)).color(pal.warn))
                 .on_hover_text(format!("Text contrast is below {MIN_CONTRAST}:1 (WCAG AA). The palette is still saved."));
         }
-        ui.label(RichText::new(theme::to_skin(*c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
-        changed = egui::color_picker::color_edit_button_srgba(ui, c, egui::color_picker::Alpha::Opaque).changed();
+        changed = widgets::color_edit(ui, pal, c);
     });
     changed
 }
@@ -210,8 +209,7 @@ fn metric_color_rows(ui: &mut egui::Ui, pal: &Palette, g: &mut settings::Graphs)
                     g.metric_colors.remove(key);
                     changed = true;
                 }
-                ui.label(RichText::new(theme::to_skin(c).to_string()).font(theme::mono(12.0)).color(pal.text_dim));
-                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                if widgets::color_edit(ui, pal, &mut c) {
                     g.metric_colors.insert(key.into(), theme::to_skin(c).to_string());
                     changed = true;
                 }

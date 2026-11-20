@@ -1038,6 +1038,47 @@ pub fn text_edit<'t>(edit: egui::TextEdit<'t>, frame: bool) -> impl egui::Widget
     }
 }
 
+/// An opaque colour typed as `#RRGGBB` or `#RGB`: the `#` is optional, case and surrounding
+/// spaces don't matter. Anything else (a colour with alpha too) is `None`.
+pub fn parse_hex_color(text: &str) -> Option<Color32> {
+    let t = text.trim();
+    let hex = t.strip_prefix('#').unwrap_or(t);
+    // Checked here: `from_str_radix` would take a sign.
+    if !matches!(hex.len(), 3 | 6) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    crate::skin::Color::parse(hex).map(theme::from_skin)
+}
+
+/// A colour to edit: its hex value as a text field and the colour button that opens egui's
+/// picker (in a right-to-left row the button is at the left of the field). The field takes what
+/// [`parse_hex_color`] reads, typed or pasted; while it reads nothing the text is drawn in the
+/// warning colour and `color` stays as it was, and when the field loses focus it shows `color`
+/// again. Returns whether `color` changed.
+pub fn color_edit(ui: &mut Ui, pal: &Palette, color: &mut Color32) -> bool {
+    let id = ui.auto_id_with("color-hex");
+    let mut changed = false;
+    // What is being typed, kept while the field has focus.
+    let typed: Option<String> = ui.data(|d| d.get_temp(id));
+    let mut text = typed.clone().unwrap_or_else(|| theme::to_skin(*color).to_string());
+    let ink = if typed.is_some() && parse_hex_color(&text).is_none() { pal.warn } else { pal.text_dim };
+    let edit = egui::TextEdit::singleline(&mut text).id(id).desired_width(68.0 + 8.0).font(theme::mono(12.0)).text_color(ink);
+    let resp = ui.add(text_edit(edit, true)).on_hover_text("Hex colour, such as #5EEAD4 or 5eead4");
+    if resp.changed() {
+        if let Some(c) = parse_hex_color(&text).filter(|c| c != color) {
+            *color = c;
+            changed = true;
+        }
+    }
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else if typed.is_some() {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    changed |= egui::color_picker::color_edit_button_srgba(ui, color, egui::color_picker::Alpha::Opaque).changed();
+    changed
+}
+
 /// Text field with a magnifier at its left and a hint, in the application style: `width` wide
 /// and as high as a toolbar button (36 px), whatever the layout around it (a right-to-left
 /// toolbar included).
@@ -1954,6 +1995,19 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 mod tests {
     use super::*;
     use crate::metrics::Series;
+
+    #[test]
+    fn hex_colours_are_read_leniently_and_strictly() {
+        let teal = Color32::from_rgb(0x5E, 0xEA, 0xD4);
+        for s in ["#5EEAD4", "5eead4", " #5eEaD4 ", "#5eead4\n"] {
+            assert_eq!(parse_hex_color(s), Some(teal), "{s:?}");
+        }
+        assert_eq!(parse_hex_color("#fff"), Some(Color32::WHITE));
+        assert_eq!(parse_hex_color("0a0"), Some(Color32::from_rgb(0, 0xAA, 0)));
+        for s in ["", "#", "#12345", "#1234567", "#5EEAD4FF", "#GGGGGG", "+5eead4", "##5eead4", "#5e ead4", "-12345"] {
+            assert_eq!(parse_hex_color(s), None, "{s:?}");
+        }
+    }
 
     #[test]
     fn live_sparklines_keep_a_fixed_scale() {
