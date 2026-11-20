@@ -126,7 +126,7 @@ pub fn rates(prev: NetBytes, now: NetBytes, secs: f64) -> (f64, f64) {
 }
 
 #[cfg(windows)]
-pub use etw::{set_wanted, state, totals, SESSION_NAME};
+pub use etw::{forget, set_wanted, state, totals, SESSION_NAME};
 
 #[cfg(not(windows))]
 pub fn set_wanted(_on: bool) {}
@@ -137,9 +137,12 @@ pub fn state() -> State {
 }
 
 #[cfg(not(windows))]
-pub fn totals(_alive: &dyn Fn(u32) -> bool) -> HashMap<u32, NetBytes> {
+pub fn totals() -> HashMap<u32, NetBytes> {
     HashMap::new()
 }
+
+#[cfg(not(windows))]
+pub fn forget(_alive: &dyn Fn(u32) -> bool) {}
 
 #[cfg(windows)]
 mod etw {
@@ -218,11 +221,16 @@ mod etw {
         }
     }
 
-    /// The counters of the processes for which `alive(pid)` holds; the others are forgotten.
-    pub fn totals(alive: &dyn Fn(u32) -> bool) -> HashMap<u32, NetBytes> {
-        let Ok(mut c) = COUNTERS.lock() else { return HashMap::new() };
-        c.retain(|pid, _| alive(*pid));
-        c.clone()
+    /// The counters, by pid.
+    pub fn totals() -> HashMap<u32, NetBytes> {
+        COUNTERS.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Forgets the counters of the processes for which `alive(pid)` does not hold.
+    pub fn forget(alive: &dyn Fn(u32) -> bool) {
+        if let Ok(mut c) = COUNTERS.lock() {
+            c.retain(|pid, _| alive(*pid));
+        }
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -347,11 +355,14 @@ mod etw {
         use std::io::{Read, Write};
         use std::time::{Duration, Instant};
 
-        /// Elevated only (CI runs elevated): the session starts, counts this process's traffic
-        /// to another machine and stops again. Loopback traffic is not counted.
+        /// Elevated: the session starts, counts this process's traffic to another machine and
+        /// stops again; loopback traffic is not counted. Not elevated: no session, no figures.
         #[test]
         fn counts_this_process_when_elevated() {
             if !crate::platform::is_elevated() {
+                // GitHub's Windows runners run elevated: there this test must not shrink to the
+                // short case.
+                assert!(std::env::var_os("GITHUB_ACTIONS").is_none(), "expected an elevated CI runner");
                 set_wanted(true);
                 assert_eq!(state(), State::NeedsAdmin);
                 set_wanted(false);
@@ -363,7 +374,7 @@ mod etw {
             // Give the provider a moment to come up.
             std::thread::sleep(Duration::from_millis(1500));
             let me = std::process::id();
-            let before = totals(&|_| true).get(&me).copied().unwrap_or_default();
+            let before = totals().get(&me).copied().unwrap_or_default();
             // Loopback: 200 kB each way, which must not count.
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let mut a = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
@@ -383,15 +394,15 @@ mod etw {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut now = before;
             while Instant::now() < deadline {
-                now = totals(&|_| true).get(&me).copied().unwrap_or_default();
-                if got == 0 || now.received - before.received >= got as u64 {
+                now = totals().get(&me).copied().unwrap_or_default();
+                if got == 0 || now.received.saturating_sub(before.received) >= got as u64 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
             set_wanted(false);
             assert_eq!(state(), State::Off);
-            let (sent, received) = (now.sent - before.sent, now.received - before.received);
+            let (sent, received) = (now.sent.saturating_sub(before.sent), now.received.saturating_sub(before.received));
             eprintln!("network: answer {got} bytes; counted sent {sent}, received {received}");
             assert!(sent < 200_000 && received < 200_000, "loopback is not counted: sent {sent}, received {received}");
             if got > 0 {
@@ -467,6 +478,6 @@ mod tests {
     fn other_systems_have_no_counters() {
         set_wanted(true);
         assert_eq!(state(), State::Unsupported);
-        assert!(totals(&|_| true).is_empty());
+        assert!(totals().is_empty());
     }
 }

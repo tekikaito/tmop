@@ -190,8 +190,7 @@ impl Enumerator {
         let mut guard = 0;
         let efficiency = super::efficiency_marks();
         let windowed = windowed_pids();
-        // Counters of the processes seen last time; the others are forgotten.
-        let net_totals = super::netio::totals(&|pid| self.prev.contains_key(&pid));
+        let net_totals = super::netio::totals();
         loop {
             guard += 1;
             if guard > 100_000 || offset + std::mem::size_of::<SystemProcessInformation>() > buf.len() {
@@ -277,6 +276,7 @@ impl Enumerator {
         // Forget identities of exited processes.
         self.identity_cache.retain(|k, _| next_prev.get(&k.0).map(|p| p.create_time == k.1).unwrap_or(false));
         super::retain_efficiency(|k| next_prev.get(&k.0).map(|p| p.create_time == k.1).unwrap_or(false));
+        super::netio::forget(&|pid| next_prev.contains_key(&pid));
         self.prev = next_prev;
         self.last = Some(now);
         Ok((rows, totals))
