@@ -383,11 +383,50 @@ pub fn visible_pages(caps: &Caps, docker: bool) -> Vec<Page> {
     Page::NAV.into_iter().filter(|p| p.supported(caps) && (*p != Page::Docker || docker)).collect()
 }
 
+/// How long after start-up the window may take to show as maximized (seconds).
+const MAXIMIZE_GRACE: f64 = 3.0;
+
+/// Decides what to remember of the window's maximized state (`window.maximized`). A window
+/// asked to start maximized can report `maximized: false` for its first frames, before the
+/// request is applied; recording that would clear the setting at once. Until the window has
+/// been seen maximized (or [`MAXIMIZE_GRACE`] has passed, the request was refused) a `false`
+/// is not recorded.
+#[derive(Debug)]
+pub struct MaximizedMemory {
+    /// Asked to open maximized and not yet seen so, since this time.
+    waiting: bool,
+    started: Option<f64>,
+}
+
+impl MaximizedMemory {
+    /// `requested`: the window was asked to open maximized.
+    pub fn new(requested: bool) -> Self {
+        Self { waiting: requested, started: None }
+    }
+
+    /// One frame's report at `time` (seconds, any origin): the value to remember, if any.
+    pub fn observe(&mut self, reported: Option<bool>, time: f64) -> Option<bool> {
+        let reported = reported?;
+        let started = *self.started.get_or_insert(time);
+        if reported {
+            self.waiting = false;
+        } else if self.waiting {
+            if time - started < MAXIMIZE_GRACE {
+                return None;
+            }
+            self.waiting = false;
+        }
+        Some(reported)
+    }
+}
+
 pub struct App {
     /// What this OS and session support, probed once at start-up.
     pub caps: Caps,
     pub settings: Settings,
     pub settings_dirty: bool,
+    /// What of the window's maximized state is remembered, see [`MaximizedMemory`].
+    maximized_memory: MaximizedMemory,
     pub catalog: SkinCatalog,
     pub palettes: PaletteCatalog,
     pub palette_ui: settings_page::PaletteUi,
@@ -458,6 +497,7 @@ fn main_hwnd(cc: &eframe::CreationContext<'_>) -> isize {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, status: String, launch: Launch) -> Self {
         let popout_only = launch.popout_only;
+        let settings_maximized = settings.window.maximized;
         let display_font = install_display_font(&cc.egui_ctx, &settings.appearance.display_font);
         let ctx = cc.egui_ctx.clone();
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
@@ -493,6 +533,7 @@ impl App {
             perf: performance::PerfState::default(),
             settings,
             settings_dirty: false,
+            maximized_memory: MaximizedMemory::new(settings_maximized),
             catalog,
             palettes,
             palette_ui: settings_page::PaletteUi::new(main_hwnd(cc)),
@@ -1026,11 +1067,13 @@ impl App {
         } else {
             // Remembered for the next start (window.maximized). A minimized window keeps what
             // it was before.
-            let (maximized, minimized) = ctx.input(|i| (i.viewport().maximized, i.viewport().minimized));
-            if let (Some(maximized), false) = (maximized, minimized.unwrap_or(false)) {
-                if maximized != self.settings.window.maximized {
-                    self.settings.window.maximized = maximized;
-                    self.settings_dirty = true;
+            let (maximized, minimized, time) = ctx.input(|i| (i.viewport().maximized, i.viewport().minimized, i.time));
+            if !minimized.unwrap_or(false) {
+                if let Some(maximized) = self.maximized_memory.observe(maximized, time) {
+                    if maximized != self.settings.window.maximized {
+                        self.settings.window.maximized = maximized;
+                        self.settings_dirty = true;
+                    }
                 }
             }
             self.replace_poll(ctx);
@@ -1103,6 +1146,27 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window asked to open maximized may report `false` first: that must not clear the setting.
+    #[test]
+    fn maximized_is_not_forgotten_before_the_window_is_seen_maximized() {
+        let mut m = MaximizedMemory::new(true);
+        assert_eq!(m.observe(None, 0.0), None);
+        assert_eq!(m.observe(Some(false), 0.1), None);
+        assert_eq!(m.observe(Some(false), 1.0), None);
+        assert_eq!(m.observe(Some(true), 1.2), Some(true));
+        // Seen maximized: from here on the user's un-maximize is recorded at once.
+        assert_eq!(m.observe(Some(false), 1.3), Some(false));
+        // The request was never applied (refused): after the grace period false counts.
+        let mut m = MaximizedMemory::new(true);
+        assert_eq!(m.observe(Some(false), 10.0), None);
+        assert_eq!(m.observe(Some(false), 12.9), None);
+        assert_eq!(m.observe(Some(false), 13.0), Some(false));
+        // Not asked to maximize: reports are taken as they come.
+        let mut m = MaximizedMemory::new(false);
+        assert_eq!(m.observe(Some(false), 0.0), Some(false));
+        assert_eq!(m.observe(Some(true), 0.1), Some(true));
+    }
 
     #[test]
     fn visible_pages_follow_caps_and_the_docker_switch() {
