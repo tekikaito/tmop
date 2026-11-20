@@ -41,6 +41,14 @@ bytes = "1.12.1"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "pollster", "common-controls-v6"] }
 
+# Keeping TMOP in the notification area (opt-in, Windows only): the tray icon and its menu
+# (Shell_NotifyIcon, TrackPopupMenu) and the global shortcut (RegisterHotKey; no keyboard hook).
+# Both from the Tauri team, MIT OR Apache-2.0. Not on Linux, where tray-icon needs GTK and
+# libappindicator at build and run time.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false }
+global-hotkey = "0.10.0"
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62.2"
 features = [
