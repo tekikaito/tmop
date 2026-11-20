@@ -526,6 +526,9 @@ impl App {
                     facts.push(("Committed".to_string(), format!("{} / {}", format_bytes(u as f64), format_bytes(l as f64))));
                 }
                 facts.push(("Cached".to_string(), format_bytes(s.memory.cached as f64)));
+                if let Some(mhz) = crate::pro::smbios::memory_speed_mhz() {
+                    facts.push(("Speed".to_string(), crate::pro::smbios::format_speed(mhz)));
+                }
                 let swap = crate::platform::swap_word();
                 if let Some(total) = s.memory.swap_total {
                     facts.push((swap.to_string(), format_bytes(total as f64)));

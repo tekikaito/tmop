@@ -89,6 +89,8 @@ pub struct Window {
     pub performance_cpus_expanded: bool,
     /// Show each GPU on its own instead of the grouped view.
     pub gpus_separated: bool,
+    /// The main window was maximized when it was last shown; it opens maximized again.
+    pub maximized: bool,
     /// Show each physical disk on its own instead of the grouped view.
     pub disks_separated: bool,
 }
@@ -243,6 +245,7 @@ impl Default for Window {
             process_table_column_widths: BTreeMap::new(),
             performance_cpus_expanded: true,
             gpus_separated: false,
+            maximized: false,
             disks_separated: false,
         }
     }
@@ -690,6 +693,23 @@ mod tests {
         let mut s = Settings::default();
         s.appearance.accent = "#8B9CFF".into();
         assert_eq!(parse(&s.to_json()).settings.appearance.accent, "#8B9CFF");
+    }
+
+    /// `window.maximized` is new: files without it load as not maximized, and it round-trips.
+    #[test]
+    fn maximized_is_optional() {
+        let load = parse(r#"{"version":1,"window":{"alwaysOnTop":true}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty());
+        assert!(load.settings.window.always_on_top && !load.settings.window.maximized);
+        let mut s = Settings::default();
+        s.window.maximized = true;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["window"]["maximized"], true);
+        assert!(parse(&s.to_json()).settings.window.maximized);
+        assert!(Settings::from_json(r#"{"version":1,"window":{"maximized":"yes"}}"#).is_err());
+        // TMOG's format has no such key (its `mainWindowPlacement` is dropped).
+        assert!(!parse(SAMPLE).settings.window.maximized);
     }
 
     #[test]
