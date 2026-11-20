@@ -27,13 +27,15 @@ const SPARK_H: f32 = 24.0;
 const SHOWN_MEMBERS: usize = 3;
 /// Height of the system history strip.
 const STRIP_H: f32 = 108.0;
+/// Network use (bytes/s, sent and received) that the Network column marks hot; its heat grows towards it.
+const NET_HOT: f32 = 10.0 * 1048576.0;
 /// Width of the "Columns" button at the right end of the filter tabs.
 const COLUMNS_W: f32 = 140.0;
 /// The filter tabs; the fourth holds the OS's own processes ("Windows", else "System").
 const VIEWS: [&str; 6] = ["All", "Apps", "Background", process::os_group(), "Services", "Suspended"];
 
 /// Column display order; the first entries are the ones shown by default.
-const ORDER: [Column; 23] = [
+const ORDER: [Column; 24] = [
     Column::Name,
     Column::Pid,
     Column::Status,
@@ -43,6 +45,7 @@ const ORDER: [Column; 23] = [
     Column::Disk,
     Column::DiskRead,
     Column::DiskWrite,
+    Column::Network,
     Column::Gpu,
     Column::Threads,
     Column::Handles,
@@ -110,12 +113,21 @@ struct Agg {
     mem: u64,
     read: f64,
     write: f64,
+    /// Network send + receive.
+    net: f64,
     gpu: f32,
+}
+
+impl Agg {
+    /// The values of `r` alone.
+    fn own(r: &ProcessRow) -> Self {
+        Self { cpu: r.cpu_pct, mem: r.private_working_set, read: r.read_bps, write: r.write_bps, net: r.net_send_bps + r.net_recv_bps, gpu: r.gpu_pct }
+    }
 }
 
 fn agg_of(i: usize, rows: &[ProcessRow], children: &HashMap<usize, Vec<usize>>, depth: usize) -> Agg {
     let r = &rows[i];
-    let mut a = Agg { cpu: r.cpu_pct, mem: r.private_working_set, read: r.read_bps, write: r.write_bps, gpu: r.gpu_pct };
+    let mut a = Agg::own(r);
     if depth < 32 {
         for c in children.get(&i).into_iter().flatten() {
             let b = agg_of(*c, rows, children, depth + 1);
@@ -123,6 +135,7 @@ fn agg_of(i: usize, rows: &[ProcessRow], children: &HashMap<usize, Vec<usize>>, 
             a.mem += b.mem;
             a.read += b.read;
             a.write += b.write;
+            a.net += b.net;
             a.gpu = a.gpu.max(b.gpu);
         }
     }
@@ -161,10 +174,10 @@ fn parent_in(rows: &[ProcessRow], by_pid: &HashMap<u32, usize>, i: usize) -> Opt
 /// own process's value, so a group of busy children ranks by what its row reads.
 fn sort_entries(v: &mut [usize], rows: &[ProcessRow], aggs: &HashMap<usize, Agg>, col: Column, desc: bool) {
     let f = |x: f64, y: f64| x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
-    let own = |i: usize| Agg { cpu: rows[i].cpu_pct, mem: rows[i].private_working_set, read: rows[i].read_bps, write: rows[i].write_bps, gpu: rows[i].gpu_pct };
+    let own = |i: usize| Agg::own(&rows[i]);
     v.sort_by(|a, b| {
         let o = match col {
-            Column::Cpu | Column::Memory | Column::DiskRead | Column::DiskWrite | Column::Disk | Column::Gpu if aggs.contains_key(a) || aggs.contains_key(b) => {
+            Column::Cpu | Column::Memory | Column::DiskRead | Column::DiskWrite | Column::Disk | Column::Network | Column::Gpu if aggs.contains_key(a) || aggs.contains_key(b) => {
                 let (x, y) = (aggs.get(a).copied().unwrap_or_else(|| own(*a)), aggs.get(b).copied().unwrap_or_else(|| own(*b)));
                 match col {
                     Column::Cpu => f(x.cpu as f64, y.cpu as f64),
@@ -172,6 +185,7 @@ fn sort_entries(v: &mut [usize], rows: &[ProcessRow], aggs: &HashMap<usize, Agg>
                     Column::DiskRead => f(x.read, y.read),
                     Column::DiskWrite => f(x.write, y.write),
                     Column::Disk => f(x.read + x.write, y.read + y.write),
+                    Column::Network => f(x.net, y.net),
                     _ => f(x.gpu as f64, y.gpu as f64),
                 }
             }
@@ -685,7 +699,11 @@ impl App {
                     let caps = self.caps.proc;
                     for c in ORDER.into_iter().filter(|c| *c != Column::Name && c.supported(&caps)) {
                         let mut shown = self.column_visible(c);
-                        if ui.checkbox(&mut shown, theme::button_text(c.title())).changed() {
+                        let mut resp = ui.checkbox(&mut shown, theme::button_text(c.title()));
+                        if c == Column::Network && !crate::platform::is_elevated() {
+                            resp = resp.on_hover_text(process::netio::State::NeedsAdmin.reason().unwrap_or_default());
+                        }
+                        if resp.changed() {
                             self.set_column_visible(c, shown);
                         }
                     }
@@ -712,6 +730,9 @@ impl App {
         let order_ids = ORDER.map(Column::id);
         let saved_order = self.settings.window.process_table_column_order.clone();
         let shown: Vec<usize> = table::column_order(&order_ids, &saved_order, 1).into_iter().filter(|i| self.column_visible(ORDER[*i])).collect();
+        // Why the Network column has no figures, while it has none.
+        let net_reason = process::netio::state().reason();
+        let net_off = net_reason.is_some();
         let mut cols: Vec<PCol> = Vec::new();
         let mut places: Vec<usize> = Vec::new();
         for (place, c) in shown.iter().map(|i| ORDER[*i]).enumerate() {
@@ -825,7 +846,10 @@ impl App {
                                 } else {
                                     widgets::tracked_text(&clip, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &label, font, color, 0.08);
                                 }
-                                let resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), reorder.sense(places[k]));
+                                let mut resp = ui.interact(r, ui.scope_id().with(("hdr", c.id())), reorder.sense(places[k]));
+                                if let (PCol::Data(Column::Network), Some(why)) = (c, &net_reason) {
+                                    resp = resp.on_hover_text(why.as_str());
+                                }
                                 if resp.hovered() {
                                     ui.painter().rect_filled(r, rounding, pal.raise(0.04));
                                 }
@@ -888,7 +912,7 @@ impl App {
                                 } else {
                                     spark.get(&key).map(|s| (&s.0, &s.1))
                                 };
-                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st };
+                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st, net_off };
                                 for (ci, c) in cols.iter().enumerate() {
                                     row.col(|ui| {
                                         if cell_ui(ui, r, *c, &pal, cx, icons, ci == 0, false) {
@@ -1501,6 +1525,8 @@ struct CellCtx<'a> {
     trend: Option<(&'a Series, &'a Series)>,
     mem_color: Color32,
     st: theme::Status,
+    /// The network counters do not run ([`process::netio::state`]): the Network column shows no figure.
+    net_off: bool,
 }
 
 /// Draws one cell. Returns true when the tree chevron was clicked. `first` / `filler` tell the
@@ -1508,7 +1534,7 @@ struct CellCtx<'a> {
 #[allow(clippy::too_many_arguments)]
 fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellCtx<'_>, icons: &mut IconCache, first: bool, filler: bool) -> bool {
     let rect = ui.max_rect();
-    let a = cx.agg.unwrap_or(Agg { cpu: r.cpu_pct, mem: r.private_working_set, read: r.read_bps, write: r.write_bps, gpu: r.gpu_pct });
+    let a = cx.agg.unwrap_or_else(|| Agg::own(r));
     let cpu = if cx.per_core { a.cpu * cx.logical.max(1) as f32 } else { a.cpu };
     let c = pc.base();
     // Heat-map intensity for the activity columns.
@@ -1521,6 +1547,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             Column::DiskRead => (a.read as f32 / cx.max_io).clamp(0.0, 1.0).sqrt(),
             Column::DiskWrite => (a.write as f32 / cx.max_io).clamp(0.0, 1.0).sqrt(),
             Column::Disk => ((a.read + a.write) as f32 / (2.0 * cx.max_io)).clamp(0.0, 1.0).sqrt(),
+            Column::Network if !cx.net_off => (a.net as f32 / NET_HOT).clamp(0.0, 1.0).sqrt(),
             Column::Gpu => (a.gpu / 15.0).clamp(0.0, 1.0),
             _ => 0.0,
         }
@@ -1575,6 +1602,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
         Column::DiskRead => a.read >= 10.0 * 1048576.0,
         Column::DiskWrite => a.write >= 10.0 * 1048576.0,
         Column::Disk => a.read + a.write >= 10.0 * 1048576.0,
+        Column::Network => !cx.net_off && a.net >= NET_HOT as f64,
         Column::Gpu => a.gpu >= 20.0,
         _ => false,
     };
@@ -1665,6 +1693,9 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
                 Column::DiskRead => format_rate(a.read),
                 Column::DiskWrite => format_rate(a.write),
                 Column::Disk => format_rate(a.read + a.write),
+                // No figure while the counters do not run (not elevated); the header says why.
+                Column::Network if cx.net_off => "\u{2014}".to_string(),
+                Column::Network => format_rate(a.net),
                 Column::Gpu => format!("{:.1}%", a.gpu),
                 _ => cell(r, c),
             };
@@ -1700,6 +1731,7 @@ pub fn cell(r: &ProcessRow, c: Column) -> String {
         Column::DiskRead => format_rate(r.read_bps),
         Column::DiskWrite => format_rate(r.write_bps),
         Column::Disk => format_rate(r.io_bps),
+        Column::Network => format_rate(r.net_send_bps + r.net_recv_bps),
         Column::Gpu => format!("{:.1}%", r.gpu_pct),
         Column::PeakMemory => format_bytes(r.peak_working_set as f64),
         Column::PageFaults => r.page_faults.to_string(),
@@ -1968,6 +2000,7 @@ mod tests {
                             trend: Some((&series.0, &series.1)),
                             mem_color: pal.accent,
                             st,
+                            net_off: true,
                         };
                         let (rect, _) = ui.allocate_exact_size(vec2(300.0, ROW_H), Sense::hover());
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {

@@ -270,6 +270,8 @@ impl Enumerator {
                 status: if matches!(st.state, 'T' | 't') { Status::Suspended } else { Status::Running },
                 read_bps,
                 write_bps,
+                net_send_bps: 0.0,
+                net_recv_bps: 0.0,
                 peak_working_set: status.peak_rss,
                 page_faults: st.faults.min(u32::MAX as u64) as u32,
                 command_line: id.command_line,

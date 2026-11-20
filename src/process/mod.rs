@@ -13,6 +13,7 @@
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
+pub mod netio;
 mod procfs;
 #[cfg(windows)]
 mod win;
@@ -229,6 +230,10 @@ pub struct ProcessRow {
     /// Read / write transfer rates (bytes/s), including non-disk I/O.
     pub read_bps: f64,
     pub write_bps: f64,
+    /// Network send / receive rates (bytes/s), loopback left out; 0 while [`netio::state`] is
+    /// not `Running`.
+    pub net_send_bps: f64,
+    pub net_recv_bps: f64,
     pub peak_working_set: u64,
     pub page_faults: u32,
     pub command_line: Option<String>,
@@ -283,11 +288,12 @@ pub enum Column {
     Commit,
     Path,
     Description,
+    Network,
 }
 
 impl Column {
     /// Display order; the visible-by-default columns come first.
-    pub const ALL: [Column; 23] = [
+    pub const ALL: [Column; 24] = [
         Column::Name,
         Column::Pid,
         Column::Status,
@@ -311,6 +317,7 @@ impl Column {
         Column::Commit,
         Column::Path,
         Column::Description,
+        Column::Network,
     ];
 
     /// Stable id used in `processTableHiddenColumns`, `processTableColumnWidths` and `processTableColumnOrder`.
@@ -339,6 +346,7 @@ impl Column {
             Column::CpuTime => "cpuTime",
             Column::Commit => "commitSize",
             Column::Path => "imagePath",
+            Column::Network => "network",
         }
     }
 
@@ -367,6 +375,7 @@ impl Column {
             Column::CpuTime => "CPU time",
             Column::Commit => "Commit size",
             Column::Path => "Image path",
+            Column::Network => "Network",
         }
     }
 
@@ -379,14 +388,14 @@ impl Column {
             Column::Pid => 52.0,
             Column::Status | Column::Architecture => 70.0,
             Column::Cpu | Column::Gpu | Column::Threads | Column::Handles | Column::Priority | Column::Session => 56.0,
-            Column::Memory | Column::DiskRead | Column::DiskWrite | Column::Disk => 76.0,
+            Column::Memory | Column::DiskRead | Column::DiskWrite | Column::Disk | Column::Network => 76.0,
             _ => 84.0,
         }
     }
 
     /// Hidden unless the user enables them.
     pub fn hidden_by_default(self) -> bool {
-        matches!(self, Column::Disk | Column::Session | Column::ParentPid | Column::Commit | Column::Path | Column::Description)
+        matches!(self, Column::Disk | Column::Session | Column::ParentPid | Column::Commit | Column::Path | Column::Description | Column::Network)
     }
 
     pub fn numeric(self) -> bool {
@@ -411,6 +420,7 @@ pub fn compare(a: &ProcessRow, b: &ProcessRow, col: Column) -> Ordering {
         Column::Cpu => f(a.cpu_pct as f64, b.cpu_pct as f64),
         Column::Memory => a.private_working_set.cmp(&b.private_working_set),
         Column::Disk => f(a.io_bps, b.io_bps),
+        Column::Network => f(a.net_send_bps + a.net_recv_bps, b.net_send_bps + b.net_recv_bps),
         Column::Gpu => f(a.gpu_pct as f64, b.gpu_pct as f64),
         Column::Threads => a.threads.cmp(&b.threads),
         Column::Handles => a.handles.cmp(&b.handles),
@@ -530,6 +540,7 @@ impl Column {
             Column::Session => caps.session,
             Column::Architecture => caps.arch,
             Column::Gpu => caps.gpu,
+            Column::Network => caps.network,
             _ => true,
         }
     }
@@ -823,6 +834,6 @@ mod tests {
     fn columns_follow_caps() {
         let none = crate::platform::Caps::OTHER.proc;
         assert!(Column::ALL.iter().all(|c| c.supported(&ALL_CAPS)));
-        assert!(!Column::Handles.supported(&none) && !Column::Gpu.supported(&none) && Column::Cpu.supported(&none));
+        assert!(!Column::Handles.supported(&none) && !Column::Gpu.supported(&none) && !Column::Network.supported(&none) && Column::Cpu.supported(&none));
     }
 }
