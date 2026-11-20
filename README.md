@@ -1,8 +1,46 @@
 # TMOP — Task Manager OverPowered
 
+[![CI](https://github.com/tekikaito/tmop/actions/workflows/ci.yml/badge.svg)](https://github.com/tekikaito/tmop/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/tekikaito/tmop)](https://github.com/tekikaito/tmop/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/tekikaito/tmop/total)](https://github.com/tekikaito/tmop/releases)
+[![License: GPL-3.0](https://img.shields.io/github/license/tekikaito/tmop)](LICENSE)
+![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue)
+
 TMOP shows what your computer is doing: how busy the processor, memory, disk, network and
 graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
-macOS**, is free and needs no installation.
+macOS**, is free and open source, and needs no installation.
+
+![TMOP overview](docs/screenshots/summary.png)
+
+**[Download TMOP](https://tekikaito.github.io/tmop/)** · [All install options](#get-tmop) ·
+[Release notes](https://github.com/tekikaito/tmop/releases)
+
+Install with one command (run it again to update):
+
+```powershell
+# Windows, in PowerShell
+irm https://tekikaito.github.io/tmop/install.ps1 | iex
+```
+
+```sh
+# Linux and macOS, in a terminal
+curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
+```
+
+## Why TMOP
+
+- **Free and open source.** Every feature is free, with no paid tier. GPL-3.0.
+- **The same on Windows, Linux and macOS.** Where a system can't provide something, TMOP hides it
+  instead of showing zeros (see [Platforms](#platforms)).
+- **More than processes and graphs.** Per-core CPU, memory, disk, network and graphics card with
+  engines; processes with end task, suspend and priority; services, startup apps, installed apps,
+  connections; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
+- **Skinnable.** Skins, palettes and fonts change how it looks. Skins use the `.tmogskin`
+  format, and TMOP can take the place of Windows Task Manager (Ctrl+Shift+Esc, Windows only).
+- **No installer, no telemetry.** TMOP is one program, and it sends no data (see
+  [Privacy](#privacy)).
+
+## Privacy
 
 TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
 update check (*Settings → General*, off by default), which asks GitHub for the newest release. On
@@ -10,8 +48,6 @@ Windows its only internet requests go to GitHub: that update check if you turn i
 TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
 check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
 (for example an image you pull).
-
-![TMOP overview](docs/screenshots/summary.png)
 
 ## Get TMOP
 
