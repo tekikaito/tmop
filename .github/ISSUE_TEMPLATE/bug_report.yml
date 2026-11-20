@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in TMOP does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead? A screenshot helps.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TMOP version
+      placeholder: "0.10.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows 11, Windows 10, Linux, macOS, Other]
+    validations:
+      required: true
+  - type: input
+    id: os-details
+    attributes:
+      label: System details
+      description: "Windows build, Linux distribution and desktop (X11 or Wayland), or macOS version; Intel or ARM."
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install TMOP?
+      options: [Install command, Downloaded file by hand, Homebrew, AppImage, Built from source, Other]
+  - type: textarea
+    id: log
+    attributes:
+      label: Log or error message
+      description: "If TMOP does not start on Windows, paste %LOCALAPPDATA%\TMOP\startup-error.log."
+      render: text

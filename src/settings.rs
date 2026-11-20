@@ -28,7 +28,7 @@ pub const VERSION: u32 = 1;
 const MIGRATIONS: &[fn(&mut Map<String, Value>)] = &[];
 
 /// Maps whose keys are data (column ids, metric ids), not settings, so they are not checked.
-const FREE_MAPS: &[&str] = &["window.processTableColumnWidths", "graphs.metricColors", "docker.contexts"];
+const FREE_MAPS: &[&str] = &["window.processTableColumnWidths", "window.tableColumnOrder", "graphs.metricColors", "docker.contexts"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -86,9 +86,20 @@ pub struct Window {
     pub process_tree: bool,
     pub process_table_hidden_columns: Vec<String>,
     pub process_table_column_widths: BTreeMap<String, u32>,
+    /// Column ids of the Processes table in the order the user put them; empty means the
+    /// default order. Ids this build does not know are ignored, and columns missing from the
+    /// list take their default place (see [`crate::ui::table::column_order`]).
+    pub process_table_column_order: Vec<String>,
+    /// The same for the other tables, keyed by table id (`apps-table`, `docker-containers`, ...);
+    /// there the column ids are the column titles.
+    pub table_column_order: BTreeMap<String, Vec<String>>,
     pub performance_cpus_expanded: bool,
     /// Show each GPU on its own instead of the grouped view.
     pub gpus_separated: bool,
+    /// The main window was maximized when it was last shown; it opens maximized again.
+    pub maximized: bool,
+    /// Show each physical disk on its own instead of the grouped view.
+    pub disks_separated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -239,8 +250,12 @@ impl Default for Window {
             process_tree: true,
             process_table_hidden_columns: Vec::new(),
             process_table_column_widths: BTreeMap::new(),
+            process_table_column_order: Vec::new(),
+            table_column_order: BTreeMap::new(),
             performance_cpus_expanded: true,
             gpus_separated: false,
+            maximized: false,
+            disks_separated: false,
         }
     }
 }
@@ -689,12 +704,51 @@ mod tests {
         assert_eq!(parse(&s.to_json()).settings.appearance.accent, "#8B9CFF");
     }
 
+    /// The column orders are new: version 1 files without them load unchanged in the default
+    /// order (no migration), and table ids are data, not unknown keys.
+    #[test]
+    fn column_orders_are_optional() {
+        let old = r#"{"version":1,"window":{"processTree":false,"processTableHiddenColumns":["handles"],"processTableColumnWidths":{"cpu":80}}}"#;
+        let load = parse(old);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+        let w = &load.settings.window;
+        assert!(w.process_table_column_order.is_empty() && w.table_column_order.is_empty());
+        assert_eq!((w.process_tree, w.process_table_hidden_columns.as_slice()), (false, ["handles".to_string()].as_slice()));
+        assert!(parse(SAMPLE).settings.window.process_table_column_order.is_empty(), "TMOG files keep the default order");
+        let load = parse(r#"{"version":1,"window":{"processTableColumnOrder":["name","memory","cpu"],"tableColumnOrder":{"apps-table":["Name","Size"],"docker-volumes":[]}}}"#);
+        assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+        let w = &load.settings.window;
+        assert_eq!(w.process_table_column_order, ["name", "memory", "cpu"]);
+        assert_eq!(w.table_column_order["apps-table"], ["Name", "Size"]);
+        assert!(Settings::from_json(r#"{"version":1,"window":{"tableColumnOrder":{"apps-table":"Name"}}}"#).is_err());
+    }
+
+    /// `window.maximized` is new: files without it load as not maximized, and it round-trips.
+    #[test]
+    fn maximized_is_optional() {
+        let load = parse(r#"{"version":1,"window":{"alwaysOnTop":true}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty());
+        assert!(load.settings.window.always_on_top && !load.settings.window.maximized);
+        let mut s = Settings::default();
+        s.window.maximized = true;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["window"]["maximized"], true);
+        assert!(parse(&s.to_json()).settings.window.maximized);
+        assert!(Settings::from_json(r#"{"version":1,"window":{"maximized":"yes"}}"#).is_err());
+        // TMOG's format has no such key (its `mainWindowPlacement` is dropped).
+        assert!(!parse(SAMPLE).settings.window.maximized);
+    }
+
     #[test]
     fn v1_round_trips() {
         let mut s = Settings::default();
         s.general.update_speed = "high".into();
         s.window.process_table_hidden_columns = vec!["handles".into()];
         s.window.process_table_column_widths.insert("name".into(), 240);
+        s.window.process_table_column_order = vec!["name".into(), "memory".into(), "cpu".into()];
+        s.window.table_column_order.insert("conn-table".into(), vec!["Process".into(), "State".into()]);
         s.appearance.theme = "dark".into();
         s.graphs.metric_colors.insert("cpu".into(), "#4fb4ff".into());
         s.popout.mode = "topMost".into();
@@ -739,6 +793,18 @@ mod tests {
         assert!(Settings::from_json(r#"{"schemaVersion":12,"alwaysOnTop":"yes"}"#).is_err());
         assert!(Settings::from_json("{}").is_err());
         assert!(Settings::from_json("[]").is_err());
+    }
+
+    /// A key added without a migration: a file written before it loads with the default, and the
+    /// key is known once written.
+    #[test]
+    fn disks_separated_is_off_until_set() {
+        let old = parse(r#"{"version":1,"window":{"gpusSeparated":true}}"#);
+        assert!(old.settings.window.gpus_separated && !old.settings.window.disks_separated);
+        let set = parse(r#"{"version":1,"window":{"disksSeparated":true}}"#);
+        assert!(set.settings.window.disks_separated && !set.settings.window.gpus_separated);
+        assert!(set.unknown_keys.is_empty(), "{:?}", set.unknown_keys);
+        assert!(parse(&set.settings.to_json()).settings.window.disks_separated);
     }
 
     #[test]

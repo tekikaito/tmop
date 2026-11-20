@@ -3,7 +3,7 @@
 //! every host.
 
 use super::procfs::GpuDev;
-use super::{GpuAdapter, GpuProcessUsage, GpuSample, NetworkSample};
+use super::{DiskDrive, GpuAdapter, GpuProcessUsage, GpuSample, NetworkSample};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -100,11 +100,15 @@ pub struct DiskCounters {
     pub query: i64,
 }
 
-/// Active time (the disks' average, as PDH's `_Total`) and summed throughput between two readings
-/// of the same disks, keyed by device number; `None` when no disk was read both times.
+/// One Windows disk between two readings: (disk number, its volumes as "C: D:", active time in
+/// %, read B/s, write B/s).
+pub type DiskUse = (u32, String, f32, f64, f64);
+
+/// Each disk's active time and throughput between two readings of the same disks, keyed by
+/// device number and without volumes; a disk not read both times is left out.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn disk_delta(prev: &[(u32, DiskCounters)], now: &[(u32, DiskCounters)]) -> Option<(f32, f64, f64)> {
-    let (mut busy, mut disks, mut read, mut write) = (0.0f64, 0usize, 0.0f64, 0.0f64);
+pub fn disk_deltas(prev: &[(u32, DiskCounters)], now: &[(u32, DiskCounters)]) -> Vec<DiskUse> {
+    let mut out = Vec::with_capacity(now.len());
     for (id, n) in now {
         let Some((_, p)) = prev.iter().find(|(pid, _)| pid == id) else { continue };
         let span = n.query - p.query;
@@ -113,12 +117,127 @@ pub fn disk_delta(prev: &[(u32, DiskCounters)], now: &[(u32, DiskCounters)]) -> 
         }
         let secs = span as f64 / 1e7;
         let idle = ((n.idle - p.idle) as f64 / span as f64).clamp(0.0, 1.0);
-        busy += 1.0 - idle;
-        disks += 1;
-        read += n.read.saturating_sub(p.read) as f64 / secs;
-        write += n.written.saturating_sub(p.written) as f64 / secs;
+        out.push((*id, String::new(), ((1.0 - idle) * 100.0) as f32, n.read.saturating_sub(p.read) as f64 / secs, n.written.saturating_sub(p.written) as f64 / secs));
     }
-    (disks > 0).then(|| ((busy / disks as f64 * 100.0) as f32, read, write))
+    out
+}
+
+/// The grouped view of `disks`: active time as their average (as PDH's `_Total`) and summed
+/// throughput; `None` without a disk.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn group_disks(disks: &[DiskUse]) -> Option<(f32, f64, f64)> {
+    let busy: f64 = disks.iter().map(|d| d.2 as f64).sum();
+    (!disks.is_empty()).then(|| ((busy / disks.len() as f64) as f32, disks.iter().map(|d| d.3).sum(), disks.iter().map(|d| d.4).sum()))
+}
+
+/// Disk number and volumes of a PDH `PhysicalDisk` instance: "0 C: D:" is disk 0 with "C: D:",
+/// "1" a disk without a drive letter. `None` for `_Total`.
+pub fn parse_disk_instance(name: &str) -> Option<(u32, &str)> {
+    let (number, volumes) = name.split_once(' ').unwrap_or((name, ""));
+    Some((number.parse().ok()?, volumes.trim()))
+}
+
+/// PDH's `PhysicalDisk(*)` idle time, read rate and write rate joined by instance into one
+/// reading per disk, in disk order. A disk without an idle reading is left out.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn pdh_disks(idle: &[(String, f64)], read: &[(String, f64)], write: &[(String, f64)]) -> Vec<DiskUse> {
+    let of = |items: &[(String, f64)], name: &str| items.iter().find(|(n, _)| n == name).map_or(0.0, |(_, v)| v.max(0.0));
+    let mut out: Vec<DiskUse> = idle
+        .iter()
+        .filter_map(|(name, idle)| {
+            let (number, volumes) = parse_disk_instance(name)?;
+            Some((number, volumes.to_string(), (100.0 - idle).clamp(0.0, 100.0) as f32, of(read, name), of(write, name)))
+        })
+        .collect();
+    out.sort_by_key(|d| d.0);
+    out.dedup_by_key(|d| d.0);
+    out
+}
+
+/// A disk with its volumes as Windows Task Manager writes it: "Disk 0 (C: D:)", or "Disk 1"
+/// without a drive letter.
+pub fn disk_title(name: &str, volumes: &str) -> String {
+    if volumes.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} ({volumes})")
+    }
+}
+
+/// How full the file systems (Windows: volumes) are: those wholly on one disk per disk, and all
+/// of them together.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Storage {
+    /// Per disk id, the (used, total) of the file systems lying on that disk alone. A disk whose
+    /// file systems are all shared with other disks has no entry.
+    pub each: HashMap<String, (u64, u64)>,
+    /// Every file system once, whether it lies on one disk or several; `None` without any.
+    pub all: Option<(u64, u64)>,
+}
+
+/// Splits file systems into [`Storage`]. `volumes` has, for each file system, the disks it lies
+/// on and its (used, total). One on several disks (RAID, LVM, a spanned or mirrored volume) is
+/// counted once in the total and on no single disk: its size is no disk's own, and adding it to
+/// each would count it again.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn split_storage(volumes: &[(Vec<String>, (u64, u64))]) -> Storage {
+    let mut s = Storage::default();
+    let add = |sum: &mut (u64, u64), (used, total): (u64, u64)| *sum = (sum.0.saturating_add(used), sum.1.saturating_add(total));
+    for (disks, space) in volumes {
+        add(s.all.get_or_insert((0, 0)), *space);
+        let mut disks = disks.clone();
+        disks.sort();
+        disks.dedup();
+        if let [only] = disks.as_slice() {
+            add(s.each.entry(only.clone()).or_default(), *space);
+        }
+    }
+    s
+}
+
+/// The drive letters of Windows disks as [`Storage`]. Each letter is asked of `space_of` once
+/// as (used, total); a letter that does not answer (locked, no medium) is left out. A letter
+/// that more than one disk lists (a spanned or mirrored volume, Storage Spaces) is shared.
+/// Disks are keyed by their number as text, as [`windows_drive`] does.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn volumes_storage(disks: &[DiskUse], space_of: impl Fn(&str) -> Option<(u64, u64)>) -> Storage {
+    let mut letters: Vec<(&str, Vec<String>)> = Vec::new();
+    for d in disks {
+        for letter in d.1.split_whitespace() {
+            match letters.iter_mut().find(|(l, _)| *l == letter) {
+                Some((_, on)) => on.push(d.0.to_string()),
+                None => letters.push((letter, vec![d.0.to_string()])),
+            }
+        }
+    }
+    let volumes: Vec<_> = letters.into_iter().filter_map(|(l, on)| space_of(l).map(|s| (on, s))).collect();
+    split_storage(&volumes)
+}
+
+/// A Windows disk for the snapshot.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_drive(d: &DiskUse, model: &str) -> DiskDrive {
+    let name = format!("Disk {}", d.0);
+    DiskDrive { id: d.0.to_string(), title: disk_title(&name, &d.1), name, volumes: d.1.clone(), model: model.to_string(), active_pct: d.2, read_bps: d.3, write_bps: d.4, space: None }
+}
+
+/// A disk's model from the vendor and product its device reports, either of which may be empty
+/// or padded: "SanDisk" and "Ultra" give "SanDisk Ultra". A product that names its vendor
+/// ("Samsung SSD 990 PRO") stays as it is, as does one under a bus name ("NVMe", "ATA") that
+/// drivers put where the vendor goes.
+pub fn disk_model(vendor: &str, product: &str) -> String {
+    let squeeze = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (vendor, product) = (squeeze(vendor), squeeze(product));
+    let lower = vendor.to_ascii_lowercase();
+    let bus = ["nvme", "ata", "usb", "generic"].contains(&lower.as_str());
+    if product.is_empty() {
+        if bus { String::new() } else { vendor }
+    } else if vendor.is_empty() || bus || product.to_ascii_lowercase().starts_with(&lower) {
+        product
+    } else {
+        format!("{vendor} {product}")
+    }
 }
 
 /// One engine reading: (pid, adapter, engine type, %).
@@ -281,12 +400,89 @@ mod tests {
         // Disk 0: half a second busy of one second, 2 MB read; disk 1 idle; disk 2 new (skipped).
         let prev = [(0, c(1_000, 0, 0, 0)), (1, c(0, 0, 0, 0))];
         let now = [(0, c(2_001_000, 500, 5_000_000, 10_000_000)), (1, c(0, 0, 10_000_000, 10_000_000)), (2, c(9, 9, 0, 9))];
-        let (active, r, w) = disk_delta(&prev, &now).unwrap();
+        let each = disk_deltas(&prev, &now);
+        assert_eq!(each, [(0, String::new(), 50.0, 2_000_000.0, 500.0), (1, String::new(), 0.0, 0.0, 0.0)]);
+        let (active, r, w) = group_disks(&each).unwrap();
         assert!((active - 25.0).abs() < 1e-3, "{active}");
         assert_eq!((r, w), (2_000_000.0, 500.0));
         // First reading, or a disk whose clock did not move: nothing to report.
-        assert_eq!(disk_delta(&[], &now), None);
-        assert_eq!(disk_delta(&now, &now), None);
+        assert_eq!(group_disks(&disk_deltas(&[], &now)), None);
+        assert_eq!(group_disks(&disk_deltas(&now, &now)), None);
+    }
+
+    #[test]
+    fn pdh_disk_instances_become_one_reading_per_disk() {
+        assert_eq!(parse_disk_instance("0 C: D:"), Some((0, "C: D:")));
+        assert_eq!(parse_disk_instance("12"), Some((12, "")));
+        assert_eq!(parse_disk_instance("_Total"), None);
+        assert_eq!(parse_disk_instance(""), None);
+        let v = |items: &[(&str, f64)]| items.iter().map(|(n, v)| (n.to_string(), *v)).collect::<Vec<_>>();
+        // Out of order, with the total, an idle time above 100 and a disk without rates.
+        let idle = v(&[("_Total", 70.0), ("1 E:", 40.0), ("0 C: D:", 100.4), ("2", 99.0)]);
+        let read = v(&[("0 C: D:", 10.0), ("1 E:", 2000.0), ("_Total", 2010.0)]);
+        let write = v(&[("1 E:", 300.0), ("0 C: D:", -1.0)]);
+        let disks = pdh_disks(&idle, &read, &write);
+        assert_eq!(disks, [(0, "C: D:".to_string(), 0.0, 10.0, 0.0), (1, "E:".to_string(), 60.0, 2000.0, 300.0), (2, String::new(), 1.0, 0.0, 0.0)]);
+        assert!(pdh_disks(&[], &read, &write).is_empty());
+        let d = windows_drive(&disks[1], "Samsung SSD 990 PRO 2TB");
+        assert_eq!((d.id.as_str(), d.name.as_str(), d.volumes.as_str(), d.title.as_str(), d.model.as_str()), ("1", "Disk 1", "E:", "Disk 1 (E:)", "Samsung SSD 990 PRO 2TB"));
+        assert_eq!((d.active_pct, d.read_bps, d.write_bps), (60.0, 2000.0, 300.0));
+        assert_eq!(windows_drive(&disks[2], "").title, "Disk 2");
+    }
+
+    #[test]
+    fn disk_titles_and_models() {
+        assert_eq!(disk_title("Disk 0", "C: D:"), "Disk 0 (C: D:)");
+        assert_eq!(disk_title("nvme0n1", ""), "nvme0n1");
+        assert_eq!(disk_model("", " Lexar SSD NM790 4TB  "), "Lexar SSD NM790 4TB");
+        assert_eq!(disk_model("SanDisk ", "Ultra   Fit"), "SanDisk Ultra Fit");
+        assert_eq!(disk_model("Samsung", "SAMSUNG MZVL21T0"), "SAMSUNG MZVL21T0");
+        assert_eq!(disk_model("NVMe", "KINGSTON SNV2S1000G"), "KINGSTON SNV2S1000G");
+        assert_eq!(disk_model("ATA", "WDC WD40EFRX-68N"), "WDC WD40EFRX-68N");
+        assert_eq!(disk_model("Msft", ""), "Msft");
+        assert_eq!(disk_model("ATA", ""), "");
+        assert_eq!(disk_model("", ""), "");
+    }
+
+    #[test]
+    fn a_volume_on_several_disks_counts_once_and_on_none() {
+        let space = |v: &str| match v {
+            "C:" => Some((300, 1000)),
+            "D:" => Some((50, 500)),
+            "S:" => Some((10, 2000)),
+            _ => None,
+        };
+        let disk = |n: u32, v: &str| (n, v.to_string(), 0.0, 0.0, 0.0);
+        // Disk 0 holds C: and D:; S: is spread over disks 1 and 2.
+        let s = volumes_storage(&[disk(0, "C: D:"), disk(1, "S:"), disk(2, "S:")], space);
+        assert_eq!(s.each.get("0"), Some(&(350, 1500)));
+        assert_eq!(s.each.get("1"), None);
+        assert_eq!(s.each.get("2"), None);
+        assert_eq!(s.all, Some((360, 3500)));
+        // A locked volume is left out; a disk without a volume that answers has no figure.
+        let s = volumes_storage(&[disk(0, "E: D:"), disk(1, "E:"), disk(2, "")], space);
+        assert_eq!((s.each.get("0").copied(), s.each.get("1"), s.each.get("2"), s.all), (Some((50, 500)), None, None, Some((50, 500))));
+        assert_eq!(volumes_storage(&[disk(0, "E:")], space), Storage::default());
+        assert_eq!(volumes_storage(&[], space), Storage::default());
+    }
+
+    #[test]
+    fn storage_counts_each_file_system_once() {
+        let on = |disks: &[&str], used, total| (disks.iter().map(|d| d.to_string()).collect::<Vec<_>>(), (used, total));
+        let tb = 1u64 << 40;
+        // RAID1 of two 4 TB disks with one 4 TB file system 1 TB full: df says 1 / 4 TB.
+        let s = split_storage(&[on(&["sda", "sdb"], tb, 4 * tb)]);
+        assert_eq!(s.all, Some((tb, 4 * tb)));
+        assert!(s.each.is_empty());
+        // RAID0 / LVM over two 1 TB disks: 2 TB on neither disk.
+        let s = split_storage(&[on(&["sda", "sdb"], tb, 2 * tb), on(&["sdc"], 5, 10), on(&["sdc"], 1, 2)]);
+        assert_eq!(s.all, Some((tb + 6, 2 * tb + 12)));
+        assert_eq!(s.each.get("sdc"), Some(&(6, 12)));
+        assert_eq!((s.each.get("sda"), s.each.get("sdb")), (None, None));
+        // A disk listed twice for one file system is still one disk.
+        let s = split_storage(&[on(&["sda", "sda"], 1, 2)]);
+        assert_eq!(s.each.get("sda"), Some(&(1, 2)));
+        assert_eq!(split_storage(&[]), Storage::default());
     }
 
     #[test]

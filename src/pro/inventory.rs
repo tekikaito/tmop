@@ -165,16 +165,17 @@ pub fn system_info() -> Result<Sections, String> {
     let logical = hklm(r"HARDWARE\DESCRIPTION\System\CentralProcessor").map(|k| k.subkeys().len()).unwrap_or(0);
     let mut kb = 0u64;
     let installed_ram = if unsafe { GetPhysicallyInstalledSystemMemory(&mut kb) }.is_ok() { crate::process::format_bytes(kb as f64 * 1024.0) } else { String::new() };
-    out.push((
-        "Processor and memory",
-        vec![
-            ("Processor".into(), s(&cpu0, "ProcessorNameString").trim().to_string()),
-            ("Identifier".into(), s(&cpu0, "Identifier")),
-            ("Rated speed".into(), cpu0.as_ref().and_then(|k| k.u32("~MHz")).map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_default()),
-            ("Logical processors".into(), logical.to_string()),
-            ("Installed memory".into(), installed_ram),
-        ],
-    ));
+    let mut cpu_mem = vec![
+        ("Processor".into(), s(&cpu0, "ProcessorNameString").trim().to_string()),
+        ("Identifier".into(), s(&cpu0, "Identifier")),
+        ("Rated speed".into(), cpu0.as_ref().and_then(|k| k.u32("~MHz")).map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_default()),
+        ("Logical processors".into(), logical.to_string()),
+        ("Installed memory".into(), installed_ram),
+    ];
+    if let Some(mhz) = super::smbios::memory_speed_mhz() {
+        cpu_mem.push(("Memory speed".into(), super::smbios::format_speed(mhz)));
+    }
+    out.push(("Processor and memory", cpu_mem));
 
     let mut gpus = Vec::new();
     if let Some(class) = hklm(r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}") {

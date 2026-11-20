@@ -11,6 +11,7 @@
 
 use super::client::{self, Connection};
 use super::context::Context;
+use super::files;
 use super::model::{
     cpu_percent, rate, stacks_from, Container, ContainerState, EngineInfo, EngineStatus, Image, Network, PortMapping,
     Stack, StatsSample, Totals, Volume,
@@ -22,7 +23,7 @@ use bollard::models as api;
 use bollard::query_parameters::{
     ListContainersOptions, ListImagesOptions, ListVolumesOptions, PruneBuildOptions, PruneContainersOptions,
     PruneImagesOptions, PruneNetworksOptions, PruneVolumesOptions, RemoveContainerOptions, RemoveImageOptions,
-    RemoveVolumeOptions, RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
+    RestartContainerOptions, StartContainerOptions, StatsOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use futures_util::StreamExt;
@@ -620,6 +621,11 @@ fn handle_internal(link: &mut Link, inner: &Arc<Inner>, tx: &UnboundedSender<Int
                     }));
                     let events = tokio::spawn(events_loop(docker.clone(), Arc::clone(inner), gen, Arc::clone(&notify)));
                     let read_only = lock(&inner.shared).read_only;
+                    if !read_only {
+                        // Stopped volume helpers of an earlier run keep their volumes in use.
+                        let docker = docker.clone();
+                        tokio::spawn(async move { files::remove_stopped_helpers(&docker).await });
+                    }
                     *lock(&inner.engine) = Some(Engine {
                         docker: docker.clone(),
                         runtime: Handle::current(),
@@ -805,11 +811,10 @@ async fn run(docker: &Docker, cmd: &Command) -> Result<String, String> {
                 .map(|_| format!("Removed image {name}"))
                 .map_err(|e| fail("remove image", name, &e))
         }
-        Command::RemoveVolume { name, force } => docker
-            .remove_volume(name, Some(RemoveVolumeOptions { force: *force }))
+        Command::RemoveVolume { name, force } => files::remove_volume(docker, name, *force)
             .await
             .map(|_| format!("Removed volume {name}"))
-            .map_err(|e| fail("remove volume", name, &e)),
+            .map_err(|e| format!("Could not remove volume {name}: {e}")),
         Command::RemoveNetwork { id, name } => docker
             .remove_network(id)
             .await
@@ -991,6 +996,9 @@ async fn refresh_lists(docker: &Docker, inspects: &mut InspectCache) -> Result<L
         .list_containers(Some(ListContainersOptions { all: true, ..Default::default() }))
         .await
         .map_err(|e| err_text(&e))?;
+    // TMOP's own volume helpers are not the user's containers.
+    let raw: Vec<_> = raw.into_iter().filter(|c| !files::is_helper(c.labels.as_ref())).collect();
+    let users = volume_users(&raw);
 
     let mut containers = Vec::with_capacity(raw.len());
     let mut members: HashMap<String, Vec<String>> = HashMap::new();
@@ -1030,7 +1038,12 @@ async fn refresh_lists(docker: &Docker, inspects: &mut InspectCache) -> Result<L
         .volumes
         .unwrap_or_default()
         .iter()
-        .map(map_volume)
+        .map(|v| {
+            let mut volume = map_volume(v);
+            // The volume list carries no usage data; count the containers that mount the volume.
+            volume.ref_count = volume.ref_count.or(Some(users.get(&volume.name).copied().unwrap_or(0)));
+            volume
+        })
         .collect();
     let networks = docker
         .list_networks(None)
@@ -1044,6 +1057,18 @@ async fn refresh_lists(docker: &Docker, inspects: &mut InspectCache) -> Result<L
         })
         .collect();
     Ok(Lists { containers, images, volumes, networks })
+}
+
+/// Number of containers that mount each named volume.
+pub fn volume_users(containers: &[api::ContainerSummary]) -> HashMap<String, i64> {
+    let mut users: HashMap<String, i64> = HashMap::new();
+    for c in containers {
+        let names: BTreeSet<&str> = c.mounts.iter().flatten().filter_map(|m| m.name.as_deref()).collect();
+        for name in names {
+            *users.entry(name.to_string()).or_default() += 1;
+        }
+    }
+    users
 }
 
 fn apply_lists(inner: &Inner, lists: Lists) {
@@ -1267,6 +1292,12 @@ pub fn decode_event(
     }
 }
 
+/// Whether the event is about one of TMOP's own volume helpers. Container events carry
+/// the container's labels as attributes.
+pub fn is_helper_event(msg: &api::EventMessage) -> bool {
+    files::is_helper(msg.actor.as_ref().and_then(|a| a.attributes.as_ref()))
+}
+
 async fn events_loop(docker: Docker, inner: Arc<Inner>, gen: u64, notify: Arc<Notify>) {
     let mut restarts = RestartTracker::default();
     loop {
@@ -1276,6 +1307,9 @@ async fn events_loop(docker: Docker, inner: Arc<Inner>, gen: u64, notify: Arc<No
                 return;
             }
             let Ok(msg) = item else { break };
+            if is_helper_event(&msg) {
+                continue;
+            }
             let decoded = {
                 let requested = lock(&inner.requested_stops);
                 decode_event(&msg, &mut restarts, &requested, Instant::now())
