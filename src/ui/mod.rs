@@ -1024,6 +1024,15 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         } else {
+            // Remembered for the next start (window.maximized). A minimized window keeps what
+            // it was before.
+            let (maximized, minimized) = ctx.input(|i| (i.viewport().maximized, i.viewport().minimized));
+            if let (Some(maximized), false) = (maximized, minimized.unwrap_or(false)) {
+                if maximized != self.settings.window.maximized {
+                    self.settings.window.maximized = maximized;
+                    self.settings_dirty = true;
+                }
+            }
             self.replace_poll(ctx);
             self.updates_poll(ctx);
             if let Some([hi, mid, edge]) = pal.backdrop {
