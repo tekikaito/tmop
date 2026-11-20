@@ -1,0 +1,149 @@
+name: Scoop
+
+# Installs the Scoop manifest in bucket/ with a real Scoop on a Windows runner, starts the installed
+# TMOP (--dump), and runs Scoop's own checkver / autoupdate / hash checks against it.
+on:
+  pull_request:
+    paths:
+      - 'bucket/**'
+      - 'packaging/scoop/**'
+      - '.github/workflows/scoop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bucket/**'
+      - 'packaging/scoop/**'
+      - '.github/workflows/scoop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scoop:
+    name: Install with Scoop
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+    env:
+      # Scoop's checkver asks the GitHub API; the token avoids the anonymous rate limit.
+      SCOOP_GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Scoop
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-Expression "& {$(Invoke-RestMethod https://get.scoop.sh)} -RunAsAdmin"
+          "$HOME\scoop\shims" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & "$HOME\scoop\shims\scoop.ps1" --version
+
+      - name: Install tmop from the checkout
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$HOME\scoop\shims;$env:PATH"
+          scoop install "$PWD\bucket\tmop.json"
+          if ($LASTEXITCODE -ne 0) { throw "scoop install failed ($LASTEXITCODE)" }
+          scoop list
+
+      - name: Check the installed program
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$HOME\scoop\shims;$env:PATH"
+          $manifest = Get-Content bucket\tmop.json -Raw | ConvertFrom-Json
+
+          $shim = Get-Command tmop -ErrorAction Stop
+          Write-Host "shim: $($shim.Source)"
+          if ($shim.Source -notlike "$HOME\scoop\shims\*") { throw "tmop resolves outside Scoop's shims: $($shim.Source)" }
+
+          $app = Join-Path $HOME 'scoop\apps\tmop\current'
+          $exe = Join-Path $app 'TMOP.exe'
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          $item = Get-Item $exe
+          Write-Host "TMOP.exe: $($item.Length) bytes, FileVersion '$($item.VersionInfo.FileVersion)'"
+          if ($item.Length -lt 1MB) { throw "TMOP.exe is implausibly small" }
+          if (((Get-Item (Join-Path $HOME 'scoop\apps\tmop\current')).Target -join ' ') -notmatch [regex]::Escape($manifest.version)) {
+            throw "apps\tmop\current does not point at version $($manifest.version)"
+          }
+          foreach ($f in 'LICENSE', 'README.md') { if (-not (Test-Path (Join-Path $app $f))) { throw "missing $f" } }
+
+          # The Start menu shortcut Scoop creates for `shortcuts`.
+          $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Scoop Apps\TMOP.lnk'
+          if (-not (Test-Path $lnk)) { throw "missing Start menu shortcut $lnk" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
+          Write-Host "shortcut -> $target"
+          if ((Resolve-Path $target).Path -ne (Resolve-Path $exe).Path -and $target -notlike "*\apps\tmop\*") { throw "shortcut points at $target" }
+
+          # TMOP.exe is a GUI program: write its output to files, wait for it, then read them.
+          $out = Join-Path $env:RUNNER_TEMP 'dump.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'dump.err'
+          $p = Start-Process -FilePath $exe -ArgumentList '--dump' -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Write-Host "--dump exit code $($p.ExitCode)"
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { Get-Content $err; throw "tmop --dump failed" }
+          if (-not (Select-String -Path $out -Pattern '^CPU' -Quiet)) { throw "--dump output has no CPU line" }
+
+          # The same through the shim.
+          $out2 = Join-Path $env:RUNNER_TEMP 'dump-shim.txt'
+          $p = Start-Process -FilePath $shim.Source -ArgumentList '--dump' -Wait -PassThru -RedirectStandardOutput $out2 -RedirectStandardError $err
+          Write-Host "shim --dump exit code $($p.ExitCode)"
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path $out2 -Pattern '^CPU' -Quiet)) { Get-Content $out2; throw "tmop --dump through the shim failed" }
+
+      - name: checkver, autoupdate and hashes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$HOME\scoop\shims;$env:PATH"
+          $bin = Join-Path (scoop prefix scoop) 'bin'
+          $manifest = Get-Content bucket\tmop.json -Raw | ConvertFrom-Json
+
+          # checkver: the newest GitHub release version, compared with the manifest.
+          $log = & "$bin\checkver.ps1" -App tmop -Dir "$PWD\bucket" 6>&1 | Out-String
+          Write-Host $log
+          # Fails when the manifest is not the newest release (a newer release is not an error of
+          # this change, but the manifest should be updated by the release workflow).
+          if ($log -notmatch 'tmop:\s*(\d+\.\d+\.\d+)') { throw "checkver printed no version" }
+          $latest = $Matches[1]
+          Write-Host "checkver: latest $latest, manifest $($manifest.version)"
+          if ([version]$latest -lt [version]$manifest.version) { throw "checkver ($latest) is older than the manifest" }
+
+          # autoupdate dry run on a copy: -ForceUpdate rewrites the copy from the latest release.
+          $copy = Join-Path $env:RUNNER_TEMP 'bucket-copy'
+          New-Item -ItemType Directory $copy | Out-Null
+          Copy-Item bucket\tmop.json $copy
+          & "$bin\checkver.ps1" -App tmop -Dir $copy -ForceUpdate 6>&1 | Out-String | Write-Host
+          $updated = Get-Content (Join-Path $copy 'tmop.json') -Raw | ConvertFrom-Json
+          Write-Host "autoupdate produced version $($updated.version)"
+          if ($updated.version -eq $manifest.version) {
+            foreach ($arch in '64bit', 'arm64') {
+              foreach ($k in 'url', 'hash') {
+                if ($updated.architecture.$arch.$k -ne $manifest.architecture.$arch.$k) {
+                  throw "autoupdate changed $arch.$k : '$($manifest.architecture.$arch.$k)' -> '$($updated.architecture.$arch.$k)'"
+                }
+              }
+            }
+            Write-Host "autoupdate reproduces the committed URLs and hashes"
+          } else {
+            Write-Host "A newer release exists; the autoupdate result for $($updated.version):"
+            $updated.architecture | ConvertTo-Json -Depth 5
+          }
+
+          # checkhashes: download both zips and compare with the hashes in the manifest.
+          $log = & "$bin\checkhashes.ps1" -App tmop -Dir "$PWD\bucket" 6>&1 | Out-String
+          Write-Host $log
+          if ($log -notmatch 'Ok') { throw "checkhashes did not report the hashes as ok" }
+          if ($log -match 'Mismatch|Error') { throw "checkhashes reported a problem" }
+
+      - name: Uninstall
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$HOME\scoop\shims;$env:PATH"
+          scoop uninstall tmop
+          if ($LASTEXITCODE -ne 0) { throw "scoop uninstall failed ($LASTEXITCODE)" }
+          $left = @()
+          if (Test-Path "$HOME\scoop\apps\tmop") { $left += Get-ChildItem "$HOME\scoop\apps\tmop" -Recurse -Force | ForEach-Object FullName; $left += "$HOME\scoop\apps\tmop" }
+          if (Test-Path "$HOME\scoop\shims\tmop.exe") { $left += "$HOME\scoop\shims\tmop.exe" }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Scoop Apps\TMOP.lnk") { $left += 'Start menu shortcut' }
+          if ($left) { $left | ForEach-Object { Write-Host "left behind: $_" }; throw "uninstall left files behind" }
+          Write-Host "Nothing left behind."
