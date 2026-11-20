@@ -20,48 +20,72 @@
 //!
 //! The `--engine-relay` modes honour the `TMOP_ENGINE_*` test overrides (`tmop::engine::Overrides`).
 
+use std::io::{self, BufWriter, Write};
 use tmop::metrics::Collector;
 use tmop::settings;
 use tmop::ui::{App, Launch, Page};
 
-fn dump() {
+/// Exit code for a command that prints to stdout. A reader that closes the pipe early
+/// (`| head -1`, `| grep -q`) is a normal end, not an error; `println!` would panic on it (#78).
+fn output_exit_code(result: io::Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(e) => {
+            eprintln!("TMOP: cannot write the output: {e}");
+            1
+        }
+    }
+}
+
+/// Runs a print-and-exit command through a locked, buffered stdout and returns its exit code.
+fn run_output(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> i32 {
+    let mut out = BufWriter::new(io::stdout().lock());
+    let result = write(&mut out).and_then(|()| out.flush());
+    output_exit_code(result)
+}
+
+/// Writes the two-sample report to `out`; the caller decides what a failed write means.
+fn dump(out: &mut dyn Write) -> io::Result<()> {
     tmop::metrics::set_gpu_detail(true);
     let mut c = Collector::new();
     let _ = c.collect();
     std::thread::sleep(std::time::Duration::from_secs(1));
     let (s, procs) = c.collect();
-    println!("CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz);
+    writeln!(out, "CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz)?;
     if cfg!(windows) {
-        println!(
+        writeln!(
+            out,
             "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
             s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
-        );
+        )?;
     } else {
         let diag: String = s.cpu.diag.iter().map(|(k, v)| format!("  {k} {v}")).collect();
-        println!("Clock    base {:?} MHz  max {:?}  boost {:?}  live {}{diag}", s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.boost_mhz, s.cpu.clock_live);
+        writeln!(out, "Clock    base {:?} MHz  max {:?}  boost {:?}  live {}{diag}", s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.boost_mhz, s.cpu.clock_live)?;
     }
-    println!("Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total.saturating_sub(s.memory.available), s.memory.total);
+    writeln!(out, "Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total.saturating_sub(s.memory.available), s.memory.total)?;
     if !cfg!(windows) {
-        println!("Swap     {:?} / {:?} bytes  commit {:?} / {:?}", s.memory.swap_used, s.memory.swap_total, s.memory.commit_used, s.memory.commit_limit);
+        writeln!(out, "Swap     {:?} / {:?} bytes  commit {:?} / {:?}", s.memory.swap_used, s.memory.swap_total, s.memory.commit_used, s.memory.commit_limit)?;
     }
-    println!("Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps);
-    println!("Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps);
-    println!("GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines);
+    writeln!(out, "Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps)?;
+    writeln!(out, "Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps)?;
+    writeln!(out, "GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines)?;
     for (i, a) in s.gpu.adapters.iter().enumerate() {
-        println!("GPU {i}    {a:?}");
+        writeln!(out, "GPU {i}    {a:?}")?;
     }
-    println!("GPU      {} processes", s.gpu.processes.len());
-    println!("Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources);
+    writeln!(out, "GPU      {} processes", s.gpu.processes.len())?;
+    writeln!(out, "Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources)?;
     let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
-    println!("Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count);
+    writeln!(out, "Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count)?;
     let mut top: Vec<_> = procs.iter().collect();
     top.sort_by_key(|p| std::cmp::Reverse(p.private_working_set));
     for p in top.iter().take(5) {
-        println!("  {:>6} {:<28} {:>10} KB  user {:?}", p.pid, p.name, p.private_working_set / 1024, p.user);
+        writeln!(out, "  {:>6} {:<28} {:>10} KB  user {:?}", p.pid, p.name, p.private_working_set / 1024, p.user)?;
     }
     for e in &s.errors {
-        println!("error: {e}");
+        writeln!(out, "error: {e}")?;
     }
+    Ok(())
 }
 
 #[cfg(all(windows, feature = "screensaver"))]
@@ -239,8 +263,7 @@ fn main() -> eframe::Result<()> {
         std::process::exit(engine_relay_stop());
     }
     if args.iter().any(|a| a == "--dump") {
-        dump();
-        return Ok(());
+        std::process::exit(run_output(dump));
     }
     // From here on TMOP opens a window: make failures visible (#46).
     tmop::startup::install_panic_hook();
@@ -289,7 +312,9 @@ fn main() -> eframe::Result<()> {
         .with_app_id(tmop::APP_ID)
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
         .with_min_inner_size([900.0, 600.0])
-        .with_maximized(args.iter().any(|a| a == "--maximized"));
+        // The main window opens as it was closed, unless a size is asked for; the pop-out alone
+        // has its own fixed size.
+        .with_maximized(args.iter().any(|a| a == "--maximized") || (!popout_only && size.is_none() && settings.window.maximized));
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
     }
