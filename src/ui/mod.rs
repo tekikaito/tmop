@@ -423,6 +423,9 @@ impl MaximizedMemory {
 pub struct App {
     /// What this OS and session support, probed once at start-up.
     pub caps: Caps,
+    /// The window is drawn by a software OpenGL renderer (llvmpipe in the server package, #46):
+    /// every frame costs tens of milliseconds of CPU time, so high frequency visuals stay off.
+    pub software_gl: bool,
     pub settings: Settings,
     pub settings_dirty: bool,
     /// What of the window's maximized state is remembered, see [`MaximizedMemory`].
@@ -523,9 +526,11 @@ impl App {
             // Since 0.36 egui sets the window theme; TMOP leaves the title bar to the system.
             o.sync_window_theme = false;
         });
+        let software_gl = gl_renderer(cc).is_some_and(|r| crate::startup::is_software_renderer(&r));
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let mut app = Self {
             caps,
+            software_gl,
             docker,
             perf_docker: performance::DockerPerfCache::default(),
             summary: summary::SummaryState::default(),
@@ -970,6 +975,20 @@ impl eframe::App for App {
     }
 }
 
+/// OpenGL's `GL_RENDERER` for the window, e.g. `llvmpipe (LLVM 21.1.0, 256 bits)`.
+fn gl_renderer(cc: &eframe::CreationContext<'_>) -> Option<String> {
+    use eframe::glow::HasContext;
+    // SAFETY: eframe made the context current on this thread before calling the app creator.
+    cc.gl.as_ref().map(|gl| unsafe { gl.get_parameter_string(eframe::glow::RENDERER) })
+}
+
+/// Whether TMOP animates between samples (appearance.highFrequencyVisuals). Not under a
+/// software renderer: there each frame costs about 40 ms of CPU time, so 30–60 frames a
+/// second kept one core or more busy (#46); without them TMOP redraws a few times a second.
+fn high_frequency(setting: bool, software_gl: bool) -> bool {
+    setting && !software_gl
+}
+
 /// Frame statistics written to `%TEMP%\tmop-profile.txt` when `TMOP_PROFILE` is set.
 pub struct Profile {
     frames: u64,
@@ -1040,7 +1059,7 @@ impl App {
         self.last_frame_at = now;
         self.take_sample(&snap, &rows, now);
         let interval = self.settings.update_speed().interval();
-        let hf = self.settings.appearance.high_frequency_visuals;
+        let hf = high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl);
         let phase = match interval {
             Some(iv) if hf => (now.duration_since(self.last_sample_at).as_secs_f32() / iv.as_secs_f32()).clamp(0.0, 1.0),
             _ => 0.0,
@@ -1166,6 +1185,14 @@ mod tests {
         let mut m = MaximizedMemory::new(false);
         assert_eq!(m.observe(Some(false), 0.0), Some(false));
         assert_eq!(m.observe(Some(true), 0.1), Some(true));
+    }
+
+    #[test]
+    fn software_rendering_turns_high_frequency_visuals_off() {
+        assert!(high_frequency(true, false));
+        assert!(!high_frequency(false, false));
+        assert!(!high_frequency(true, true));
+        assert!(!high_frequency(false, true));
     }
 
     #[test]

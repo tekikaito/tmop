@@ -555,6 +555,7 @@ impl App {
     pub fn settings_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
         let caps = self.caps;
+        let software_gl = self.software_gl;
         let subtitle = format!("saved automatically \u{b7} {} \u{b7} {}", settings::default_path().display(), Page::Settings.shortcut());
         let body = self.page_title(ui, &pal, "Settings", &subtitle);
         let area = Rect::from_min_max(pos2(body.left() + 12.0, body.top() + 4.0), pos2(body.right(), body.bottom()));
@@ -626,10 +627,15 @@ impl App {
                             });
                             let hover_hint = "A faded popout stays out of the way of the desktop behind it, and comes back to full strength while the pointer is over it.";
                             changed |= toggle_row_hint(ui, &pal, &mut s.popout.opaque_on_hover, "Full strength on mouse over", hover_hint);
-                            let hf_hint = "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use.";
+                            let hf_hint = if software_gl {
+                                "Off: this window is drawn on the CPU (software OpenGL, no graphics driver), where every frame costs tens of milliseconds of CPU time. TMOP redraws when new data arrives."
+                            } else {
+                                "Smooth graph motion and meters between data updates. Turn off to redraw only when new data arrives, minimizing CPU use."
+                            };
                             row_hint(ui, &pal, "High frequency visuals", hf_hint, |ui| {
-                                let label = if s.appearance.high_frequency_visuals { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
-                                egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(theme::button_text(label)).show_ui(ui, |ui| {
+                                let on = s.appearance.high_frequency_visuals && !software_gl;
+                                let label = if on { format!("{} fps", s.appearance.frame_rate) } else { "Off".into() };
+                                ui.add_enabled_ui(!software_gl, |ui| egui::ComboBox::from_id_salt("hf").width(200.0).selected_text(theme::button_text(label)).show_ui(ui, |ui| {
                                     if ui.selectable_label(!s.appearance.high_frequency_visuals, theme::button_text("Off")).clicked() {
                                         s.appearance.high_frequency_visuals = false;
                                         changed = true;
@@ -641,7 +647,7 @@ impl App {
                                             changed = true;
                                         }
                                     }
-                                });
+                                }));
                             });
                             changed |= toggle_row(ui, &pal, &mut s.appearance.bloom, "Visual bloom");
                             row(ui, &pal, "Bloom level", |ui| {
