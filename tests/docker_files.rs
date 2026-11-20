@@ -190,3 +190,36 @@ fn volume_export_import() {
     });
     cleanup.volumes.clear();
 }
+
+#[test]
+fn volume_removal_is_not_blocked_by_a_helper() {
+    let Some((rt, docker)) = engine() else { return };
+    let vol = format!("tmop-test-files-rm-{}", suffix());
+    let cleanup = Cleanup {
+        handle: rt.handle().clone(),
+        docker: docker.clone(),
+        containers: Vec::new(),
+        volumes: vec![vol.clone()],
+        paths: Vec::new(),
+        helpers_before: rt.block_on(helper_ids(&docker)),
+    };
+
+    rt.block_on(async {
+        ensure_image(&docker).await.unwrap();
+        let request = VolumeCreateRequest { name: Some(vol.clone()), ..Default::default() };
+        docker.create_volume(request).await.unwrap();
+
+        // A helper that keeps running, as one left behind by a crashed TMOP does.
+        let browser = files::VolumeBrowser::open(&docker, &vol).await.unwrap();
+        browser.list(&docker, "/").await.unwrap();
+        assert_eq!(files::remove_helpers_of(&docker, &vol).await.unwrap(), 1);
+        let again = files::create_helper(&docker, &vol).await.unwrap();
+        assert!(files::is_helper(docker.inspect_container(&again.id, None).await.unwrap().config.unwrap().labels.as_ref()));
+
+        // The engine itself would refuse this volume while the helper exists.
+        files::remove_volume(&docker, &vol, false).await.unwrap();
+        assert!(docker.inspect_volume(&vol).await.is_err(), "volume {vol} still exists");
+        assert!(docker.inspect_container(&again.id, None).await.is_err(), "helper still exists");
+    });
+    drop(cleanup);
+}

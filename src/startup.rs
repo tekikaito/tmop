@@ -25,12 +25,36 @@ fn mesa_beside_exe() -> bool {
 
 /// In the server package, makes Mesa draw with llvmpipe, its software renderer. Mesa would
 /// otherwise try its Direct3D 12 driver first, which needs `dxil.dll` and ended TMOP on a test
-/// machine. Must run before the window is created; a `GALLIUM_DRIVER` the user set wins.
+/// machine. Must run before the window is created; a `GALLIUM_DRIVER` or `LP_NUM_THREADS` the
+/// user set wins.
 pub fn software_opengl() {
     #[cfg(windows)]
-    if std::env::var_os("GALLIUM_DRIVER").is_none() && mesa_beside_exe() {
-        std::env::set_var("GALLIUM_DRIVER", "llvmpipe");
+    if mesa_beside_exe() {
+        if std::env::var_os("GALLIUM_DRIVER").is_none() {
+            std::env::set_var("GALLIUM_DRIVER", "llvmpipe");
+        }
+        if std::env::var_os("LP_NUM_THREADS").is_none() {
+            let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+            std::env::set_var("LP_NUM_THREADS", llvmpipe_threads(cpus).to_string());
+        }
     }
+}
+
+/// Rasterizer threads for llvmpipe. Mesa starts one per logical CPU (and as many for compute),
+/// all woken for every frame; TMOP's window gains nothing from more than a few, and on a
+/// many-core server the rest only add wake-ups and contend with the server's own work (#46).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn llvmpipe_threads(cpus: usize) -> usize {
+    cpus.clamp(1, 4)
+}
+
+/// Whether `renderer` (OpenGL's `GL_RENDERER`) is a software renderer that draws on the CPU:
+/// Mesa's llvmpipe (TMOP's server package, Linux machines without a GPU driver), softpipe or
+/// swrast, Mesa on Windows' WARP (Microsoft Basic Render Driver), or Google's SwiftShader.
+/// Every frame there costs tens of milliseconds of CPU time.
+pub fn is_software_renderer(renderer: &str) -> bool {
+    let r = renderer.to_ascii_lowercase();
+    ["llvmpipe", "softpipe", "swrast", "swiftshader", "basic render driver"].iter().any(|k| r.contains(k))
 }
 
 /// The OpenGL hint, when `error` looks like the window's OpenGL context failed. On Windows x64
@@ -120,6 +144,28 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llvmpipe_gets_a_few_threads_at_most() {
+        assert_eq!(llvmpipe_threads(1), 1);
+        assert_eq!(llvmpipe_threads(2), 2);
+        assert_eq!(llvmpipe_threads(4), 4);
+        assert_eq!(llvmpipe_threads(32), 4);
+        // available_parallelism never reports 0, but 0 would turn llvmpipe's threading off.
+        assert_eq!(llvmpipe_threads(0), 1);
+    }
+
+    #[test]
+    fn software_renderers_are_recognised() {
+        assert!(is_software_renderer("llvmpipe (LLVM 21.1.0, 256 bits)"));
+        assert!(is_software_renderer("Gallium 0.4 on softpipe"));
+        assert!(is_software_renderer("Software Rasterizer (swrast)"));
+        assert!(is_software_renderer("Google SwiftShader"));
+        assert!(!is_software_renderer("NVIDIA GeForce RTX 4080/PCIe/SSE2"));
+        assert!(!is_software_renderer("AMD Radeon(TM) Graphics"));
+        assert!(is_software_renderer("D3D12 (Microsoft Basic Render Driver)"));
+        assert!(!is_software_renderer(""));
+    }
 
     #[test]
     fn opengl_failures_get_the_driver_hint() {

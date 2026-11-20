@@ -693,7 +693,7 @@ fn cancel<T: Send + 'static>(task: &mut Option<Task<T>>) {
 fn remove_browser(engine: Option<&Engine>, vb: Arc<VolumeBrowser>) {
     if let Some(e) = engine {
         let docker = e.docker.clone();
-        drop(e.runtime.spawn(async move { files::remove_helper(&docker, &vb.helper).await }));
+        drop(e.runtime.spawn(async move { vb.close(&docker).await }));
     }
 }
 

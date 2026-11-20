@@ -45,7 +45,8 @@ run "$home" > "$work/out1"
 grep -q 'TMOP is installed' "$work/out1" || fail "no success message"
 check_installed "$home" "tar.gz"
 grep -qx "Exec=\"$home/.local/bin/tmop\"" "$home/.local/share/applications/tmop.desktop" || fail "Exec does not point at the installed file"
-"$home/.local/bin/tmop" --dump | grep -q '^CPU' || fail "the installed tmop --dump printed no CPU line"
+"$home/.local/bin/tmop" --dump > "$work/dump1" || fail "the installed tmop --dump failed"
+grep -q '^CPU' "$work/dump1" || fail "the installed tmop --dump printed no CPU line"
 ok "tar.gz install"
 
 # 2. Running it again updates in place and says so.
@@ -59,7 +60,8 @@ run "$home" --appimage > "$work/out3"
 check_installed "$home" "appimage"
 [ "$(head -c 11 "$home/.local/bin/tmop" | tail -c 3 | od -An -tx1 | tr -d ' \n')" = "414902" ] \
     || fail "\$HOME/.local/bin/tmop is not a type 2 AppImage"
-APPIMAGE_EXTRACT_AND_RUN=1 "$home/.local/bin/tmop" --dump | grep -q '^CPU' || fail "the installed AppImage --dump printed no CPU line"
+APPIMAGE_EXTRACT_AND_RUN=1 "$home/.local/bin/tmop" --dump > "$work/dump2" || fail "the installed AppImage --dump failed"
+grep -q '^CPU' "$work/dump2" || fail "the installed AppImage --dump printed no CPU line"
 ok "appimage install"
 
 # 4. --uninstall removes exactly the listed files and keeps user data.
