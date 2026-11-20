@@ -19,6 +19,7 @@
 //! * [`diskdelete`]    delete safety classifier and the delete worker (recycle bin or permanent)
 //! * [`inuse`]        which processes hold a file open (Restart Manager, /proc, libproc)
 //! * [`inventory`]    system info, services, startup apps
+//! * [`smbios`]       memory speed from the SMBIOS table
 //! * [`sysfmt`]       pure parsers for os-release, `.desktop` files and XML property lists
 
 pub mod apps;
@@ -36,6 +37,7 @@ pub mod mounts;
 pub mod plist;
 pub mod power;
 pub mod recorder;
+pub mod smbios;
 pub mod sysfmt;
 pub mod trash;
 #[cfg(windows)]
