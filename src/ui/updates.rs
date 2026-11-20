@@ -187,7 +187,7 @@ impl App {
         let accent = pal.accent;
         let buttons: Vec<DialogButton> = match &method {
             Method::InPlace => vec![DialogButton::Ghost("Skip this version"), DialogButton::Secondary("Later"), DialogButton::Primary(if error.is_some() { "Try again" } else { "Update now" })],
-            Method::InstallCommand | Method::Homebrew => vec![DialogButton::Ghost("Skip this version"), DialogButton::Secondary("Later"), DialogButton::Primary("Copy command")],
+            Method::InstallCommand | Method::Homebrew | Method::Scoop => vec![DialogButton::Ghost("Skip this version"), DialogButton::Secondary("Later"), DialogButton::Primary("Copy command")],
         };
         let answer = kit::dialog(ctx, "update-available", |ui| {
             let body = format!("You have TMOP {}. What's new:", update::current_version());
@@ -230,7 +230,7 @@ impl App {
             1 => self.updates.offer = None,
             _ => match method {
                 Method::InPlace => self.updates.start_install(release),
-                Method::InstallCommand | Method::Homebrew => {
+                Method::InstallCommand | Method::Homebrew | Method::Scoop => {
                     ctx.copy_text(method.command(&release.repo).unwrap_or_default());
                     self.status = "Update command copied: paste it in a terminal".into();
                     self.updates.offer = None;

@@ -264,7 +264,7 @@
   <section id="install">
     <div class="wrap">
       <h2>Up and running in a minute</h2>
-      <p class="sub">There's nothing to set up. TMOP is a single program you start with a double-click.</p>
+      <p class="sub">There's no installer to run. TMOP is a single program you start with a double-click.</p>
 
       <!-- Windows -->
       <div data-only="windows">
@@ -415,8 +415,8 @@
           <div class="os-tag">Linux and macOS</div>
           <h3 style="margin:0 0 4px; font-size:17px;">Good to know</h3>
           <ul style="margin-top:10px;">
-            <li>Everything that makes sense outside Windows is there: performance, processes, services, startup apps, installed apps, connections, Disk Space and Docker.</li>
-            <li>Windows-only parts are hidden: replacing Task Manager, TMOP's own Docker engine and the Windows Disk Cleanup handlers.</li>
+            <li>Most pages are there: performance, processes, services, startup apps, installed apps, connections, Disk Space and Docker.</li>
+            <li>Windows-only parts are hidden, such as replacing Task Manager, TMOP's own Docker engine and the Windows Disk Cleanup handlers.</li>
             <li data-only="macos">Temperatures and per-engine graphics load aren't available on macOS; Apple Silicon Macs report no clock speeds.</li>
             <li data-only="linux">On Wayland, "always on top" for the popout isn't available; on X11 it is.</li>
             <li>The <a href="https://github.com/tekikaito/tmop#platforms">README</a> lists exactly what works where.</li>
@@ -436,7 +436,7 @@
   <section id="features">
     <div class="wrap">
       <h2>What you can do with it</h2>
-      <p class="sub">Everything Task Manager does, and a lot it doesn't.</p>
+      <p class="sub">The basics of Task Manager, and a lot it doesn't.</p>
       <div class="features">
         <div class="feature">
           <div class="img"><img src="screenshots/performance.png" loading="lazy" alt="Performance graphs for CPU, memory, disk and network"></div>
@@ -452,7 +452,7 @@
         </div>
         <div class="feature">
           <div class="img contain"><img src="screenshots/popout.png" loading="lazy" alt="Small always-on-top monitor window"></div>
-          <div class="t"><h3>Keep a monitor on your desktop</h3><p>The <i>Popout</i> button opens a small window that stays on top while you work or play.</p></div>
+          <div class="t"><h3>Keep a monitor on your desktop</h3><p>The <i>Popout</i> button opens a small window that stays on top while you work or play (not on Linux with Wayland).</p></div>
         </div>
       </div>
       <ul class="more">
@@ -485,6 +485,7 @@
         <div class="a">
           <p data-only="windows"><b>Windows:</b> if you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it.</p>
           <p data-only="linux macos"><b>Linux and macOS:</b> if you used the install command, run it again. Otherwise download the newest version here and replace the old <span data-only="linux">AppImage</span><span data-only="macos">TMOP in <i>Applications</i></span> with it.</p>
+          <p data-only="windows"><b>Installed with Scoop:</b> run <code>scoop update tmop</code>.</p>
           <p data-only="macos"><b>Installed with Homebrew:</b> run <code>brew upgrade --cask tmop</code> (or just <code>brew upgrade</code>).</p>
           <p>Your settings are kept either way. TMOP can also tell you about new versions: turn on <i>Check for updates when TMOP starts</i> in <i>Settings → General</i>. On Windows it then updates itself with <i>Update now</i>.</p>
         </div>
@@ -494,6 +495,7 @@
         <div class="a">
           <div data-only="windows">
             <p><b>Windows</b>, installed with the PowerShell command: remove it in <i>Settings → Apps → Installed apps</i>. It also gives Ctrl+Shift+Esc back to Windows Task Manager.</p>
+            <p><b>Installed with Scoop:</b> run <code>scoop uninstall tmop</code>.</p>
             <p>Downloaded by hand: if TMOP opens instead of Task Manager, turn that off in TMOP's <i>Settings</i> first. Then delete TMOP.exe.</p>
             <p>To also remove your settings, delete the folder <code>%LOCALAPPDATA%\TMOP</code> (paste it into File Explorer's address bar).</p>
           </div>
@@ -516,13 +518,13 @@
       <details>
         <summary>Does TMOP send my data anywhere?</summary>
         <div class="a">
-          <p>No. On Linux and macOS TMOP itself makes no internet requests unless you turn on the update check (<i>Settings → General</i>, off by default), which asks GitHub for the newest release. On Windows its only requests go to GitHub: that update check if you turn it on, downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab).</p>
+          <p>No. On Linux and macOS TMOP itself makes no internet requests unless you turn on the update check (<i>Settings → General</i>, off by default), which asks GitHub for the newest release. On Windows its only requests go to GitHub: that update check if you turn it on, downloading TMOP's own Docker engine when you set it up, and checking for a newer engine release (you can switch that off on the Docker page's <i>Engine</i> tab). TMOP also connects to the Docker hosts you add yourself.</p>
         </div>
       </details>
       <details>
         <summary>Is the download safe?</summary>
         <div class="a">
-          <p>TMOP is open source, and every download is built by GitHub Actions straight from the <a href="https://github.com/tekikaito/tmop">public code</a>. Each file on the release page comes with a <code>.sha256</code> checksum; the install commands check it for you.</p>
+          <p>TMOP is open source, and TMOP in every download is built by GitHub Actions straight from the <a href="https://github.com/tekikaito/tmop">public code</a> (the server package for Windows also carries Mesa's OpenGL, built by the mesa-dist-win project). Each file on the release page comes with a <code>.sha256</code> checksum; the install commands check it for you.</p>
           <p data-only="macos">The Mac app isn't notarized by Apple, which is why macOS asks you to confirm the first start (see <a href="#gatekeeper">above</a>).</p>
         </div>
       </details>

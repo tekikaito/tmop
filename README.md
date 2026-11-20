@@ -8,7 +8,7 @@
 
 TMOP shows what your computer is doing: how busy the processor, memory, disk, network and
 graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
-macOS**, is free and open source, and needs no installation.
+macOS**, is free and open source, and needs no installer.
 
 ![TMOP overview](docs/screenshots/summary.png)
 
@@ -30,11 +30,13 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 ## Why TMOP
 
 - **Free and open source.** Every feature is free, with no paid tier. GPL-3.0.
-- **The same on Windows, Linux and macOS.** Where a system can't provide something, TMOP hides it
-  instead of showing zeros (see [Platforms](#platforms)).
-- **More than processes and graphs.** Per-core CPU, memory, disk, network and graphics card with
-  engines; processes with end task, suspend and priority; services, startup apps, installed apps,
-  connections; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
+- **One app on Windows, Linux and macOS.** A few things exist on one system only, or differ
+  between them (see [Platforms](#platforms)). Where a system can't provide something, TMOP hides
+  it instead of showing zeros.
+- **More than processes and graphs.** Per-core CPU, memory, disk (each disk on its own if you
+  like), network and graphics card, with engines where the system reports them; processes with
+  end task, suspend and priority; services, startup apps, installed apps, connections; table
+  columns you can put in any order; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
 - **Skinnable.** Skins, palettes and fonts change how it looks. Skins use the `.tmogskin`
   format, and TMOP can take the place of Windows Task Manager (Ctrl+Shift+Esc, Windows only).
 - **No installer, no telemetry.** TMOP is one program, and it sends no data (see
@@ -43,11 +45,11 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 ## Privacy
 
 TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
-update check (*Settings → General*, off by default), which asks GitHub for the newest release. On
-Windows its only internet requests go to GitHub: that update check if you turn it on, downloading
+update check (*Settings → General*, off by default), which asks GitHub for the newest release
+(through `curl`). On Windows its only internet requests go to GitHub: that update check if you turn it on, downloading
 TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
 check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
-(for example an image you pull).
+(for example an image you pull). TMOP also connects to the Docker hosts you add yourself.
 
 ## Get TMOP
 
@@ -166,21 +168,30 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.
+- **See each disk on its own:** right-click the *Disk* card on *Performance* or *Summary* and
+  choose *Show disks separately* (it only appears when TMOP finds two or more disks).
+- **Put table columns in the order you like:** drag a column header onto another column, or
+  right-click it for *Move left* and *Move right*.
 - **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
 
 ## Platforms
 
-TMOP looks and works the same everywhere. Where a system can't provide something, TMOP hides it
-instead of showing zeros.
+TMOP is the same app on Windows, Linux and macOS, but not every feature exists on all three: the
+table shows what differs. Where a system can't provide something, TMOP hides it instead of
+showing zeros.
 
 | | Windows | Linux | macOS |
 |---|---|---|---|
 | Summary and Performance (CPU, memory, disk, network) | ✔ | ✔ (*Swap* instead of *Page file*) | ✔ (*Swap*; no committed memory) |
+| Disks separately or grouped (right-click the Disk card) | ✔ | ✔ | ✔ |
+| Disk used / total storage, disk firmware revision (*Performance*) | ✔ | ✔ | — |
+| Memory speed (*Performance → Memory*, *System Info*) | ✔ | Only where normal users may read the DMI table (most systems: root only) | — |
 | Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; not Intel yet | Usage and memory, no engines |
 | Clock speeds | ✔ | ✔ | Intel Macs; none on Apple Silicon |
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
 | Processes: end task, end tree, suspend, priority | ✔ | ✔ (raising priority needs root; no *Realtime*) | ✔ (no *Realtime*) |
+| Processes: Network column (bytes per second per process) | ✔ as administrator | — | — |
 | Processes: efficiency mode | ✔ | ✔ as idle scheduling | ✔ as *Background priority* |
 | Processes: other users' processes | ✔ as administrator | End or renice asks for your password (pkexec) | Some details need root |
 | Users, App history, System info, Benchmarks, Flight recorder | ✔ | ✔ | ✔ |
@@ -197,7 +208,7 @@ instead of showing zeros.
 | Skins, palettes, fonts, system light/dark theme | ✔ | ✔ | ✔ |
 | Open TMOP instead of Task Manager | ✔ | — | — |
 | Keep running in the notification area, shortcut, start with Windows | ✔ | — | — |
-| Screensaver | ✔ (separate build) | — | — |
+| Screensaver | ✔ (only in a build you make yourself, with `--features screensaver`) | — | — |
 
 ### Where TMOP keeps its files
 
@@ -271,6 +282,9 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   - Linux and macOS: remove it with
     `curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall`.
     It removes exactly the files it installed.
+- **Installed with Scoop (Windows)?** Update with `scoop update tmop`: TMOP does not replace
+  its own exe there, its update dialog shows that command (with a Copy command button). Remove with
+  `scoop uninstall tmop`.
 - **Installed with Homebrew (macOS)?** Update with `brew upgrade --cask tmop` (or just
   `brew upgrade`), remove with `brew uninstall --cask tmop`; add `--zap` to also remove your
   settings.
@@ -300,7 +314,7 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   user on the server needs access to Docker (for example by being in the `docker` group).
 - **CPU temperature on Windows:** Windows itself only reports the firmware's ACPI zones. For the
   CPU's own sensor (AMD Ryzen Tctl/Tdie or the Intel package), install the free
-  [PawnIO](https://pawnio.eu) driver, switch on *Settings → General → CPU temperature through
+  [PawnIO](https://pawnio.eu) driver (x64 PCs only), switch on *Settings → General → CPU temperature through
   PawnIO* and run TMOP as administrator. It is off by default. Some anti-cheat software refuses
   to run beside PawnIO. TMOP also reads HWiNFO's sensors when *Shared Memory Support* is on there.
   The PawnIO modules TMOP carries are LGPL-2.1-or-later (licence and source in `assets/pawnio`).

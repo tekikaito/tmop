@@ -12,7 +12,8 @@
 //! renaming a running program, not overwriting it) and puts the new one in its place.
 //! [`remove_leftover`] deletes the `.old` file on the next start. Linux and macOS show the
 //! install command (or `brew upgrade tmop`) instead, because TMOP is installed in several ways
-//! there (AppImage, tar.gz, install command, Homebrew cask).
+//! there (AppImage, tar.gz, install command, Homebrew cask). A Windows copy installed with Scoop
+//! ([`is_scoop_exe`]) shows `scoop update tmop` instead, so Scoop keeps owning its version folders.
 //!
 //! Where updates come from: the GitHub repository this build was released from
 //! ([`RELEASE_REPO`], set by a fork's release workflow), or the one named in
@@ -228,6 +229,8 @@ pub enum Method {
     InstallCommand,
     /// macOS: installed with the Homebrew cask.
     Homebrew,
+    /// Windows: installed with Scoop, which owns the version folders.
+    Scoop,
 }
 
 impl Method {
@@ -237,6 +240,7 @@ impl Method {
             Method::InPlace => None,
             Method::InstallCommand => Some(format!("curl -fsSL {}install.sh | sh", pages_url(repo))),
             Method::Homebrew => Some("brew upgrade --cask tmop".into()),
+            Method::Scoop => Some("scoop update tmop".into()),
         }
     }
 
@@ -246,17 +250,64 @@ impl Method {
             Method::InPlace => "",
             Method::InstallCommand => "Installed with the install command? Run it again in a terminal to update. Otherwise download the new version from the release page.",
             Method::Homebrew => "TMOP was installed with Homebrew. To update, run this in a terminal:",
+            Method::Scoop => "TMOP was installed with Scoop. To update, run this in a terminal:",
         }
     }
 }
 
+/// The repository the Scoop bucket and the Homebrew cask (`tekikaito/tmop`) install from.
+const SCOOP_REPO: &str = "tekikaito/tmop";
+
 /// The repository the Homebrew cask (`tekikaito/tmop` tap) installs from.
 const HOMEBREW_REPO: &str = "tekikaito/tmop";
+
+/// Splits a Windows or POSIX path into its components, without a `\\?\` prefix or empty parts.
+fn path_parts(p: &str) -> Vec<&str> {
+    let p = p.strip_prefix(r"\\?\").unwrap_or(p);
+    p.split(['\\', '/']).filter(|s| !s.is_empty()).collect()
+}
+
+/// True when `exe` is `<root>\apps\tmop\<version or current>\<file>` of a Scoop root: `root`
+/// is one of `env_roots` (`SCOOP`, `SCOOP_GLOBAL`), or `is_dir` finds both `<root>\shims` and
+/// `<root>\apps`. Case-insensitive, either path separator, `\\?\` prefix ignored. A folder
+/// that is merely called `apps\tmop` is not a Scoop install.
+pub fn is_scoop_exe(exe: &str, env_roots: &[String], is_dir: impl Fn(&str) -> bool) -> bool {
+    let parts = path_parts(exe);
+    let n = parts.len();
+    if n < 5 || !parts[n - 3].eq_ignore_ascii_case("tmop") || !parts[n - 4].eq_ignore_ascii_case("apps") {
+        return false;
+    }
+    let root = &parts[..n - 4];
+    let same = |a: &[&str], b: &[&str]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y));
+    if env_roots.iter().any(|r| same(&path_parts(r), root)) {
+        return true;
+    }
+    let joined = root.join("\\");
+    // `\\?\UNC\server\share` (a canonicalized network path) is `\\server\share`.
+    let base = if exe.to_ascii_uppercase().starts_with(r"\\?\UNC\") { format!(r"\\{}", joined.get(4..).unwrap_or("")) } else { joined };
+    is_dir(&format!(r"{base}\shims")) && is_dir(&format!(r"{base}\apps"))
+}
+
+/// True when the running exe lives in a Scoop app folder (checked once). The path is tried as
+/// given and with junctions resolved (`apps\tmop\current` points at the version folder).
+fn is_scoop_install() -> bool {
+    static SCOOP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SCOOP.get_or_init(|| {
+        let Ok(exe) = std::env::current_exe() else { return false };
+        let roots: Vec<String> = ["SCOOP", "SCOOP_GLOBAL"].iter().filter_map(|k| std::env::var(k).ok()).filter(|v| !v.trim().is_empty()).collect();
+        let is_dir = |p: &str| Path::new(p).is_dir();
+        [Some(exe.clone()), std::fs::canonicalize(&exe).ok()].into_iter().flatten().any(|p| is_scoop_exe(&p.to_string_lossy(), &roots, is_dir))
+    })
+}
 
 /// How to update the running copy from `repo`. The Homebrew cask only follows its own repository.
 pub fn method(repo: &str) -> Method {
     if cfg!(windows) {
-        Method::InPlace
+        if is_scoop_install() && repo.eq_ignore_ascii_case(SCOOP_REPO) {
+            Method::Scoop
+        } else {
+            Method::InPlace
+        }
     } else if repo.eq_ignore_ascii_case(HOMEBREW_REPO) && ["/opt/homebrew/Caskroom/tmop", "/usr/local/Caskroom/tmop"].iter().any(|d| Path::new(d).is_dir()) {
         Method::Homebrew
     } else {
@@ -433,6 +484,46 @@ mod tests {
         assert_eq!(Method::InstallCommand.command("Someone/tmop-fork").as_deref(), Some("curl -fsSL https://someone.github.io/tmop-fork/install.sh | sh"));
         assert_eq!(method("tekikaito/tmop") == Method::InPlace, cfg!(windows));
         assert_ne!(method("someone/fork"), Method::Homebrew, "the cask only updates from its own repository");
+        assert_eq!(Method::Scoop.command("tekikaito/tmop").as_deref(), Some("scoop update tmop"));
+    }
+
+    #[test]
+    fn scoop_installs_are_recognised() {
+        let dirs = |known: &'static [&'static str]| move |p: &str| known.iter().any(|k| k.eq_ignore_ascii_case(p));
+        let user = dirs(&[r"C:\Users\Ann\scoop\shims", r"C:\Users\Ann\scoop\apps"]);
+        let no_env: Vec<String> = vec![];
+        assert!(is_scoop_exe(r"C:\Users\Ann\scoop\apps\tmop\0.11.1\TMOP.exe", &no_env, user));
+        assert!(is_scoop_exe(r"C:\Users\Ann\scoop\apps\tmop\current\TMOP.exe", &no_env, user));
+        // Case, slashes and the prefix canonicalize() adds.
+        assert!(is_scoop_exe(r"\\?\c:\users\ann\SCOOP\Apps\TMOP\0.11.1\tmop.exe", &no_env, user));
+        assert!(is_scoop_exe("C:/Users/Ann/scoop/apps/tmop/0.11.1/TMOP.exe", &no_env, user));
+        // Global install, found through SCOOP_GLOBAL even if the folders cannot be listed.
+        let global = vec![r"C:\ProgramData\scoop".to_string()];
+        assert!(is_scoop_exe(r"C:\ProgramData\scoop\apps\tmop\0.11.1\TMOP.exe", &global, dirs(&[])));
+        assert!(is_scoop_exe(r"C:\programdata\SCOOP\apps\tmop\current\TMOP.exe", &[r"C:\ProgramData\scoop\".to_string()], dirs(&[])));
+        // A custom root with shims and apps beside each other.
+        assert!(is_scoop_exe(r"D:\tools\apps\tmop\0.11.1\TMOP.exe", &no_env, dirs(&[r"D:\tools\shims", r"D:\tools\apps"])));
+        // A canonicalized network root.
+        assert!(is_scoop_exe(r"\\?\UNC\srv\share\scoop\apps\tmop\1.0.0\TMOP.exe", &no_env, dirs(&[r"\\srv\share\scoop\shims", r"\\srv\share\scoop\apps"])));
+    }
+
+    #[test]
+    fn other_folders_are_not_scoop() {
+        let none = |_: &str| false;
+        let no_env: Vec<String> = vec![];
+        // Merely called apps\tmop: no shims folder next to apps.
+        assert!(!is_scoop_exe(r"C:\apps\tmop\0.11.1\TMOP.exe", &no_env, |p| p == r"C:\apps"));
+        assert!(!is_scoop_exe(r"C:\Users\Ann\scoop\apps\tmop\0.11.1\TMOP.exe", &no_env, none));
+        // Wrong depth or names.
+        assert!(!is_scoop_exe(r"C:\Users\Ann\scoop\apps\tmop\TMOP.exe", &["C:\\Users\\Ann\\scoop".into()], none));
+        assert!(!is_scoop_exe(r"C:\Users\Ann\scoop\apps\tmop\0.11.1\bin\TMOP.exe", &["C:\\Users\\Ann\\scoop".into()], none));
+        assert!(!is_scoop_exe(r"C:\Users\Ann\scoop\apps\other\0.11.1\TMOP.exe", &["C:\\Users\\Ann\\scoop".into()], none));
+        assert!(!is_scoop_exe(r"C:\Users\Ann\scoop\app\tmop\0.11.1\TMOP.exe", &["C:\\Users\\Ann\\scoop".into()], none));
+        // A different SCOOP root than the one the exe is in.
+        assert!(!is_scoop_exe(r"C:\Users\Ann\apps\tmop\0.11.1\TMOP.exe", &["C:\\Users\\Ann\\scoop".into()], none));
+        // Ordinary install locations.
+        assert!(!is_scoop_exe(r"C:\Program Files\TMOP\TMOP.exe", &no_env, none));
+        assert!(!is_scoop_exe("", &no_env, none));
     }
 
     #[test]
