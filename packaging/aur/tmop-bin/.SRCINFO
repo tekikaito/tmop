@@ -1,0 +1,25 @@
+pkgbase = tmop-bin
+	pkgdesc = Task Manager OverPowered: a skinnable task manager and system monitor (prebuilt release)
+	pkgver = 0.11.0
+	pkgrel = 1
+	url = https://tekikaito.github.io/tmop/
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-only
+	depends = glibc
+	depends = gcc-libs
+	depends = libxkbcommon-x11
+	optdepends = wayland: run as a native Wayland client
+	optdepends = libx11: run as a native X11 client
+	optdepends = libglvnd: OpenGL, which TMOP draws its window with (needs a graphics driver, e.g. mesa)
+	optdepends = xdg-desktop-portal: file dialogs
+	optdepends = docker: show and manage containers
+	provides = tmop
+	conflicts = tmop
+	options = !debug
+	source_x86_64 = tmop-bin-0.11.0-x86_64.tar.gz::https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-linux-x64.tar.gz
+	sha256sums_x86_64 = c79424568aab0c8a7f656edf8b54adf383aaf3cf58139f7aae5b0ec58e6dec7e
+	source_aarch64 = tmop-bin-0.11.0-aarch64.tar.gz::https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-linux-arm64.tar.gz
+	sha256sums_aarch64 = c71e73934d158d01bbdfe5624bdf6cf00a71593feb51fa00878af461d77c524c
+
+pkgname = tmop-bin
