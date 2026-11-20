@@ -12,9 +12,9 @@
 //! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
 //! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
-use super::common::{cpu_brand, net_delta, tick_delta_pct, NetMark, Ticks};
+use super::common::{cpu_brand, disk_model, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::nvml::Nvml;
-use super::procfs::{self, DiskTotals, GpuDev, HwmonChip, NetIf};
+use super::procfs::{self, DiskStat, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
 use crate::process::{Enumerator, ProcessRow};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +37,49 @@ const CPU_DIR: &str = "/sys/devices/system/cpu";
 
 fn read(path: impl AsRef<Path>) -> Option<String> {
     fs::read_to_string(path).ok()
+}
+
+/// How often the file systems are asked how full they are.
+const DISK_SPACE_PERIOD: Duration = Duration::from_secs(10);
+
+/// The kernel's name of the block device a mount is on ("nvme0n1p2", "dm-0"): what its source
+/// links to, else (`/dev/root`) the device of the mount.
+fn block_name(m: &crate::pro::mounts::Mount) -> Option<String> {
+    let name = |p: PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let known = |n: &String| Path::new("/sys/class/block").join(n).exists();
+    fs::canonicalize(&m.source).ok().and_then(name).filter(known).or_else(|| fs::canonicalize(format!("/sys/dev/block/{}:{}", m.dev.0, m.dev.1)).ok().and_then(name))
+}
+
+/// The whole disks block device `name` lies on: "nvme0n1" for "nvme0n1p2", and for a
+/// device-mapper or md device itself and the disks below it.
+fn whole_disks(name: &str, depth: u32) -> Vec<String> {
+    let Ok(dir) = fs::canonicalize(format!("/sys/class/block/{name}")) else { return Vec::new() };
+    let dir = if dir.join("partition").exists() { dir.parent().map_or(dir.clone(), Path::to_path_buf) } else { dir };
+    let Some(disk) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else { return Vec::new() };
+    let mut out = vec![disk];
+    if depth < 4 {
+        for below in fs::read_dir(dir.join("slaves")).into_iter().flatten().flatten() {
+            out.extend(whole_disks(&below.file_name().to_string_lossy(), depth + 1));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Used and total bytes of the mounted file systems on each disk, as the Disk Space page counts
+/// them. Only local block devices are asked, so no unreachable share can hold this up.
+fn disk_spaces() -> HashMap<String, (u64, u64)> {
+    let Some(text) = read("/proc/self/mountinfo") else { return HashMap::new() };
+    let mounts = crate::pro::mounts::parse_mountinfo(&text);
+    let mut seen = HashSet::new();
+    let mut volumes = Vec::new();
+    for m in procfs::block_mounts(&mounts) {
+        let Some(dev) = block_name(m).filter(|d| seen.insert(d.clone())) else { continue };
+        let Some((total, free)) = crate::pro::mounts::space(Path::new(&m.point)).filter(|s| s.0 > 0) else { continue };
+        volumes.push((whole_disks(&dev, 0), (total.saturating_sub(free), total)));
+    }
+    procfs::disk_spaces(&volumes)
 }
 
 fn read_u64(path: impl AsRef<Path>) -> Option<u64> {
@@ -77,6 +120,13 @@ pub struct Collector {
     prev_sys: Option<Ticks>,
     prev_cores: Vec<(u32, Ticks)>,
     prev_disk: Option<(Instant, DiskTotals)>,
+    /// The disks of the last reading, for each disk's own rates.
+    prev_disk_stats: Vec<DiskStat>,
+    /// The model of each disk listed (device -> model), read when the disk first shows.
+    disk_models: HashMap<String, String>,
+    /// Used and total bytes of the file systems on each disk (device -> bytes), and when asked.
+    disk_spaces: HashMap<String, (u64, u64)>,
+    disk_spaces_at: Option<Instant>,
     prev_net: Option<NetMark>,
     /// Static cpufreq figures (kHz) read once: max, base.
     freq_max: Option<u64>,
@@ -113,6 +163,10 @@ impl Collector {
             prev_sys: None,
             prev_cores: Vec::new(),
             prev_disk: None,
+            prev_disk_stats: Vec::new(),
+            disk_models: HashMap::new(),
+            disk_spaces: HashMap::new(),
+            disk_spaces_at: None,
             prev_net: None,
             freq_max: read_u64(cpu0.join("cpuinfo_max_freq")),
             freq_base: read_u64(cpu0.join("base_frequency")).or_else(|| read_u64(cpu0.join("amd_pstate_nominal_freq"))),
@@ -211,8 +265,28 @@ impl Collector {
         let stats = if block.is_empty() { procfs::parse_diskstats(&text, procfs::looks_whole) } else { procfs::parse_diskstats(&text, |n| block.contains(n)) };
         let now = Instant::now();
         let cur = DiskTotals::of(&stats);
-        snap.disk = procfs::disk_delta(self.prev_disk.as_ref().map(|p| &p.1), &cur, self.prev_disk.as_ref().map_or(Duration::ZERO, |p| now.duration_since(p.0)));
+        let dt = self.prev_disk.as_ref().map_or(Duration::ZERO, |p| now.duration_since(p.0));
+        snap.disk = procfs::disk_delta(self.prev_disk.as_ref().map(|p| &p.1), &cur, dt);
         self.prev_disk = Some((now, cur));
+        // Each disk on its own. A device name may pass to another disk once its own is gone.
+        self.disk_models.retain(|dev, _| stats.iter().any(|d| d.name == *dev));
+        let mut drives = procfs::disk_drives(&self.prev_disk_stats, &stats, dt);
+        for d in &mut drives {
+            if !self.disk_models.contains_key(&d.id) {
+                let of = |file: &str| read(format!("/sys/block/{}/device/{file}", d.id)).unwrap_or_default();
+                self.disk_models.insert(d.id.clone(), disk_model(&of("vendor"), &of("model")));
+            }
+            d.model.clone_from(&self.disk_models[&d.id]);
+        }
+        if self.disk_spaces_at.is_none_or(|t| now.duration_since(t) >= DISK_SPACE_PERIOD) {
+            self.disk_spaces = disk_spaces();
+            self.disk_spaces_at = Some(now);
+        }
+        for d in &mut drives {
+            d.space = self.disk_spaces.get(&d.id).copied();
+        }
+        snap.disk.drives = drives;
+        self.prev_disk_stats = stats;
     }
 
     fn network(&mut self, snap: &mut Snapshot) {
@@ -372,4 +446,27 @@ fn thermal_fold(chips: &[HwmonChip]) -> super::ThermalSample {
         })
         .collect();
     procfs::fold_thermal(chips, zones)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs on the Linux CI runners: the file system at `/` is traced to whole disks of
+    /// `/sys/block`, and each of them says how full it is.
+    #[test]
+    fn the_root_file_system_counts_on_its_disk() {
+        let mounts = crate::pro::mounts::parse_mountinfo(&read("/proc/self/mountinfo").unwrap());
+        // In a container `/` is an overlay, on no block device.
+        let Some(root) = procfs::block_mounts(&mounts).into_iter().find(|m| m.point == "/") else { return };
+        let dev = block_name(root).unwrap_or_else(|| panic!("no block device for {root:?}"));
+        let disks = whole_disks(&dev, 0);
+        let spaces = disk_spaces();
+        eprintln!("{} is {dev} on {disks:?}: {spaces:?}", root.source);
+        assert!(!disks.is_empty() && disks.iter().all(|d| Path::new("/sys/block").join(d).exists()), "{disks:?}");
+        for d in &disks {
+            let (used, total) = spaces[d];
+            assert!(total > 0 && used <= total, "{d}: {used} / {total}");
+        }
+    }
 }

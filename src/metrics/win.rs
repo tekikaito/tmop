@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, disk_delta, fold_adapters, fold_gpu, merge_sensors, net_delta, tick_delta_pct, DiskCounters, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
+use super::common::{cpu_brand, disk_deltas, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_space, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -201,6 +201,8 @@ pub struct Collector {
     disk_ioctl: Option<DiskIoctl>,
     /// PDH's PhysicalDisk counters reported traffic once, so they work and the fallback is off.
     pdh_disk_proven: bool,
+    disk_models: DiskModels,
+    disk_spaces: DiskSpaces,
 }
 
 /// How often the physical disks are listed again (one plugged in or removed).
@@ -211,53 +213,66 @@ const DISK_LIST_PERIOD: Duration = Duration::from_secs(30);
 /// counters switched off or their registration broken), which left every disk readout at 0.
 struct DiskIoctl {
     drives: Vec<(u32, windows::Win32::Foundation::HANDLE)>,
+    /// The drive letters on each disk ("C: D:"), as PDH's instance names give them.
+    volumes: Vec<(u32, String)>,
     listed: Option<Instant>,
     prev: Vec<(u32, DiskCounters)>,
 }
 
+/// Opens a device without read or write access: the queries here need none, nor administrator.
+fn open_device(path: &str) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    let w = wide(path);
+    // SAFETY: a NUL-terminated path; the caller closes the handle.
+    unsafe { CreateFileW(PCWSTR(w.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }.ok()
+}
+
+fn close_device(h: windows::Win32::Foundation::HANDLE) {
+    // SAFETY: a handle from `open_device`, closed once.
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+    }
+}
+
 impl DiskIoctl {
     fn new() -> Self {
-        Self { drives: Vec::new(), listed: None, prev: Vec::new() }
+        Self { drives: Vec::new(), volumes: Vec::new(), listed: None, prev: Vec::new() }
     }
 
     fn close(&mut self) {
         for (_, h) in self.drives.drain(..) {
-            // SAFETY: a handle from CreateFileW, closed once.
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(h);
-            }
+            close_device(h);
         }
     }
 
-    /// Opens the disks without read or write access: the query needs none, nor administrator.
     fn list(&mut self) {
-        use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
         self.close();
         for n in 0..32u32 {
-            let w = wide(&format!(r"\\.\PhysicalDrive{n}"));
-            // SAFETY: a NUL-terminated path; the handle is kept and closed in `close`.
-            if let Ok(h) = unsafe { CreateFileW(PCWSTR(w.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) } {
+            if let Some(h) = open_device(&format!(r"\\.\PhysicalDrive{n}")) {
                 if read_disk(h).is_some() {
                     self.drives.push((n, h));
                 } else {
-                    // SAFETY: as above, never stored.
-                    unsafe {
-                        let _ = windows::Win32::Foundation::CloseHandle(h);
-                    }
+                    close_device(h);
                 }
             }
         }
+        self.volumes = disk_volumes();
         self.listed = Some(Instant::now());
     }
 
-    /// Active time and read and write rates since the last call; `None` on the first call or
-    /// without readable disks.
-    fn sample(&mut self) -> Option<(f32, f64, f64)> {
+    /// Each disk's active time and read and write rates since the last call; empty on the first
+    /// call or without readable disks.
+    fn sample(&mut self) -> Vec<DiskUse> {
         if self.listed.is_none_or(|t| t.elapsed() >= DISK_LIST_PERIOD) {
             self.list();
         }
         let now: Vec<(u32, DiskCounters)> = self.drives.iter().filter_map(|(n, h)| read_disk(*h).map(|c| (*n, c))).collect();
-        let out = disk_delta(&self.prev, &now);
+        let mut out = disk_deltas(&self.prev, &now);
+        for d in &mut out {
+            if let Some((_, v)) = self.volumes.iter().find(|(n, _)| *n == d.0) {
+                d.1.clone_from(v);
+            }
+        }
         self.prev = now;
         out
     }
@@ -277,6 +292,147 @@ fn read_disk(h: windows::Win32::Foundation::HANDLE) -> Option<DiskCounters> {
     // SAFETY: the output buffer is the struct the control code fills.
     unsafe { DeviceIoControl(h, IOCTL_DISK_PERFORMANCE, None, 0, Some(&mut d as *mut _ as *mut std::ffi::c_void), std::mem::size_of::<DISK_PERFORMANCE>() as u32, Some(&mut ret), None) }.ok()?;
     Some(DiskCounters { read: d.BytesRead.max(0) as u64, written: d.BytesWritten.max(0) as u64, idle: d.IdleTime, query: d.QueryTime })
+}
+
+/// The drive letters on each physical disk, as (disk number, "C: D:"): what PDH puts in its
+/// instance names, read from the volumes for when PDH has no disk counters. A volume that spans
+/// disks is listed on each.
+fn disk_volumes() -> Vec<(u32, String)> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows::Win32::System::IO::DeviceIoControl;
+    const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    // `VOLUME_DISK_EXTENTS`: a count, then (after padding) 24-byte extents that start with the
+    // disk number.
+    const EXTENTS: usize = 16;
+    let mut out: Vec<(u32, String)> = Vec::new();
+    // SAFETY: no arguments.
+    let mask = unsafe { GetLogicalDrives() };
+    for letter in (b'A'..=b'Z').filter(|l| mask & (1 << (l - b'A')) != 0) {
+        let letter = letter as char;
+        let root = wide(&format!(r"{letter}:\"));
+        // SAFETY: a NUL-terminated root path. Network and optical drives are on no disk.
+        if !matches!(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }, DRIVE_REMOVABLE | DRIVE_FIXED) {
+            continue;
+        }
+        let Some(h) = open_device(&format!(r"\\.\{letter}:")) else { continue };
+        // u64 backing keeps the extents aligned.
+        let mut buf = [0u64; 1 + EXTENTS * 3];
+        let mut ret = 0u32;
+        // SAFETY: the output buffer is writable for the size given.
+        let ok = unsafe { DeviceIoControl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, None, 0, Some(buf.as_mut_ptr().cast()), std::mem::size_of_val(&buf) as u32, Some(&mut ret), None) }.is_ok();
+        close_device(h);
+        if !ok {
+            continue;
+        }
+        let count = (buf[0] as u32 as usize).min(EXTENTS);
+        for e in 0..count {
+            let disk = buf[1 + e * 3] as u32;
+            let text = format!("{letter}:");
+            match out.iter_mut().find(|(n, _)| *n == disk) {
+                Some((_, v)) if v.split(' ').any(|l| l == text) => {}
+                Some((_, v)) => {
+                    v.push(' ');
+                    v.push_str(&text);
+                }
+                None => out.push((disk, text)),
+            }
+        }
+    }
+    out
+}
+
+/// The model the disk itself reports (`IOCTL_STORAGE_QUERY_PROPERTY`), as Task Manager shows
+/// under the disk's name; empty when it cannot be asked.
+fn storage_model(disk: u32) -> String {
+    use windows::Win32::System::Ioctl::{PropertyStandardQuery, StorageDeviceProperty, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY};
+    use windows::Win32::System::IO::DeviceIoControl;
+    let Some(h) = open_device(&format!(r"\\.\PhysicalDrive{disk}")) else { return String::new() };
+    let query = STORAGE_PROPERTY_QUERY { PropertyId: StorageDeviceProperty, QueryType: PropertyStandardQuery, ..Default::default() };
+    // u64 backing keeps the descriptor aligned.
+    let mut buf = [0u64; 128];
+    let mut ret = 0u32;
+    // SAFETY: the input is the query struct, the output buffer is writable for the size given.
+    let ok = unsafe {
+        DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, Some(&query as *const _ as *const std::ffi::c_void), std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32, Some(buf.as_mut_ptr().cast()), std::mem::size_of_val(&buf) as u32, Some(&mut ret), None)
+    }
+    .is_ok();
+    close_device(h);
+    let len = (ret as usize).min(std::mem::size_of_val(&buf));
+    if !ok || len < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
+        return String::new();
+    }
+    // SAFETY: the buffer is aligned and at least a descriptor long; only `len` bytes are read.
+    let (d, bytes) = unsafe { (&*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR), std::slice::from_raw_parts(buf.as_ptr() as *const u8, len)) };
+    // An offset of 0 means the device has no such string.
+    let text = |offset: u32| {
+        let tail = bytes.get(offset as usize..).filter(|_| offset > 0).unwrap_or_default();
+        String::from_utf8_lossy(&tail[..tail.iter().position(|b| *b == 0).unwrap_or(tail.len())]).into_owned()
+    };
+    disk_model(&text(d.VendorIdOffset), &text(d.ProductIdOffset))
+}
+
+/// Each disk's model, asked of the disks now and then rather than with every sample.
+#[derive(Default)]
+struct DiskModels {
+    at: Option<Instant>,
+    /// (disk number, model).
+    known: Vec<(u32, String)>,
+}
+
+impl DiskModels {
+    /// Reads the models again when they are old or `disks` names one they lack.
+    fn refresh(&mut self, disks: &[DiskUse]) {
+        if self.at.is_none_or(|t| t.elapsed() >= DISK_LIST_PERIOD) || disks.iter().any(|d| !self.known.iter().any(|k| k.0 == d.0)) {
+            self.known = disks.iter().map(|d| (d.0, storage_model(d.0))).collect();
+            self.at = Some(Instant::now());
+        }
+    }
+
+    fn of(&self, disk: u32) -> &str {
+        self.known.iter().find(|k| k.0 == disk).map_or("", |k| k.1.as_str())
+    }
+}
+
+/// How often the volumes are asked how full they are.
+const DISK_SPACE_PERIOD: Duration = Duration::from_secs(10);
+
+/// Used and total bytes of the volume with drive letter `volume` ("C:"), as the Disk Space page
+/// counts them; `None` while it does not answer (locked by BitLocker, no medium).
+fn volume_space(volume: &str) -> Option<(u64, u64)> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let root = wide(&format!(r"{volume}\"));
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: a NUL-terminated root path; the outputs are plain integers.
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(root.as_ptr()), Some(&mut free), Some(&mut total), None) }.ok()?;
+    (total > 0).then(|| (total.saturating_sub(free), total))
+}
+
+/// Used and total bytes, when they can be asked.
+type Space = Option<(u64, u64)>;
+
+/// How full the volumes of each disk are together, asked now and then rather than with every
+/// sample.
+#[derive(Default)]
+struct DiskSpaces {
+    at: Option<Instant>,
+    /// (disk number, its volumes as asked, used and total bytes).
+    known: Vec<(u32, String, Space)>,
+}
+
+impl DiskSpaces {
+    /// Asks again when the figures are old or `disks` has a disk or a volume they lack.
+    fn refresh(&mut self, disks: &[DiskUse]) {
+        if self.at.is_none_or(|t| t.elapsed() >= DISK_SPACE_PERIOD) || disks.iter().any(|d| !self.known.iter().any(|k| k.0 == d.0 && k.1 == d.1)) {
+            self.known = disks.iter().map(|d| (d.0, d.1.clone(), volumes_space(&d.1, volume_space))).collect();
+            self.at = Some(Instant::now());
+        }
+    }
+
+    fn of(&self, disk: u32) -> Space {
+        self.known.iter().find(|k| k.0 == disk).and_then(|k| k.2)
+    }
 }
 
 /// How often the GPU list is taken again.
@@ -309,6 +465,10 @@ impl Collector {
             ("disk_idle", r"\PhysicalDisk(_Total)\% Idle Time"),
             ("disk_read", r"\PhysicalDisk(_Total)\Disk Read Bytes/sec"),
             ("disk_write", r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"),
+            // Each disk, for the separated view; the totals above stay the grouped one.
+            ("disk_idle_each", r"\PhysicalDisk(*)\% Idle Time"),
+            ("disk_read_each", r"\PhysicalDisk(*)\Disk Read Bytes/sec"),
+            ("disk_write_each", r"\PhysicalDisk(*)\Disk Write Bytes/sec"),
             ("gpu_engine", r"\GPU Engine(*)\Utilization Percentage"),
             ("gpu_mem", r"\GPU Adapter Memory(*)\Dedicated Usage"),
             ("gpu_shared", r"\GPU Adapter Memory(*)\Shared Usage"),
@@ -335,6 +495,8 @@ impl Collector {
             pawnio: super::pawnio::Source::default(),
             disk_ioctl: None,
             pdh_disk_proven: false,
+            disk_models: DiskModels::default(),
+            disk_spaces: DiskSpaces::default(),
         }
     }
 
@@ -400,12 +562,14 @@ impl Collector {
         // missing), as before 0.6; the PDH error below says why they stay at zero.
         snap.disk.available = true;
         let mut pdh_disk = None;
+        let mut pdh_disks_each = Vec::new();
         if let Some(pdh) = &self.pdh {
             pdh.collect();
             // Disk
             if let (Some(idle), Some(read), Some(write)) = (pdh.value("disk_idle"), pdh.value("disk_read"), pdh.value("disk_write")) {
                 pdh_disk = Some(((100.0 - idle).clamp(0.0, 100.0) as f32, read, write));
             }
+            pdh_disks_each = pdh_disks(&pdh.array("disk_idle_each"), &pdh.array("disk_read_each"), &pdh.array("disk_write_each"));
             let pagefile_size = snap.memory.swap_total.unwrap_or(0);
             snap.memory.swap_used = pdh.value("pagefile").map(|pct| (pct / 100.0 * pagefile_size as f64) as u64);
             // GPU
@@ -438,12 +602,15 @@ impl Collector {
                 }
             }
         }
-        let disk = self.disk(pdh_disk);
+        let (disk, each) = self.disk(pdh_disk, pdh_disks_each);
         if let Some((active, read, write)) = disk {
             snap.disk.active_pct = active;
             snap.disk.read_bps = read;
             snap.disk.write_bps = write;
         }
+        self.disk_models.refresh(&each);
+        self.disk_spaces.refresh(&each);
+        snap.disk.drives = each.iter().map(|d| DiskDrive { space: self.disk_spaces.of(d.0), ..windows_drive(d, self.disk_models.of(d.0)) }).collect();
         if self.pdh.is_none() {
             let what = if disk.is_some() { "GPU and thermal" } else { "disk, GPU and thermal" };
             snap.errors.push(format!("PDH unavailable: {what} readings disabled"));
@@ -523,19 +690,23 @@ impl Collector {
     /// memory when it is up) and the source summary.
     /// Disk active time and rates: PDH's, or the disks' own counters while PDH's are missing or
     /// read zero although the disks move data.
-    fn disk(&mut self, pdh: Option<(f32, f64, f64)>) -> Option<(f32, f64, f64)> {
+    ///
+    /// `pdh` is the grouped reading and `pdh_each` PDH's reading of each disk; each disk comes
+    /// from the source the grouped figures come from.
+    fn disk(&mut self, pdh: Option<(f32, f64, f64)>, pdh_each: Vec<DiskUse>) -> (Option<(f32, f64, f64)>, Vec<DiskUse>) {
         if pdh.is_some_and(|(_, r, w)| r + w > 0.0) {
             self.pdh_disk_proven = true;
             self.disk_ioctl = None;
         }
         if self.pdh_disk_proven {
-            return pdh;
+            return (pdh, pdh_each);
         }
-        let direct = self.disk_ioctl.get_or_insert_with(DiskIoctl::new).sample();
-        match (pdh, direct) {
-            (Some(p), Some(d)) if p.1 + p.2 > 0.0 || d.1 + d.2 <= 0.0 => Some(p),
-            (_, Some(d)) => Some(d),
-            (p, None) => p,
+        let direct_each = self.disk_ioctl.get_or_insert_with(DiskIoctl::new).sample();
+        match (pdh, group_disks(&direct_each)) {
+            // Idle on both: PDH's figures, and its disks unless it lists none.
+            (Some(p), Some(d)) if p.1 + p.2 > 0.0 || d.1 + d.2 <= 0.0 => (Some(p), if pdh_each.is_empty() { direct_each } else { pdh_each }),
+            (_, Some(d)) => (Some(d), direct_each),
+            (p, None) => (p, pdh_each),
         }
     }
 
@@ -798,6 +969,34 @@ mod tests {
         assert_eq!(per_core_perf_mhz(&items, 2000, 2), Some(vec![2600, 2200]));
         assert_eq!(per_core_perf_mhz(&items, 2000, 3), None);
         assert_eq!(per_core_perf_mhz(&items, 2000, 0), None);
+    }
+
+    /// Both sources of per-disk figures on this machine: PDH's instances and the disks read
+    /// directly name the same disks with the same drive letters, and the collector lists them.
+    /// Either may be missing on a machine (that is why there are two), so each is only checked
+    /// when it answers.
+    #[test]
+    fn disks_are_listed_one_by_one() {
+        let mut c = Collector::new();
+        let mut direct = DiskIoctl::new();
+        let _ = (c.collect(), direct.sample());
+        std::thread::sleep(Duration::from_millis(200));
+        let (s, _) = c.collect();
+        let direct = direct.sample();
+        eprintln!("{:?}\ndirect {direct:?}", s.disk.drives);
+        for d in &s.disk.drives {
+            assert_eq!(d.name, format!("Disk {}", d.id));
+            assert!(d.title.starts_with(&d.name) && (0.0..=100.0).contains(&d.active_pct), "{d:?}");
+            assert_eq!(d.model, storage_model(d.id.parse().unwrap()));
+            // A disk with drive letters says how full they are; used space moves between two
+            // readings, the total does not.
+            assert_eq!(d.space.map(|s| s.1), volumes_space(&d.volumes, volume_space).map(|s| s.1), "{d:?}");
+            assert!(d.space.is_none_or(|(used, total)| used <= total && total > 0), "{d:?}");
+        }
+        if !direct.is_empty() && !s.disk.drives.is_empty() {
+            let titles: Vec<String> = direct.iter().map(|d| windows_drive(d, "").title).collect();
+            assert_eq!(titles, s.disk.drives.iter().map(|d| d.title.clone()).collect::<Vec<_>>());
+        }
     }
 
     /// The call wants a whole number of entries (a 4 KiB buffer fails with a length mismatch);

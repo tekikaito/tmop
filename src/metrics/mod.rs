@@ -14,7 +14,8 @@
 //! * CPU total/kernel: `GetSystemTimes`; per logical CPU: `NtQuerySystemInformation`
 //!   (`SystemProcessorPerformanceInformation`); clock: `CallNtPowerInformation(ProcessorInformation)`.
 //! * Memory: `GlobalMemoryStatusEx`.
-//! * Disk: PDH `\PhysicalDisk(_Total)\...` (aggregated over all disks).
+//! * Disk: PDH `\PhysicalDisk(_Total)\...` (aggregated over all disks) and `\PhysicalDisk(*)\...`
+//!   (each disk); the disks' own counters while PDH's are missing or stay at zero.
 //! * Network: `GetIfTable2` octet deltas.
 //! * GPU: PDH `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage`.
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin); CPU
@@ -101,6 +102,30 @@ pub struct MemorySample {
 pub struct DiskSample {
     /// The disk counters were read; false = unsupported or failed (not idle).
     pub available: bool,
+    pub active_pct: f32,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    /// Each physical disk on its own; the fields above stay the grouped view.
+    pub drives: Vec<DiskDrive>,
+}
+
+/// One physical disk.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DiskDrive {
+    /// Stable across samples (Windows: the disk number, Linux: the device name).
+    pub id: String,
+    /// "Disk 0" (Windows, macOS) or the device ("nvme0n1").
+    pub name: String,
+    /// The drive letters on it (Windows: "C: D:"); empty elsewhere and for a disk without one.
+    pub volumes: String,
+    /// The name with its volumes, as Windows Task Manager writes it: "Disk 0 (C: D:)". Without
+    /// volumes the name.
+    pub title: String,
+    /// Empty when the system names none.
+    pub model: String,
+    /// Used and total bytes of the mounted volumes on it (Windows: those with a drive letter):
+    /// their sum, not the size of the disk. `None` when it has none or they cannot be asked.
+    pub space: Option<(u64, u64)>,
     pub active_pct: f32,
     pub read_bps: f64,
     pub write_bps: f64,
@@ -343,6 +368,14 @@ impl Series {
     }
 }
 
+/// The history of one disk.
+#[derive(Clone, Debug)]
+pub struct DiskSeries {
+    pub active: Series,
+    pub read: Series,
+    pub write: Series,
+}
+
 #[derive(Clone, Debug)]
 pub struct History {
     pub cpu: Series,
@@ -353,6 +386,8 @@ pub struct History {
     pub disk: Series,
     pub disk_read: Series,
     pub disk_write: Series,
+    /// Active time and rates of each disk, keyed by [`DiskDrive::id`].
+    pub disk_drives: Vec<(String, DiskSeries)>,
     pub net_rx: Series,
     pub net_tx: Series,
     pub gpu: Series,
@@ -377,6 +412,7 @@ impl History {
             disk: s(),
             disk_read: s(),
             disk_write: s(),
+            disk_drives: Vec::new(),
             net_rx: s(),
             net_tx: s(),
             gpu: s(),
@@ -411,6 +447,18 @@ impl History {
         self.disk.push(snap.disk.active_pct);
         self.disk_read.push(snap.disk.read_bps as f32);
         self.disk_write.push(snap.disk.write_bps as f32);
+        // Like a GPU below: a disk that is unplugged keeps its history, reading 0.
+        for d in &snap.disk.drives {
+            if !self.disk_drives.iter().any(|(id, _)| *id == d.id) {
+                self.disk_drives.push((d.id.clone(), DiskSeries { active: Series::new(cap), read: Series::new(cap), write: Series::new(cap) }));
+            }
+        }
+        for (id, s) in &mut self.disk_drives {
+            let d = snap.disk.drives.iter().find(|d| d.id == *id);
+            s.active.push(d.map_or(0.0, |d| d.active_pct));
+            s.read.push(d.map_or(0.0, |d| d.read_bps as f32));
+            s.write.push(d.map_or(0.0, |d| d.write_bps as f32));
+        }
         self.net_rx.push(snap.network.rx_bps as f32);
         self.net_tx.push(snap.network.tx_bps as f32);
         self.gpu.push(snap.gpu.utilization_pct);
@@ -448,6 +496,16 @@ impl History {
         for s in self.per_core.iter_mut().chain(self.per_core_kernel.iter_mut()).chain(self.gpu_adapters.iter_mut().map(|(_, s)| s)) {
             s.resize(capacity);
         }
+        for (_, d) in &mut self.disk_drives {
+            for s in [&mut d.active, &mut d.read, &mut d.write] {
+                s.resize(capacity);
+            }
+        }
+    }
+
+    /// The history of disk `id`.
+    pub fn disk_drive(&self, id: &str) -> Option<&DiskSeries> {
+        self.disk_drives.iter().find(|(i, _)| i == id).map(|(_, s)| s)
     }
 
     /// The utilisation history of GPU `id`.
@@ -570,6 +628,23 @@ mod tests {
         assert!(h.gpu_adapter("c").is_none());
         h.resize(1);
         assert_eq!(h.gpu_adapter("b").unwrap().capacity, 2);
+    }
+
+    #[test]
+    fn history_tracks_each_disk_by_id() {
+        let snap = |ids: &[(&str, f32, f64)]| {
+            let drives = ids.iter().map(|(id, a, r)| DiskDrive { id: id.to_string(), active_pct: *a, read_bps: *r, write_bps: r * 2.0, ..Default::default() }).collect();
+            Snapshot { disk: DiskSample { drives, ..Default::default() }, ..Default::default() }
+        };
+        let mut h = History::new(8);
+        h.push(&snap(&[("0", 10.0, 100.0), ("1", 20.0, 200.0)]));
+        h.push(&snap(&[("1", 30.0, 300.0)]));
+        let (gone, kept) = (h.disk_drive("0").unwrap(), h.disk_drive("1").unwrap());
+        assert_eq!((gone.active.last(), gone.read.last(), gone.active.values.len()), (0.0, 0.0, 2));
+        assert_eq!((kept.active.last(), kept.read.last(), kept.write.last()), (30.0, 300.0, 600.0));
+        assert!(h.disk_drive("2").is_none());
+        h.resize(1);
+        assert_eq!(h.disk_drive("1").unwrap().write.capacity, 2);
     }
 
     #[test]

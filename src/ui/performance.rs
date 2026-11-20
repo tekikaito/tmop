@@ -2,6 +2,7 @@
 //! facts, the other resources as a strip and, for the CPU, the logical processors and the apps
 //! using the most.
 
+use super::disk_drives::{self, disk_menu, drive_subtitle};
 use super::gpu_activity::{adapter_title, gpu_menu, GpuMenu};
 use super::health::{app_groups, cpu_text, AppGroup};
 use super::table::TableState;
@@ -11,7 +12,7 @@ use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
 use super::{App, Device, FrameData};
 use crate::docker::model::{Container, EngineStatus};
-use crate::metrics::{GpuAdapter, Series, SOURCES};
+use crate::metrics::{DiskDrive, GpuAdapter, Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
 use super::widgets::ScrollArea029 as _;
@@ -49,6 +50,8 @@ pub struct PerfState {
     spark_seq: u64,
     /// The GPU shown while they are separated; the first one when this one is gone.
     pub gpu_selected: Option<String>,
+    /// The disk shown while they are separated; the first one when this one is gone.
+    pub disk_selected: Option<String>,
     /// The GPU activity section is open.
     pub gpu_activity: bool,
     pub gpu_overview_table: TableState,
@@ -132,6 +135,9 @@ enum Act {
     Device(Device),
     Gpu(String),
     GpuMenu(GpuMenu),
+    Disk(String),
+    /// Show the disks separately, or grouped.
+    DisksSeparated(bool),
     Refresh,
     Cores(bool),
     View(CoreView),
@@ -235,6 +241,11 @@ impl App {
                 self.perf.gpu_selected = Some(id);
             }
             Some(Act::GpuMenu(m)) => self.apply_gpu_menu(m),
+            Some(Act::Disk(id)) => {
+                self.device = Device::Disk;
+                self.perf.disk_selected = Some(id);
+            }
+            Some(Act::DisksSeparated(on)) => self.apply_disk_menu(on),
             Some(Act::Refresh) => self.sampler.refresh(),
             Some(Act::Cores(on)) => {
                 self.settings.window.performance_cpus_expanded = on;
@@ -331,26 +342,44 @@ impl App {
         adapters.get(i).map(|a| (i, a))
     }
 
+    /// The disk the page shows on its own, when they are separated: with its position in the list.
+    fn selected_drive<'a>(&self, fd: &FrameData<'a>) -> Option<(usize, &'a DiskDrive)> {
+        if !fd.disks_separated {
+            return None;
+        }
+        let drives = &fd.snap.disk.drives;
+        let chosen = self.perf.disk_selected.as_ref().and_then(|id| drives.iter().position(|d| d.id == *id));
+        let i = chosen.unwrap_or(0);
+        drives.get(i).map(|d| (i, d))
+    }
+
     /// The device cards, the preview span and the Refresh button.
     fn device_list(&self, ui: &mut egui::Ui, list: Rect, fd: &FrameData<'_>, act: &mut Option<Act>) {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let top = ui.cursor().min;
         let mut y = top.y;
-        // One card per entry: a separated GPU is a device of its own here.
+        // One card per entry: a separated GPU or disk is a device of its own here, told apart by
+        // its position among its kind.
         let mut entries: Vec<(Device, Option<usize>)> = Vec::new();
         for d in Device::ALL.into_iter().filter(|d| self.device_listed(*d)) {
             if d == Device::Gpu && fd.gpus_separated {
                 entries.extend((0..fd.snap.gpu.adapters.len()).map(|i| (d, Some(i))));
+            } else if d == Device::Disk && fd.disks_separated {
+                entries.extend((0..fd.snap.disk.drives.len()).map(|i| (d, Some(i))));
             } else {
                 entries.push((d, None));
             }
         }
-        let selected = self.selected_adapter(fd).map(|(i, _)| i);
-        for (d, gpu) in entries {
+        let selected_gpu = self.selected_adapter(fd).map(|(i, _)| i);
+        let selected_disk = self.selected_drive(fd).map(|(i, _)| i);
+        for (d, one) in entries {
+            let gpu = one.filter(|_| d == Device::Gpu);
             let adapter = gpu.map(|i| &fd.snap.gpu.adapters[i]);
+            let drive = one.filter(|_| d == Device::Disk).map(|i| &fd.snap.disk.drives[i]);
+            let selected = if d == Device::Disk { selected_disk } else { selected_gpu };
             let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), DEVICE_CARD_H));
-            let resp = ui.interact(r, ui.scope_id().with(("dev", d.key(), gpu)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = ui.interact(r, ui.scope_id().with(("dev", d.key(), one)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if d == Device::Gpu {
                 kit::context_menu(&resp, |ui| {
                     if let Some(m) = gpu_menu(ui, fd, self.perf.gpu_activity) {
@@ -358,7 +387,14 @@ impl App {
                     }
                 });
             }
-            let active = self.device == d && (gpu.is_none() || gpu == selected);
+            if d == Device::Disk && disk_drives::offers_menu(fd) {
+                kit::context_menu(&resp, |ui| {
+                    if let Some(on) = disk_menu(ui, fd) {
+                        *act = Some(Act::DisksSeparated(on));
+                    }
+                });
+            }
+            let active = self.device == d && (one.is_none() || one == selected);
             if active {
                 p.rect_filled(r, 8.0, with_alpha(pal.accent, 0.1));
                 p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, with_alpha(pal.accent, 0.5)), egui::StrokeKind::Outside);
@@ -368,14 +404,23 @@ impl App {
                 p.rect_filled(r, 8.0, pal.raise(if resp.hovered() { 0.06 } else { 0.04 }));
                 p.rect_stroke(r, 8.0, Stroke::new(1.0_f32, pal.raise(0.08)), egui::StrokeKind::Outside);
             }
-            let view = match adapter.and_then(|a| Some((a, fd.hist.gpu_adapter(&a.id)?))) {
-                Some((a, series)) => DevView { value: format!("{:.0}%", a.utilization_pct), lines: vec![(series, fd.metric("gpu"), (0.0, 100.0))], dashed_second: false },
-                None => self.dev_view(d, fd),
+            let view = match (adapter.and_then(|a| Some((a, fd.hist.gpu_adapter(&a.id)?))), drive.and_then(|v| Some((v, fd.hist.disk_drive(&v.id)?)))) {
+                (Some((a, series)), _) => DevView { value: format!("{:.0}%", a.utilization_pct), lines: vec![(series, fd.metric("gpu"), (0.0, 100.0))], dashed_second: false },
+                (_, Some((v, series))) => DevView { value: format!("{:.0}%", v.active_pct), lines: vec![(&series.active, fd.metric("disk"), (0.0, 100.0))], dashed_second: false },
+                _ => self.dev_view(d, fd),
             };
-            let title = gpu.zip(adapter).map_or_else(|| d.title().to_string(), |(i, a)| adapter_title(i, a));
+            let gpu_title;
+            let title: &str = match (gpu.zip(adapter), drive) {
+                (Some((i, a)), _) => {
+                    gpu_title = adapter_title(i, a);
+                    &gpu_title
+                }
+                (_, Some(v)) => &v.title,
+                _ => d.title(),
+            };
             let value_w = widgets::text_width(&p, &view.value, theme::mono(12.0));
             let name_w = r.width() - 24.0 - value_w - 8.0;
-            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, &title, theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
+            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, title, theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
             widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + 19.0), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
             let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 34.0), vec2(r.width() - 24.0, 32.0));
             if d == Device::Docker {
@@ -384,9 +429,10 @@ impl App {
                 widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
             }
             if resp.clicked() {
-                *act = Some(match adapter {
-                    Some(a) => Act::Gpu(a.id.clone()),
-                    None => Act::Device(d),
+                *act = Some(match (adapter, drive) {
+                    (Some(a), _) => Act::Gpu(a.id.clone()),
+                    (_, Some(v)) => Act::Disk(v.id.clone()),
+                    _ => Act::Device(d),
                 });
             }
             y += DEVICE_CARD_H + 6.0;
@@ -567,28 +613,59 @@ impl App {
             Device::Disk => {
                 let c = fd.metric("disk");
                 let write = theme::status(&pal).warn;
-                let value = if s.disk_known() { (format!("{:.0}", fd.smooth.disk), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
-                let hd = Head { title: "Disk", sub: SOURCES.disk.into(), value, side: format!("R {} \u{b7} W {}", format_rate(s.disk.read_bps), format_rate(s.disk.write_bps)) };
+                if disk_drives::offers_menu(fd) {
+                    // Under the card's content, so the plots keep their hover readout: right-click only.
+                    let section = Rect::from_min_size(pos2(x, y), vec2(w, 300.0));
+                    kit::context_menu(&ui.interact(section, ui.scope_id().with("disk-section"), Sense::click()), |ui| {
+                        if let Some(on) = disk_menu(ui, fd) {
+                            *act = Some(Act::DisksSeparated(on));
+                        }
+                    });
+                }
+                // The grouped figures, or those of the disk shown on its own.
+                let one = self.selected_drive(fd).and_then(|(_, d)| Some((d, fd.hist.disk_drive(&d.id)?)));
+                let (title, sub) = one.map_or(("Disk", SOURCES.disk), |(d, _)| (d.title.as_str(), drive_subtitle(d)));
+                let (active, shown_active, read_bps, write_bps) = match one {
+                    Some((d, _)) => (d.active_pct, d.active_pct, d.read_bps, d.write_bps),
+                    None => (s.disk.active_pct, fd.smooth.disk, s.disk.read_bps, s.disk.write_bps),
+                };
+                let (h_active, h_read, h_write) = match one {
+                    Some((_, h)) => (&h.active, &h.read, &h.write),
+                    None => (&fd.hist.disk, &fd.hist.disk_read, &fd.hist.disk_write),
+                };
+                let value = if s.disk_known() { (format!("{shown_active:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
+                let hd = Head { title, sub: sub.into(), value, side: format!("R {} \u{b7} W {}", format_rate(read_bps), format_rate(write_bps)) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
-                let lines = [PlotLine::new(&fd.hist.disk, c, (0.0, 100.0))];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.disk, age));
+                let lines = [PlotLine::new(h_active, c, (0.0, 100.0))];
+                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(h_active, age));
                 let (ph, hover) = plot(ui, &pc, "disk", ix, cy, gw, 150.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
-                    let d = &s.disk;
-                    let labels = [("Disks", "all physical disks".to_string()), ("Read", format_rate(d.read_bps)), ("Write", format_rate(d.write_bps)), ("Active time", format!("{:.1}%", d.active_pct))];
+                    let which = match one {
+                        Some((d, _)) => ("Disk", d.name.clone()),
+                        None => ("Disks", "all physical disks".to_string()),
+                    };
+                    let labels = [which, ("Read", format_rate(read_bps)), ("Write", format_rate(write_bps)), ("Active time", format!("{active:.1}%"))];
                     figure_at(&p, &pal, Exploded::Disk, ix + gw, cy, 194.0, &labels);
                 }
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Active time", c, false)], hover.as_deref(), ix + gw);
                 cy += 34.0;
-                let m = widgets::eased(ui.ctx(), "perf-disk-rate", fd.hist.disk_read.max().max(fd.hist.disk_write.max()).max(1024.0 * 1024.0));
-                let lines = [PlotLine::new(&fd.hist.disk_read, c, (0.0, m)), PlotLine::new(&fd.hist.disk_write, write, (0.0, m))];
-                let readout = |age: usize| format!("{} \u{b7} R {} \u{b7} W {}", ago(iv, age), format_rate(at(&fd.hist.disk_read, age) as f64), format_rate(at(&fd.hist.disk_write, age) as f64));
+                let m = widgets::eased(ui.ctx(), "perf-disk-rate", h_read.max().max(h_write.max()).max(1024.0 * 1024.0));
+                let lines = [PlotLine::new(h_read, c, (0.0, m)), PlotLine::new(h_write, write, (0.0, m))];
+                let readout = |age: usize| format!("{} \u{b7} R {} \u{b7} W {}", ago(iv, age), format_rate(at(h_read, age) as f64), format_rate(at(h_write, age) as f64));
                 let (ph, hover) = plot(ui, &pc, "disk-rate", ix, cy, iw, 130.0, 64.0, &rate_labels(m), &lines, &readout);
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Read", c, false), ("Write", write, false)], hover.as_deref(), ix + iw);
                 cy += 24.0;
-                let facts = vec![("Active time".to_string(), format!("{:.1}%", s.disk.active_pct)), ("Read speed".to_string(), format_rate(s.disk.read_bps)), ("Write speed".to_string(), format_rate(s.disk.write_bps))];
+                let mut facts = vec![("Active time".to_string(), format!("{active:.1}%")), ("Read speed".to_string(), format_rate(read_bps)), ("Write speed".to_string(), format_rate(write_bps))];
+                // How full the volumes are: of this disk, or of all the disks together.
+                let space = match one {
+                    Some((d, _)) => d.space,
+                    None => disk_drives::total_space(&s.disk.drives),
+                };
+                if let Some(space) = space {
+                    facts.push(("Storage used".to_string(), disk_drives::space_text(space)));
+                }
                 cy += dl(&p, &pal, ix, cy, iw, &facts);
             }
             Device::Network => {
