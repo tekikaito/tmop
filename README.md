@@ -262,7 +262,8 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   - Linux and macOS: remove it with
     `curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh -s -- --uninstall`.
     It removes exactly the files it installed.
-- **Installed with Scoop (Windows)?** Update with `scoop update tmop`, remove with
+- **Installed with Scoop (Windows)?** Update with `scoop update tmop`: TMOP does not replace
+  its own exe there, its update dialog shows that command (with a Copy command button). Remove with
   `scoop uninstall tmop`.
 - **Installed with Homebrew (macOS)?** Update with `brew upgrade --cask tmop` (or just
   `brew upgrade`), remove with `brew uninstall --cask tmop`; add `--zap` to also remove your
