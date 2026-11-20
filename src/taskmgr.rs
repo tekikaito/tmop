@@ -105,12 +105,13 @@ fn is_tmop_exe(path: &Path) -> bool {
 }
 
 /// Path text without the `\\?\` prefix `current_exe` can return.
-fn plain(p: &Path) -> String {
+pub fn plain(p: &Path) -> String {
     let s = p.display().to_string();
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+/// Whether two Windows paths name the same file, ignoring case, slash style and a trailing slash.
+pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| plain(p).replace('/', "\\").trim_end_matches('\\').to_lowercase();
     norm(a) == norm(b)
 }
