@@ -18,7 +18,7 @@
 //! Process rows come from the libproc enumerator ([`crate::process::Enumerator`]). The FFI below is declared by hand (libSystem, IOKit, CoreFoundation) so no binding
 //! crate is needed; the decoding is pure and lives in [`super::mac_parse`].
 
-use super::common::{brand_from_bytes, cpu_brand, net_delta, tick_delta_pct, NetMark, Ticks};
+use super::common::{brand_from_bytes, cpu_brand, disk_model, net_delta, tick_delta_pct, NetMark, Ticks};
 use super::mac_parse::*;
 use super::{MemorySample, Probe, Snapshot, Sources};
 use crate::process::{Enumerator, ProcessRow};
@@ -125,6 +125,8 @@ mod ffi {
         pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
         pub fn CFDictionaryGetTypeID() -> usize;
         pub fn CFNumberGetTypeID() -> usize;
+        pub fn CFStringGetTypeID() -> usize;
+        pub fn CFStringGetCString(string: CFTypeRef, buffer: *mut c_char, size: CFIndex, encoding: u32) -> u8;
         pub fn CFDictionaryGetValue(dict: CFTypeRef, key: *const c_void) -> *const c_void;
         pub fn CFNumberGetValue(number: CFTypeRef, the_type: CFIndex, value_ptr: *mut c_void) -> u8;
         pub fn CFStringCreateWithCString(alloc: CFTypeRef, c_str: *const c_char, encoding: u32) -> CFTypeRef;
@@ -139,7 +141,13 @@ mod ffi {
         pub fn IOObjectRelease(object: io_object_t) -> kern_return_t;
         pub fn IORegistryEntryCreateCFProperty(entry: io_object_t, key: CFTypeRef, allocator: CFTypeRef, options: u32) -> CFTypeRef;
         pub fn IORegistryEntryGetRegistryEntryID(entry: io_object_t, entry_id: *mut u64) -> kern_return_t;
+        /// Returns a +1 copy of the property found on `entry` or, with the options below, on the
+        /// nearest entry above it in `plane` that has one.
+        pub fn IORegistryEntrySearchCFProperty(entry: io_object_t, plane: *const c_char, key: CFTypeRef, allocator: CFTypeRef, options: u32) -> CFTypeRef;
     }
+
+    /// `kIORegistryIterateRecursively | kIORegistryIterateParents`.
+    pub const SEARCH_PARENTS: u32 = 0x1 | 0x2;
 }
 
 // The hand-written offsets in mac_parse and the structs above against libc's definitions, checked
@@ -220,6 +228,29 @@ impl Cf {
             Some(out)
         }
     }
+
+    /// A string under `key` when `self` is a dictionary and the value a string of up to 255 bytes.
+    fn dict_string(&self, key: &Cf) -> Option<String> {
+        if self.0.is_null() || key.0.is_null() {
+            return None;
+        }
+        // SAFETY: as in `dict_i64`; the buffer is writable for the size given and NUL-terminated
+        // by a successful call.
+        unsafe {
+            if ffi::CFGetTypeID(self.0) != ffi::CFDictionaryGetTypeID() {
+                return None;
+            }
+            let v = ffi::CFDictionaryGetValue(self.0, key.0);
+            if v.is_null() || ffi::CFGetTypeID(v) != ffi::CFStringGetTypeID() {
+                return None;
+            }
+            let mut buf = [0 as c_char; 256];
+            if ffi::CFStringGetCString(v, buf.as_mut_ptr(), buf.len() as ffi::CFIndex, ffi::K_CF_STRING_ENCODING_UTF8) == 0 {
+                return None;
+            }
+            Some(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+        }
+    }
 }
 
 impl Drop for Cf {
@@ -266,6 +297,16 @@ fn property(svc: ffi::io_object_t, key: &Cf) -> Option<Cf> {
     }
     // SAFETY: svc is a live registry entry, key a live CFString.
     let v = unsafe { ffi::IORegistryEntryCreateCFProperty(svc, key.0, std::ptr::null(), 0) };
+    (!v.is_null()).then_some(Cf(v))
+}
+
+/// A copy (+1) of a property of `svc` or of the nearest service above it that has one.
+fn parent_property(svc: ffi::io_object_t, key: &Cf) -> Option<Cf> {
+    if key.0.is_null() {
+        return None;
+    }
+    // SAFETY: svc is a live registry entry, key a live CFString, the plane name NUL-terminated.
+    let v = unsafe { ffi::IORegistryEntrySearchCFProperty(svc, c"IOService".as_ptr(), key.0, std::ptr::null(), ffi::SEARCH_PARENTS) };
     (!v.is_null()).then_some(Cf(v))
 }
 
@@ -342,6 +383,9 @@ struct Keys {
     bytes_write: Cf,
     time_read: Cf,
     time_write: Cf,
+    characteristics: Cf,
+    vendor_name: Cf,
+    product_name: Cf,
     perf: Cf,
     utilization: Cf,
     vram: Cf,
@@ -356,6 +400,9 @@ impl Keys {
             bytes_write: Cf::string(c"Bytes (Write)"),
             time_read: Cf::string(c"Total Time (Read)"),
             time_write: Cf::string(c"Total Time (Write)"),
+            characteristics: Cf::string(c"Device Characteristics"),
+            vendor_name: Cf::string(c"Vendor Name"),
+            product_name: Cf::string(c"Product Name"),
             perf: Cf::string(c"PerformanceStatistics"),
             utilization: Cf::string(c"Device Utilization %"),
             vram: Cf::string(c"vramUsedBytes"),
@@ -376,6 +423,8 @@ pub struct Collector {
     prev_cores: Vec<[u32; 4]>,
     prev_net: Option<NetMark>,
     prev_disk: Option<(Instant, HashMap<u64, DiskCounters>)>,
+    /// The model of each disk listed, by registry entry ID.
+    disk_models: HashMap<u64, String>,
     keys: Keys,
     procs: Enumerator,
 }
@@ -404,6 +453,7 @@ impl Collector {
             prev_cores: Vec::new(),
             prev_net: None,
             prev_disk: None,
+            disk_models: HashMap::new(),
             keys: Keys::new(),
             procs: Enumerator::new(),
         }
@@ -522,6 +572,7 @@ impl Collector {
 
     fn disk(&mut self, snap: &mut Snapshot) {
         let k = &self.keys;
+        let models = &mut self.disk_models;
         let mut cur = HashMap::new();
         let ok = each_service(c"IOBlockStorageDriver", |svc| {
             let Some(stats) = property(svc, &k.statistics) else { return };
@@ -532,17 +583,32 @@ impl Collector {
             }
             let get = |key: &Cf| stats.dict_i64(key).unwrap_or(0).max(0) as u64;
             cur.insert(id, DiskCounters { read_bytes: get(&k.bytes_read), write_bytes: get(&k.bytes_write), busy_ns: get(&k.time_read) + get(&k.time_write) });
+            // Asked once per disk: the device above the driver names itself.
+            models.entry(id).or_insert_with(|| {
+                let of = |key: &Cf| parent_property(svc, &k.characteristics).and_then(|c| c.dict_string(key)).unwrap_or_default();
+                disk_model(&of(&k.vendor_name), &of(&k.product_name))
+            });
         });
         if !ok {
             snap.errors.push("IOKit: IOBlockStorageDriver query failed".into());
         }
+        models.retain(|id, _| cur.contains_key(id));
         let now = Instant::now();
         snap.disk.available = !cur.is_empty();
         if let Some((t, prev)) = &self.prev_disk {
-            let (active, read, write) = disk_rates(prev, &cur, now.duration_since(*t));
+            let dt = now.duration_since(*t);
+            let (active, read, write) = disk_rates(prev, &cur, dt);
             snap.disk.active_pct = active;
             snap.disk.read_bps = read;
             snap.disk.write_bps = write;
+            snap.disk.drives = disk_drives(prev, &cur, dt);
+        } else {
+            snap.disk.drives = disk_drives(&HashMap::new(), &cur, std::time::Duration::from_secs(1));
+        }
+        for d in &mut snap.disk.drives {
+            if let Some(m) = d.id.parse().ok().and_then(|id: u64| self.disk_models.get(&id)) {
+                d.model.clone_from(m);
+            }
         }
         self.prev_disk = Some((now, cur));
     }
