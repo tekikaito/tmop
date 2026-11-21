@@ -90,7 +90,7 @@ pub struct FileDialog {
     /// Save (pick a new or existing file name) rather than open an existing file.
     pub save: bool,
     pub title: String,
-    /// File-type filter, e.g. `("TMOP palette", "tmoptheme")`.
+    /// File-type filter, e.g. `("TMOP palette", "tmoptheme")`; the extension `"*"` shows every file.
     pub filter: (String, String),
     /// Suggested file name (save only).
     pub file_name: String,
@@ -124,7 +124,9 @@ fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
             dialog.SetTitle(&HSTRING::from(d.title.as_str()))?;
             let (name, spec, ext) = (HSTRING::from(format!("{} (*.{})", d.filter.0, d.filter.1)), HSTRING::from(format!("*.{}", d.filter.1)), HSTRING::from(d.filter.1.as_str()));
             dialog.SetFileTypes(&[COMDLG_FILTERSPEC { pszName: PCWSTR(name.as_ptr()), pszSpec: PCWSTR(spec.as_ptr()) }])?;
-            dialog.SetDefaultExtension(&ext)?;
+            if d.filter.1 != "*" {
+                dialog.SetDefaultExtension(&ext)?;
+            }
             let mut opts = dialog.GetOptions()? | FOS_FORCEFILESYSTEM;
             if d.save {
                 opts |= FOS_OVERWRITEPROMPT;
@@ -150,7 +152,8 @@ fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
 /// the running event loop) and this worker thread waits for the answer.
 #[cfg(not(windows))]
 fn run_file_dialog(d: &FileDialog) -> Option<std::path::PathBuf> {
-    let dialog = rfd::AsyncFileDialog::new().set_title(&d.title).add_filter(&d.filter.0, &[d.filter.1.as_str()]);
+    let dialog = rfd::AsyncFileDialog::new().set_title(&d.title);
+    let dialog = if d.filter.1 == "*" { dialog } else { dialog.add_filter(&d.filter.0, &[d.filter.1.as_str()]) };
     let file = if d.save { block_on(dialog.set_file_name(&d.file_name).save_file()) } else { block_on(dialog.pick_file()) }?;
     let mut path = file.path().to_path_buf();
     // Portals and panels may hand back a save name without the type's extension.
