@@ -1,7 +1,8 @@
 # winget manifests for TMOP
 
-Prepared for `tekikaito.TMOP` 0.11.0, **not submitted**. Submitting is a pull request to
-[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) from your own GitHub account.
+Manifests for `tekikaito.TMOP` 0.14.1, **submitted** as
+[microsoft/winget-pkgs#485728](https://github.com/microsoft/winget-pkgs/pull/485728) (a pull request
+from the tekikaito account; status is on that page).
 
 | File | Manifest type |
 | --- | --- |
@@ -23,7 +24,7 @@ zip support since client 1.5, portable since 1.3, `PortableCommandAlias` only va
 winget unpacks the zip into `%LOCALAPPDATA%\Microsoft\WinGet\Packages\tekikaito.TMOP_...`, links
 `TMOP.exe` as the command `tmop` and registers it in *Settings > Apps* for uninstall.
 
-I chose the versioned zips (`TMOP-v0.11.0-windows-x64.zip`, `...-arm64.zip`) over the bare
+I chose the versioned zips (`TMOP-v0.14.1-windows-x64.zip`, `...-arm64.zip`) over the bare
 `TMOP-windows-x64.exe` because winget needs a URL whose file never changes (the hash is pinned),
 and the bare exe is published under a version-less name that is replaced by every release. The zip
 holds `TMOP.exe`, `LICENSE`, `README.md`, `Michroma-OFL.txt` and `PawnIO-Modules-LGPL-2.1.txt`
@@ -38,9 +39,9 @@ it can become a second package later.
   `winget-cli/schemas/JSON/manifests/v1.28.0/manifest.{version,installer,defaultLocale}.1.28.0.json`
   (checked with ajv; the only complaint was `ReleaseDate`, which the YAML library read as a date
   object instead of the string winget expects, a limitation of my checker).
-- **Not validated:** `winget validate`, a real `winget install --manifest`, Windows Sandbox, and
-  winget-pkgs' own validation pipeline. winget is not run from this repository's tooling; do that
-  step yourself (below).
+- `winget validate --manifest` (client 1.29) passes for 0.14.1 (an earlier draft had `Scope: user`,
+  which validate warns about for portable installers; it was removed). **Not done:** a real
+  `winget install --manifest`, Windows Sandbox. winget-pkgs' own validation pipeline runs on the PR.
 
 ## What you do to submit
 
@@ -64,11 +65,11 @@ Rules and checks are described in
    (If `winget validate` objects to this README sitting in the folder, copy the three `.yaml`
    files to a fresh folder and point it there.)
 
-2. Fork `microsoft/winget-pkgs`, clone your fork, create a branch such as `tekikaito.TMOP-0.11.0`
+2. Fork `microsoft/winget-pkgs`, clone your fork, create a branch such as `tekikaito.TMOP-0.14.1`
    and copy the three files to
 
    ```
-   manifests/t/tekikaito/TMOP/0.11.0/
+   manifests/t/tekikaito/TMOP/0.14.1/
    ```
 
    (partition `t` = first letter of the identifier, lower case; folder names are `Publisher/Package/version`).
@@ -81,7 +82,7 @@ Alternative to steps 2 and 3, with [wingetcreate](https://github.com/microsoft/w
 (`winget install wingetcreate`), which also fills hashes itself and opens the PR:
 
 ```powershell
-wingetcreate new https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-x64.zip https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-arm64.zip
+wingetcreate new https://github.com/tekikaito/tmop/releases/download/v0.14.1/TMOP-v0.14.1-windows-x64.zip https://github.com/tekikaito/tmop/releases/download/v0.14.1/TMOP-v0.14.1-windows-arm64.zip
 ```
 
 (then pick the nested `TMOP.exe` as portable and review each prompt against these files).
@@ -89,9 +90,9 @@ wingetcreate new https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMO
 **Later releases**, once the package exists, one command per release:
 
 ```powershell
-wingetcreate update tekikaito.TMOP --version 0.11.1 `
-  --urls https://github.com/tekikaito/tmop/releases/download/v0.11.1/TMOP-v0.11.1-windows-x64.zip `
-         https://github.com/tekikaito/tmop/releases/download/v0.11.1/TMOP-v0.11.1-windows-arm64.zip `
+wingetcreate update tekikaito.TMOP --version 0.14.2 `
+  --urls https://github.com/tekikaito/tmop/releases/download/v0.14.2/TMOP-v0.14.2-windows-x64.zip `
+         https://github.com/tekikaito/tmop/releases/download/v0.14.2/TMOP-v0.14.2-windows-arm64.zip `
   --submit
 ```
 
