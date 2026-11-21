@@ -26,9 +26,10 @@ const SPARK_W: f32 = 84.0;
 const SPARK_H: f32 = 24.0;
 /// A group shows this many member rows before "+ n more processes".
 const SHOWN_MEMBERS: usize = 3;
-/// Tree view: indentation per level, and the level beyond which deeper rows indent no further.
+/// Tree view: indentation per level, and the level beyond which deeper rows indent no further
+/// (eight levels, so a default-width Name column keeps room for the name).
 const TREE_STEP: f32 = 16.0;
-const TREE_MAX_INDENT: usize = 12;
+const TREE_MAX_INDENT: usize = 8;
 /// Height of the system history strip.
 const STRIP_H: f32 = 108.0;
 /// Network use (bytes/s, sent and received) that the Network column marks hot; its heat grows towards it.
@@ -361,9 +362,17 @@ fn tree_tab(view: usize, r: &ProcessRow) -> bool {
     }
 }
 
-/// The table lines of the tree view, one per tree row.
-fn tree_entries(tree: &[TreeRow]) -> Vec<Entry> {
-    tree.iter().map(|t| Entry::Row { idx: t.index, depth: t.depth, kids: usize::from(t.has_children), open: t.expanded }).collect()
+/// The table lines of the tree view, one per tree row. While filtering the tree stays open and has
+/// no arrows (`kids` 0), so a click on that spot selects the row like anywhere else.
+fn tree_entries(tree: &[TreeRow], filtering: bool) -> Vec<Entry> {
+    tree.iter().map(|t| Entry::Row { idx: t.index, depth: t.depth, kids: usize::from(t.has_children && !filtering), open: t.expanded }).collect()
+}
+
+/// Whether the row of process `k` is among the lines `entries` the table lists now. The keyboard
+/// shortcuts act on the selection only then: a selected process inside a closed group, or hidden by
+/// the search or a tab, stays selected but is not one the user can see.
+fn row_listed(entries: &[Entry], rows: &[ProcessRow], k: (u32, i64)) -> bool {
+    entries.iter().any(|e| matches!(e, Entry::Row { idx, .. } if (rows[*idx].pid, rows[*idx].create_time) == k))
 }
 
 /// Tree view: what Left or Right, pressed this frame, does on line `at` (the selection).
@@ -676,7 +685,7 @@ impl App {
         let mut built = Built::default();
         let tctx = TreeCtx { rows, children: &groups.children, expanded: &self.proc.expanded, show_all: &self.proc.show_all };
         match view {
-            _ if tree_view => built.entries = tree_entries(&tree_rows),
+            _ if tree_view => built.entries = tree_entries(&tree_rows, filtering),
             0 => {
                 built.entries.push(Entry::Group("Apps", groups.app_procs));
                 for i in &groups.apps {
@@ -1144,7 +1153,7 @@ impl App {
                 }
             });
             let ctx = ui.ctx();
-            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() {
+            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() && row_listed(&built.entries, rows, (r.pid, r.create_time)) {
                 if key_once(ctx, egui::Key::Delete) {
                     let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
                     requested = Some((action, r.clone()));
@@ -2099,11 +2108,11 @@ mod tests {
         let rows = tree_sample();
         let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Cpu)];
         let tree = tree_of_sample(&rows, &HashSet::new());
-        let csv = csv_of(&rows, &tree_entries(&tree), &HashMap::new(), &cols, false, 4, false, "");
+        let csv = csv_of(&rows, &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
         assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nrustc,4,40.0%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
         let collapsed: HashSet<(u32, i64)> = [(3, 3)].into_iter().collect();
         let tree = tree_of_sample(&rows, &collapsed);
-        let csv = csv_of(&rows, &tree_entries(&tree), &HashMap::new(), &cols, false, 4, false, "");
+        let csv = csv_of(&rows, &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
         assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
     }
 
@@ -2222,6 +2231,27 @@ mod tests {
         assert!(!frame(vec![egui::Event::PointerMoved(name)]));
         assert!(!frame(vec![egui::Event::PointerButton { pos: name, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]));
         assert!(!frame(vec![egui::Event::PointerButton { pos: name, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]));
+        // Deeper than the cap the arrow stops moving right: depth 20 sits where depth 8 does.
+        let deep = TreeRow { index: 2, depth: 20, has_children: true, expanded: true, matched: true };
+        let capped = pos2(cell.left() + TREE_MAX_INDENT as f32 * TREE_STEP + 16.0, cell.center().y);
+        let mut deep_frame = |events: Vec<egui::Event>, kids: usize| {
+            let mut toggled = false;
+            ctx.run_ui(egui::RawInput { events, screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                        toggled = cell_ui(ui, &rows[2], PCol::Data(Column::Name), &pal, CellCtx { kids, ..cx_of(&deep) }, &mut icons, true, false);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+            toggled
+        };
+        let click = |pos| vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }];
+        assert!(!deep_frame(vec![egui::Event::PointerMoved(capped)], 1));
+        assert!(!deep_frame(vec![egui::Event::PointerButton { pos: capped, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }], 1));
+        assert!(deep_frame(click(capped), 1), "the arrow of a deep row sits at the cap");
+        // Without an arrow (filtering) the same click toggles nothing.
+        assert!(!deep_frame(click(capped), 0));
     }
 
     /// The tabs pick the matches of the tree view: Apps the windowed processes, Background the rest.
@@ -2304,6 +2334,63 @@ mod tests {
         // Without grouping each process sorts by its own value.
         let flat = group_rows(&rows, &visible, false, Column::Cpu, true);
         assert_eq!(flat.bg, vec![1, 2, 0]);
+    }
+
+    /// Delete, Shift+Delete and Enter act on the selection only when its row is listed: in the flat
+    /// list, in an open group (not behind "+ n more" or in a closed group), and in the tree.
+    #[test]
+    fn shortcuts_need_the_selected_row_to_be_listed() {
+        let mut root = row(10, 1, 5, "app.exe");
+        root.has_window = true;
+        let mut rows = vec![root];
+        for k in 0..5u32 {
+            rows.push(row(11 + k, 10, 6 + k as i64, "child.exe"));
+        }
+        let visible: Vec<usize> = (0..rows.len()).collect();
+        let key = |i: usize| (rows[i].pid, rows[i].create_time);
+        let listed = |b: &Built, i: usize| row_listed(&b.entries, &rows, key(i));
+        let build = |tree: bool, expanded: &HashSet<(u32, i64)>| {
+            let g = group_rows(&rows, &visible, tree, Column::Pid, false);
+            let show_all = HashSet::new();
+            let t = TreeCtx { rows: &rows, children: &g.children, expanded, show_all: &show_all };
+            let mut b = Built::default();
+            for i in g.apps.iter().chain(&g.bg) {
+                push_root(*i, &t, &mut b);
+            }
+            b
+        };
+        // Flat: every process is a line.
+        let flat = build(false, &HashSet::new());
+        assert!((0..rows.len()).all(|i| listed(&flat, i)));
+        // Grouped and closed: only the app; its children are hidden.
+        let closed = build(true, &HashSet::new());
+        assert!(listed(&closed, 0) && !(1..rows.len()).any(|i| listed(&closed, i)));
+        // Open: the first members are lines, the rest sit behind "+ n more".
+        let open = build(true, &[key(0)].into_iter().collect());
+        assert!((0..=SHOWN_MEMBERS).all(|i| listed(&open, i)) && !listed(&open, SHOWN_MEMBERS + 1));
+        // Tree view: all lines, but a filter hides what does not match and has no match below.
+        let all: Vec<usize> = (0..rows.len()).collect();
+        let tree = ptree::build(&rows, &all, None, (Column::Pid, false), &HashSet::new());
+        let entries = tree_entries(&tree, false);
+        assert!((0..rows.len()).all(|i| row_listed(&entries, &rows, key(i))));
+        let pick = |r: &ProcessRow| r.pid == 12;
+        let tree = ptree::build(&rows, &all, Some(&pick), (Column::Pid, false), &HashSet::new());
+        let entries = tree_entries(&tree, true);
+        assert!(row_listed(&entries, &rows, key(0)) && row_listed(&entries, &rows, key(2)) && !row_listed(&entries, &rows, key(3)));
+        // Nothing is listed for a process that is gone.
+        assert!(!row_listed(&entries, &rows, (999, 1)));
+    }
+
+    /// While filtering the tree has no arrows: a click where the arrow would be is no toggle.
+    #[test]
+    fn filtered_tree_lines_have_no_arrow() {
+        let rows = tree_sample();
+        let all: Vec<usize> = (0..rows.len()).collect();
+        let pick = |r: &ProcessRow| r.name == "rustc";
+        let tree = ptree::build(&rows, &all, Some(&pick), (Column::Pid, false), &HashSet::new());
+        assert!(tree.iter().any(|t| t.has_children));
+        assert!(tree_entries(&tree, true).iter().all(|e| matches!(e, Entry::Row { kids: 0, .. })));
+        assert!(tree_entries(&tree, false).iter().any(|e| matches!(e, Entry::Row { kids, .. } if *kids > 0)));
     }
 
     #[test]
