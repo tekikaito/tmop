@@ -519,6 +519,8 @@ pub enum Action {
     SetPriority(Priority),
     Efficiency(bool),
     OpenFileLocation,
+    /// The shell's file Properties dialog of the executable (Windows).
+    Properties,
 }
 
 impl Action {
@@ -528,6 +530,7 @@ impl Action {
             Action::Suspend | Action::Resume => caps.suspend,
             Action::Efficiency(_) => caps.efficiency,
             Action::SetPriority(Priority::Realtime) => caps.realtime,
+            Action::Properties => caps.properties,
             _ => true,
         }
     }
@@ -560,6 +563,7 @@ pub mod actions {
         fn set_priority(&self, pid: u32, start: i64, p: Priority) -> Result<(), String>;
         fn set_efficiency(&self, pid: u32, start: i64, on: bool) -> Result<(), String>;
         fn open_location(&self, path: &str) -> Result<(), String>;
+        fn properties(&self, path: &str) -> Result<(), String>;
     }
 
     struct Native;
@@ -582,6 +586,14 @@ pub mod actions {
         }
         fn open_location(&self, path: &str) -> Result<(), String> {
             imp::sys::open_location(path)
+        }
+        #[cfg(windows)]
+        fn properties(&self, path: &str) -> Result<(), String> {
+            imp::sys::properties(path)
+        }
+        #[cfg(not(windows))]
+        fn properties(&self, _path: &str) -> Result<(), String> {
+            Err(format!("not available on {}", crate::platform::os_name()))
         }
     }
 
@@ -619,7 +631,68 @@ pub mod actions {
                 Some(p) => sys.open_location(p).map(|_| String::new()),
                 None => Err("Image path unavailable".into()),
             },
+            Action::Properties => match &row.path {
+                Some(p) => sys.properties(p).map(|_| String::new()),
+                None => Err("Image path unavailable".into()),
+            },
         }
+    }
+}
+
+/// The address of a web search for a process name: only the image name goes out, never its path or
+/// command line.
+pub fn search_url(name: &str) -> String {
+    let mut url = String::from("https://www.bing.com/search?q=");
+    for b in name.trim().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => url.push(b as char),
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    url
+}
+
+/// Whether a services list holds a service that runs in the process `pid` (0 is "not running").
+pub fn hosts_services(pids: impl IntoIterator<Item = u32>, pid: u32) -> bool {
+    pid != 0 && pids.into_iter().any(|p| p == pid)
+}
+
+/// Memory dumps of a process (Windows: `MiniDumpWriteDump`).
+pub mod dump {
+    use std::path::{Path, PathBuf};
+
+    /// The file name of a dump of `name`: the image name without characters a file name cannot
+    /// hold, with `.DMP` (`svchost.exe` becomes `svchost.exe.DMP`), or `process.DMP` for nothing
+    /// usable. `n` > 0 numbers it: `svchost.exe (2).DMP`.
+    pub fn file_name(name: &str, n: u32) -> String {
+        let stem: String = name.trim().chars().filter(|c| !c.is_control() && !"<>:\"\\/|?*".contains(*c)).collect();
+        let stem = stem.trim().trim_end_matches('.');
+        let stem = if stem.is_empty() { "process" } else { stem };
+        if n == 0 {
+            format!("{stem}.DMP")
+        } else {
+            format!("{stem} ({n}).DMP")
+        }
+    }
+
+    /// The first file in `dir` for a dump of `name` that `taken` does not report as existing.
+    pub fn free_path(dir: &Path, name: &str, taken: impl Fn(&Path) -> bool) -> PathBuf {
+        (0u32..).map(|n| dir.join(file_name(name, n))).find(|p| !taken(p)).expect("an unbounded range")
+    }
+
+    /// Writes a full memory dump of `pid` into `dir` (never over an existing file) and returns
+    /// where it went. Blocks while the dump is written: call it off the UI thread.
+    #[cfg(windows)]
+    pub fn create(pid: u32, name: &str, dir: &Path) -> Result<PathBuf, String> {
+        if pid == std::process::id() {
+            return Err("refusing to dump TMOP itself".into());
+        }
+        super::imp::sys::create_dump(pid, name, dir)
+    }
+
+    #[cfg(not(windows))]
+    pub fn create(_pid: u32, _name: &str, _dir: &Path) -> Result<PathBuf, String> {
+        Err(format!("not available on {}", crate::platform::os_name()))
     }
 }
 
@@ -687,6 +760,68 @@ mod tests {
     }
 
     #[test]
+    fn search_url_encodes_only_the_name() {
+        assert_eq!(search_url("svchost.exe"), "https://www.bing.com/search?q=svchost.exe");
+        assert_eq!(search_url(" My App & Co+1.exe "), "https://www.bing.com/search?q=My%20App%20%26%20Co%2B1.exe");
+        assert_eq!(search_url("caf\u{e9}"), "https://www.bing.com/search?q=caf%C3%A9");
+    }
+
+    #[test]
+    fn services_are_found_by_pid() {
+        assert!(hosts_services([0, 5, 8], 8));
+        assert!(!hosts_services([0, 5, 8], 6));
+        assert!(!hosts_services([0, 5], 0), "a stopped service has pid 0");
+        assert!(!hosts_services([], 8));
+    }
+
+    #[test]
+    fn dump_names_do_not_clobber() {
+        use std::path::Path;
+        assert_eq!(dump::file_name("svchost.exe", 0), "svchost.exe.DMP");
+        assert_eq!(dump::file_name("a<b>:c/d\\e|f?g*h\"", 0), "abcdefgh.DMP");
+        assert_eq!(dump::file_name("  ", 0), "process.DMP");
+        assert_eq!(dump::file_name("x.exe", 2), "x.exe (2).DMP");
+        let dir = Path::new("tmp");
+        let taken = [dir.join("x.exe.DMP"), dir.join("x.exe (1).DMP")];
+        assert_eq!(dump::free_path(dir, "x.exe", |p| taken.iter().any(|t| t == p)), dir.join("x.exe (2).DMP"));
+        assert_eq!(dump::free_path(dir, "y.exe", |p| taken.iter().any(|t| t == p)), dir.join("y.exe.DMP"));
+    }
+
+    /// Dumps a child this test starts itself (never another process) into a folder of its own.
+    #[cfg(windows)]
+    #[test]
+    fn dumps_a_child_process_without_clobbering() {
+        let dir = std::env::temp_dir().join(format!("tmop-dump-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let first = dump::create(child.id(), "ping.exe", &dir);
+        let second = dump::create(child.id(), "ping.exe", &dir);
+        let _ = child.kill();
+        let _ = child.wait();
+        let own = dump::create(std::process::id(), "tmop", &dir);
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first.file_name().unwrap(), "ping.exe.DMP");
+        assert_eq!(second.file_name().unwrap(), "ping.exe (1).DMP");
+        assert!(std::fs::metadata(&first).unwrap().len() > 0);
+        assert!(own.is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn properties_need_a_path_and_the_cap() {
+        let sys = FakeSys::default();
+        let mut r = row(5, 1, 1);
+        assert_eq!(actions::run_with(&sys, &ALL_CAPS, Action::Properties, &r, &[]).unwrap_err(), "Image path unavailable");
+        r.path = Some("C:\\x\\a.exe".into());
+        assert!(actions::run_with(&sys, &ALL_CAPS, Action::Properties, &r, &[]).is_ok());
+        assert_eq!(sys.calls(), vec!["properties C:\\x\\a.exe"]);
+        let none = ProcCaps { properties: false, ..ALL_CAPS };
+        assert!(actions::run_with(&sys, &none, Action::Properties, &r, &[]).is_err());
+        assert_eq!(sys.calls().len(), 1);
+    }
+
+    #[test]
     fn formatting() {
         assert_eq!(format_bytes(512.0), "512 B");
         assert_eq!(format_bytes(1536.0), "1.5 KB");
@@ -732,6 +867,9 @@ mod tests {
         }
         fn open_location(&self, path: &str) -> Result<(), String> {
             self.call(format!("open {path}"), 0)
+        }
+        fn properties(&self, path: &str) -> Result<(), String> {
+            self.call(format!("properties {path}"), 0)
         }
     }
 

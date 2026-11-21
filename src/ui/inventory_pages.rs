@@ -33,6 +33,8 @@ pub struct InventoryState {
     pub sysinfo_read_at: Option<(u16, u16, u16)>,
     pub services: Loader<Vec<crate::pro::inventory::Service>>,
     pub services_table: TableState,
+    /// Only the services of this process (set by "Go to services" in the Processes menu).
+    pub services_pid: Option<u32>,
     /// Description and company of the services looked at in the side panel.
     pub svc_info: InfoCache,
     pub startup: Loader<Vec<StartupApp>>,
@@ -49,6 +51,7 @@ impl Default for InventoryState {
             sysinfo_read_at: None,
             services: Loader::default(),
             services_table: TableState::default(),
+            services_pid: None,
             svc_info: InfoCache::default(),
             startup: Loader::default(),
             startup_table: TableState::default(),
@@ -600,13 +603,18 @@ impl App {
         toolbar(ui, tools, |ui| {
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             widgets::search_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
+            if let Some(pid) = self.pro.inv.services_pid {
+                if widgets::button(ui, &format!("PID {pid}  \u{d7}"), &pal, None).on_hover_text("Showing the services of this process; click to show all").clicked() {
+                    self.pro.inv.services_pid = None;
+                }
+            }
         });
         let inv = &mut self.pro.inv;
         if refresh || inv.services.stale(Duration::from_secs(15)) {
             inv.services.start(crate::pro::inventory::services);
         }
         let list: &[crate::pro::inventory::Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
-        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info);
+        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info, inv.services_pid);
         if let Some(sel) = open {
             self.selected = Some(sel);
             self.page = Page::Processes;

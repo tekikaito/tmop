@@ -118,6 +118,77 @@ impl App {
         }
     }
 
+    /// Writes a memory dump of `row` into the temp folder on a worker thread (it can take a while
+    /// and several GB); [`App::dump_dialog`] reports where it went, or why it failed.
+    pub(super) fn start_dump(&mut self, ctx: &egui::Context, row: &ProcessRow) {
+        if self.dump_job.is_some() {
+            self.status = "A memory dump is already being written".into();
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (pid, name, ctx) = (row.pid, row.name.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("tmop-dump".into()).spawn({
+            let name = name.clone();
+            move || {
+                let r = process::dump::create(pid, &name, &std::env::temp_dir());
+                let _ = tx.send(r);
+                ctx.request_repaint();
+            }
+        });
+        match spawned {
+            Ok(_) => {
+                self.dump_job = Some((name.clone(), rx));
+                self.status = format!("Writing a memory dump of {name}\u{2026}");
+            }
+            Err(e) => self.status = format!("{name}: could not start the dump: {e}"),
+        }
+    }
+
+    /// Picks up the dump worker's result and shows a finished dump with a button to open its folder.
+    pub(super) fn dump_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        if let Some((name, rx)) = &self.dump_job {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    self.status = format!("Memory dump of {name} saved to {}", path.display());
+                    self.dump_done = Some((name.clone(), path));
+                    self.dump_job = None;
+                }
+                Ok(Err(e)) => {
+                    self.status = format!("{name}: {e}");
+                    self.dump_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status = format!("{name}: the dump stopped unexpectedly");
+                    self.dump_job = None;
+                }
+            }
+        }
+        let Some((name, path)) = &self.dump_done else { return };
+        let st = theme::status(pal);
+        let mut answer = None;
+        kit::dialog(ctx, "dump-done", |ui| {
+            ui.spacing_mut().item_spacing.y = 18.0;
+            kit::dialog_header(ui, pal, Some((Icon::Check, st.ok)), &format!("Dump of **{name}** saved"), &format!("{}\n\nIt holds the whole memory of the process, so treat it as private.", path.display()));
+            answer = kit::dialog_buttons(ui, pal, &[DialogButton::Secondary("Close"), DialogButton::Primary("Show in folder")]);
+        });
+        if answer.is_none() && key_once(ctx, egui::Key::Escape) {
+            answer = Some(0);
+        }
+        match answer {
+            Some(1) => {
+                if let Err(e) = crate::platform::reveal(path) {
+                    self.status = format!("could not open the folder: {e}");
+                }
+                self.dump_done = None;
+            }
+            Some(_) => self.dump_done = None,
+            None => {}
+        }
+    }
+
     pub(super) fn confirm_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
         self.poll_elevated();
         let Some(p) = &self.pending else { return };

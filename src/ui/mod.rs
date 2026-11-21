@@ -457,6 +457,10 @@ pub struct App {
     run_task: run_task::RunTaskUi,
     /// A process action running as administrator (`pkexec`); its status text arrives here.
     elevated_job: Option<std::sync::mpsc::Receiver<String>>,
+    /// A memory dump being written (process name, result), see `start_dump`.
+    dump_job: Option<(String, std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>)>,
+    /// A finished dump (process name, file) the dialog shows.
+    dump_done: Option<(String, std::path::PathBuf)>,
     /// "HOST {b7} user" shown in the header.
     machine: String,
     /// Ctrl+K was pressed: focus the header search on the next frame.
@@ -571,6 +575,8 @@ impl App {
             affinity: None,
             run_task: run_task::RunTaskUi::new(main_hwnd(cc)),
             elevated_job: None,
+            dump_job: None,
+            dump_done: None,
             machine: if launch.shot.is_some() { crate::shot::MACHINE.into() } else { chrome::machine_line() },
             focus_search: false,
             status,
@@ -1156,6 +1162,7 @@ impl App {
                 Page::Docker => self.docker_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
+            self.dump_dialog(ctx, &pal);
             self.affinity_dialog(ctx, &pal);
             self.run_task_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);

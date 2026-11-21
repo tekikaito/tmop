@@ -34,6 +34,10 @@ pub struct ProcCaps {
     /// "Set affinity" (which logical processors a process may run on): Windows (one processor
     /// group only, see [`Caps::with_groups`]) and Linux; macOS has no supported API.
     pub affinity: bool,
+    /// "Properties": the shell's file Properties dialog of the executable (Windows only).
+    pub properties: bool,
+    /// "Create dump file": a full memory dump through `MiniDumpWriteDump` (Windows only).
+    pub dump: bool,
 }
 
 /// What this build can do; see the module docs. Fields are plain flags so a test can build any
@@ -96,7 +100,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true, network: true, affinity: true },
+        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true, network: true, affinity: true, properties: true, dump: true },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -117,7 +121,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: true },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: true, properties: false, dump: false },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -139,7 +143,7 @@ impl Caps {
         clocks: cfg!(target_arch = "x86_64"),
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: false },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: false, properties: false, dump: false },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -161,7 +165,7 @@ impl Caps {
         clocks: false,
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false, network: false, affinity: false },
+        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false, network: false, affinity: false, properties: false, dump: false },
         trash: false,
         delete_safe: false,
         window_levels: false,
@@ -266,6 +270,12 @@ mod tests {
         let many = Caps::WINDOWS.with_groups(2);
         assert!(!many.proc.affinity);
         assert_eq!(Caps { proc: ProcCaps { affinity: true, ..many.proc }, ..many }, Caps::WINDOWS);
+    }
+
+    #[test]
+    fn properties_and_dump_are_windows_only() {
+        assert_eq!([Caps::WINDOWS.proc.properties, Caps::LINUX.proc.properties, Caps::MACOS.proc.properties, Caps::OTHER.proc.properties], [true, false, false, false]);
+        assert_eq!([Caps::WINDOWS.proc.dump, Caps::LINUX.proc.dump, Caps::MACOS.proc.dump, Caps::OTHER.proc.dump], [true, false, false, false]);
     }
 
     #[test]

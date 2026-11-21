@@ -44,7 +44,7 @@ impl App {
         }
         let list: &[Service] = self.pro.drivers.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let mut info = InfoCache::default();
-        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info);
+        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info, None);
     }
 }
 
@@ -122,6 +122,7 @@ pub fn driver_like_page(
     drivers: bool,
     icons: &mut super::icons::IconCache,
     info: &mut InfoCache,
+    only_pid: Option<u32>,
 ) -> Option<(u32, i64)> {
     let pal = &fd.pal;
     let st = theme::status(pal);
@@ -145,7 +146,7 @@ pub fn driver_like_page(
         (Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - h - 14.0)), Rect::from_min_max(pos2(rest.left(), rest.bottom() - h), rest.max))
     };
 
-    let mut order: Vec<usize> = (0..list.len()).filter(|i| table::matches(&state.filter, &[&list[*i].name, &list[*i].display, &list[*i].company, &list[*i].path])).collect();
+    let mut order: Vec<usize> = (0..list.len()).filter(|i| only_pid.is_none_or(|p| list[*i].pid == p) && table::matches(&state.filter, &[&list[*i].name, &list[*i].display, &list[*i].company, &list[*i].path])).collect();
     // Services have no version column: their column 6 is the image path.
     let map = |col: usize| if !drivers && col >= 6 { col + 1 } else { col };
     state.sort(list, &mut order, |a, b, col| match map(col) {
@@ -418,8 +419,9 @@ mod tests {
                 ctx.run_ui(egui::RawInput::default(), |root| {
                     egui::CentralPanel::default().show(root, |ui| {
                         let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(width, 700.0));
-                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info), None);
-                        assert_eq!(driver_like_page(ui, area, &fd, &[], &mut state, Some("no access"), drivers, &mut icons, &mut info), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, None), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, Some(2112)), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &[], &mut state, Some("no access"), drivers, &mut icons, &mut info, None), None);
                     });
                 }).drop_without_applying_deltas();
             }

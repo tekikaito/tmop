@@ -497,4 +497,54 @@ pub(super) mod sys {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+
+    /// The shell's Properties dialog of the file at `path` (`ShellExecuteExW`, verb `properties`).
+    pub fn properties(path: &str) -> Result<(), String> {
+        use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+        let verb: Vec<u16> = "properties".encode_utf16().chain(std::iter::once(0)).collect();
+        let file: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_INVOKEIDLIST,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            nShow: SW_SHOW.0,
+            ..Default::default()
+        };
+        // SAFETY: `info` and both strings outlive the call; the dialog belongs to the shell.
+        unsafe { ShellExecuteExW(&mut info).map_err(err) }
+    }
+
+    /// Writes a full memory dump of `pid` to a new file in `dir` (`MiniDumpWriteDump`); a failed
+    /// dump leaves no file behind.
+    pub fn create_dump(pid: u32, name: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::System::Diagnostics::Debug::{MiniDumpWithFullMemory, MiniDumpWriteDump};
+        use windows::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
+        const PROCESS_VM_READ: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGHTS(0x10);
+        let h = open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ).map_err(err)?;
+        // `create_new` fails if the name is taken meanwhile: try the next one.
+        let (file, path) = (0u32..)
+            .find_map(|n| {
+                let p = dir.join(super::super::dump::file_name(name, n));
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+                    Ok(f) => Some(Ok((f, p))),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(e) => Some(Err(e.to_string())),
+                }
+            })
+            .expect("an unbounded range")?;
+        // SAFETY: both handles are open for the call; no callbacks or extra streams.
+        let done = unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), MiniDumpWithFullMemory, None, None, None) };
+        match done {
+            Ok(()) => Ok(path),
+            Err(e) => {
+                let msg = err(e);
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                Err(msg)
+            }
+        }
+    }
 }
