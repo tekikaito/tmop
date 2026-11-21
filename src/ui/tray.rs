@@ -167,9 +167,10 @@ impl App {
     pub fn window_logic(&mut self, ctx: &egui::Context) {
         if self.tray_ui.focus_pending && !self.tray_ui.vis.hidden {
             self.tray_ui.focus_pending = false;
-            if !tray::bring_to_front(self.tray_ui.hwnd) {
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-            }
+            // When Windows refuses, the taskbar button flashes, as it should. There is no
+            // fallback to `ViewportCommand::Focus`: winit forces the foreground with a
+            // synthetic Alt key press.
+            tray::bring_to_front(self.tray_ui.hwnd);
         }
         let mut events = self.tray_ui.tray.as_ref().map(|t| t.events()).unwrap_or_default();
         match self.replace.take_request().as_deref() {
