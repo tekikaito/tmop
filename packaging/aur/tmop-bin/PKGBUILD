@@ -1,13 +1,14 @@
 # Maintainer: tekikaito <https://github.com/tekikaito>
 pkgname=tmop-bin
-pkgver=0.11.0
+pkgver=0.14.1
 pkgrel=1
 pkgdesc='Task Manager OverPowered: a skinnable task manager and system monitor (prebuilt release)'
 arch=('x86_64' 'aarch64')
 url='https://tekikaito.github.io/tmop/'
 license=('GPL-3.0-only')
 # The binary links only glibc and libgcc_s. The GUI stack loads libxkbcommon-x11 with dlopen
-# and panics on X11 without it. X11, Wayland and OpenGL libraries are loaded with dlopen too.
+# and panics on X11 without it. X11, Wayland, OpenGL, libdbus-1 and libnvidia-ml are loaded with
+# dlopen too (checked with readelf -d and strings on 0.14.1).
 depends=('glibc' 'gcc-libs' 'libxkbcommon-x11')
 optdepends=(
     'wayland: run as a native Wayland client'
@@ -15,14 +16,16 @@ optdepends=(
     'libglvnd: OpenGL, which TMOP draws its window with (needs a graphics driver, e.g. mesa)'
     'xdg-desktop-portal: file dialogs'
     'docker: show and manage containers'
+    'dbus: desktop integration over D-Bus'
+    'nvidia-utils: NVIDIA GPU statistics (libnvidia-ml)'
 )
 provides=('tmop')
 conflicts=('tmop')
 options=('!debug')
 source_x86_64=("$pkgname-$pkgver-x86_64.tar.gz::https://github.com/tekikaito/tmop/releases/download/v$pkgver/TMOP-v$pkgver-linux-x64.tar.gz")
 source_aarch64=("$pkgname-$pkgver-aarch64.tar.gz::https://github.com/tekikaito/tmop/releases/download/v$pkgver/TMOP-v$pkgver-linux-arm64.tar.gz")
-sha256sums_x86_64=('c79424568aab0c8a7f656edf8b54adf383aaf3cf58139f7aae5b0ec58e6dec7e')
-sha256sums_aarch64=('c71e73934d158d01bbdfe5624bdf6cf00a71593feb51fa00878af461d77c524c')
+sha256sums_x86_64=('d9320c2fb018262eafaf91c113b2ab3bfd101564f4cd2469061f7097a7b4f2ba')
+sha256sums_aarch64=('1a52da014e611d4e8bb8873166b4d1e34f3cba069b9a0027c67732c286b2d308')
 
 package() {
     local dir
