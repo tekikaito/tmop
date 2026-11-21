@@ -382,6 +382,10 @@ pub struct Launch {
     pub engine_test: Option<String>,
     /// Start hidden in the notification area (`--tray`), when tray mode is on.
     pub tray: bool,
+    /// This start takes the place of a TMOP that is exiting (`--replacing`, or an elevated
+    /// start that asked one that is not elevated to exit): the pipe and the shortcut are
+    /// claimed with retries while that one lets go of them.
+    pub replacing: bool,
 }
 
 /// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
@@ -536,7 +540,11 @@ impl App {
         });
         let software_gl = gl_renderer(cc).is_some_and(|r| crate::startup::is_software_renderer(&r));
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
-        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, !popout_only && caps.tray, launch.tray);
+        // The pipe first: only the copy that has it gets the tray icon and the shortcut.
+        let claim_for = if launch.replacing { crate::tray::CLAIM_RETRY } else { Duration::ZERO };
+        let replace = replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace, claim_for);
+        let owns_tray = crate::tray::owns_tray(caps.tray, popout_only, replace.listening());
+        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, tray::Role { owns_tray, other_copy: caps.tray && !popout_only && !owns_tray, replacing: launch.replacing }, launch.tray);
         let mut app = Self {
             caps,
             software_gl,
@@ -581,7 +589,7 @@ impl App {
             pro: pro_pages::ProState::default(),
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
-            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
+            replace,
             tray_ui,
             updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),

@@ -37,11 +37,18 @@ pub struct ReplaceUi {
 }
 
 impl ReplaceUi {
-    /// Reads the state; with `listen`, also takes over later Task Manager launches.
-    pub fn new(ctx: &egui::Context, listen: bool) -> Self {
+    /// Whether this TMOP has the hand-off pipe, so later starts reach it: it is the primary
+    /// copy (see [`crate::tray::owns_tray`]).
+    pub fn listening(&self) -> bool {
+        self.inbox.is_some()
+    }
+
+    /// Reads the state; with `listen`, also takes over later Task Manager launches and starts
+    /// (for `claim_for`, see [`taskmgr::listen`]).
+    pub fn new(ctx: &egui::Context, listen: bool, claim_for: Duration) -> Self {
         let inbox = if listen {
             let ctx = ctx.clone();
-            taskmgr::listen(move || ctx.request_repaint())
+            taskmgr::listen(move || ctx.request_repaint(), claim_for)
         } else {
             None
         };

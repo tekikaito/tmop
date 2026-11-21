@@ -310,6 +310,7 @@ fn main() -> eframe::Result<()> {
         docker_tab: value(&["--docker-tab="]),
         engine_test: value(&["--engine-test="]),
         tray: args.iter().any(|a| a == tmop::tray::FLAG || a == tmop::tray::FLAG_ALIAS),
+        replacing: false,
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;
@@ -319,15 +320,21 @@ fn main() -> eframe::Result<()> {
     tmop::platform::raise_open_files_limit();
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
-    // In tray mode one TMOP runs: a second start brings the running one to the front (a
-    // `--tray` start at sign-in only tells it that it is there), over the Task Manager pipe.
-    let replacing = args.iter().any(|a| a == tmop::tray::REPLACING_FLAG);
+    // In tray mode one TMOP sits in the tray: a plain second start (or one with only `--page=`)
+    // brings it to the front, and a `--tray` start at sign-in only tells it that it is there,
+    // over the Task Manager pipe. A start with other arguments runs as a copy of its own
+    // (`tray::hand_off_message`). An elevated start replaces a TMOP that is not elevated.
+    let mut replacing = args.iter().any(|a| a == tmop::tray::REPLACING_FLAG);
     if settings.tray.keep_running && !popout_only && !replacing && tmop::platform::Caps::get().tray {
-        let message = if launch.tray { tmop::tray::ALREADY_RUNNING } else { "" };
-        if tmop::taskmgr::hand_off(message) {
-            return Ok(());
+        if let Some(message) = tmop::tray::hand_off_message(&args) {
+            match tmop::taskmgr::hand_off_start(&message, message != tmop::tray::ALREADY_RUNNING) {
+                tmop::taskmgr::HandOff::Delivered => return Ok(()),
+                tmop::taskmgr::HandOff::Replacing => replacing = true,
+                tmop::taskmgr::HandOff::NoServer => {}
+            }
         }
     }
+    let launch = Launch { replacing, ..launch };
     if let Some(skin) = value(&["--popout-skin="]) {
         settings.popout.skin = skin;
     }

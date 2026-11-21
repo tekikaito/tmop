@@ -39,6 +39,21 @@ pub struct TrayUi {
     autostart: autostart::State,
     autostart_read_at: Instant,
     autostart_message: Option<String>,
+    /// Another TMOP has the tray (see [`crate::tray::owns_tray`]): this one shows a note.
+    other_copy: bool,
+    /// A `--replacing` start whose predecessor still holds the shortcut tries again.
+    shortcut_retry: Option<(Shortcut, tray::Retry)>,
+}
+
+/// This copy's part in tray mode, decided at start-up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Role {
+    /// The primary copy: the tray icon and the shortcut are this TMOP's (when switched on).
+    pub owns_tray: bool,
+    /// Another TMOP is the primary copy; the Settings section says so.
+    pub other_copy: bool,
+    /// The start takes the place of an exiting TMOP (`--replacing`).
+    pub replacing: bool,
 }
 
 /// The real Run key; none off Windows.
@@ -58,9 +73,9 @@ fn read_autostart() -> autostart::State {
 }
 
 impl TrayUi {
-    /// Sets up the icon and the shortcut as `s` asks. `available`: this OS has a tray and this
-    /// is the main window. `start_hidden`: `--tray`.
-    pub fn new(ctx: &egui::Context, hwnd: isize, s: &settings::Tray, available: bool, start_hidden: bool) -> Self {
+    /// Sets up the icon and the shortcut as `s` asks, when `role.owns_tray`. `start_hidden`:
+    /// `--tray`.
+    pub fn new(ctx: &egui::Context, hwnd: isize, s: &settings::Tray, role: Role, start_hidden: bool) -> Self {
         let mut ui = TrayUi {
             tray: None,
             vis: Visibility::new(false),
@@ -75,8 +90,10 @@ impl TrayUi {
             autostart: autostart::State::Off,
             autostart_read_at: Instant::now(),
             autostart_message: None,
+            other_copy: role.other_copy,
+            shortcut_retry: None,
         };
-        if !available {
+        if !role.owns_tray {
             return ui;
         }
         let wake = ctx.clone();
@@ -85,7 +102,14 @@ impl TrayUi {
         if s.keep_running {
             ui.set_icon(true);
             if s.shortcut_enabled {
-                ui.register(Shortcut::parse(&s.shortcut));
+                let shortcut = Shortcut::parse(&s.shortcut);
+                if !ui.register(shortcut) && role.replacing {
+                    // The TMOP this one replaces may still hold it for a moment.
+                    if let Some(s) = shortcut.filter(Shortcut::is_valid) {
+                        ui.shortcut_message = None;
+                        ui.shortcut_retry = Some((s, tray::Retry::new(Instant::now(), tray::CLAIM_RETRY)));
+                    }
+                }
             }
         }
         if start_hidden && ui.keeps_running(s) {
@@ -172,6 +196,7 @@ impl App {
             // synthetic Alt key press.
             tray::bring_to_front(self.tray_ui.hwnd);
         }
+        self.retry_shortcut(ctx);
         let mut events = self.tray_ui.tray.as_ref().map(|t| t.events()).unwrap_or_default();
         match self.replace.take_request().as_deref() {
             None | Some(tray::ALREADY_RUNNING) => {}
@@ -208,6 +233,34 @@ impl App {
         }
         if self.tray_ui.vis.hidden && !self.popout_open {
             self.sampler.set_interval(tray::hidden_interval(self.settings.update_speed().interval(), self.recorder.is_recording()));
+        }
+    }
+
+    /// A `--replacing` start: registers the shortcut again until the TMOP it replaces has let
+    /// go of it, and reports "taken" only after the last try.
+    fn retry_shortcut(&mut self, ctx: &egui::Context) {
+        let Some((shortcut, mut retry)) = self.tray_ui.shortcut_retry.take() else { return };
+        let s = &self.settings.tray;
+        // The user changed something in the meantime: that wins.
+        if self.tray_ui.capturing || self.tray_ui.registered.is_some() || !s.keep_running || !s.shortcut_enabled || Shortcut::parse(&s.shortcut) != Some(shortcut) {
+            return;
+        }
+        let now = Instant::now();
+        match retry.attempt(now) {
+            tray::Attempt::Wait => {
+                ctx.request_repaint_after(retry.wait(now));
+                self.tray_ui.shortcut_retry = Some((shortcut, retry));
+            }
+            tray::Attempt::Try => {
+                if !self.tray_ui.register(Some(shortcut)) {
+                    self.tray_ui.shortcut_message = None;
+                    ctx.request_repaint_after(retry.wait(now));
+                    self.tray_ui.shortcut_retry = Some((shortcut, retry));
+                }
+            }
+            tray::Attempt::Last => {
+                self.tray_ui.register(Some(shortcut));
+            }
         }
     }
 
@@ -256,6 +309,16 @@ impl App {
 
     /// The Settings section.
     pub fn tray_section(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+        if self.tray_ui.other_copy {
+            let text = if self.settings.tray.keep_running {
+                "Another TMOP is running in the notification area; the icon and the shortcut are its. This window is a copy of its own and ends when you close it. Change these settings in that TMOP."
+            } else {
+                "Another TMOP window is open; these settings are changed there."
+            };
+            note(ui, pal, text);
+            ui.add_space(8.0);
+            return;
+        }
         if self.tray_ui.autostart_read_at.elapsed() > Duration::from_secs(2) {
             self.tray_ui.autostart = read_autostart();
             self.tray_ui.autostart_read_at = Instant::now();

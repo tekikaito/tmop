@@ -123,6 +123,89 @@ pub const ALREADY_RUNNING: &str = "tray-start";
 /// What `TMOP --exit` sends: the running TMOP exits, as with Exit in the icon's menu.
 pub const EXIT_REQUEST: &str = "tray-exit";
 
+/// What a second start in tray mode sends to the running TMOP, or `None` when it starts a
+/// copy of its own. Only a start that asks for nothing but the window is handed over: no
+/// arguments (an empty message: come to the front), `--page=<id>` (that page id, as a Task
+/// Manager launch sends it), or [`FLAG`] ([`ALREADY_RUNNING`]). Any other argument
+/// (`--record`, `--bench=`, `--disk-root=`, `--docker-terminal=`, `--window-size=`, ...) asks
+/// for something the running TMOP would not do, so that start runs as it did before tray
+/// mode; it is not the primary copy (see [`owns_tray`]).
+pub fn hand_off_message(args: &[String]) -> Option<String> {
+    let mut page = None;
+    let mut tray = false;
+    for a in args {
+        if a == FLAG || a == FLAG_ALIAS {
+            tray = true;
+        } else {
+            page = Some(a.strip_prefix("--page=").or_else(|| a.strip_prefix("--start-page="))?.trim());
+        }
+    }
+    if tray {
+        return Some(ALREADY_RUNNING.into());
+    }
+    // The pipe's own words are not page ids.
+    let page = page.filter(|p| *p != ALREADY_RUNNING && *p != EXIT_REQUEST).unwrap_or("");
+    Some(page.into())
+}
+
+/// Whether this TMOP has the tray icon and the shortcut (when tray mode is on). Only the
+/// primary copy does: the one that has the hand-off pipe (`listening`), so later starts reach
+/// it. Any other copy (one started with arguments of its own while a TMOP sits in the tray, or
+/// a second window while tray mode is off) has no icon and no shortcut, and closing it ends it.
+/// The popout-only window never has them.
+pub fn owns_tray(caps_tray: bool, popout_only: bool, listening: bool) -> bool {
+    caps_tray && !popout_only && listening
+}
+
+/// How long a start that takes the place of an exiting TMOP (`--replacing`) keeps trying to
+/// get the pipe and the shortcut, which that TMOP holds until its process has ended.
+pub const CLAIM_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What [`Retry::attempt`] says to do now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attempt {
+    /// Not yet.
+    Wait,
+    /// Try again; on failure keep quiet, there are more tries.
+    Try,
+    /// The last try; a failure is reported.
+    Last,
+}
+
+/// Retries spaced [`Retry::STEP`] apart within a time limit (registering the shortcut in a
+/// `--replacing` start).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    until: std::time::Instant,
+    next: std::time::Instant,
+}
+
+impl Retry {
+    pub const STEP: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// Retries from `now` (after a first failed try) for `within`.
+    pub fn new(now: std::time::Instant, within: std::time::Duration) -> Self {
+        Retry { until: now + within, next: now + Self::STEP }
+    }
+
+    pub fn attempt(&mut self, now: std::time::Instant) -> Attempt {
+        if now < self.next {
+            return Attempt::Wait;
+        }
+        self.next = now + Self::STEP;
+        if now >= self.until {
+            Attempt::Last
+        } else {
+            Attempt::Try
+        }
+    }
+
+    /// How long until the next try is due.
+    pub fn wait(&self, now: std::time::Instant) -> std::time::Duration {
+        self.next.saturating_duration_since(now)
+    }
+}
+
 /// The sampling interval while the window is hidden in the tray with no popout open:
 /// `configured` while the flight recorder writes a recording (it needs every sample), else
 /// none. Everything else the samples feed is on screen only.
@@ -233,6 +316,69 @@ mod tests {
         assert_eq!(hidden_interval(second, false), None);
         assert_eq!(hidden_interval(second, true), second);
         assert_eq!(hidden_interval(None, true), None, "paused stays paused");
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Only a start that asks for the window alone is handed over; anything else starts a copy.
+    #[test]
+    fn only_window_starts_are_handed_over() {
+        assert_eq!(hand_off_message(&[]).as_deref(), Some(""));
+        assert_eq!(hand_off_message(&args(&["--page=processes"])).as_deref(), Some("processes"));
+        assert_eq!(hand_off_message(&args(&["--start-page=docker"])).as_deref(), Some("docker"));
+        assert_eq!(hand_off_message(&args(&["--page="])).as_deref(), Some(""));
+        assert_eq!(hand_off_message(&args(&["--tray"])).as_deref(), Some(ALREADY_RUNNING));
+        assert_eq!(hand_off_message(&args(&["--hidden", "--page=summary"])).as_deref(), Some(ALREADY_RUNNING));
+        // The pipe's own messages are no page ids: `--page=tray-exit` does not end the running TMOP.
+        assert_eq!(hand_off_message(&args(&["--page=tray-exit"])).as_deref(), Some(""));
+        assert_eq!(hand_off_message(&args(&["--page=tray-start"])).as_deref(), Some(""));
+        for other in [
+            &["--record", "--record-seconds=60"][..],
+            &["--record=C:\\rec"],
+            &["--bench=all"],
+            &["--disk-root=C:\\"],
+            &["--disk-scan=D:\\"],
+            &["--docker-terminal=web;sh"],
+            &["--window-size=800x600"],
+            &["--page=performance", "--device=gpu"],
+            &["--maximized"],
+            &["--popout"],
+            &["--page=processes", "--record"],
+            &["--tray", "--bench=cpu"],
+            &["something-else"],
+        ] {
+            assert_eq!(hand_off_message(&args(other)), None, "{other:?}");
+        }
+    }
+
+    /// The icon and the shortcut belong to the copy that has the pipe, and never to the popout.
+    #[test]
+    fn only_the_primary_copy_owns_the_tray() {
+        assert!(owns_tray(true, false, true));
+        assert!(!owns_tray(true, false, false), "a copy started with its own arguments");
+        assert!(!owns_tray(true, true, true), "the popout-only window");
+        assert!(!owns_tray(false, false, true), "no tray on this OS");
+    }
+
+    #[test]
+    fn retries_are_spaced_and_end_with_a_last_try() {
+        let t0 = std::time::Instant::now();
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let mut r = Retry::new(t0, std::time::Duration::from_secs(1));
+        assert_eq!(r.attempt(ms(100)), Attempt::Wait);
+        assert_eq!(r.wait(ms(100)), std::time::Duration::from_millis(150));
+        assert_eq!(r.attempt(ms(250)), Attempt::Try);
+        assert_eq!(r.attempt(ms(300)), Attempt::Wait, "spaced by a step");
+        assert_eq!(r.attempt(ms(500)), Attempt::Try);
+        assert_eq!(r.attempt(ms(750)), Attempt::Try);
+        assert_eq!(r.attempt(ms(1000)), Attempt::Last);
+        // A late wake-up (the window was busy) still ends with one last try, not several.
+        let mut r = Retry::new(t0, std::time::Duration::from_secs(1));
+        assert_eq!(r.attempt(ms(5000)), Attempt::Last);
+        let tries = (1..=12).map(|i| r.attempt(ms(5000 + i * 250))).filter(|a| *a == Attempt::Try).count();
+        assert_eq!(tries, 0);
     }
 
     #[test]
