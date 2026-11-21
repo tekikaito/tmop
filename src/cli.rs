@@ -235,6 +235,8 @@ mod tests {
         }
     }
 
+    // Task Manager's path is a Win32 path; elsewhere `\` is not a separator.
+    #[cfg(windows)]
     #[test]
     fn task_manager_launches_are_never_rejected() {
         assert_eq!(p(&[r"C:\WINDOWS\system32\taskmgr.exe", "/7"]), Cli::Run);
