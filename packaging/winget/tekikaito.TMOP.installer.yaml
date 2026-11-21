@@ -1,21 +1,20 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
 
 PackageIdentifier: tekikaito.TMOP
-PackageVersion: 0.11.0
+PackageVersion: 0.14.1
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
 - RelativeFilePath: TMOP.exe
   PortableCommandAlias: tmop
-Scope: user
 MinimumOSVersion: 10.0.0.0
-ReleaseDate: 2026-11-20
+ReleaseDate: 2026-11-21
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-x64.zip
-  InstallerSha256: E288ACCDCBF4E8053414BB2D6AA76E7FC6F7D32EF104D10C9F21F39CF6827D7D
+  InstallerUrl: https://github.com/tekikaito/tmop/releases/download/v0.14.1/TMOP-v0.14.1-windows-x64.zip
+  InstallerSha256: 0CA5D001FC3C6733E7C7ABC34A7560187DE08A8FB34E8077C8419A06BCE7E863
 - Architecture: arm64
-  InstallerUrl: https://github.com/tekikaito/tmop/releases/download/v0.11.0/TMOP-v0.11.0-windows-arm64.zip
-  InstallerSha256: F630FC58F945C91ACB36A7962B950C172E10A8028958E9395EDB1A71F6FBDBF8
+  InstallerUrl: https://github.com/tekikaito/tmop/releases/download/v0.14.1/TMOP-v0.14.1-windows-arm64.zip
+  InstallerSha256: 1E2E5A8883CB2F4DCF5D68D14BA7200667AFEE8BF22371D84CF2FB3551A9A009
 ManifestType: installer
 ManifestVersion: 1.28.0

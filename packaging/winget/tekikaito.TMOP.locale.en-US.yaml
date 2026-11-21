@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.28.0.schema.json
 
 PackageIdentifier: tekikaito.TMOP
-PackageVersion: 0.11.0
+PackageVersion: 0.14.1
 PackageLocale: en-US
 Publisher: tekikaito
 PublisherUrl: https://github.com/tekikaito
@@ -10,7 +10,7 @@ Author: tekikaito
 PackageName: TMOP
 PackageUrl: https://tekikaito.github.io/tmop/
 License: GPL-3.0-only
-LicenseUrl: https://github.com/tekikaito/tmop/blob/v0.11.0/LICENSE
+LicenseUrl: https://github.com/tekikaito/tmop/blob/v0.14.1/LICENSE
 Copyright: Copyright (c) tekikaito
 ShortDescription: Task Manager OverPowered, a skinnable task manager and system monitor.
 Description: |-
@@ -22,6 +22,6 @@ Tags:
 - process
 - system-monitor
 - task-manager
-ReleaseNotesUrl: https://github.com/tekikaito/tmop/releases/tag/v0.11.0
+ReleaseNotesUrl: https://github.com/tekikaito/tmop/releases/tag/v0.14.1
 ManifestType: defaultLocale
 ManifestVersion: 1.28.0
