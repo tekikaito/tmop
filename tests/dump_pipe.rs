@@ -28,3 +28,13 @@ fn dump_prints_the_cpu_line() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.lines().next().is_some_and(|l| l.starts_with("CPU")), "first line: {stdout}");
 }
+
+#[test]
+fn dump_prints_values_not_rust_debug_syntax() {
+    let out = dump().stdout(Stdio::piped()).stderr(Stdio::piped()).output().expect("run TMOP --dump");
+    assert!(out.status.success(), "exit status {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.lines().next().is_some_and(|l| l.starts_with("CPU")), "first line: {stdout}");
+    assert!(!stdout.contains("Some("), "Some( in the report: {stdout}");
+    assert!(!stdout.contains("None"), "None in the report: {stdout}");
+}

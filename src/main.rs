@@ -50,6 +50,37 @@ fn run_output(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> i32 {
     output_exit_code(result)
 }
 
+/// A value that may be absent: the bare value, or `n/a`.
+fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map_or_else(|| "n/a".to_string(), |v| v.to_string())
+}
+
+/// `(name, number)` pairs as `name 1.5<unit>, name 2.0<unit>`; `n/a` for none.
+fn pairs(v: &[(String, f32)], unit: &str) -> String {
+    if v.is_empty() {
+        return "n/a".to_string();
+    }
+    v.iter().map(|(k, n)| format!("{k} {n:.1}{unit}")).collect::<Vec<_>>().join(", ")
+}
+
+/// One GPU adapter as labelled fields; absent readings are `n/a`.
+fn adapter_text(a: &tmop::metrics::GpuAdapter) -> String {
+    format!(
+        "id {}  name {}  utilization {:.1}%  engines {}  dedicated {} / {} bytes  shared {} / {} bytes  temp {} C  power {} W  clock {} MHz",
+        a.id,
+        a.name,
+        a.utilization_pct,
+        pairs(&a.engines, "%"),
+        opt(a.dedicated_used),
+        opt(a.dedicated_total),
+        opt(a.shared_used),
+        opt(a.shared_total),
+        opt(a.temperature_c.map(|t| format!("{t:.1}"))),
+        opt(a.power_w.map(|w| format!("{w:.1}"))),
+        opt(a.clock_mhz),
+    )
+}
+
 /// Writes the two-sample report to `out`; the caller decides what a failed write means.
 fn dump(out: &mut dyn Write) -> io::Result<()> {
     tmop::metrics::set_gpu_detail(true);
@@ -57,20 +88,25 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
     let _ = c.collect();
     std::thread::sleep(std::time::Duration::from_secs(1));
     let (s, procs) = c.collect();
-    writeln!(out, "CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {:?} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), s.cpu.current_mhz)?;
+    writeln!(out, "CPU      {:5.1}%  kernel {:4.1}%  cores {}  clock {} MHz", s.cpu.total_pct, s.cpu.kernel_pct, s.cpu.per_core_pct.len(), opt(s.cpu.current_mhz))?;
     if cfg!(windows) {
         writeln!(
             out,
-            "Clock    base {:?} MHz  MaxMhz {:?}  MhzLimit {:?}  %ProcessorPerformance {:?}  ProcessorFrequency {:?}  live {}",
-            s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.mhz_limit, s.cpu.perf_pct, s.cpu.pdh_freq_mhz, s.cpu.clock_live
+            "Clock    base {} MHz  MaxMhz {}  MhzLimit {}  %ProcessorPerformance {}  ProcessorFrequency {}  live {}",
+            opt(s.cpu.base_mhz),
+            opt(s.cpu.max_mhz),
+            opt(s.cpu.mhz_limit),
+            opt(s.cpu.perf_pct),
+            opt(s.cpu.pdh_freq_mhz),
+            s.cpu.clock_live
         )?;
     } else {
         let diag: String = s.cpu.diag.iter().map(|(k, v)| format!("  {k} {v}")).collect();
-        writeln!(out, "Clock    base {:?} MHz  max {:?}  boost {:?}  live {}{diag}", s.cpu.base_mhz, s.cpu.max_mhz, s.cpu.boost_mhz, s.cpu.clock_live)?;
+        writeln!(out, "Clock    base {} MHz  max {}  boost {}  live {}{diag}", opt(s.cpu.base_mhz), opt(s.cpu.max_mhz), opt(s.cpu.boost_mhz), s.cpu.clock_live)?;
     }
     writeln!(out, "Memory   {:5.1}%  {} / {} bytes", s.memory.used_pct, s.memory.total.saturating_sub(s.memory.available), s.memory.total)?;
     if !cfg!(windows) {
-        writeln!(out, "Swap     {:?} / {:?} bytes  commit {:?} / {:?}", s.memory.swap_used, s.memory.swap_total, s.memory.commit_used, s.memory.commit_limit)?;
+        writeln!(out, "Swap     {} / {} bytes  commit {} / {}", opt(s.memory.swap_used), opt(s.memory.swap_total), opt(s.memory.commit_used), opt(s.memory.commit_limit))?;
     }
     writeln!(out, "Disk     {:5.1}%  read {:.0} B/s  write {:.0} B/s", s.disk.active_pct, s.disk.read_bps, s.disk.write_bps)?;
     for d in &s.disk.drives {
@@ -79,18 +115,19 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "  {}  [{}]{firmware}  {:5.1}%  read {:.0} B/s  write {:.0} B/s{space}", d.title, d.model, d.active_pct, d.read_bps, d.write_bps)?;
     }
     writeln!(out, "Network  rx {:.0} B/s  tx {:.0} B/s  link {:.0} b/s", s.network.rx_bps, s.network.tx_bps, s.network.link_bps)?;
-    writeln!(out, "GPU      {:5.1}%  available {}  engines {:?}", s.gpu.utilization_pct, s.gpu.available, s.gpu.engines)?;
+    writeln!(out, "GPU      {:5.1}%  available {}  engines {}", s.gpu.utilization_pct, s.gpu.available, pairs(&s.gpu.engines, "%"))?;
     for (i, a) in s.gpu.adapters.iter().enumerate() {
-        writeln!(out, "GPU {i}    {a:?}")?;
+        writeln!(out, "GPU {i}    {}", adapter_text(a))?;
     }
     writeln!(out, "GPU      {} processes", s.gpu.processes.len())?;
-    writeln!(out, "Thermal  {:?}  cpu {:?}  [{}]", s.thermal.zones, s.thermal.cpu, s.thermal.sources)?;
+    let cpu_temp = s.thermal.cpu.as_ref().map(|(label, c)| format!("{label} {c:.1} C"));
+    writeln!(out, "Thermal  {}  cpu {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), s.thermal.sources)?;
     let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
     writeln!(out, "Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count)?;
     let mut top: Vec<_> = procs.iter().collect();
     top.sort_by_key(|p| std::cmp::Reverse(p.private_working_set));
     for p in top.iter().take(5) {
-        writeln!(out, "  {:>6} {:<28} {:>10} KB  user {:?}", p.pid, p.name, p.private_working_set / 1024, p.user)?;
+        writeln!(out, "  {:>6} {:<28} {:>10} KB  user {}", p.pid, p.name, p.private_working_set / 1024, opt(p.user.as_deref()))?;
     }
     for e in &s.errors {
         writeln!(out, "error: {e}")?;
@@ -396,4 +433,31 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(App::new(cc, settings, status, launch)))),
     )
     .inspect_err(|e| tmop::startup::report(&e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_prints_the_bare_value_or_na() {
+        assert_eq!(opt(Some(4700u32)), "4700");
+        assert_eq!(opt(Some(0u64)), "0");
+        assert_eq!(opt(Some("x")), "x");
+        assert_eq!(opt(None::<u32>), "n/a");
+    }
+
+    #[test]
+    fn pairs_are_a_plain_list() {
+        assert_eq!(pairs(&[], "%"), "n/a");
+        assert_eq!(pairs(&[("3D".into(), 2.53), ("Copy".into(), 0.0)], "%"), "3D 2.5%, Copy 0.0%");
+    }
+
+    #[test]
+    fn adapter_text_has_no_rust_syntax() {
+        let a = tmop::metrics::GpuAdapter { id: "0x1".into(), name: "Card".into(), dedicated_used: Some(5), ..Default::default() };
+        let t = adapter_text(&a);
+        assert!(t.contains("name Card") && t.contains("dedicated 5 / n/a bytes") && t.contains("clock n/a MHz"), "{t}");
+        assert!(!t.contains("Some(") && !t.contains("None") && !t.contains(char::from(34)) && !t.contains(char::from(91)), "{t}");
+    }
 }
