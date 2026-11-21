@@ -531,6 +531,31 @@ pub(super) fn toggle_row_hint(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, l
     changed
 }
 
+/// The project's pages, opened only when a link is clicked.
+const REPO_URL: &str = "https://github.com/tekikaito/tmop";
+const ISSUES_URL: &str = "https://github.com/tekikaito/tmop/issues/new/choose";
+
+/// The release page of `version`.
+fn release_notes_url(version: &str) -> String {
+    format!("{REPO_URL}/releases/tag/v{version}")
+}
+
+/// The About links: plain links that open in the browser when clicked and do nothing else.
+fn about_links(ui: &mut egui::Ui, pal: &Palette) {
+    let links = [("Project on GitHub", REPO_URL.to_string()), ("Report a problem", ISSUES_URL.to_string()), ("Release notes", release_notes_url(env!("CARGO_PKG_VERSION"))), ("Star TMOP on GitHub", REPO_URL.to_string())];
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(18.0, 6.0);
+        for (label, url) in links {
+            let link = egui::Link::new(RichText::new(label).font(theme::ui(13.0)).color(pal.accent));
+            if ui.add(link).on_hover_text(&url).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        }
+    });
+    ui.add_space(8.0);
+}
+
 /// A faint explanation under a group of rows.
 pub(super) fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
     ui.add_space(4.0);
@@ -781,6 +806,7 @@ impl App {
                                 let notice = "PawnIO modules: LGPL-2.1-or-later, licence and source in assets/pawnio at github.com/tekikaito/tmop";
                                 widgets::text_fit(p, pos2(r.left() + 56.0, r.center().y + 26.0), Align2::LEFT_CENTER, notice, theme::ui(12.0), pal.text_faint, r.width() - 56.0);
                             }
+                            about_links(ui, &pal);
                         });
                     })
             })
@@ -1034,6 +1060,24 @@ mod tests {
         assert!(!changed && on);
         assert_eq!(sections.tops.len(), 2);
         assert!(sections.tops[0] < sections.tops[1]);
+    }
+
+    #[test]
+    fn release_notes_url_names_the_version_tag() {
+        assert_eq!(release_notes_url("0.13.0"), "https://github.com/tekikaito/tmop/releases/tag/v0.13.0");
+    }
+
+    /// The About links lay out and open nothing until clicked.
+    #[test]
+    fn about_links_draw_without_opening_anything() {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let out = ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| about_links(ui, &theme::DARK));
+        });
+        assert!(out.platform_output.commands.is_empty());
+        out.drop_without_applying_deltas();
     }
 
     #[test]

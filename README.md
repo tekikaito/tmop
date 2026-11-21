@@ -323,3 +323,4 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   TMOG or its makers.
 - Free and open source under the [GPL-3.0](LICENSE) license. To build it yourself, install
   [Rust](https://rustup.rs) and run `cargo build --release`.
+- If TMOP is useful to you, a [star on GitHub](https://github.com/tekikaito/tmop) helps others find it.
