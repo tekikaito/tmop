@@ -93,11 +93,11 @@ pub fn classify(value: Option<&str>, current: &Path, resolve: impl Fn(&Path) -> 
         return State::Default;
     };
     let path = debugger_path(value);
-    let resolved = resolve(&path);
-    if same_path(&path, current) || resolved.as_deref().map(|r| same_path(r, current)).unwrap_or(false) {
+    if is_this_exe(&path, current, &resolve) {
         State::Ours
     } else if is_tmop_exe(&path) {
-        State::OtherTmop { path, exists: resolved.is_some() }
+        let exists = resolve(&path).is_some();
+        State::OtherTmop { path, exists }
     } else {
         State::Foreign(value.to_string())
     }
@@ -302,10 +302,40 @@ pub fn describe_exit(code: i32) -> String {
     }
 }
 
-/// The running exe in its full long form (no 8.3 short names), as it is registered.
+/// The running exe in its full long form (no 8.3 short names), as it is registered (the
+/// `Debugger` value, the Run entry). In a Scoop install that is the `current` spelling (see
+/// [`stable_exe`]).
 pub fn this_exe() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
-    std::fs::canonicalize(&exe).map(|p| PathBuf::from(plain(&p))).unwrap_or(exe)
+    let canonical = std::fs::canonicalize(&exe).map(|p| PathBuf::from(plain(&p))).unwrap_or(exe);
+    stable_exe(&canonical, crate::update::is_scoop_install(), |p| std::fs::canonicalize(p).ok())
+}
+
+/// The path to register for `canonical` (the running exe with junctions resolved). Scoop keeps
+/// each version in `...\apps\<name>\<version>\` and points the junction `...\apps\<name>\current`
+/// at the newest one; resolving the junction would register the version folder, and after
+/// `scoop update` the old version would go on starting. So when `scoop` (this is a Scoop
+/// install) and the sibling `current` resolves to the exe's folder, the `current` spelling is
+/// returned. `resolve` gives a path with junctions resolved, when it exists.
+pub fn stable_exe(canonical: &Path, scoop: bool, resolve: impl Fn(&Path) -> Option<PathBuf>) -> PathBuf {
+    let stable = || {
+        let (dir, file) = (canonical.parent()?, canonical.file_name()?);
+        let current = dir.parent()?.join("current");
+        let points_here = !same_path(dir, &current) && resolve(&current).is_some_and(|r| same_path(&r, dir));
+        points_here.then(|| current.join(file))
+    };
+    scoop.then(stable).flatten().unwrap_or_else(|| canonical.to_path_buf())
+}
+
+/// Whether a registered `path` is the running exe `current`: the same spelling, or both resolve
+/// to the same file (`resolve` gives the full long form with junctions resolved), so an 8.3
+/// short name and Scoop's `current` and version spellings count as this copy.
+pub fn is_this_exe(path: &Path, current: &Path, resolve: impl Fn(&Path) -> Option<PathBuf>) -> bool {
+    if same_path(path, current) {
+        return true;
+    }
+    let Some(resolved) = resolve(path) else { return false };
+    same_path(&resolved, current) || resolve(current).is_some_and(|c| same_path(&resolved, &c))
 }
 
 /// Current state, read from the registry.
@@ -829,6 +859,58 @@ mod tests {
         let foreign = classify(Some(r#""C:\Sys\procexp64.exe""#), cur, none);
         assert_eq!(foreign, State::Foreign(r#""C:\Sys\procexp64.exe""#.into()));
         assert!(!foreign.is_tmop());
+    }
+
+    /// Scoop: the version folder that `current` points at is registered as `current`, so the
+    /// registration follows `scoop update`. Anything else stays as it is.
+    #[cfg(windows)]
+    #[test]
+    fn scoop_installs_register_the_current_junction() {
+        let version = Path::new(r"C:\Users\me\scoop\apps\tmop\0.11.2\TMOP.exe");
+        let current = PathBuf::from(r"C:\Users\me\scoop\apps\tmop\current\TMOP.exe");
+        let to = |target: &'static str| move |p: &Path| plain(p).to_lowercase().ends_with(r"\apps\tmop\current").then(|| PathBuf::from(format!(r"\\?\C:\Users\me\scoop\apps\tmop\{target}")));
+        assert_eq!(stable_exe(version, true, to("0.11.2")), current);
+        // `current` points at another version (this one is an older copy still on disk).
+        assert_eq!(stable_exe(version, true, to("0.12.0")), version);
+        // Not a Scoop install, or no `current` next to it.
+        assert_eq!(stable_exe(version, false, to("0.11.2")), version);
+        assert_eq!(stable_exe(version, true, |_: &Path| None), version);
+        // Already the `current` spelling (its junction was not resolved).
+        assert_eq!(stable_exe(&current, true, to("0.11.2")), current);
+        let portable = Path::new(r"D:\Tools\TMOP.exe");
+        assert_eq!(stable_exe(portable, true, |p: &Path| Some(p.to_path_buf())), portable);
+        // Both spellings are this copy for the Task Manager registration.
+        let junction = |p: &Path| Some(PathBuf::from(plain(p).to_lowercase().replace(r"\current\", r"\0.11.2\")));
+        assert_eq!(classify(Some(&debugger_value(version)), &current, junction), State::Ours);
+        assert_eq!(classify(Some(&debugger_value(&current)), version, junction), State::Ours);
+        let old = r#""C:\Users\me\scoop\apps\tmop\0.11.1\TMOP.exe""#;
+        assert!(matches!(classify(Some(old), &current, junction), State::OtherTmop { exists: true, .. }));
+    }
+
+    /// The same with a real directory junction (`mklink /J` needs no administrator rights).
+    #[cfg(windows)]
+    #[test]
+    fn stable_exe_follows_a_real_junction() {
+        let root = std::env::temp_dir().join(format!("tmop-scoop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The temp folder can be an 8.3 spelling; compare long forms.
+        let root = PathBuf::from(plain(&std::fs::canonicalize(&root).unwrap()));
+        let version = root.join(r"apps\tmop\0.11.2");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(version.join("TMOP.exe"), b"").unwrap();
+        let current = root.join(r"apps\tmop\current");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&current).arg(&version).output().map(|o| o.status.success()).unwrap_or(false);
+        let resolve = |p: &Path| std::fs::canonicalize(p).ok();
+        let canonical = resolve(&current.join("TMOP.exe")).map(|p| PathBuf::from(plain(&p)));
+        let stable = canonical.as_deref().map(|c| stable_exe(c, true, resolve));
+        let same = canonical.as_deref().zip(stable.as_deref()).is_some_and(|(c, s)| is_this_exe(c, s, resolve));
+        // Cleaned up before the checks, so a failure leaves nothing behind.
+        let _ = std::fs::remove_dir(&current);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(made, "mklink /J failed");
+        assert!(same_path(canonical.as_deref().unwrap(), &version.join("TMOP.exe")), "{canonical:?}");
+        assert!(same_path(stable.as_deref().unwrap(), &current.join("TMOP.exe")), "{stable:?}");
+        assert!(same);
     }
 
     #[test]

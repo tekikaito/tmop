@@ -9,7 +9,7 @@
 //!   Settings → Apps → Startup) while it stays in place; [`State::On`] carries that.
 //! * The registry is reached through [`RunStore`], so tests never write the real Run key.
 
-use crate::taskmgr::{debugger_path, plain, same_path};
+use crate::taskmgr::{debugger_path, is_this_exe, plain};
 use std::path::{Path, PathBuf};
 
 /// The Run key under HKCU.
@@ -61,13 +61,13 @@ pub fn classify(value: Option<&str>, approved: bool, exe: &Path, resolve: impl F
         return State::Off;
     };
     let path = debugger_path(value);
-    let resolved = resolve(&path);
-    let ours = same_path(&path, exe) || resolved.as_deref().is_some_and(|r| same_path(r, exe));
+    let ours = is_this_exe(&path, exe, &resolve);
     let flagged = value.split_whitespace().any(|a| a == super::FLAG || a == super::FLAG_ALIAS);
     if ours && flagged {
         State::On { approved }
     } else {
-        State::Stale { path, exists: resolved.is_some() }
+        let exists = resolve(&path).is_some();
+        State::Stale { path, exists }
     }
 }
 
@@ -188,6 +188,7 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::taskmgr::same_path;
 
     /// A Run key in memory.
     #[derive(Default)]
@@ -253,6 +254,25 @@ mod tests {
         // This exe without the flag would open a window at sign-in: not what TMOP writes.
         assert!(matches!(classify(Some(r#""C:\Program Files\TMOP\TMOP.exe""#), approved, &exe(), exists), State::Stale { exists: true, .. }));
         assert!(!State::Off.has_entry() && State::On { approved: false }.has_entry());
+    }
+
+    /// A Scoop install registers `...\current\TMOP.exe`; an entry with the version folder that
+    /// `current` points at is this copy too, and so is the other way round.
+    #[cfg(windows)]
+    #[test]
+    fn scoop_spellings_are_the_same_copy() {
+        let current = PathBuf::from(r"C:\Users\me\scoop\apps\tmop\current\TMOP.exe");
+        let version = PathBuf::from(r"C:\Users\me\scoop\apps\tmop\0.11.2\TMOP.exe");
+        let junction = |p: &Path| {
+            let s = plain(p).to_lowercase();
+            Some(PathBuf::from(s.replace(r"\current\", r"\0.11.2\")))
+        };
+        assert_eq!(classify(Some(&command(&current)), true, &current, junction), State::On { approved: true });
+        assert_eq!(classify(Some(&command(&version)), true, &current, junction), State::On { approved: true });
+        assert_eq!(classify(Some(&command(&current)), true, &version, junction), State::On { approved: true });
+        // An older version folder is another copy: after `scoop update` it is the old TMOP.
+        let old = r#""C:\Users\me\scoop\apps\tmop\0.11.1\TMOP.exe" --tray"#;
+        assert!(matches!(classify(Some(old), true, &current, junction), State::Stale { exists: true, .. }));
     }
 
     #[test]
