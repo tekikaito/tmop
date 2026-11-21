@@ -3,7 +3,9 @@
 //!
 //! Usage:
 //!   TMOP                  main window (page from `defaultPage`)
-//!   TMOP --page=<id>      start on summary|performance|processes|docker|settings
+//!   TMOP --version | -V   print the version and exit
+//!   TMOP --help | -h      print the user-facing options and exit (text in src/cli.rs)
+//!   TMOP --page=<id>     start on summary|performance|processes|docker|settings
 //!   TMOP --docker-terminal=<container>[;<command>]
 //!                         open a terminal session in a container on the Docker page
 //!   TMOP --docker-tab=<tab>    open the Docker page on engine (local)|containers|stacks|images|volumes|networks (test-only)
@@ -225,6 +227,24 @@ fn engine_relay_stop() -> i32 {
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Before anything touches the display, the settings or the single-instance hand-off (#106).
+    match tmop::cli::parse(&args) {
+        tmop::cli::Cli::Run => {}
+        tmop::cli::Cli::Version => {
+            tmop::cli::attach_console();
+            std::process::exit(run_output(|out| out.write_all(tmop::cli::version_text().as_bytes())));
+        }
+        tmop::cli::Cli::Help => {
+            tmop::cli::attach_console();
+            std::process::exit(run_output(|out| out.write_all(tmop::cli::help_text().as_bytes())));
+        }
+        tmop::cli::Cli::Unknown(arg) => {
+            tmop::cli::attach_console();
+            let _ = io::stderr().write_all(tmop::cli::unknown_text(&arg).as_bytes());
+            std::process::exit(2);
+        }
+    }
+
     // The AppImage's AppRun puts its bundled libraries first on LD_LIBRARY_PATH. The loader has
     // read it already, so the programs TMOP starts (xdg-open, gdbus, ...) get the caller's back.
     #[cfg(target_os = "linux")]
@@ -272,6 +292,13 @@ fn main() -> eframe::Result<()> {
     }
     if args.iter().any(|a| a == "--dump") {
         std::process::exit(run_output(dump));
+    }
+    // From here on TMOP opens a window. Without an X11 or Wayland session on Linux that ends in
+    // an abort inside the graphics libraries; say so in one line instead (#106).
+    #[cfg(target_os = "linux")]
+    if tmop::cli::display_missing(|n| std::env::var_os(n).is_some_and(|v| !v.is_empty())) {
+        let _ = io::stderr().write_all(tmop::cli::NO_DISPLAY_TEXT.as_bytes());
+        std::process::exit(1);
     }
     // From here on TMOP opens a window: make failures visible (#46).
     tmop::startup::install_panic_hook();
