@@ -1,29 +1,38 @@
 # AUR package for TMOP
 
-`tmop-bin/` is a ready `PKGBUILD` and `.SRCINFO` for `tmop-bin` 0.11.0 (x86_64 and aarch64),
-**not submitted**. It repackages the release's `TMOP-v0.11.0-linux-{x64,arm64}.tar.gz`.
+`tmop-bin/` holds a `PKGBUILD` and `.SRCINFO` for `tmop-bin` 0.14.1 (x86_64 and aarch64). It
+repackages the release's `TMOP-v0.14.1-linux-{x64,arm64}.tar.gz`.
+
+**Status: NOT uploaded to the AUR.** There is no AUR account yet.
 
 ## What it installs
 
-Checked against the real tarball listing (and by running `package()` against the extracted
-x64 archive into a scratch folder): `/usr/bin/tmop`, `/usr/share/applications/tmop.desktop`,
+Checked against the real 0.14.1 tarball listings (both architectures have the same layout under
+`TMOP-v0.14.1-linux-{x64,arm64}/`): `/usr/bin/tmop`, `/usr/share/applications/tmop.desktop`,
 `/usr/share/icons/hicolor/{64x64,256x256,512x512,1024x1024}/apps/tmop.png`, the README under
-`/usr/share/doc/tmop-bin` and `LICENSE` and `Michroma-OFL.txt` under `/usr/share/licenses/tmop-bin`.
+`/usr/share/doc/tmop-bin`, and `LICENSE` and `Michroma-OFL.txt` under `/usr/share/licenses/tmop-bin`.
+That is every file in the tarball; no other licence file is shipped.
 `provides=tmop` and `conflicts=tmop` leave room for a source-built `tmop` package later.
 
 - License: `GPL-3.0-only`, as `Cargo.toml` says (the `LICENSE` file is the GPLv3 text).
-- Dependencies, from `readelf -d` of the x64 binary (needs `libgcc_s.so.1`, `libm`, `libc`; highest
-  glibc symbol version used is 2.35, which every Arch system exceeds) plus
-  `packaging/linux/package.sh`/`release.yml`: the window library loads `libxkbcommon-x11` with
-  `dlopen` and panics without it, hence `depends=(glibc gcc-libs libxkbcommon-x11)`. X11, Wayland,
-  OpenGL and the file-dialog portal are `dlopen`ed too and are `optdepends`.
+- sha256 sums are the release's `.sha256` assets and were re-checked by hashing the downloaded
+  tarballs.
+- Dependencies: `readelf -d` of the x64 binary shows `libgcc_s.so.1`, `libm`, `libc` (highest glibc
+  symbol version 2.35). The window library loads `libxkbcommon-x11` with `dlopen` and panics
+  without it, hence `depends=(glibc gcc-libs libxkbcommon-x11)`. X11, Wayland, OpenGL, the
+  file-dialog portal, `libdbus-1` and `libnvidia-ml` are `dlopen`ed (strings in the binary) and are
+  `optdepends`.
 
-## Not validated
+## Verified and not verified
 
-`makepkg`, `namcap` and `makepkg --printsrcinfo` are not available here (WSL has only Ubuntu), so
-`.SRCINFO` was written by hand in the format `makepkg --printsrcinfo` produces, and the package was
-never built or started on Arch. The `optdepends` names and `!debug` should be checked by namcap.
-Please run the steps below on an Arch machine before pushing.
+Verified: tarball layout vs. every path `package()` installs; sha256 sums; `readelf -d`/`ldd` and
+`tmop --version` (prints `tmop 0.14.1`) of the x64 binary in WSL Ubuntu.
+
+Not verified: `makepkg`, `namcap` and `makepkg --printsrcinfo` are not available here (WSL has only
+Ubuntu). **`.SRCINFO` was written by hand** in the format `makepkg --printsrcinfo` produces and must
+be regenerated with `makepkg --printsrcinfo > .SRCINFO` before the first upload. The package was
+never built or started on Arch, and the aarch64 binary was not run. The `optdepends` names and
+`!debug` should be checked with namcap.
 
 ## What you do to submit
 
@@ -33,7 +42,7 @@ Please run the steps below on an Arch machine before pushing.
 
    ```sh
    cd packaging/aur/tmop-bin
-   makepkg --printsrcinfo > /tmp/srcinfo && diff /tmp/srcinfo .SRCINFO   # should match
+   makepkg --printsrcinfo > .SRCINFO     # regenerate; check with git diff that nothing changed
    makepkg -si          # or: extra-x86_64-build (devtools) for a clean chroot
    namcap PKGBUILD tmop-bin-*.pkg.tar.zst
    tmop                 # starts?
@@ -45,7 +54,7 @@ Please run the steps below on an Arch machine before pushing.
    git clone ssh://aur@aur.archlinux.org/tmop-bin.git
    cp PKGBUILD .SRCINFO tmop-bin/ && cd tmop-bin
    git add PKGBUILD .SRCINFO
-   git commit -m "tmop-bin 0.11.0"
+   git commit -m "tmop-bin 0.14.1"
    git push        # the AUR accepts the branch `master` only
    ```
 
