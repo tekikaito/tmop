@@ -13,6 +13,7 @@
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
+pub mod affinity;
 pub mod netio;
 mod procfs;
 #[cfg(windows)]
