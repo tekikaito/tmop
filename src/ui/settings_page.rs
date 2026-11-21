@@ -858,9 +858,9 @@ impl App {
             match settings::import_tmog() {
                 Ok(load) => {
                     self.status = load.describe("Imported TMOG settings");
-                    // A read-only file (newer TMOP, or no backup) stays protected after an import.
-                    let read_only = self.settings.read_only;
-                    self.settings = Settings { read_only, ..load.settings };
+                    // A read-only file (newer TMOP, or no backup) stays protected after an
+                    // import, and tray mode stays as it is (its icon and shortcut do too).
+                    self.settings = settings::after_import(&self.settings, load.settings);
                     self.settings_dirty = true;
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),

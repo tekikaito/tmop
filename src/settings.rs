@@ -643,6 +643,13 @@ pub fn import_tmog() -> Result<Load, String> {
     std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t))
 }
 
+/// The settings after "Import TMOG settings" replaced `current` with `imported`. What TMOG has
+/// no say over is kept: a read-only file stays protected, and the `tray` section stays, since
+/// the tray icon, the shortcut and the Run entry of this TMOP stay in place too.
+pub fn after_import(current: &Settings, imported: Settings) -> Settings {
+    Settings { read_only: current.read_only, tray: current.tray.clone(), ..imported }
+}
+
 /// Loads TMOP's settings; on first run imports TMOG's file if present.
 pub fn load_or_import() -> (Settings, String) {
     let own = default_path();
@@ -828,6 +835,20 @@ mod tests {
 
     /// The `tray` section is new: files without it (0.11 and TMOG's) load with tray mode off and
     /// no shortcut, its keys are known once written, and they round-trip.
+    /// An import of TMOG's settings replaces everything TMOG knows, but keeps tray mode (whose
+    /// icon, shortcut and Run entry stay in place) and the read-only protection.
+    #[test]
+    fn import_keeps_tray_and_read_only() {
+        let tray = Tray { keep_running: true, shortcut_enabled: true, shortcut: "Ctrl+Alt+T".into() };
+        let current = Settings { tray: tray.clone(), read_only: true, ..Default::default() };
+        let imported = parse(SAMPLE).settings;
+        assert_eq!(imported.tray, Tray::default());
+        let after = after_import(&current, imported.clone());
+        assert_eq!(after.tray, tray);
+        assert!(after.read_only);
+        assert_eq!(Settings { tray: Tray::default(), read_only: false, ..after }, imported);
+    }
+
     #[test]
     fn tray_is_off_until_set() {
         for old in [r#"{"version":1,"window":{"alwaysOnTop":true}}"#, SAMPLE] {
