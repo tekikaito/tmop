@@ -985,6 +985,7 @@ impl App {
             self.selected = Some((r.pid, r.create_time));
             match pick {
                 MenuPick::Do(a) => requested = Some((a, r)),
+                MenuPick::Affinity => self.open_affinity(r),
                 MenuPick::Details => {
                     self.proc.details = true;
                     self.proc.details_tab = 0;
@@ -1008,7 +1009,7 @@ impl App {
                 }
             });
             let ctx = ui.ctx();
-            if self.pending.is_none() && !ctx.egui_wants_keyboard_input() {
+            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() {
                 if key_once(ctx, egui::Key::Delete) {
                     let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
                     requested = Some((action, r.clone()));
@@ -1759,6 +1760,8 @@ pub fn cell(r: &ProcessRow, c: Column) -> String {
 enum MenuPick {
     Do(Action),
     Details,
+    /// The "Set affinity" dialog for this process.
+    Affinity,
 }
 
 /// The context menu of a process; `caps` leaves out what the backend cannot do.
@@ -1789,6 +1792,9 @@ fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps) -> O
             }
         }
     });
+    if caps.affinity && kit::menu_item(ui, "Set affinity\u{2026}", None, false) {
+        out = Some(MenuPick::Affinity);
+    }
     ui.separator();
     if kit::menu_item(ui, "View details", Some("Enter"), false) {
         out = Some(MenuPick::Details);
