@@ -48,7 +48,7 @@ fn windows_target(line: &str, exists: impl Fn(&str) -> bool) -> Option<(String, 
     if exists(line) {
         return Some((line.to_string(), String::new()));
     }
-    // Unquoted: the shortest start of the line that is a file on disk is the file (a start like "C: Program" is none).
+    // Unquoted: the shortest start of the line that is a file on disk is the file, so a path with spaces needs no quotes.
     for (i, c) in line.char_indices() {
         if c.is_whitespace() && i > 0 && exists(&line[..i]) {
             return Some((line[..i].to_string(), line[i..].trim().to_string()));

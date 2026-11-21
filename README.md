@@ -167,7 +167,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 | ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
-- **Start a program:** on *Processes*, press *Run new task*, type a program, file or web address (or *Browse…*) and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
+- **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
