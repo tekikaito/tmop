@@ -9,13 +9,13 @@ use super::App;
 use crate::pro::Loader;
 use crate::settings::General;
 use crate::update::{self, Method, Release};
-use eframe::egui::{self, RichText, ViewportCommand};
+use eframe::egui::{self, RichText};
 use super::widgets::ScrollArea029 as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const TOGGLE_HINT: &str = "Off by default. When TMOP starts, at most once a day, it asks GitHub for the newest release and shows what's new. Nothing else is sent.";
+const TOGGLE_HINT: &str = "Off by default. When TMOP starts, and while it keeps running (also in the notification area), at most once a day it asks GitHub for the newest release and shows what's new. Nothing else is sent.";
 
 #[derive(Default)]
 pub struct UpdateUi {
@@ -31,6 +31,17 @@ pub struct UpdateUi {
     install: Loader<PathBuf>,
     /// Download progress of `install` (bytes done, total).
     progress: Arc<Mutex<(u64, u64)>>,
+    /// When [`UpdateUi::check_on_start`] last looked whether a check is due.
+    looked_at: Option<Instant>,
+}
+
+/// How often a running TMOP (one that stays in the notification area for days) looks whether
+/// the daily check is due.
+pub const LOOK_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// Whether it is time to look again (never looked: yes).
+fn look_due(looked_at: Option<Instant>, now: Instant) -> bool {
+    looked_at.is_none_or(|t| now.saturating_duration_since(t) >= LOOK_EVERY)
 }
 
 impl UpdateUi {
@@ -46,8 +57,17 @@ impl UpdateUi {
 
     /// The start-up check: only when switched on and a day has passed since the last one.
     pub fn check_on_start(&mut self, general: &General) {
+        self.looked_at = Some(Instant::now());
         if general.check_for_updates && update::due(general.update_last_check, update::now_secs()) {
             self.start_check(general, false);
+        }
+    }
+
+    /// While TMOP runs, shown or hidden in the notification area: once an hour it looks whether
+    /// the daily check is due, so a TMOP that never restarts still checks once a day.
+    pub fn check_while_running(&mut self, general: &General) {
+        if look_due(self.looked_at, Instant::now()) {
+            self.check_on_start(general);
         }
     }
 
@@ -163,8 +183,8 @@ impl App {
         let installed = if u.install.poll() { u.install.ok().cloned() } else { None };
         if let Some(exe) = installed {
             self.save_settings();
-            match std::process::Command::new(&exe).spawn() {
-                Ok(_) => ctx.send_viewport_cmd(ViewportCommand::Close),
+            match std::process::Command::new(&exe).arg(crate::tray::REPLACING_FLAG).spawn() {
+                Ok(_) => self.quit(ctx),
                 Err(e) => {
                     self.updates.offer = None;
                     self.status = format!("TMOP is updated; start it again to use the new version ({e})");
@@ -248,6 +268,18 @@ mod tests {
     fn megabytes_have_one_decimal() {
         assert_eq!(mb(0), "0.0");
         assert_eq!(mb(15 * 1024 * 1024 + 512 * 1024), "15.5");
+    }
+
+    #[test]
+    fn a_running_tmop_looks_once_an_hour() {
+        let t0 = Instant::now();
+        assert!(look_due(None, t0));
+        assert!(!look_due(Some(t0), t0 + Duration::from_secs(59 * 60)));
+        assert!(look_due(Some(t0), t0 + LOOK_EVERY));
+        // With the switch off nothing is asked, also later.
+        let mut u = UpdateUi::default();
+        u.check_while_running(&General::default());
+        assert!(u.looked_at.is_some() && !u.check.is_loading());
     }
 
     #[test]

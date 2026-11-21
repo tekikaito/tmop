@@ -31,6 +31,7 @@ pub mod table;
 pub mod terminal;
 pub mod theme;
 pub mod titlebar;
+pub mod tray;
 pub mod updates;
 pub mod widgets;
 
@@ -379,6 +380,12 @@ pub struct Launch {
     pub docker_tab: Option<String>,
     /// Test-only engine operation at start-up: setup, wizard, start, stop, restart, remove or update.
     pub engine_test: Option<String>,
+    /// Start hidden in the notification area (`--tray`), when tray mode is on.
+    pub tray: bool,
+    /// This start takes the place of a TMOP that is exiting (`--replacing`, or an elevated
+    /// start that asked one that is not elevated to exit): the pipe and the shortcut are
+    /// claimed with retries while that one lets go of them.
+    pub replacing: bool,
 }
 
 /// [`Page::NAV`] minus the pages `caps` does not support, and minus Docker unless `docker`.
@@ -466,6 +473,9 @@ pub struct App {
     pub font_list: settings_page::FontList,
     last_seq: u64,
     last_sample_at: Instant,
+    /// The interval the sampler was last given (slower while hidden in the tray; see
+    /// [`App::set_sample_interval`]); App history counts each sample as that long.
+    sample_interval: Option<Duration>,
     last_frame_at: Instant,
     pub smooth: Smooth,
     pub popout_textures: popout::Textures,
@@ -476,6 +486,8 @@ pub struct App {
     pub icons: icons::IconCache,
     pub proc: processes::ProcState,
     pub replace: replace::ReplaceUi,
+    /// The notification area icon, the shortcut and the window hidden in the tray.
+    pub tray_ui: tray::TrayUi,
     pub updates: updates::UpdateUi,
     pub docker: docker::DockerState,
     /// Docker series for the Performance page, refreshed when the backend has new stats.
@@ -531,6 +543,11 @@ impl App {
         });
         let software_gl = gl_renderer(cc).is_some_and(|r| crate::startup::is_software_renderer(&r));
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
+        // The pipe first: only the copy that has it gets the tray icon and the shortcut.
+        let claim_for = if launch.replacing { crate::tray::CLAIM_RETRY } else { Duration::ZERO };
+        let replace = replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace, claim_for);
+        let owns_tray = crate::tray::owns_tray(caps.tray, popout_only, replace.listening());
+        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, tray::Role { owns_tray, other_copy: caps.tray && !popout_only && !owns_tray, replacing: launch.replacing }, launch.tray);
         let mut app = Self {
             caps,
             software_gl,
@@ -566,6 +583,7 @@ impl App {
             font_list: settings_page::FontList::default(),
             last_seq: 0,
             last_sample_at: Instant::now(),
+            sample_interval: None,
             last_frame_at: Instant::now(),
             smooth: Smooth::default(),
             popout_textures: popout::Textures::default(),
@@ -575,7 +593,8 @@ impl App {
             pro: pro_pages::ProState::default(),
             icons: icons::IconCache::new(&cc.egui_ctx),
             proc: processes::ProcState::default(),
-            replace: replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace),
+            replace,
+            tray_ui,
             updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
@@ -714,6 +733,10 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // The keys belong to the shortcut field of Settings while it listens.
+        if self.tray_ui.capturing() {
+            return;
+        }
         let mut go = None;
         ctx.input(|i| {
             // A page this OS does not have keeps its key unused rather than landing on Summary.
@@ -936,14 +959,28 @@ impl eframe::App for App {
         }
     }
 
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe 0.37 skips `ui` while the window is minimized or hidden (0.29 still ran `update`
         // then): new samples are taken in here, so recording and App history go on meanwhile.
         let (snap, _, rows) = self.snapshot();
         self.take_sample(&snap, &rows, Instant::now());
+        if !self.popout_only {
+            self.window_logic(ctx);
+            // Here rather than in `ui`, which does not run while the window is hidden in the
+            // notification area: a TMOP that stays there for days still checks once a day.
+            self.updates.check_while_running(&self.settings.general);
+            // Wakes a TMOP that is hidden and paused (nothing else would) for the next look.
+            ctx.request_repaint_after(updates::LOOK_EVERY);
+            self.updates_poll(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Hidden in the notification area: eframe still calls this for a window that is hidden
+        // but not minimized, so draw nothing and ask for no repaint (see `ui::tray`).
+        if self.tray_ui.vis.hidden && !self.popout_open {
+            return;
+        }
         let t_update = Instant::now();
         self.update_inner(ui);
         if let Some(p) = &mut self.profile {
@@ -970,6 +1007,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.tray_ui.shut_down();
         self.recorder.stop();
         crate::process::netio::set_wanted(false);
         self.save_palette_edits(true);
@@ -1009,6 +1047,12 @@ impl Default for Profile {
 }
 
 impl App {
+    /// Sets the sampler's interval (`None`: paused) and remembers it.
+    pub fn set_sample_interval(&mut self, interval: Option<Duration>) {
+        self.sample_interval = interval;
+        self.sampler.set_interval(interval);
+    }
+
     /// Feeds a sample the sampler has not delivered before to the recorder, App history and the
     /// temperature log.
     fn take_sample(&mut self, snap: &Snapshot, rows: &[ProcessRow], now: Instant) {
@@ -1017,7 +1061,7 @@ impl App {
             self.last_sample_at = now;
             self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(snap, rows);
-            let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            let dt = self.sample_interval.or_else(|| self.settings.update_speed().interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(rows, dt);
             self.perf.note_temperature(snap.thermal.max_c());
         }
@@ -1090,7 +1134,15 @@ impl App {
             if self.popout_ui(root, &fd, &skin) {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+        } else if self.tray_ui.vis.hidden {
+            // Hidden in the notification area: only the popout is drawn.
+            if self.popout_open {
+                self.popout_viewport(ctx, &fd);
+            }
         } else {
+            if self.page != Page::Settings {
+                self.tray_ui.end_capture(&self.settings.tray);
+            }
             // Remembered for the next start (window.maximized). A minimized window keeps what
             // it was before.
             let (maximized, minimized, time) = ctx.input(|i| (i.viewport().maximized, i.viewport().minimized, i.time));
@@ -1103,7 +1155,6 @@ impl App {
                 }
             }
             self.replace_poll(ctx);
-            self.updates_poll(ctx);
             if let Some([hi, mid, edge]) = pal.backdrop {
                 widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.content_rect(), hi, mid, edge);
             }
@@ -1145,14 +1196,14 @@ impl App {
         }
 
         // Apply cadence changes and persist.
-        self.sampler.set_interval(self.settings.update_speed().interval());
+        self.set_sample_interval(self.settings.update_speed().interval());
         // Sampled at once, so that switching off closes the device even while updates are paused.
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();
         }
         // The network counters run while the Processes table shows their column (a popout-only
         // TMOP has no table).
-        crate::process::netio::set_wanted(!self.popout_only && self.caps.proc.network && self.column_visible(Column::Network));
+        crate::process::netio::set_wanted(!self.popout_only && !self.tray_ui.vis.hidden && self.caps.proc.network && self.column_visible(Column::Network));
         // What a part of a page had to tell the user (a file manager that would not open).
         if let Some(message) = kit::take_report(ctx) {
             self.status = message;

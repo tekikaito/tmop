@@ -963,7 +963,7 @@ pub fn block_untrashable(items: &mut [Assessed], vols: &mut super::trash::Volume
 pub fn relaunch_args(root: &Path) -> String {
     let s = root.display().to_string();
     let trailing = s.len() - s.trim_end_matches('\\').len();
-    format!("--page=disk-space --disk-root=\"{s}{}\"", "\\".repeat(trailing))
+    format!("{} --page=disk-space --disk-root=\"{s}{}\"", crate::tray::REPLACING_FLAG, "\\".repeat(trailing))
 }
 
 /// Starts this exe through the UAC prompt, on Disk Space with `root`. Ok once the new process

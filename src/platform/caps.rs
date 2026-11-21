@@ -42,6 +42,9 @@ pub struct Caps {
     pub inventory: bool,
     /// Opening TMOP in place of Windows Task Manager (Settings section, banner, menu item).
     pub taskmgr_replace: bool,
+    /// Keeping TMOP in the notification area, with a global shortcut and a start-up entry
+    /// (Settings section; see [`crate::tray`]).
+    pub tray: bool,
     /// TMOP's own Docker engine (WSL): the Engine tab, its wizard and its settings.
     pub engine: bool,
     /// The Windows Disk Cleanup handlers in Clean up.
@@ -78,6 +81,7 @@ impl Caps {
     pub const WINDOWS: Caps = Caps {
         inventory: true,
         taskmgr_replace: true,
+        tray: true,
         engine: true,
         volcache: true,
         mft: true,
@@ -98,6 +102,7 @@ impl Caps {
     pub const LINUX: Caps = Caps {
         inventory: true,
         taskmgr_replace: false,
+        tray: false,
         engine: false,
         volcache: false,
         mft: false,
@@ -117,6 +122,7 @@ impl Caps {
     pub const MACOS: Caps = Caps {
         inventory: true,
         taskmgr_replace: false,
+        tray: false,
         engine: false,
         volcache: false,
         mft: false,
@@ -138,6 +144,7 @@ impl Caps {
     pub const OTHER: Caps = Caps {
         inventory: false,
         taskmgr_replace: false,
+        tray: false,
         engine: false,
         volcache: false,
         mft: false,
@@ -198,7 +205,7 @@ mod tests {
     fn windows_has_everything() {
         let w = Caps::WINDOWS;
         let p = w.proc;
-        let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
+        let all = [w.inventory, w.taskmgr_replace, w.tray, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels];
         let procs = [p.efficiency, p.realtime, p.suspend, p.not_responding, p.handles, p.session, p.arch, p.gpu, p.window_owner];
         assert!(all.iter().chain(&procs).all(|b| *b));
         assert_eq!(Caps::probed(Os::Windows, false), Caps::WINDOWS);
@@ -207,7 +214,7 @@ mod tests {
     #[test]
     fn windows_only_features_are_off_elsewhere_and_delete_needs_a_classifier() {
         for c in [Caps::LINUX, Caps::MACOS, Caps::OTHER] {
-            assert!(!(c.taskmgr_replace || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver || c.pawnio || c.proc.network));
+            assert!(!(c.taskmgr_replace || c.tray || c.engine || c.volcache || c.mft || c.elevate_relaunch || c.screensaver || c.pawnio || c.proc.network));
         }
         // Disk Space deletes where the protected-paths classifier, the Trash and the clean up
         // categories exist (Windows, Linux, macOS); never on a target without them.

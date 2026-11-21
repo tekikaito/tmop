@@ -4,7 +4,7 @@ use super::theme::{self, Palette};
 use super::widgets::{self, draw_icon, Icon};
 use super::{fmt_clock, fmt_hms, kit, App, Page, HEADER_H, RAIL_W, STATUS_H, TOP_BAR_H};
 use crate::metrics::Snapshot;
-use eframe::egui::{self, pos2, vec2, Align2, Color32, Id, Key, Rect, Response, Sense, Stroke, ViewportCommand};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, Id, Key, Rect, Response, Sense, Stroke};
 use std::time::{Duration, Instant};
 
 /// Window width below which the header drops the live readouts.
@@ -182,7 +182,7 @@ impl App {
                 });
                 ui.separator();
                 if kit::menu_item(ui, "Exit", None, false) {
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    self.quit(&ctx);
                 }
             });
             if close {
