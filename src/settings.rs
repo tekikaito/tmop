@@ -83,7 +83,11 @@ pub struct General {
 pub struct Window {
     pub always_on_top: bool,
     pub uptime_visible: bool,
+    /// "Group by app" on the Processes page (the key's name predates the tree view).
     pub process_tree: bool,
+    /// The Processes page shows the parent/child tree ("Tree view"); while on, it takes the place
+    /// of the flat list and of "Group by app". Optional: older files load without it (off).
+    pub process_tree_view: bool,
     pub process_table_hidden_columns: Vec<String>,
     pub process_table_column_widths: BTreeMap<String, u32>,
     /// Column ids of the Processes table in the order the user put them; empty means the
@@ -248,6 +252,7 @@ impl Default for Window {
             always_on_top: false,
             uptime_visible: true,
             process_tree: true,
+            process_tree_view: false,
             process_table_hidden_columns: Vec::new(),
             process_table_column_widths: BTreeMap::new(),
             process_table_column_order: Vec::new(),
@@ -805,6 +810,26 @@ mod tests {
         assert!(set.settings.window.disks_separated && !set.settings.window.gpus_separated);
         assert!(set.unknown_keys.is_empty(), "{:?}", set.unknown_keys);
         assert!(parse(&set.settings.to_json()).settings.window.disks_separated);
+    }
+
+    /// `window.processTreeView` is new (no migration): older files load with the tree view off and
+    /// "Group by app" as saved, and the key round-trips.
+    #[test]
+    fn process_tree_view_is_optional() {
+        let old = parse(r#"{"version":1,"window":{"processTree":false}}"#);
+        assert!(matches!(old.outcome, LoadOutcome::Loaded));
+        assert!(old.unknown_keys.is_empty(), "{:?}", old.unknown_keys);
+        assert!(!old.settings.window.process_tree_view && !old.settings.window.process_tree);
+        assert!(!parse(SAMPLE).settings.window.process_tree_view, "TMOG files have no tree view");
+        let set = parse(r#"{"version":1,"window":{"processTreeView":true}}"#);
+        assert!(set.unknown_keys.is_empty(), "{:?}", set.unknown_keys);
+        assert!(set.settings.window.process_tree_view && set.settings.window.process_tree);
+        let mut s = Settings::default();
+        s.window.process_tree_view = true;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["window"]["processTreeView"], true);
+        assert_eq!(parse(&s.to_json()).settings, s);
+        assert!(Settings::from_json(r#"{"version":1,"window":{"processTreeView":"yes"}}"#).is_err());
     }
 
     #[test]

@@ -16,6 +16,7 @@ use linux as imp;
 pub mod affinity;
 pub mod netio;
 mod procfs;
+pub mod tree;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
