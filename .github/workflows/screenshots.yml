@@ -6,6 +6,10 @@ name: Screenshots
 
 on:
   workflow_dispatch:
+  # TEMPORARY while iterating on this branch; removed before the PR.
+  push:
+    branches: [docs/ci-screenshots]
+    paths: ['.github/workflows/screenshots.yml', '.github/screenshots/**']
 
 permissions:
   contents: read
