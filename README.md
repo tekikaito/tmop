@@ -10,7 +10,10 @@ TMOP shows what your computer is doing: how busy the processor, memory, disk, ne
 graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
 macOS**, is free and open source, and needs no installer.
 
-![TMOP overview](docs/screenshots/summary.png)
+![TMOP's Performance page on Windows: the CPU graph and one graph per logical processor moving live](docs/screenshots/performance.gif)
+
+*Still images of the same app on Windows:
+[Summary](docs/screenshots/summary.png) · [Performance](docs/screenshots/performance.png).*
 
 **[Download TMOP](https://tekikaito.github.io/tmop/)** · [All install options](#get-tmop) ·
 [Release notes](https://github.com/tekikaito/tmop/releases)
@@ -179,6 +182,11 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 TMOP is the same app on Windows, Linux and macOS, but not every feature exists on all three: the
 table shows what differs. Where a system can't provide something, TMOP hides it instead of
 showing zeros.
+
+| On Linux | On macOS |
+|---|---|
+| ![TMOP's Summary page on Linux, light theme](docs/screenshots/linux-summary-light.png) | ![TMOP's Summary page on macOS](docs/screenshots/macos-summary.png) |
+| ![TMOP's Docker page on Linux, listing two running containers](docs/screenshots/linux-docker.png) | ![TMOP's Performance page on macOS, with the CPU graph](docs/screenshots/macos-performance.png) |
 
 | | Windows | Linux | macOS |
 |---|---|---|---|

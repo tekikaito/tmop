@@ -283,7 +283,8 @@ impl App {
         if self.status != self.status_seen.0 {
             self.status_seen = (self.status.clone(), Instant::now());
         }
-        if self.ip.1.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true) {
+        // A screenshot run shows no address.
+        if self.shot.is_none() && self.ip.1.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true) {
             self.ip = (crate::pro::connections::primary_ipv4().map(|a| a.to_string()), Some(Instant::now()));
         }
         let st = theme::status(pal);

@@ -18,6 +18,16 @@ cargo build --release
 cargo test
 ```
 
+## Screenshots
+
+`TMOP --screenshot=out.png --page=performance --device=disk --window-size=1584x877` makes the
+window render its own frame to a PNG after `--wait=` seconds (default 25, so the graphs have
+history) and exit; nothing is captured from the desktop. Add `--theme=dark|light`,
+`--settings-section=graphs`, or `--frames=N --every=MS` for numbered frames (`out-0001.png`, ...).
+The run reads real data from your machine but uses a private settings folder (`--shot-home=<dir>`,
+else a temporary one), shows a neutral host and user name and no IP address. Look at every image
+before you commit it: the Processes, Services and Connections pages list your running programs.
+
 ## Before you open a pull request
 
 CI runs the same checks on Windows, Linux and macOS, so please run them first:

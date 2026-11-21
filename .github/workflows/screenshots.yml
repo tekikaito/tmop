@@ -1,0 +1,190 @@
+# Takes the README screenshots on GitHub's runners, where nothing personal exists (#87).
+# Manual only: never runs on push or pull request and never commits anything; it only uploads
+# artifacts. TMOP renders its own frames (--screenshot, src/shot.rs); a synthetic load runs in
+# the background so the graphs move (.github/screenshots/).
+name: Screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Screenshots (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-windows
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # No GPU here and Windows offers only OpenGL 1.1: Mesa's llvmpipe beside the exe, exactly as
+      # the release workflow's "Package server" step does (same pinned build). TMOP selects it.
+      - name: Software OpenGL
+        shell: pwsh
+        env:
+          MESA_VERSION: '26.2.7'
+          MESA_SHA256: '19c74aad7b09e682473b8de4c35b47e6498de97b71cae5511a231b8eb02f2b22'
+        run: |
+          $archive = "$env:RUNNER_TEMP\mesa.7z"
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-mingw.7z" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:MESA_SHA256) { Write-Error "Mesa archive checksum mismatch"; exit 1 }
+          7z x -y "-o$env:RUNNER_TEMP\mesa" $archive x64\opengl32.dll x64\libgallium_wgl.dll | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:RUNNER_TEMP\mesa\x64\opengl32.dll", "$env:RUNNER_TEMP\mesa\x64\libgallium_wgl.dll" target\release
+
+      # The runner's desktop is 1024x768 and a window cannot be larger than it; raise it.
+      - name: Screen resolution
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Res {
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+            public struct DEVMODE {
+              [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+              public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+              public int dmFields;
+              public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+              public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+              [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+              public short dmLogPixels;
+              public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+              public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+            }
+            [DllImport("user32.dll")] public static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+            [DllImport("user32.dll")] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+          }
+          "@
+          $dm = New-Object Res+DEVMODE
+          $dm.dmSize = [int][Runtime.InteropServices.Marshal]::SizeOf($dm)
+          $modes = @(); $i = 0
+          while ([Res]::EnumDisplaySettings($null, $i, [ref]$dm)) { $modes += "$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"; $i++ }
+          "Modes: " + (($modes | Sort-Object -Unique) -join ' ')
+          [Res]::EnumDisplaySettings($null, -1, [ref]$dm) | Out-Null
+          $dm.dmPelsWidth = 1920; $dm.dmPelsHeight = 1080; $dm.dmFields = 0x180000
+          "ChangeDisplaySettings: " + [Res]::ChangeDisplaySettings([ref]$dm, 0)
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+
+      - name: Take the screenshots
+        shell: bash
+        run: bash .github/screenshots/shoot.sh windows target/release/TMOP.exe shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-windows
+          path: shots/*.png
+          if-no-files-found: error
+
+  linux:
+    name: Screenshots (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-linux
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils libxkbcommon-x11-0 libgl1-mesa-dri libglx-mesa0 libegl1
+
+      # Two small public containers so the Docker page shows something.
+      - name: Containers
+        run: |
+          docker info --format '{{.ServerVersion}}'
+          docker run -d --name web -p 8080:80 nginx:alpine
+          docker run -d --name cache redis:alpine
+          docker ps
+
+      - name: Take the screenshots
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a -s "-screen 0 1700x1000x24" bash .github/screenshots/shoot.sh linux target/release/TMOP shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-linux
+          path: shots/*.png
+          if-no-files-found: error
+
+  macos:
+    name: Screenshots (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-macos
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # The runner's display is small and a window cannot be larger than it; raise it if possible.
+      - name: Screen resolution
+        continue-on-error: true
+        run: |
+          system_profiler SPDisplaysDataType | grep -i -E "resolution|display type" || true
+          brew install jakehilborn/jakehilborn/displayplacer
+          displayplacer list | head -30
+          id=$(displayplacer list | grep -m1 'Persistent screen id' | sed 's/.*: //')
+          displayplacer "id:$id res:1920x1080 scaling:off" || displayplacer "id:$id res:1920x1080"
+          system_profiler SPDisplaysDataType | grep -i resolution || true
+
+      - name: Take the screenshots
+        run: bash .github/screenshots/shoot.sh macos target/release/TMOP shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-macos
+          path: shots/*.png
+          if-no-files-found: error
+
+  # The animation of the Performance page, put together from the frames of the other jobs.
+  animation:
+    name: Animation
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shots-*
+          path: frames
+      - name: Make GIFs
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+          mkdir -p out
+          for os in windows linux; do
+            ffmpeg -loglevel error -framerate 2 -i "frames/shots-$os/anim-%04d.png" \
+              -vf "scale=900:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
+              -loop 0 "out/performance-$os.gif"
+          done
+          ls -l out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: animation
+          path: out/*.gif
+          if-no-files-found: error
