@@ -31,6 +31,9 @@ pub struct ProcCaps {
     pub window_owner: bool,
     /// A Network column (sent and received per process; see [`crate::process::netio`]).
     pub network: bool,
+    /// "Set affinity" (which logical processors a process may run on): Windows (one processor
+    /// group only, see [`Caps::with_groups`]) and Linux; macOS has no supported API.
+    pub affinity: bool,
 }
 
 /// What this build can do; see the module docs. Fields are plain flags so a test can build any
@@ -93,7 +96,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true, network: true },
+        proc: ProcCaps { efficiency: true, realtime: true, suspend: true, not_responding: true, handles: true, session: true, arch: true, gpu: true, window_owner: true, network: true, affinity: true },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -114,7 +117,7 @@ impl Caps {
         clocks: true,
         gpu_engines: true,
         commit_mem: true,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: true },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -136,7 +139,7 @@ impl Caps {
         clocks: cfg!(target_arch = "x86_64"),
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false },
+        proc: ProcCaps { efficiency: true, realtime: false, suspend: true, not_responding: false, handles: true, session: false, arch: true, gpu: false, window_owner: true, network: false, affinity: false },
         trash: true,
         delete_safe: true,
         window_levels: true,
@@ -158,7 +161,7 @@ impl Caps {
         clocks: false,
         gpu_engines: false,
         commit_mem: false,
-        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false, network: false },
+        proc: ProcCaps { efficiency: false, realtime: false, suspend: false, not_responding: false, handles: false, session: false, arch: false, gpu: false, window_owner: false, network: false, affinity: false },
         trash: false,
         delete_safe: false,
         window_levels: false,
@@ -195,10 +198,17 @@ impl Caps {
         self
     }
 
+    /// Narrowed by the processor groups of the machine: an affinity mask covers one group of up
+    /// to 64 processors, so with more than one group the action is hidden rather than wrong.
+    pub const fn with_groups(mut self, groups: usize) -> Caps {
+        self.proc.affinity &= crate::process::affinity::supported_with_groups(groups);
+        self
+    }
+
     /// This build on this machine, probed once.
     pub fn get() -> Caps {
         static CAPS: OnceLock<Caps> = OnceLock::new();
-        *CAPS.get_or_init(|| Self::probed(OS, super::is_wayland()).with_metrics(crate::metrics::probe()))
+        *CAPS.get_or_init(|| Self::probed(OS, super::is_wayland()).with_metrics(crate::metrics::probe()).with_groups(crate::process::affinity::processor_groups()))
     }
 }
 
@@ -210,8 +220,8 @@ mod tests {
     fn windows_has_everything() {
         let w = Caps::WINDOWS;
         let p = w.proc;
+        let procs = [p.efficiency, p.realtime, p.suspend, p.not_responding, p.handles, p.session, p.arch, p.gpu, p.window_owner, p.affinity];
         let all = [w.inventory, w.taskmgr_replace, w.engine, w.volcache, w.mft, w.elevate_relaunch, w.screensaver, w.thermal, w.clocks, w.gpu_engines, w.commit_mem, w.trash, w.delete_safe, w.window_levels, w.run_task, w.run_task_admin];
-        let procs = [p.efficiency, p.realtime, p.suspend, p.not_responding, p.handles, p.session, p.arch, p.gpu, p.window_owner];
         assert!(all.iter().chain(&procs).all(|b| *b));
         assert_eq!(Caps::probed(Os::Windows, false), Caps::WINDOWS);
     }
@@ -247,6 +257,15 @@ mod tests {
         assert_eq!(Caps::WINDOWS.with_metrics(all), Caps::WINDOWS);
         assert!(!Caps::MACOS.with_metrics(all).thermal);
         assert!(Caps::LINUX.with_metrics(Probe { clocks: true, thermal: false }).clocks);
+    }
+
+    #[test]
+    fn affinity_is_for_windows_and_linux_on_one_processor_group() {
+        assert_eq!([Caps::WINDOWS.proc.affinity, Caps::LINUX.proc.affinity, Caps::MACOS.proc.affinity, Caps::OTHER.proc.affinity], [true, true, false, false]);
+        assert!(Caps::WINDOWS.with_groups(1).proc.affinity);
+        let many = Caps::WINDOWS.with_groups(2);
+        assert!(!many.proc.affinity);
+        assert_eq!(Caps { proc: ProcCaps { affinity: true, ..many.proc }, ..many }, Caps::WINDOWS);
     }
 
     #[test]

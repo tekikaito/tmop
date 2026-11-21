@@ -1,6 +1,7 @@
 //! eframe/egui front end: window chrome (header bar, navigation rail, page title, status bar,
 //! see [`chrome`]), the pages, and the skinnable popout window.
 
+pub mod affinity_dialog;
 pub mod apps_page;
 pub mod bench_page;
 pub mod chrome;
@@ -450,6 +451,8 @@ pub struct App {
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
     pending: Option<process_actions::Pending>,
+    /// The "Set affinity" dialog.
+    affinity: Option<affinity_dialog::AffinityDialog>,
     /// The "Run new task" dialog.
     run_task: run_task::RunTaskUi,
     /// A process action running as administrator (`pkexec`); its status text arrives here.
@@ -565,6 +568,7 @@ impl App {
             sort: (Column::Cpu, true),
             selected: None,
             pending: None,
+            affinity: None,
             run_task: run_task::RunTaskUi::new(main_hwnd(cc)),
             elevated_job: None,
             machine: if launch.shot.is_some() { crate::shot::MACHINE.into() } else { chrome::machine_line() },
@@ -1152,6 +1156,7 @@ impl App {
                 Page::Docker => self.docker_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
+            self.affinity_dialog(ctx, &pal);
             self.run_task_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
             self.updates_dialog(ctx, &pal);

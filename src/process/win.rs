@@ -1,6 +1,6 @@
 //! Windows process enumeration (NtQuerySystemInformation) and actions.
 
-use super::{Priority, ProcessRow, Totals};
+use super::{affinity, Priority, ProcessRow, Totals};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::Instant;
@@ -8,7 +8,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS};
 use windows::Win32::Security::{GetTokenInformation, LookupAccountSidW, TokenUser, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, ProcessPowerThrottling, QueryFullProcessImageNameW, SetPriorityClass,
+    GetProcessAffinityMask, SetProcessAffinityMask, OpenProcess, OpenProcessToken, ProcessPowerThrottling, QueryFullProcessImageNameW, SetPriorityClass,
     SetProcessInformation, TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS,
     HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS,
     PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
@@ -465,6 +465,29 @@ pub(super) mod sys {
             .map_err(err)?;
             SetPriorityClass(h.0, if on { IDLE_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS }).map_err(err)
         }
+    }
+
+    /// Processor groups of the machine: affinity masks are per group, see [`super::super::affinity`].
+    pub fn processor_groups() -> usize {
+        // SAFETY: no arguments.
+        unsafe { windows::Win32::System::Threading::GetActiveProcessorGroupCount() as usize }
+    }
+
+    /// The processors of the system (group 0) and the ones `pid` may use now.
+    pub fn get(pid: u32, _start: i64) -> Result<(Vec<usize>, Vec<usize>), String> {
+        let h = open(pid, PROCESS_QUERY_LIMITED_INFORMATION).map_err(err)?;
+        let (mut process, mut system) = (0usize, 0usize);
+        // SAFETY: both out pointers are valid for the call.
+        unsafe { GetProcessAffinityMask(h.0, &mut process, &mut system).map_err(err)? };
+        Ok((affinity::mask_to_cpus(system as u64), affinity::mask_to_cpus(process as u64)))
+    }
+
+    /// Binds `pid` to `cpus` (numbers within group 0).
+    pub fn set(pid: u32, _start: i64, cpus: &[usize]) -> Result<(), String> {
+        let mask = affinity::cpus_to_mask(cpus).ok_or("a processor outside the first 64 cannot be set")?;
+        let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
+        // SAFETY: a handle with PROCESS_SET_INFORMATION and a plain mask.
+        unsafe { SetProcessAffinityMask(h.0, mask as usize).map_err(err) }
     }
 
     pub fn open_location(path: &str) -> Result<(), String> {

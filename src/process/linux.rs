@@ -4,7 +4,7 @@
 //! a `.desktop` heuristic. The parsers live in `procfs.rs`.
 
 use super::procfs::{self, DesktopApp, Elevated, Stat};
-use super::{Action, Priority, ProcessRow, Status, Totals, ACCESS_DENIED};
+use super::{affinity, Action, Priority, ProcessRow, Status, Totals, ACCESS_DENIED};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -589,6 +589,57 @@ pub(super) mod sys {
     pub fn set_efficiency(pid: u32, start: i64, on: bool) -> Result<(), String> {
         target(pid, start)?;
         set_policy(pid, if on { libc::SCHED_IDLE } else { libc::SCHED_OTHER })
+    }
+
+    /// The online processors of the system and the ones `pid` may use now.
+    ///
+    /// The mask is the main thread's. Affinity is per thread on Linux, and a thread can have its
+    /// own mask (a program that pins its workers); [`set`] writes one mask to all of them.
+    pub fn get(pid: u32, start: i64) -> Result<(Vec<usize>, Vec<usize>), String> {
+        target(pid, start)?;
+        let mut set = new_cpu_set();
+        // SAFETY: `set` is a valid cpu_set_t of the size passed.
+        if unsafe { libc::sched_getaffinity(pid as libc::pid_t, std::mem::size_of::<libc::cpu_set_t>(), &mut set) } != 0 {
+            return Err(os_err(std::io::Error::last_os_error()));
+        }
+        let online = std::fs::read_to_string("/sys/devices/system/cpu/online").map(|t| affinity::parse_cpu_list(&t)).unwrap_or_default();
+        let cpus = if online.is_empty() { (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect() } else { online };
+        // SAFETY: CPU_ISSET only reads the bit of a valid set; the index is below CPU_SETSIZE.
+        let current = cpus.iter().copied().filter(|c| *c < libc::CPU_SETSIZE as usize && unsafe { libc::CPU_ISSET(*c, &set) }).collect();
+        Ok((cpus, current))
+    }
+
+    /// Binds every thread of `pid` to `cpus`, as `taskset -a -p` does: setting only the main
+    /// thread would leave the threads that matter (and every thread started earlier) where
+    /// they were. Threads that ended meanwhile are skipped; new ones inherit their creator's mask.
+    /// Needs the same rights as `renice`: your own processes, else root (`CAP_SYS_NICE`).
+    pub fn set(pid: u32, start: i64, cpus: &[usize]) -> Result<(), String> {
+        target(pid, start)?;
+        let mut set = new_cpu_set();
+        for c in cpus {
+            if *c >= libc::CPU_SETSIZE as usize {
+                return Err("a processor above 1023 cannot be set".into());
+            }
+            // SAFETY: the index is below CPU_SETSIZE.
+            unsafe { libc::CPU_SET(*c, &mut set) };
+        }
+        for tid in tids(pid) {
+            // SAFETY: `set` is a valid cpu_set_t of the size passed.
+            if unsafe { libc::sched_setaffinity(tid as libc::pid_t, std::mem::size_of::<libc::cpu_set_t>(), &set) } != 0 {
+                let e = std::io::Error::last_os_error();
+                match e.raw_os_error() {
+                    Some(libc::ESRCH) => {}
+                    Some(libc::EINVAL) => return Err("none of the chosen processors can be used by this process (offline, or outside its cpuset)".into()),
+                    _ => return Err(os_err(e)),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn new_cpu_set() -> libc::cpu_set_t {
+        // SAFETY: cpu_set_t is a plain bit array; all zeros is the empty set.
+        unsafe { std::mem::zeroed() }
     }
 
     /// Selects the image in the file manager.
