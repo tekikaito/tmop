@@ -654,12 +654,16 @@ impl App {
         }
         let mut refresh = false;
         let mut toggle_tree = false;
+        let mut run_task = false;
         let mut end_task = false;
-        let (tools, area) = page_layout(body, 370.0);
+        let (tools, area) = page_layout(body, if self.caps.run_task { 490.0 } else { 370.0 });
         toolbar(ui, tools, |ui| {
             ui.add_enabled_ui(sel_row.is_some(), |ui| {
                 end_task = Button::primary("End task").show(ui, &pal).clicked();
             });
+            if self.caps.run_task {
+                run_task = widgets::button(ui, "Run new task", &pal, Some(Icon::Play)).clicked();
+            }
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             toggle_tree = check_chip(ui, "Group by app", tree_on, &pal);
         });
@@ -669,6 +673,9 @@ impl App {
         }
         if refresh {
             self.sampler.refresh();
+        }
+        if run_task {
+            self.open_run_task();
         }
         if end_task {
             if let Some(r) = &sel_row {
@@ -1008,7 +1015,7 @@ impl App {
                 }
             });
             let ctx = ui.ctx();
-            if self.pending.is_none() && !ctx.egui_wants_keyboard_input() {
+            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() {
                 if key_once(ctx, egui::Key::Delete) {
                     let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
                     requested = Some((action, r.clone()));

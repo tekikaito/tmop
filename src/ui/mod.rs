@@ -25,6 +25,7 @@ pub mod process_actions;
 pub mod processes;
 pub mod recorder_page;
 pub mod replace;
+pub mod run_task;
 pub mod settings_page;
 pub mod summary;
 pub mod table;
@@ -449,6 +450,8 @@ pub struct App {
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
     pending: Option<process_actions::Pending>,
+    /// The "Run new task" dialog.
+    run_task: run_task::RunTaskUi,
     /// A process action running as administrator (`pkexec`); its status text arrives here.
     elevated_job: Option<std::sync::mpsc::Receiver<String>>,
     /// "HOST {b7} user" shown in the header.
@@ -562,6 +565,7 @@ impl App {
             sort: (Column::Cpu, true),
             selected: None,
             pending: None,
+            run_task: run_task::RunTaskUi::new(main_hwnd(cc)),
             elevated_job: None,
             machine: if launch.shot.is_some() { crate::shot::MACHINE.into() } else { chrome::machine_line() },
             focus_search: false,
@@ -1148,6 +1152,7 @@ impl App {
                 Page::Docker => self.docker_page(ui, &fd),
             });
             self.confirm_dialog(ctx, &pal);
+            self.run_task_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
             self.updates_dialog(ctx, &pal);
             self.disk_delete_dialogs(ctx, &pal);
