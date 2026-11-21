@@ -769,7 +769,7 @@ impl App {
                 places.push(place);
             }
         }
-        let mut reorder = table::HeaderReorder::new(shown.len(), 1, !saved_order.is_empty());
+        let mut reorder = table::HeaderReorder::new(shown.len(), 1, !saved_order.is_empty()).with_csv();
         let relayout = table::take_relayout(ui.ctx(), proc_table_id()).is_some();
         let titles: Vec<String> = cols.iter().map(|c| c.title(&span)).collect();
         let widths: Vec<f32> = cols.iter().map(|c| c.width(&self.settings.window.process_table_column_widths)).collect();
@@ -977,6 +977,10 @@ impl App {
             kit::empty_state(&p, table_rect.shrink2(vec2(0.0, 40.0)), &pal, "No matching processes");
         }
         p.rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
+        if let Some(export) = reorder.csv_request() {
+            let text = csv_of(rows, entries, &built.agg, &cols, per_core, logical, net_off, &span);
+            super::csv::deliver(ui.ctx(), export, text, "processes");
+        }
         if let Some(order) = reorder.finish(ui, table_inner, &pal).and_then(|change| table::reordered(&order_ids, &saved_order, &shown, change)) {
             self.set_column_order(ui.ctx(), order);
         }
@@ -1576,7 +1580,6 @@ struct CellCtx<'a> {
 fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellCtx<'_>, icons: &mut IconCache, first: bool, filler: bool) -> bool {
     let rect = ui.max_rect();
     let a = cx.agg.unwrap_or_else(|| Agg::own(r));
-    let cpu = if cx.per_core { a.cpu * cx.logical.max(1) as f32 } else { a.cpu };
     let c = pc.base();
     // Heat-map intensity for the activity columns.
     let heat = if filler || pc.is_trend() {
@@ -1709,7 +1712,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             }
         }
         PCol::Data(Column::Pid) => {
-            let text = if cx.kids > 0 && !cx.open { "\u{2014}".to_string() } else { r.pid.to_string() };
+            let text = cell_text(r, Column::Pid, &cx);
             ui.painter().text(pos2(rect.left() + 10.0, cy), Align2::LEFT_CENTER, text, font, color);
         }
         PCol::Data(Column::Status) => {
@@ -1728,18 +1731,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             }
         }
         PCol::Data(c) => {
-            let text = match c {
-                Column::Cpu => format!("{cpu:.1}%"),
-                Column::Memory => format_bytes(a.mem as f64),
-                Column::DiskRead => format_rate(a.read),
-                Column::DiskWrite => format_rate(a.write),
-                Column::Disk => format_rate(a.read + a.write),
-                // No figure while the counters do not run (not elevated); the header says why.
-                Column::Network if cx.net_off => "\u{2014}".to_string(),
-                Column::Network => format_rate(a.net),
-                Column::Gpu => format!("{:.1}%", a.gpu),
-                _ => cell(r, c),
-            };
+            let text = cell_text(r, c, &cx);
             let p = ui.painter();
             if pc.right() {
                 p.with_clip_rect(rect).text(pos2(rect.right() - 10.0, cy), Align2::RIGHT_CENTER, &text, font, color);
@@ -1749,6 +1741,44 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
         }
     }
     toggled
+}
+
+/// The text of the cell of `r` in the column `c`, as the table shows it: the totals of a
+/// collapsed group in the activity columns, "\u{2014}" for the PID of a collapsed group and for the
+/// network figure while the counters do not run.
+fn cell_text(r: &ProcessRow, c: Column, cx: &CellCtx<'_>) -> String {
+    let a = cx.agg.unwrap_or_else(|| Agg::own(r));
+    let cpu = if cx.per_core { a.cpu * cx.logical.max(1) as f32 } else { a.cpu };
+    match c {
+        Column::Pid if cx.kids > 0 && !cx.open => "\u{2014}".to_string(),
+        Column::Cpu => format!("{cpu:.1}%"),
+        Column::Memory => format_bytes(a.mem as f64),
+        Column::DiskRead => format_rate(a.read),
+        Column::DiskWrite => format_rate(a.write),
+        Column::Disk => format_rate(a.read + a.write),
+        // No figure while the counters do not run (not elevated); the header says why.
+        Column::Network if cx.net_off => "\u{2014}".to_string(),
+        Column::Network => format_rate(a.net),
+        Column::Gpu => format!("{:.1}%", a.gpu),
+        _ => cell(r, c),
+    }
+}
+
+/// The table as CSV text: the data columns in `cols` (the trend columns only draw), a line per
+/// process row as listed in `entries` (group headings and "+ n more" lines are not data, and
+/// children of a collapsed group are not listed in the first place).
+#[allow(clippy::too_many_arguments)]
+fn csv_of(rows: &[ProcessRow], entries: &[Entry], agg: &HashMap<usize, Agg>, cols: &[PCol], per_core: bool, logical: usize, net_off: bool, span: &str) -> String {
+    let data: Vec<Column> = cols.iter().filter_map(|c| if let PCol::Data(c) = c { Some(*c) } else { None }).collect();
+    let header: Vec<String> = cols.iter().filter(|c| !c.is_trend()).map(|c| c.title(span)).collect();
+    let mut lines = Vec::new();
+    for e in entries {
+        if let Entry::Row { idx, depth, kids, open } = e {
+            let cx = CellCtx { max_mem: 1.0, max_io: 1.0, selected: false, depth: *depth, kids: *kids, open: *open, size: 1, agg: agg.get(idx).copied(), logical, per_core, trend: None, mem_color: Color32::TRANSPARENT, st: theme::status(&theme::DARK), net_off };
+            lines.push(data.iter().map(|c| cell_text(&rows[*idx], *c, &cx)).collect());
+        }
+    }
+    super::csv::document(&header, &lines)
 }
 
 /// Expand / collapse arrow of a group row; true when clicked.
@@ -1905,6 +1935,23 @@ mod tests {
 
     fn row(pid: u32, ppid: u32, ct: i64, name: &str) -> ProcessRow {
         ProcessRow { pid, parent_pid: ppid, create_time: ct, name: name.into(), ..Default::default() }
+    }
+
+    /// The CSV of the Processes table lists the data columns in the order shown (no trends), a
+    /// line per listed process (no group headings), with the totals of a collapsed group.
+    #[test]
+    fn csv_lists_the_rows_as_shown() {
+        let mut a = row(10, 1, 1, "=evil.exe");
+        a.cpu_pct = 12.3;
+        let b = row(11, 10, 2, "child, one");
+        let rows = vec![a, b];
+        let entries = vec![Entry::Group("Apps", 1), Entry::Row { idx: 0, depth: 0, kids: 1, open: false }, Entry::More { key: (10, 1), n: 3 }];
+        let agg: HashMap<usize, Agg> = HashMap::from([(0, Agg { cpu: 20.0, mem: 3 << 20, ..Default::default() })]);
+        let cols = [PCol::Data(Column::Name), PCol::Data(Column::Cpu), PCol::CpuTrend, PCol::Data(Column::Pid), PCol::Data(Column::Memory)];
+        assert_eq!(csv_of(&rows, &entries, &agg, &cols, false, 4, false, "60 s"), format!("Name,CPU,PID,Memory\r\n'=evil.exe,20.0%,\u{2014},{}\r\n", format_bytes((3 << 20) as f64)));
+        // An open group lists its own figures and PID, and a child its name quoted.
+        let entries = vec![Entry::Row { idx: 1, depth: 1, kids: 0, open: false }];
+        assert_eq!(csv_of(&rows, &entries, &HashMap::new(), &cols[..2], true, 4, false, ""), "Name,CPU\r\n\"child, one\",0.0%\r\n");
     }
 
     #[test]

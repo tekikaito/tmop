@@ -6,6 +6,7 @@ pub mod apps_page;
 pub mod bench_page;
 pub mod chrome;
 pub mod connections_page;
+pub mod csv;
 pub mod disk_cleanup;
 pub mod disk_delete;
 pub mod disk_drives;
@@ -524,6 +525,7 @@ impl App {
         let settings_maximized = settings.window.maximized;
         let display_font = install_display_font(&cc.egui_ctx, &settings.appearance.display_font);
         let ctx = cc.egui_ctx.clone();
+        csv::set_owner(&ctx, main_hwnd(cc));
         let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
         let catalog = skin::scan(&skin::default_skin_dirs());
         let palettes = palette::scan(&palette::default_dir());
@@ -1187,6 +1189,7 @@ impl App {
         if let Some(message) = kit::take_report(ctx) {
             self.status = message;
         }
+        csv::poll(ctx);
         self.poll_palette_dialog();
         self.save_palette_edits(false);
         if table::sync_orders(ctx, &mut self.settings.window.table_column_order) {

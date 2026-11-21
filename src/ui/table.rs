@@ -409,13 +409,28 @@ pub struct HeaderReorder {
     /// The place being dragged, and whether it was let go this frame.
     drag: Option<(usize, bool)>,
     pick: Option<Reorder>,
+    /// The table can export itself: the menu offers "Copy table as CSV" and "Save table as CSV...".
+    csv: bool,
+    csv_pick: Option<super::csv::Export>,
 }
 
 impl HeaderReorder {
     /// For a table of `places` columns of which the first `pinned` cannot move; `changed`: the
     /// order shown is not the default one.
     pub fn new(places: usize, pinned: usize, changed: bool) -> Self {
-        Self { pinned, changed, headers: vec![None; places], drag: None, pick: None }
+        Self { pinned, changed, headers: vec![None; places], drag: None, pick: None, csv: false, csv_pick: None }
+    }
+
+    /// Adds "Copy table as CSV" and "Save table as CSV..." to the context menu; the choice is
+    /// read with [`HeaderReorder::csv_request`].
+    pub fn with_csv(mut self) -> Self {
+        self.csv = true;
+        self
+    }
+
+    /// The export picked from the menu this frame, if any. Call before [`HeaderReorder::finish`].
+    pub fn csv_request(&self) -> Option<super::csv::Export> {
+        self.csv_pick
     }
 
     /// What the header cell at `place` senses: clicks (sorting), and drags where it can move.
@@ -445,8 +460,9 @@ impl HeaderReorder {
             ui.painter().rect_filled(rect, 0.0, pal.raise(0.08));
         }
         let (left, right, changed) = (movable && place > self.pinned, movable && place < last, self.changed);
-        if left || right || changed {
-            let pick = &mut self.pick;
+        let csv = self.csv;
+        if left || right || changed || csv {
+            let (pick, csv_pick) = (&mut self.pick, &mut self.csv_pick);
             super::kit::context_menu(resp, |ui| {
                 if left && super::kit::menu_item(ui, "Move left", None, false) {
                     *pick = Some(Reorder::Move { from: place, to: place - 1 });
@@ -460,6 +476,17 @@ impl HeaderReorder {
                     }
                     if super::kit::menu_item(ui, "Reset column order", None, false) {
                         *pick = Some(Reorder::Reset);
+                    }
+                }
+                if csv {
+                    if left || right || changed {
+                        ui.separator();
+                    }
+                    if super::kit::menu_item(ui, "Copy table as CSV", None, false) {
+                        *csv_pick = Some(super::csv::Export::Copy);
+                    }
+                    if super::kit::menu_item(ui, "Save table as CSV\u{2026}", None, false) {
+                        *csv_pick = Some(super::csv::Export::Save);
                     }
                 }
             });
@@ -560,7 +587,7 @@ pub fn show_with_menu(
     let logical = cols;
     let placed: Vec<Col> = shown.iter().map(|i| logical[*i]).collect();
     let cols = &placed[..];
-    let mut reorder_ui = HeaderReorder::new(cols.len(), PINNED, !saved.is_empty());
+    let mut reorder_ui = HeaderReorder::new(cols.len(), PINNED, !saved.is_empty()).with_csv();
     // Right after a move the columns keep the widths they had, by title.
     let relayout = take_relayout(ui.ctx(), table_id);
     let mut widths = fit_widths(cols, inner.width());
@@ -727,6 +754,10 @@ pub fn show_with_menu(
         });
     });
     ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
+    if let Some(export) = reorder_ui.csv_request() {
+        let text = csv_text(&titles, &shown, order, &|item, col| cell(item, col).text);
+        super::csv::deliver(ui.ctx(), export, text, id.strip_suffix("-table").unwrap_or(id));
+    }
     let header_widths: Vec<(String, f32)> = cols.iter().zip(reorder_ui.rects()).filter_map(|(c, r)| Some((c.title.to_string(), (*r)?.width()))).collect();
     if let Some(order) = reorder_ui.finish(ui, inner, pal).and_then(|change| reordered(&titles, &saved, &shown, change)) {
         set_order(ui.ctx(), id, order);
@@ -745,6 +776,16 @@ pub fn show_with_menu(
         ui.data_mut(|d| d.insert_temp(active_table(), table_id));
     }
     activated
+}
+
+/// The table as CSV text: the header line, then a line per item of `order` (as filtered and
+/// sorted), with the columns in the order shown. `titles` are the columns' titles as the caller
+/// counts them, `shown[place]` the caller's column at each place, and `text(item, col)` the text
+/// of a cell (empty for a cell that only draws, like a trend).
+pub fn csv_text(titles: &[&str], shown: &[usize], order: &[usize], text: &dyn Fn(usize, usize) -> String) -> String {
+    let header: Vec<&str> = shown.iter().map(|c| titles[*c]).collect();
+    let rows: Vec<Vec<String>> = order.iter().map(|item| shown.iter().map(|c| text(*item, *c)).collect()).collect();
+    super::csv::document(&header, &rows)
 }
 
 /// Case-insensitive "contains any word" filter.
@@ -1022,5 +1063,65 @@ mod tests {
         let s = TableState::sorted_by(0, true);
         s.sort(&items, &mut order, |a, b, _| a.cmp(b));
         assert_eq!(order, vec![0, 2, 1]);
+    }
+
+    /// The CSV follows the columns as shown (reordered, hidden ones left out) and the rows as
+    /// filtered and sorted.
+    #[test]
+    fn csv_follows_the_shown_columns_and_rows() {
+        let titles = ["Name", "Size", "Note"];
+        let data = [["b", "2", "x,y"], ["a", "1", ""], ["c", "3", "=1+1"]];
+        let text = |item: usize, col: usize| data[item][col].to_string();
+        // Default order, everything shown, rows as listed.
+        assert_eq!(csv_text(&titles, &[0, 1, 2], &[0, 1, 2], &text), "Name,Size,Note\r\nb,2,\"x,y\"\r\na,1,\r\nc,3,'=1+1\r\n");
+        // Size moved first, Note hidden; row 1 filtered out, the rest sorted the other way.
+        assert_eq!(csv_text(&titles, &[1, 0], &[2, 0], &text), "Size,Name\r\n3,c\r\n2,b\r\n");
+        assert_eq!(csv_text(&titles, &[0], &[], &text), "Name\r\n", "no rows: the header only");
+    }
+
+    /// The header menu of a table offers the CSV entries (and the menu is there even while the
+    /// column order is the default and a column cannot move).
+    #[test]
+    fn the_header_menu_offers_csv() {
+        fn texts(shape: &egui::Shape, out: &mut String) {
+            match shape {
+                egui::Shape::Text(t) => out.push_str(t.galley.text()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| texts(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut icons = super::super::icons::IconCache::new(&ctx);
+        let cols = [Col::text("Name", 200.0), Col::text("Size", 100.0)];
+        let mut state = TableState::default();
+        let mut seen = String::new();
+        for frame in 0..4 {
+            let mut input = egui::RawInput::default();
+            if frame >= 1 {
+                // Right-click the second header cell.
+                let at = pos2(260.0, 28.0);
+                input.events.push(egui::Event::PointerMoved(at));
+                if frame == 1 {
+                    for pressed in [true, false] {
+                        input.events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+                    }
+                }
+            }
+            let mut out = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(500.0, 300.0));
+                    show(ui, rect, "csv-test-table", &pal, &cols, &[0, 1], &mut state, &|i| i.to_string(), &|i, c| Cell::new(format!("{i}{c}")), &mut icons);
+                });
+            });
+            out.textures_delta.clear();
+            for s in &out.shapes {
+                texts(&s.shape, &mut seen);
+            }
+        }
+        assert!(seen.contains("Copy table as CSV"), "{seen}");
+        assert!(seen.contains("Save table as CSV\u{2026}"), "{seen}");
     }
 }
