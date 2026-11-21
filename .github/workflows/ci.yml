@@ -102,6 +102,11 @@ jobs:
         run: |
           packaging/linux/package.sh v0.0.0-ci x64 target/debug/TMOP "$RUNNER_TEMP/dist"
           packaging/linux/test-install.sh "$RUNNER_TEMP/dist"
+          # package.sh also built the .deb and .rpm (nfpm).
+          dpkg-deb --info "$RUNNER_TEMP/dist/TMOP-v0.0.0-ci-linux-x64.deb"
+          dpkg-deb --contents "$RUNNER_TEMP/dist/TMOP-v0.0.0-ci-linux-x64.deb" | grep -q ' ./usr/bin/tmop$'
+          test -s "$RUNNER_TEMP/dist/TMOP-v0.0.0-ci-linux-x64.rpm"
+          (cd "$RUNNER_TEMP/dist" && sha256sum -c --quiet TMOP-v0.0.0-ci-linux-x64.deb.sha256 TMOP-v0.0.0-ci-linux-x64.rpm.sha256)
 
       # The delete and Trash safety tests that need bind mounts and other users' files skip
       # without root, so they run once more as root here and must not skip.
