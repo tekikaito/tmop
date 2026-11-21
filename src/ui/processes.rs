@@ -11,6 +11,7 @@ use super::widgets::{self, Button, ButtonKind, ButtonSize, Dot, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::pro::connections::{Conn, Proto};
+use crate::process::tree::{self as ptree, TreeRow};
 use crate::process::{self, format_bytes, format_cpu_time, format_rate, Action, Column, Priority, ProcessRow, Status};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
 use super::widgets::ScrollArea029 as _;
@@ -25,6 +26,9 @@ const SPARK_W: f32 = 84.0;
 const SPARK_H: f32 = 24.0;
 /// A group shows this many member rows before "+ n more processes".
 const SHOWN_MEMBERS: usize = 3;
+/// Tree view: indentation per level, and the level beyond which deeper rows indent no further.
+const TREE_STEP: f32 = 16.0;
+const TREE_MAX_INDENT: usize = 12;
 /// Height of the system history strip.
 const STRIP_H: f32 = 108.0;
 /// Network use (bytes/s, sent and received) that the Network column marks hot; its heat grows towards it.
@@ -76,6 +80,9 @@ fn default_hidden(c: Column) -> bool {
 #[derive(Default)]
 pub struct ProcState {
     pub expanded: HashSet<(u32, i64)>,
+    /// Tree view: the nodes whose children are hidden (everything starts expanded). For the
+    /// session only; processes that are gone are forgotten.
+    pub collapsed: HashSet<(u32, i64)>,
     /// Groups listing all their members instead of the first few.
     pub show_all: HashSet<(u32, i64)>,
     /// Filter tab (index into [`VIEWS`]).
@@ -334,6 +341,59 @@ fn in_view(view: usize, r: &ProcessRow) -> bool {
     }
 }
 
+/// The search text `f` (lower case; empty matches all) finds `r`: in its name, user or
+/// description, or as its exact PID.
+fn text_match(r: &ProcessRow, f: &str) -> bool {
+    f.is_empty()
+        || r.name.to_lowercase().contains(f)
+        || r.pid.to_string() == f
+        || r.user.as_deref().map(|u| u.to_lowercase().contains(f)).unwrap_or(false)
+        || r.description.as_deref().map(|u| u.to_lowercase().contains(f)).unwrap_or(false)
+}
+
+/// Tree view: filter tab `view` makes `r` a match (Apps: windowed, Background: the rest, the
+/// others as in [`in_view`]).
+fn tree_tab(view: usize, r: &ProcessRow) -> bool {
+    match view {
+        1 => r.has_window,
+        2 => !r.has_window,
+        v => in_view(v, r),
+    }
+}
+
+/// The table lines of the tree view, one per tree row.
+fn tree_entries(tree: &[TreeRow]) -> Vec<Entry> {
+    tree.iter().map(|t| Entry::Row { idx: t.index, depth: t.depth, kids: usize::from(t.has_children), open: t.expanded }).collect()
+}
+
+/// Tree view: what Left or Right, pressed this frame, does on line `at` (the selection).
+fn tree_key(ctx: &egui::Context, tree: &[TreeRow], at: Option<usize>, filtering: bool) -> Option<ptree::Step> {
+    let at = at?;
+    if key_once(ctx, egui::Key::ArrowLeft) {
+        ptree::left(tree, at, filtering)
+    } else if key_once(ctx, egui::Key::ArrowRight) {
+        ptree::right(tree, at, filtering)
+    } else {
+        None
+    }
+}
+
+/// Tree view: opens or closes the node `k` (its arrow, a double click, Left or Right). Closing a
+/// node whose subtree holds the selection selects the node. While filtering every node stays
+/// open and nothing changes.
+fn tree_toggle(collapsed: &mut HashSet<(u32, i64)>, tree: &[TreeRow], rows: &[ProcessRow], k: (u32, i64), selected: &mut Option<(u32, i64)>, filtering: bool) {
+    if filtering || collapsed.remove(&k) {
+        return;
+    }
+    collapsed.insert(k);
+    let line = |key: (u32, i64)| tree.iter().position(|t| (rows[t.index].pid, rows[t.index].create_time) == key);
+    if let (Some(at), Some(sel)) = (line(k), selected.and_then(line)) {
+        if ptree::in_subtree(tree, at, sel) {
+            *selected = Some(k);
+        }
+    }
+}
+
 /// How an app is called in dialogs and breadcrumbs: the image description when it is short.
 pub(super) fn app_label(r: &ProcessRow) -> String {
     match r.description.as_deref().map(str::trim) {
@@ -490,6 +550,11 @@ impl App {
         self.settings.window.process_tree
     }
 
+    /// The parent/child tree replaces the list ("Tree view").
+    fn tree_view(&self) -> bool {
+        self.settings.window.process_tree_view
+    }
+
     /// CPU % as displayed: share of the whole machine, or of one core with "Per Core CPU
     /// Statistics" (TMOP's reading of that setting).
     pub fn shown_cpu(&self, pct: f32, logical: usize) -> f32 {
@@ -513,6 +578,7 @@ impl App {
         }
         let live: HashSet<(u32, i64)> = fd.rows.iter().map(|r| (r.pid, r.create_time)).collect();
         self.proc.spark.retain(|k, _| live.contains(k));
+        ptree::prune(&mut self.proc.collapsed, fd.rows);
     }
 
     /// History of the selected process for the details view.
@@ -566,23 +632,16 @@ impl App {
 
         let iv = self.settings.update_speed().interval();
         let tree_on = self.tree_enabled();
+        let tree_view = self.tree_view();
 
         // ---- model
         let f = self.filter.to_lowercase();
         let rows = fd.rows;
-        let visible: Vec<usize> = (0..rows.len())
-            .filter(|i| {
-                let r = &rows[*i];
-                (self.settings.general.show_self_in_reports || r.pid != std::process::id())
-                    && (f.is_empty()
-                        || r.name.to_lowercase().contains(&f)
-                        || r.pid.to_string() == f
-                        || r.user.as_deref().map(|u| u.to_lowercase().contains(&f)).unwrap_or(false)
-                        || r.description.as_deref().map(|u| u.to_lowercase().contains(&f)).unwrap_or(false))
-            })
-            .collect();
+        let show_self = self.settings.general.show_self_in_reports;
+        let listed = |r: &ProcessRow| show_self || r.pid != std::process::id();
+        let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], &f)).collect();
         let (col, desc) = self.sort;
-        let tree = tree_on && f.is_empty();
+        let tree = tree_on && !tree_view && f.is_empty();
         let all = group_rows(rows, &visible, tree, col, desc);
         let view = self.proc.view.min(VIEWS.len() - 1);
         // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
@@ -595,7 +654,17 @@ impl App {
             Some(visible.iter().filter(|i| in_view(5, &rows[**i])).count()),
         ];
         let subset;
-        let (groups, sub_roots): (&Groups, Vec<usize>) = if view >= 3 {
+        // Tree view: every listed process takes part; the filter text and the tab pick the matches,
+        // shown with their ancestors.
+        let filtering = !f.is_empty() || view != 0;
+        let tree_rows: Vec<TreeRow> = if tree_view {
+            let members: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i])).collect();
+            let pick = |r: &ProcessRow| tree_tab(view, r) && text_match(r, &f);
+            ptree::build(rows, &members, filtering.then_some(&pick as &dyn Fn(&ProcessRow) -> bool), (col, desc), &self.proc.collapsed)
+        } else {
+            Vec::new()
+        };
+        let (groups, sub_roots): (&Groups, Vec<usize>) = if view >= 3 && !tree_view {
             let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
             subset = group_rows(rows, &ids, tree, col, desc);
             let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
@@ -607,6 +676,7 @@ impl App {
         let mut built = Built::default();
         let tctx = TreeCtx { rows, children: &groups.children, expanded: &self.proc.expanded, show_all: &self.proc.show_all };
         match view {
+            _ if tree_view => built.entries = tree_entries(&tree_rows),
             0 => {
                 built.entries.push(Entry::Group("Apps", groups.app_procs));
                 for i in &groups.apps {
@@ -654,9 +724,10 @@ impl App {
         }
         let mut refresh = false;
         let mut toggle_tree = false;
+        let mut toggle_view = false;
         let mut run_task = false;
         let mut end_task = false;
-        let (tools, area) = page_layout(body, if self.caps.run_task { 490.0 } else { 370.0 });
+        let (tools, area) = page_layout(body, if self.caps.run_task { 610.0 } else { 490.0 });
         toolbar(ui, tools, |ui| {
             ui.add_enabled_ui(sel_row.is_some(), |ui| {
                 end_task = Button::primary("End task").show(ui, &pal).clicked();
@@ -665,10 +736,18 @@ impl App {
                 run_task = widgets::button(ui, "Run new task", &pal, Some(Icon::Play)).clicked();
             }
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
-            toggle_tree = check_chip(ui, "Group by app", tree_on, &pal);
+            // Three views, one at a time: the list, grouped by app, or the tree.
+            toggle_tree = check_chip(ui, "Group by app", tree_on && !tree_view, &pal);
+            toggle_view = check_chip(ui, "Tree view", tree_view, &pal);
         });
         if toggle_tree {
-            self.settings.window.process_tree = !tree_on;
+            // From the tree view "Group by app" switches to the grouped list.
+            self.settings.window.process_tree = tree_view || !tree_on;
+            self.settings.window.process_tree_view = false;
+            self.settings_dirty = true;
+        }
+        if toggle_view {
+            self.settings.window.process_tree_view = !tree_view;
             self.settings_dirty = true;
         }
         if refresh {
@@ -777,6 +856,8 @@ impl App {
             .entries
             .iter()
             .map(|e| match e {
+                // Tree rows are all full rows; the depth shows as indentation.
+                _ if tree_view => ROW_H,
                 Entry::Row { depth: 0, .. } | Entry::Group(..) => ROW_H,
                 _ => CHILD_H,
             })
@@ -789,7 +870,9 @@ impl App {
         let mut sort_click: Option<Column> = None;
         let mut resized: Vec<(String, f32)> = Vec::new();
         // Keys: Up, Down, Page Up, Page Down, Home and End move the selection through the rows
-        // shown and scroll it into view; Right opens the selected group and Left closes it.
+        // shown and scroll it into view; Right opens the selected group and Left closes it. In the
+        // tree, Left on a leaf or a closed node goes to the parent and Right on an open one to
+        // its first child.
         let mut scroll_to = None;
         if self.pending.is_none() && table::keys_free(ui.ctx()) {
             let row_key = |e: &Entry| match e {
@@ -804,6 +887,15 @@ impl App {
                 if let Some(n) = table::nav_target(current, shown.len(), nav, page.saturating_sub(1)) {
                     self.selected = row_key(&built.entries[shown[n]]);
                     scroll_to = Some(shown[n]);
+                }
+            } else if tree_view {
+                match tree_key(ui.ctx(), &tree_rows, at, filtering) {
+                    Some(ptree::Step::Toggle(n)) => toggle = row_key(&built.entries[n]),
+                    Some(ptree::Step::Select(n)) => {
+                        self.selected = row_key(&built.entries[n]);
+                        scroll_to = Some(n);
+                    }
+                    None => {}
                 }
             } else if let Some(Entry::Row { kids, open, .. }) = at.map(|a| &built.entries[a]) {
                 let fold = if *open { egui::Key::ArrowLeft } else { egui::Key::ArrowRight };
@@ -935,7 +1027,9 @@ impl App {
                                 } else {
                                     spark.get(&key).map(|s| (&s.0, &s.1))
                                 };
-                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st, net_off };
+                                // Tree view: an ancestor listed only for a match below it is dimmed.
+                                let dim = tree_view && tree_rows.get(row.index()).is_some_and(|t| !t.matched);
+                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st, net_off, tree: tree_view, dim };
                                 for (ci, c) in cols.iter().enumerate() {
                                     row.col(|ui| {
                                         if cell_ui(ui, r, *c, &pal, cx, icons, ci == 0, false) {
@@ -951,7 +1045,8 @@ impl App {
                                     clicked = Some(key);
                                 }
                                 if resp.double_clicked() {
-                                    if *kids > 0 {
+                                    // While filtering the tree stays open: a double click opens the details.
+                                    if *kids > 0 && !(tree_view && filtering) {
                                         toggle = Some(key);
                                     } else {
                                         open_details = Some(key);
@@ -995,7 +1090,9 @@ impl App {
             self.proc.show_all.insert(k);
         }
         if let Some(k) = toggle {
-            if !self.proc.expanded.remove(&k) {
+            if tree_view {
+                tree_toggle(&mut self.proc.collapsed, &tree_rows, rows, k, &mut self.selected, filtering);
+            } else if !self.proc.expanded.remove(&k) {
                 self.proc.expanded.insert(k);
             } else {
                 self.proc.show_all.remove(&k);
@@ -1572,6 +1669,10 @@ struct CellCtx<'a> {
     st: theme::Status,
     /// The network counters do not run ([`process::netio::state`]): the Network column shows no figure.
     net_off: bool,
+    /// A row of the tree view: indented by `depth`, drawn as a full row at every depth.
+    tree: bool,
+    /// Tree view while filtering: an ancestor that does not match itself, drawn faint.
+    dim: bool,
 }
 
 /// Draws one cell. Returns true when the tree chevron was clicked. `first` / `filler` tell the
@@ -1610,7 +1711,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
                 p.line_segment([pos2(rect.right() - 0.5, rect.top()), pos2(rect.right() - 0.5, rect.bottom())], s);
             }
         } else {
-            if cx.depth > 0 {
+            if cx.depth > 0 && !cx.tree {
                 p.rect_filled(rect, 0.0, with_alpha(pal.text, 0.025));
             } else {
                 p.line_segment([pos2(rect.left(), rect.top() + 0.5), pos2(rect.right(), rect.top() + 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
@@ -1623,7 +1724,8 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
     if filler {
         return false;
     }
-    let child = cx.depth > 0;
+    // A nested row of an app group (tree rows are full rows at every depth).
+    let child = cx.depth > 0 && !cx.tree;
     let mono = c.numeric() && !pc.is_trend();
     let font = if mono { theme::mono(12.0) } else { theme::ui(13.0) };
     let dimmed = matches!(c, Column::User | Column::Priority | Column::Architecture | Column::CommandLine | Column::Path | Column::Description);
@@ -1650,7 +1752,13 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
         Column::Gpu => a.gpu >= 20.0,
         _ => false,
     };
-    let color = if hot { cx.st.yellow } else { base };
+    let color = if cx.dim {
+        pal.text_faint
+    } else if hot {
+        cx.st.yellow
+    } else {
+        base
+    };
     let cy = rect.center().y;
     let mut toggled = false;
     match pc {
@@ -1660,7 +1768,7 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             if r.status == Status::Suspended {
                 p.extend(egui::Shape::dashed_line(&[pos2(area.left(), cy), pos2(area.right(), cy)], Stroke::new(1.2_f32, pal.raise(0.3)), 3.0, 3.0));
             } else if let Some((cpu_s, mem_s)) = cx.trend {
-                let fill = if cx.depth == 0 { 0.16 } else { 0.0 };
+                let fill = if child { 0.0 } else { 0.16 };
                 if pc == PCol::CpuTrend {
                     let color = if r.status == Status::NotResponding { cx.st.danger } else { pal.accent };
                     widgets::sparkline(&p, area, &[(cpu_s, color, (0.0, (cpu_s.max() * 1.2).max(2.0)))], fill, false);
@@ -1671,7 +1779,15 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
         }
         PCol::Data(Column::Name) => {
             let (icon_x, name_x);
-            if child {
+            if cx.tree {
+                // Chevron, icon and name move right by a step per level, up to a cap.
+                let x0 = rect.left() + cx.depth.min(TREE_MAX_INDENT) as f32 * TREE_STEP;
+                if cx.kids > 0 {
+                    toggled = chevron(ui, r, pal, pos2(x0 + 16.0, cy), cx.open);
+                }
+                icon_x = Some(x0 + 28.0);
+                name_x = x0 + 60.0;
+            } else if child {
                 let x = rect.left() + 56.0 + (cx.depth - 1) as f32 * 16.0;
                 if cx.kids > 0 {
                     toggled = chevron(ui, r, pal, pos2(x + 2.0, cy), cx.open);
@@ -1696,7 +1812,15 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             let count = (cx.size > 1).then(|| cx.size.to_string());
             let eco = r.efficiency;
             let tail_w = count.as_ref().map(|c| widgets::text_width(&p, c, theme::mono(11.0)) + 8.0).unwrap_or(0.0) + if windows { widgets::badge_width(&p, process::os_badge()) + 8.0 } else { 0.0 } + if eco { 30.0 } else { 0.0 };
-            let (nf, nc) = if child { (theme::ui(13.0), pal.text_dim) } else { (theme::semibold(13.0), pal.text) };
+            let (nf, nc) = if child {
+                (theme::ui(13.0), pal.text_dim)
+            } else if cx.dim {
+                (theme::ui(13.0), pal.text_faint)
+            } else if cx.tree && cx.depth > 0 {
+                (theme::ui(13.0), pal.text)
+            } else {
+                (theme::semibold(13.0), pal.text)
+            };
             let nr = widgets::text_fit(&p, pos2(name_x, cy), Align2::LEFT_CENTER, &r.name, nf, nc, rect.right() - name_x - 10.0 - tail_w);
             let mut x = nr.right() + 8.0;
             if let Some(c) = count {
@@ -1745,12 +1869,13 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
 
 /// The text of the cell of `r` in the column `c`, as the table shows it: the totals of a
 /// collapsed group in the activity columns, "\u{2014}" for the PID of a collapsed group and for the
-/// network figure while the counters do not run.
+/// network figure while the counters do not run. A collapsed node of the tree view has no totals
+/// and shows its own figures and PID.
 fn cell_text(r: &ProcessRow, c: Column, cx: &CellCtx<'_>) -> String {
     let a = cx.agg.unwrap_or_else(|| Agg::own(r));
     let cpu = if cx.per_core { a.cpu * cx.logical.max(1) as f32 } else { a.cpu };
     match c {
-        Column::Pid if cx.kids > 0 && !cx.open => "\u{2014}".to_string(),
+        Column::Pid if cx.agg.is_some() && cx.kids > 0 && !cx.open => "\u{2014}".to_string(),
         Column::Cpu => format!("{cpu:.1}%"),
         Column::Memory => format_bytes(a.mem as f64),
         Column::DiskRead => format_rate(a.read),
@@ -1766,7 +1891,8 @@ fn cell_text(r: &ProcessRow, c: Column, cx: &CellCtx<'_>) -> String {
 
 /// The table as CSV text: the data columns in `cols` (the trend columns only draw), a line per
 /// process row as listed in `entries` (group headings and "+ n more" lines are not data, and
-/// children of a collapsed group are not listed in the first place).
+/// children of a collapsed group or tree node are not listed in the first place). Names carry no
+/// indentation.
 #[allow(clippy::too_many_arguments)]
 fn csv_of(rows: &[ProcessRow], entries: &[Entry], agg: &HashMap<usize, Agg>, cols: &[PCol], per_core: bool, logical: usize, net_off: bool, span: &str) -> String {
     let data: Vec<Column> = cols.iter().filter_map(|c| if let PCol::Data(c) = c { Some(*c) } else { None }).collect();
@@ -1774,7 +1900,7 @@ fn csv_of(rows: &[ProcessRow], entries: &[Entry], agg: &HashMap<usize, Agg>, col
     let mut lines = Vec::new();
     for e in entries {
         if let Entry::Row { idx, depth, kids, open } = e {
-            let cx = CellCtx { max_mem: 1.0, max_io: 1.0, selected: false, depth: *depth, kids: *kids, open: *open, size: 1, agg: agg.get(idx).copied(), logical, per_core, trend: None, mem_color: Color32::TRANSPARENT, st: theme::status(&theme::DARK), net_off };
+            let cx = CellCtx { max_mem: 1.0, max_io: 1.0, selected: false, depth: *depth, kids: *kids, open: *open, size: 1, agg: agg.get(idx).copied(), logical, per_core, trend: None, mem_color: Color32::TRANSPARENT, st: theme::status(&theme::DARK), net_off, tree: false, dim: false };
             lines.push(data.iter().map(|c| cell_text(&rows[*idx], *c, &cx)).collect());
         }
     }
@@ -1952,6 +2078,162 @@ mod tests {
         // An open group lists its own figures and PID, and a child its name quoted.
         let entries = vec![Entry::Row { idx: 1, depth: 1, kids: 0, open: false }];
         assert_eq!(csv_of(&rows, &entries, &HashMap::new(), &cols[..2], true, 4, false, ""), "Name,CPU\r\n\"child, one\",0.0%\r\n");
+    }
+
+    /// A small tree: init > shell > (cargo > rustc, vim), and a lone root.
+    fn tree_sample() -> Vec<ProcessRow> {
+        let mut rows = vec![row(1, 0, 1, "init"), row(2, 1, 2, "shell"), row(3, 2, 3, "cargo"), row(4, 3, 4, "rustc"), row(5, 2, 5, "vim"), row(9, 0, 1, "lone")];
+        rows[2].cpu_pct = 2.5;
+        rows[3].cpu_pct = 40.0;
+        rows
+    }
+
+    fn tree_of_sample(rows: &[ProcessRow], collapsed: &HashSet<(u32, i64)>) -> Vec<TreeRow> {
+        ptree::build(rows, &(0..rows.len()).collect::<Vec<_>>(), None, (Column::Pid, false), collapsed)
+    }
+
+    /// In the tree view the CSV lists the rows as shown, in tree order, names without indentation,
+    /// children of a collapsed node left out, and the collapsed node with its own PID and figures.
+    #[test]
+    fn csv_of_the_tree_view_follows_the_tree() {
+        let rows = tree_sample();
+        let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Cpu)];
+        let tree = tree_of_sample(&rows, &HashSet::new());
+        let csv = csv_of(&rows, &tree_entries(&tree), &HashMap::new(), &cols, false, 4, false, "");
+        assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nrustc,4,40.0%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
+        let collapsed: HashSet<(u32, i64)> = [(3, 3)].into_iter().collect();
+        let tree = tree_of_sample(&rows, &collapsed);
+        let csv = csv_of(&rows, &tree_entries(&tree), &HashMap::new(), &cols, false, 4, false, "");
+        assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
+    }
+
+    /// Closing a node hides its children and moves a selection inside it up to the node; opening
+    /// it shows them again; while filtering nothing changes.
+    #[test]
+    fn toggling_a_tree_node_hides_its_children() {
+        let rows = tree_sample();
+        let mut collapsed = HashSet::new();
+        let tree = tree_of_sample(&rows, &collapsed);
+        let mut selected = Some((4, 4));
+        tree_toggle(&mut collapsed, &tree, &rows, (2, 2), &mut selected, true);
+        assert!(collapsed.is_empty() && selected == Some((4, 4)), "no change while filtering");
+        tree_toggle(&mut collapsed, &tree, &rows, (2, 2), &mut selected, false);
+        assert_eq!(selected, Some((2, 2)), "the selection was inside");
+        let tree = tree_of_sample(&rows, &collapsed);
+        assert_eq!(tree.iter().map(|t| rows[t.index].pid).collect::<Vec<_>>(), [1, 2, 9]);
+        // A selection elsewhere stays.
+        let mut other = Some((9, 1));
+        tree_toggle(&mut collapsed, &tree, &rows, (2, 2), &mut other, false);
+        assert!(collapsed.is_empty() && other == Some((9, 1)));
+        assert_eq!(tree_of_sample(&rows, &collapsed).len(), rows.len());
+    }
+
+    /// Left and Right pressed in a headless frame: collapse, go to the parent, expand, go to the
+    /// first child.
+    #[test]
+    fn tree_keys_left_and_right() {
+        let rows = tree_sample();
+        let tree = tree_of_sample(&rows, &HashSet::new());
+        // Lines: 0 init, 1 shell, 2 cargo, 3 rustc, 4 vim, 5 lone.
+        let ctx = egui::Context::default();
+        // A key going down and up in one frame (held down, the next press would be a repeat).
+        let tap = |key: egui::Key| {
+            let ev = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+            egui::RawInput { events: vec![ev(true), ev(false)], ..Default::default() }
+        };
+        let press = |key: egui::Key, at: Option<usize>, filtering: bool| {
+            let mut out = None;
+            ctx.run_ui(tap(key), |_| out = tree_key(&ctx, &tree, at, filtering)).drop_without_applying_deltas();
+            out
+        };
+        assert_eq!(press(egui::Key::ArrowLeft, Some(2), false), Some(ptree::Step::Toggle(2)));
+        assert_eq!(press(egui::Key::ArrowLeft, Some(3), false), Some(ptree::Step::Select(2)));
+        assert_eq!(press(egui::Key::ArrowLeft, Some(2), true), Some(ptree::Step::Select(1)));
+        assert_eq!(press(egui::Key::ArrowRight, Some(1), false), Some(ptree::Step::Select(2)));
+        assert_eq!(press(egui::Key::ArrowRight, Some(4), false), None);
+        assert_eq!(press(egui::Key::ArrowLeft, None, false), None);
+        assert_eq!(press(egui::Key::ArrowUp, Some(2), false), None);
+        let collapsed: HashSet<(u32, i64)> = [(3, 3)].into_iter().collect();
+        let tree = tree_of_sample(&rows, &collapsed);
+        let mut out = None;
+        ctx.run_ui(tap(egui::Key::ArrowRight), |_| out = tree_key(&ctx, &tree, Some(2), false)).drop_without_applying_deltas();
+        assert_eq!(out, Some(ptree::Step::Toggle(2)));
+    }
+
+    /// Tree rows draw at every depth (deep chains capped), dimmed ancestors included, and a click
+    /// on a node's arrow reports the toggle.
+    #[test]
+    fn tree_rows_draw_and_the_arrow_toggles() {
+        let ctx = egui::Context::default();
+        let pal = theme::DARK;
+        pal.apply(&ctx);
+        theme::install_fonts(&ctx, None);
+        let mut icons = IconCache::new(&ctx);
+        let st = theme::status(&pal);
+        let mut rows = tree_sample();
+        // A chain deeper than the indentation cap below "lone".
+        for k in 0..30u32 {
+            rows.push(row(100 + k, if k == 0 { 9 } else { 99 + k }, 10 + k as i64, "deep"));
+        }
+        let members: Vec<usize> = (0..rows.len()).collect();
+        let pick = |r: &ProcessRow| r.name == "rustc" || r.pid == 129;
+        let filtered = ptree::build(&rows, &members, Some(&pick), (Column::Cpu, true), &HashSet::new());
+        assert!(filtered.iter().any(|t| !t.matched) && filtered.iter().map(|t| t.depth).max() == Some(30));
+        let full = ptree::build(&rows, &members, None, (Column::Cpu, true), &HashSet::new());
+        let cx_of = |t: &TreeRow| CellCtx { max_mem: 1.0, max_io: 1.0, selected: t.index == 2, depth: t.depth, kids: usize::from(t.has_children), open: t.expanded, size: 1, agg: None, logical: 8, per_core: false, trend: None, mem_color: pal.accent, st, net_off: false, tree: true, dim: !t.matched };
+        let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Status), PCol::Data(Column::Cpu), PCol::CpuTrend, PCol::MemTrend];
+        for tree in [&filtered, &full] {
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    for t in tree.iter() {
+                        let (rect, _) = ui.allocate_exact_size(vec2(400.0, ROW_H), Sense::hover());
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                            for (k, pc) in cols.iter().enumerate() {
+                                cell_ui(ui, &rows[t.index], *pc, &pal, cx_of(t), &mut icons, k == 0, false);
+                            }
+                        });
+                    }
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        // One node at depth 2 with children: its arrow sits at 2 steps + 16 px from the cell's left.
+        let node = TreeRow { index: 2, depth: 2, has_children: true, expanded: true, matched: true };
+        let cell = Rect::from_min_size(pos2(20.0, 40.0), vec2(300.0, ROW_H));
+        let arrow = pos2(cell.left() + 2.0 * TREE_STEP + 16.0, cell.center().y);
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut toggled = false;
+            ctx.run_ui(egui::RawInput { events, screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| {
+                        toggled = cell_ui(ui, &rows[2], PCol::Data(Column::Name), &pal, cx_of(&node), &mut icons, true, false);
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+            toggled
+        };
+        assert!(!frame(Vec::new()));
+        assert!(!frame(vec![egui::Event::PointerMoved(arrow)]));
+        assert!(!frame(vec![egui::Event::PointerButton { pos: arrow, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]));
+        assert!(frame(vec![egui::Event::PointerButton { pos: arrow, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]), "the arrow was clicked");
+        // A click on the name is no toggle.
+        let name = pos2(cell.left() + 2.0 * TREE_STEP + 90.0, cell.center().y);
+        assert!(!frame(vec![egui::Event::PointerMoved(name)]));
+        assert!(!frame(vec![egui::Event::PointerButton { pos: name, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]));
+        assert!(!frame(vec![egui::Event::PointerButton { pos: name, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]));
+    }
+
+    /// The tabs pick the matches of the tree view: Apps the windowed processes, Background the rest.
+    #[test]
+    fn tree_tabs_pick_matches() {
+        let mut r = row(10, 1, 1, "app");
+        assert!(tree_tab(0, &r) && !tree_tab(1, &r) && tree_tab(2, &r));
+        r.has_window = true;
+        assert!(tree_tab(1, &r) && !tree_tab(2, &r));
+        r.status = Status::Suspended;
+        assert!(tree_tab(5, &r));
+        assert!(text_match(&r, "") && text_match(&r, "ap") && text_match(&r, "10") && !text_match(&r, "1"));
     }
 
     #[test]
@@ -2139,6 +2421,8 @@ mod tests {
                             mem_color: pal.accent,
                             st,
                             net_off: true,
+                            tree: false,
+                            dim: false,
                         };
                         let (rect, _) = ui.allocate_exact_size(vec2(300.0, ROW_H), Sense::hover());
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {

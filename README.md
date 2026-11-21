@@ -167,6 +167,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 | ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
+- **See which program started which:** on *Processes*, tick *Tree view*. Each process sits under the one that started it; click the arrow, or press Left and Right, to fold a branch in or out. A process whose parent has exited (or whose parent's number now belongs to a newer process) starts a branch of its own. Sorting works among the processes of one branch, and the search box and the tabs above the list keep the processes that match together with the ones above them (shown faint, with every branch open). A folded process shows its own figures, not those of its branch. *Group by app* and *Tree view* are separate views: ticking one turns the other off. TMOP remembers the view; folded branches are forgotten when it closes.
 - **Choose which processors a program may use:** on *Processes*, right-click it and choose *Set affinity…* (Windows and Linux; on a Windows PC with several processor groups, meaning more than 64 logical processors, it is hidden). Tick the logical processors it may run on; at least one stays ticked.
 - **Send a specific signal (Linux and macOS):** on *Processes*, right-click a program and open *Send signal* to send exactly one of SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGSTOP or SIGCONT. Unlike *End task*, nothing else follows it (no SIGCONT first, no SIGKILL later). Signals that end a program by default ask first. If the system refuses, Linux offers to retry as administrator (pkexec).
 - **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
@@ -206,6 +207,7 @@ showing zeros.
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
 | Processes: end task, end tree, suspend, priority | ✔ | ✔ (raising priority needs root; no *Realtime*) | ✔ (no *Realtime*) |
+| Processes: *Tree view* (parent and child processes) | ✔ | ✔ | ✔ |
 | Processes: *Run new task* | ✔ opens programs, documents and addresses like the Run dialog | ✔ programs, started without a shell | ✔ programs, started without a shell |
 | Processes: Network column (bytes per second per process) | ✔ as administrator | — | — |
 | Processes: *Set affinity…* (which processors a program may use) | ✔ (hidden with more than one processor group) | ✔ (all threads; others' processes need root) | — (no supported API) |
