@@ -168,6 +168,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
 - **Choose which processors a program may use:** on *Processes*, right-click it and choose *Set affinity…* (Windows and Linux; on a Windows PC with several processor groups, meaning more than 64 logical processors, it is hidden). Tick the logical processors it may run on; at least one stays ticked.
+- **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
@@ -200,6 +201,7 @@ showing zeros.
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
 | Processes: end task, end tree, suspend, priority | ✔ | ✔ (raising priority needs root; no *Realtime*) | ✔ (no *Realtime*) |
+| Processes: *Run new task* | ✔ opens programs, documents and addresses like the Run dialog | ✔ programs, started without a shell | ✔ programs, started without a shell |
 | Processes: Network column (bytes per second per process) | ✔ as administrator | — | — |
 | Processes: *Set affinity…* (which processors a program may use) | ✔ (hidden with more than one processor group) | ✔ (all threads; others' processes need root) | — (no supported API) |
 | Processes: efficiency mode | ✔ | ✔ as idle scheduling | ✔ as *Background priority* |
