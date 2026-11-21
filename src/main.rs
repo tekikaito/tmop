@@ -291,6 +291,7 @@ fn main() -> eframe::Result<()> {
         std::process::exit(engine_relay_stop());
     }
     if args.iter().any(|a| a == "--dump") {
+        tmop::cli::attach_console();
         std::process::exit(run_output(dump));
     }
     // From here on TMOP opens a window. Without an X11 or Wayland session on Linux that ends in
