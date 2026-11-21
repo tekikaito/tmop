@@ -47,6 +47,42 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "$env:RUNNER_TEMP\mesa\x64\opengl32.dll", "$env:RUNNER_TEMP\mesa\x64\libgallium_wgl.dll" target\release
 
+      # The runner's desktop is 1024x768 and a window cannot be larger than it; raise it.
+      - name: Screen resolution
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-Type @"
+          using System;
+          using System.Runtime.InteropServices;
+          public class Res {
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+            public struct DEVMODE {
+              [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+              public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+              public int dmFields;
+              public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+              public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+              [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+              public short dmLogPixels;
+              public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+              public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+            }
+            [DllImport("user32.dll")] public static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+            [DllImport("user32.dll")] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+          }
+          "@
+          $dm = New-Object Res+DEVMODE
+          $dm.dmSize = [int][Runtime.InteropServices.Marshal]::SizeOf($dm)
+          $modes = @(); $i = 0
+          while ([Res]::EnumDisplaySettings($null, $i, [ref]$dm)) { $modes += "$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"; $i++ }
+          "Modes: " + (($modes | Sort-Object -Unique) -join ' ')
+          [Res]::EnumDisplaySettings($null, -1, [ref]$dm) | Out-Null
+          $dm.dmPelsWidth = 1920; $dm.dmPelsHeight = 1080; $dm.dmFields = 0x180000
+          "ChangeDisplaySettings: " + [Res]::ChangeDisplaySettings([ref]$dm, 0)
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+
       - name: Take the screenshots
         shell: bash
         run: bash .github/screenshots/shoot.sh windows target/release/TMOP.exe shots
@@ -108,6 +144,17 @@ jobs:
 
       - name: Build
         run: cargo build --locked --release
+
+      # The runner's display is small and a window cannot be larger than it; raise it if possible.
+      - name: Screen resolution
+        continue-on-error: true
+        run: |
+          system_profiler SPDisplaysDataType | grep -i -E "resolution|display type" || true
+          brew install jakehilborn/jakehilborn/displayplacer
+          displayplacer list | head -30
+          id=$(displayplacer list | grep -m1 'Persistent screen id' | sed 's/.*: //')
+          displayplacer "id:$id res:1920x1080 scaling:off" || displayplacer "id:$id res:1920x1080"
+          system_profiler SPDisplaysDataType | grep -i resolution || true
 
       - name: Take the screenshots
         run: bash .github/screenshots/shoot.sh macos target/release/TMOP shots
