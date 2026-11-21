@@ -206,11 +206,20 @@ impl Retry {
     }
 }
 
+/// The slowest sampling while the window is hidden in the tray (see [`hidden_interval`]).
+pub const HIDDEN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The sampling interval while the window is hidden in the tray with no popout open:
 /// `configured` while the flight recorder writes a recording (it needs every sample), else
-/// none. Everything else the samples feed is on screen only.
+/// `configured` slowed down to [`HIDDEN_INTERVAL`]. The flight recorder's ring (always on) and
+/// its process timeline then go on, at a coarser grain, for exactly the time a tray user wants
+/// to look back at. Paused (`None`) stays paused.
 pub fn hidden_interval(configured: Option<std::time::Duration>, recording: bool) -> Option<std::time::Duration> {
-    configured.filter(|_| recording)
+    if recording {
+        configured
+    } else {
+        configured.map(|c| c.max(HIDDEN_INTERVAL))
+    }
 }
 
 #[cfg(windows)]
@@ -311,11 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn hidden_sampling_runs_only_for_a_recording() {
-        let second = Some(std::time::Duration::from_secs(1));
-        assert_eq!(hidden_interval(second, false), None);
-        assert_eq!(hidden_interval(second, true), second);
+    fn hidden_sampling_slows_down_unless_recording() {
+        let secs = |s| Some(std::time::Duration::from_secs(s));
+        assert_eq!(hidden_interval(secs(1), false), Some(HIDDEN_INTERVAL), "the flight ring goes on, slower");
+        assert_eq!(hidden_interval(secs(1), true), secs(1), "a recording needs every sample");
+        assert_eq!(hidden_interval(secs(10), false), secs(10), "never faster than configured");
         assert_eq!(hidden_interval(None, true), None, "paused stays paused");
+        assert_eq!(hidden_interval(None, false), None);
     }
 
     fn args(a: &[&str]) -> Vec<String> {

@@ -473,6 +473,9 @@ pub struct App {
     pub font_list: settings_page::FontList,
     last_seq: u64,
     last_sample_at: Instant,
+    /// The interval the sampler was last given (slower while hidden in the tray; see
+    /// [`App::set_sample_interval`]); App history counts each sample as that long.
+    sample_interval: Option<Duration>,
     last_frame_at: Instant,
     pub smooth: Smooth,
     pub popout_textures: popout::Textures,
@@ -580,6 +583,7 @@ impl App {
             font_list: settings_page::FontList::default(),
             last_seq: 0,
             last_sample_at: Instant::now(),
+            sample_interval: None,
             last_frame_at: Instant::now(),
             smooth: Smooth::default(),
             popout_textures: popout::Textures::default(),
@@ -962,6 +966,12 @@ impl eframe::App for App {
         self.take_sample(&snap, &rows, Instant::now());
         if !self.popout_only {
             self.window_logic(ctx);
+            // Here rather than in `ui`, which does not run while the window is hidden in the
+            // notification area: a TMOP that stays there for days still checks once a day.
+            self.updates.check_while_running(&self.settings.general);
+            // Wakes a TMOP that is hidden and paused (nothing else would) for the next look.
+            ctx.request_repaint_after(updates::LOOK_EVERY);
+            self.updates_poll(ctx);
         }
     }
 
@@ -1037,6 +1047,12 @@ impl Default for Profile {
 }
 
 impl App {
+    /// Sets the sampler's interval (`None`: paused) and remembers it.
+    pub fn set_sample_interval(&mut self, interval: Option<Duration>) {
+        self.sample_interval = interval;
+        self.sampler.set_interval(interval);
+    }
+
     /// Feeds a sample the sampler has not delivered before to the recorder, App history and the
     /// temperature log.
     fn take_sample(&mut self, snap: &Snapshot, rows: &[ProcessRow], now: Instant) {
@@ -1045,7 +1061,7 @@ impl App {
             self.last_sample_at = now;
             self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(snap, rows);
-            let dt = self.settings.update_speed().interval().map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            let dt = self.sample_interval.or_else(|| self.settings.update_speed().interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(rows, dt);
             self.perf.note_temperature(snap.thermal.max_c());
         }
@@ -1139,7 +1155,6 @@ impl App {
                 }
             }
             self.replace_poll(ctx);
-            self.updates_poll(ctx);
             if let Some([hi, mid, edge]) = pal.backdrop {
                 widgets::fill_radial_backdrop(&ctx.layer_painter(egui::LayerId::background()), ctx.content_rect(), hi, mid, edge);
             }
@@ -1181,7 +1196,7 @@ impl App {
         }
 
         // Apply cadence changes and persist.
-        self.sampler.set_interval(self.settings.update_speed().interval());
+        self.set_sample_interval(self.settings.update_speed().interval());
         // Sampled at once, so that switching off closes the device even while updates are paused.
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();

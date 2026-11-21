@@ -210,6 +210,25 @@ impl DockerState {
         !settings.docker.hide_page && (self.found() || (engine && settings.docker.show_page))
     }
 
+    /// While the window is hidden in the notification area (where [`DockerState::poll`] does not
+    /// run): container alerts go out as desktop notifications as they come, a few at most at a
+    /// time ([`hidden_notifications`]), and not as in-app toasts, which nobody sees and which
+    /// would all come out at the next Show. With notifications off they are dropped.
+    pub fn notify_while_hidden(&mut self) {
+        let Some(b) = &self.backend else { return };
+        let alerts: Vec<_> = lock(&b.shared).alerts.drain(..).collect();
+        if alerts.is_empty() || !self.notify_enabled {
+            return;
+        }
+        let texts = hidden_notifications(alerts.iter().map(notify::alert_text).collect());
+        // The toast calls block for a moment, so they run off the UI thread.
+        std::thread::spawn(move || {
+            for (title, body) in texts {
+                let _ = notify::send(&title, &body);
+            }
+        });
+    }
+
     /// Once per frame: caches the engine status, moves notices into toasts, shows alerts as
     /// toasts and desktop notifications, drops expired toasts, and tells the worker when the
     /// page is open.
@@ -677,5 +696,38 @@ impl App {
                 self.docker.ui.toasts.remove(i);
             }
         }
+    }
+}
+
+/// At most this many desktop notifications for the alerts that came in at once while the
+/// window is hidden; the rest are summed up in the last one.
+const HIDDEN_NOTIFICATIONS: usize = 3;
+
+/// The desktop notifications (title, body) for `alerts` that came in together while the window
+/// is hidden: each one while there are few, else the first ones and a count of the others.
+fn hidden_notifications(mut alerts: Vec<(String, String)>) -> Vec<(String, String)> {
+    if alerts.len() <= HIDDEN_NOTIFICATIONS {
+        return alerts;
+    }
+    let rest = alerts.len() - (HIDDEN_NOTIFICATIONS - 1);
+    alerts.truncate(HIDDEN_NOTIFICATIONS - 1);
+    alerts.push((format!("{rest} more container alerts"), "Open TMOP's Docker page to see the containers.".into()));
+    alerts
+}
+
+#[cfg(test)]
+mod hidden_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_alerts_are_not_a_burst() {
+        let alert = |i: usize| (format!("t{i}"), format!("b{i}"));
+        assert!(hidden_notifications(Vec::new()).is_empty());
+        let three: Vec<_> = (0..3).map(alert).collect();
+        assert_eq!(hidden_notifications(three.clone()), three);
+        let many = hidden_notifications((0..10).map(alert).collect());
+        assert_eq!(many.len(), HIDDEN_NOTIFICATIONS);
+        assert_eq!(many[..2], [alert(0), alert(1)]);
+        assert_eq!(many[2].0, "8 more container alerts");
     }
 }

@@ -821,7 +821,7 @@ mod win {
     }
 
     /// The owner SID of a pipe (or any kernel object) handle.
-    fn pipe_owner(handle: HANDLE) -> Option<String> {
+    pub(super) fn pipe_owner(handle: HANDLE) -> Option<String> {
         let mut owner = PSID::default();
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `handle` is open; `sd` receives a LocalAlloc'ed descriptor that `owner` points into.
@@ -1243,6 +1243,18 @@ mod tests {
             assert!(aces.iter().all(|a| a.starts_with("(A;;FA;;;")), "{text}");
             assert!(aces.iter().any(|a| a.ends_with(";;;SY")), "{text}");
             assert!(text.contains("(ML;;NW;;;ME)"), "{text}");
+        }
+
+        /// When the server's process cannot be read (an elevated TMOP seen from a start that is
+        /// not), the pipe's owner tells: a client's write handle can read it, and it is this user.
+        #[test]
+        fn a_client_reads_the_pipe_owner() {
+            use std::os::windows::io::AsRawHandle;
+            let name = unique("owner");
+            assert!(listen_on(&name, Inbox::default(), Box::new(|| {}), Duration::ZERO));
+            let f = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+            let owner = super::super::win::pipe_owner(windows::Win32::Foundation::HANDLE(f.as_raw_handle()));
+            assert_eq!(owner, crate::engine::winreg::current_user_sid().ok());
         }
 
         /// The listener's own process is this user's, and its elevation is known.

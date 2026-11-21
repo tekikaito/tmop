@@ -4,9 +4,11 @@
 //! [`crate::tray`].
 //!
 //! While the window is hidden and no popout is open, TMOP draws nothing and asks for no
-//! repaints; sampling stops unless the flight recorder is writing a recording
-//! ([`crate::tray::hidden_interval`]), and so do the per-process network counters. The tray
-//! icon, the shortcut and a second start wake it.
+//! repaints; sampling slows down to every 5 s unless the flight recorder is writing a
+//! recording ([`crate::tray::hidden_interval`]), so the flight recorder's ring and timeline go
+//! on; the per-process network counters and GPU detail stop. Container alerts go out as
+//! desktop notifications as they come, and the daily update check still runs. The tray icon,
+//! the shortcut and a second start wake it.
 
 use super::settings_page::{note, row_hint, toggle_row_hint};
 use super::theme::Palette;
@@ -43,6 +45,8 @@ pub struct TrayUi {
     other_copy: bool,
     /// A `--replacing` start whose predecessor still holds the shortcut tries again.
     shortcut_retry: Option<(Shortcut, tray::Retry)>,
+    /// Sampling was paused for a while the window was hidden (see `Action::Show`).
+    unsampled: bool,
 }
 
 /// This copy's part in tray mode, decided at start-up.
@@ -92,6 +96,7 @@ impl TrayUi {
             autostart_message: None,
             other_copy: role.other_copy,
             shortcut_retry: None,
+            unsampled: false,
         };
         if !role.owns_tray {
             return ui;
@@ -232,7 +237,11 @@ impl App {
             self.apply_window_action(ctx, action);
         }
         if self.tray_ui.vis.hidden && !self.popout_open {
-            self.sampler.set_interval(tray::hidden_interval(self.settings.update_speed().interval(), self.recorder.is_recording()));
+            let interval = tray::hidden_interval(self.settings.update_speed().interval(), self.recorder.is_recording());
+            self.tray_ui.unsampled |= interval.is_none();
+            self.set_sample_interval(interval);
+            // Container alerts go out as they come, not as a burst of toasts at the next Show.
+            self.docker.notify_while_hidden();
         }
     }
 
@@ -288,7 +297,12 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                 // The window is shown at the end of this pass; it comes to the front in the next.
                 self.tray_ui.focus_pending = true;
-                self.sampler.set_interval(self.settings.update_speed().interval());
+                if std::mem::take(&mut self.tray_ui.unsampled) {
+                    // Paused while hidden: the next sample is compared with one from before, and
+                    // would list every process start and exit in between at the time of this Show.
+                    self.recorder.resync_processes("TMOP was hidden and paused; process starts and exits in that time are not listed");
+                }
+                self.set_sample_interval(self.settings.update_speed().interval());
                 self.sampler.refresh();
                 ctx.request_repaint();
             }
