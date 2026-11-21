@@ -510,6 +510,77 @@ impl Priority {
     }
 }
 
+/// A signal of the "Send signal" submenu (Linux and macOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    Term,
+    Kill,
+    Int,
+    Hup,
+    Quit,
+    Usr1,
+    Usr2,
+    Stop,
+    Cont,
+}
+
+impl Signal {
+    pub const ALL: [Signal; 9] = [Signal::Term, Signal::Kill, Signal::Int, Signal::Hup, Signal::Quit, Signal::Usr1, Signal::Usr2, Signal::Stop, Signal::Cont];
+
+    /// The name without `SIG`, as `kill -s` takes it.
+    pub const fn short(self) -> &'static str {
+        match self {
+            Signal::Term => "TERM",
+            Signal::Kill => "KILL",
+            Signal::Int => "INT",
+            Signal::Hup => "HUP",
+            Signal::Quit => "QUIT",
+            Signal::Usr1 => "USR1",
+            Signal::Usr2 => "USR2",
+            Signal::Stop => "STOP",
+            Signal::Cont => "CONT",
+        }
+    }
+
+    pub fn name(self) -> String {
+        format!("SIG{}", self.short())
+    }
+
+    /// The number on this platform (USR1, USR2, STOP and CONT differ between Linux and macOS).
+    #[cfg(unix)]
+    pub const fn number(self) -> Option<i32> {
+        Some(match self {
+            Signal::Term => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+            Signal::Int => libc::SIGINT,
+            Signal::Hup => libc::SIGHUP,
+            Signal::Quit => libc::SIGQUIT,
+            Signal::Usr1 => libc::SIGUSR1,
+            Signal::Usr2 => libc::SIGUSR2,
+            Signal::Stop => libc::SIGSTOP,
+            Signal::Cont => libc::SIGCONT,
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub const fn number(self) -> Option<i32> {
+        None
+    }
+
+    /// The menu label: `SIGHUP (1)`.
+    pub fn label(self) -> String {
+        match self.number() {
+            Some(n) => format!("SIG{} ({n})", self.short()),
+            None => self.name(),
+        }
+    }
+
+    /// Whether the process ends by default on it, so picking it asks first like End task.
+    pub const fn ends(self) -> bool {
+        matches!(self, Signal::Term | Signal::Kill | Signal::Int | Signal::Hup | Signal::Quit)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     EndTask,
@@ -521,6 +592,8 @@ pub enum Action {
     OpenFileLocation,
     /// The shell's file Properties dialog of the executable (Windows).
     Properties,
+    /// Exactly this one signal (Linux and macOS): no SIGCONT first, no SIGKILL after.
+    Signal(Signal),
 }
 
 impl Action {
@@ -531,6 +604,7 @@ impl Action {
             Action::Efficiency(_) => caps.efficiency,
             Action::SetPriority(Priority::Realtime) => caps.realtime,
             Action::Properties => caps.properties,
+            Action::Signal(_) => caps.signals,
             _ => true,
         }
     }
@@ -551,7 +625,7 @@ impl Column {
 }
 
 pub mod actions {
-    use super::{caps, imp, mark_efficiency, tree_of, Action, Priority, ProcCaps, ProcessRow};
+    use super::{caps, imp, mark_efficiency, tree_of, Action, Priority, ProcCaps, ProcessRow, Signal};
 
     /// The primitives [`run`] drives: the backend's `sys` functions, or a fake in tests. `start`
     /// is the target's [`ProcessRow::create_time`]: a backend that addresses processes by pid
@@ -564,6 +638,7 @@ pub mod actions {
         fn set_efficiency(&self, pid: u32, start: i64, on: bool) -> Result<(), String>;
         fn open_location(&self, path: &str) -> Result<(), String>;
         fn properties(&self, path: &str) -> Result<(), String>;
+        fn signal(&self, pid: u32, start: i64, sig: Signal) -> Result<(), String>;
     }
 
     struct Native;
@@ -593,6 +668,14 @@ pub mod actions {
         }
         #[cfg(not(windows))]
         fn properties(&self, _path: &str) -> Result<(), String> {
+            Err(format!("not available on {}", crate::platform::os_name()))
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        fn signal(&self, pid: u32, start: i64, sig: Signal) -> Result<(), String> {
+            imp::sys::send_signal(pid, start, sig.number().ok_or("unknown signal")?)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        fn signal(&self, _pid: u32, _start: i64, _sig: Signal) -> Result<(), String> {
             Err(format!("not available on {}", crate::platform::os_name()))
         }
     }
@@ -635,6 +718,8 @@ pub mod actions {
                 Some(p) => sys.properties(p).map(|_| String::new()),
                 None => Err("Image path unavailable".into()),
             },
+            Action::Signal(sig) if row.pid == std::process::id() => Err(format!("refusing to send {} to TMOP itself", sig.name())),
+            Action::Signal(sig) => sys.signal(row.pid, row.create_time, sig).map(|_| format!("Sent {} to {} ({})", sig.name(), row.name, row.pid)),
         }
     }
 }
@@ -822,6 +907,46 @@ mod tests {
     }
 
     #[test]
+    fn signals_go_out_once_and_only_where_supported() {
+        use crate::platform::Caps;
+        let rows = [row(900_001, 0, 10)];
+        let sys = FakeSys::default();
+        let unix = Caps::LINUX.proc;
+        assert_eq!(actions::run_with(&sys, &unix, Action::Signal(Signal::Hup), &rows[0], &rows).unwrap(), "Sent SIGHUP to p900001 (900001)");
+        assert_eq!(actions::run_with(&sys, &Caps::MACOS.proc, Action::Signal(Signal::Kill), &rows[0], &rows).unwrap(), "Sent SIGKILL to p900001 (900001)");
+        // Exactly one call each: no CONT before, no KILL after.
+        assert_eq!(sys.calls(), ["signal 900001@10 HUP", "signal 900001@10 KILL"]);
+        for caps in [Caps::WINDOWS.proc, Caps::OTHER.proc] {
+            for s in Signal::ALL {
+                assert!(!Action::Signal(s).supported(&caps));
+                assert!(actions::run_with(&sys, &caps, Action::Signal(s), &rows[0], &rows).unwrap_err().starts_with("not available on"));
+            }
+        }
+        assert_eq!(sys.calls().len(), 2);
+        // A refusal comes back as the backend's error (the retry keys on it); TMOP itself is never signalled.
+        let refusing = FakeSys { fail: vec![900_001], ..Default::default() };
+        assert_eq!(actions::run_with(&refusing, &unix, Action::Signal(Signal::Usr1), &rows[0], &rows).unwrap_err(), ACCESS_DENIED);
+        let me = row(std::process::id(), 1, 5);
+        assert!(actions::run_with(&sys, &unix, Action::Signal(Signal::Term), &me, &[]).unwrap_err().contains("TMOP itself"));
+        assert_eq!(sys.calls().len(), 2);
+    }
+
+    #[test]
+    fn signal_names_and_labels() {
+        assert_eq!(Signal::Hup.name(), "SIGHUP");
+        assert_eq!(Signal::ALL.map(Signal::short), ["TERM", "KILL", "INT", "HUP", "QUIT", "USR1", "USR2", "STOP", "CONT"]);
+        #[cfg(unix)]
+        {
+            assert_eq!(Signal::Hup.label(), "SIGHUP (1)");
+            assert_eq!(Signal::Kill.label(), "SIGKILL (9)");
+            assert_eq!(Signal::Usr1.number(), Some(libc::SIGUSR1));
+        }
+        #[cfg(not(unix))]
+        assert_eq!(Signal::Hup.label(), "SIGHUP");
+        assert!(Signal::Term.ends() && Signal::Kill.ends() && !Signal::Stop.ends() && !Signal::Cont.ends() && !Signal::Usr1.ends());
+    }
+
+    #[test]
     fn formatting() {
         assert_eq!(format_bytes(512.0), "512 B");
         assert_eq!(format_bytes(1536.0), "1.5 KB");
@@ -870,6 +995,9 @@ mod tests {
         }
         fn properties(&self, path: &str) -> Result<(), String> {
             self.call(format!("properties {path}"), 0)
+        }
+        fn signal(&self, pid: u32, start: i64, sig: Signal) -> Result<(), String> {
+            self.call(format!("signal {pid}@{start} {}", sig.short()), pid)
         }
     }
 

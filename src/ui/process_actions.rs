@@ -55,6 +55,8 @@ impl App {
                 let members = if members.is_empty() { vec![row.clone()] } else { members };
                 Some((format!("End the process tree of {} ({})? All descendant processes will also be asked to end.", row.name, row.pid), Confirm::EndTree { members }))
             }
+            // The signals that end a process by default ask like End task does.
+            Action::Signal(s) if s.ends() => Some((format!("Send {} to {} ({})? It may end the process.", s.name(), row.name, row.pid), Confirm::EndTask)),
             Action::Efficiency(true) if self.settings.general.confirm_efficiency_mode => {
                 Some((format!("Turn on {} for {}? It lowers its priority and may make it less responsive.", process::efficiency_word().to_lowercase(), row.name), Confirm::Efficiency))
             }

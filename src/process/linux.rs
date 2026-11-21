@@ -576,6 +576,11 @@ pub(super) mod sys {
         send(&target(pid, start)?, pid, libc::SIGCONT)
     }
 
+    /// Exactly `sig`, once, to the process started at `start` (through its pidfd).
+    pub fn send_signal(pid: u32, start: i64, sig: libc::c_int) -> Result<(), String> {
+        send(&target(pid, start)?, pid, sig)
+    }
+
     /// The nice value of the class for every thread; a lower one than now needs root
     /// (`CAP_SYS_NICE`). Realtime is not offered (`caps.realtime`).
     pub fn set_priority(pid: u32, start: i64, p: Priority) -> Result<(), String> {
@@ -665,11 +670,12 @@ pub(super) mod elevated {
     }
 
     /// What the retry runs for `action`, if it has one.
-    fn op(action: Action) -> Option<Elevated> {
+    pub(super) fn op(action: Action) -> Option<Elevated> {
         match action {
             Action::EndTask | Action::EndTree => Some(Elevated::Signal("TERM")),
             Action::Suspend => Some(Elevated::Signal("STOP")),
             Action::Resume => Some(Elevated::Signal("CONT")),
+            Action::Signal(s) => Some(Elevated::Signal(s.short())),
             Action::SetPriority(p) if p != Priority::Realtime => Some(Elevated::Renice(p.nice())),
             Action::Efficiency(false) => Some(Elevated::NormalPolicy),
             _ => None,
@@ -738,6 +744,7 @@ pub(super) mod elevated {
             Action::EndTask => format!("Ended {} ({}) as root", row.name, row.pid),
             Action::Suspend => format!("Suspended {} as root", row.name),
             Action::Resume => format!("Resumed {} as root", row.name),
+            Action::Signal(s) => format!("Sent {} to {} ({}) as root", s.name(), row.name, row.pid),
             Action::SetPriority(p) => format!("{} priority: {} (as root)", row.name, p.label()),
             _ => {
                 super::super::mark_efficiency((row.pid, row.create_time), false);
@@ -852,6 +859,48 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGTERM));
         assert!(sys::terminate(pid, start).is_err());
         assert!(sys::terminate(1, start_of(1).unwrap()).unwrap_err().contains("init"));
+    }
+
+    #[test]
+    fn send_signal_delivers_exactly_that_signal() {
+        use crate::process::Signal;
+        use std::os::unix::process::ExitStatusExt;
+        // Each ends a fresh child the test owns; the exit status tells which signal arrived.
+        for sig in [Signal::Usr1, Signal::Hup, Signal::Int] {
+            let (mut child, pid, start) = spawn("sleep", &["30"]);
+            // A reused pid is refused before any signal.
+            assert!(sys::send_signal(pid, start + 1, sig.number().unwrap()).unwrap_err().contains("exited"));
+            sys::send_signal(pid, start, sig.number().unwrap()).unwrap();
+            assert_eq!(child.wait().unwrap().signal(), sig.number());
+        }
+        // STOP, CONT and TERM, one at a time.
+        let (mut child, pid, start) = spawn("sleep", &["30"]);
+        sys::send_signal(pid, start, Signal::Stop.number().unwrap()).unwrap();
+        until("the stop", || state(pid) == 'T');
+        sys::send_signal(pid, start, Signal::Cont.number().unwrap()).unwrap();
+        until("the continue", || state(pid) != 'T');
+        sys::send_signal(pid, start, Signal::Term.number().unwrap()).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        // TERM alone does not wake a stopped process (no CONT prelude), and no KILL follows it.
+        let (mut child, pid, start) = spawn("sleep", &["30"]);
+        sys::send_signal(pid, start, libc::SIGSTOP).unwrap();
+        until("the stop", || state(pid) == 'T');
+        sys::send_signal(pid, start, libc::SIGTERM).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(state(pid), 'T');
+        sys::send_signal(pid, start, libc::SIGKILL).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(sys::send_signal(1, start_of(1).unwrap(), libc::SIGTERM).unwrap_err().contains("init"));
+    }
+
+    #[test]
+    fn signal_retry_runs_kill_with_that_signal() {
+        let t = procfs::Tools { pkexec: "/usr/bin/pkexec".into(), kill: "/usr/bin/kill".into(), renice: "/usr/bin/renice".into(), chrt: None };
+        for s in crate::process::Signal::ALL {
+            assert_eq!(elevated::op(Action::Signal(s)), Some(Elevated::Signal(s.short())));
+            let argv = procfs::elevated_argv(&t, Elevated::Signal(s.short()), &[42]).unwrap();
+            assert_eq!(argv, ["/usr/bin/pkexec", "/usr/bin/kill", "-s", s.short(), "--", "42"]);
+        }
     }
 
     #[test]

@@ -1846,6 +1846,15 @@ fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps, svc:
     if caps.affinity && kit::menu_item(ui, "Set affinity\u{2026}", None, false) {
         out = Some(MenuPick::Affinity);
     }
+    if caps.signals {
+        ui.menu_button(RichText::new("Send signal").font(theme::ui(13.0)), |ui| {
+            for s in process::Signal::ALL {
+                if kit::menu_item(ui, &s.label(), None, false) {
+                    out = Some(MenuPick::Do(Action::Signal(s)));
+                }
+            }
+        });
+    }
     ui.separator();
     if kit::menu_item(ui, "View details", Some("Enter"), false) {
         out = Some(MenuPick::Details);
