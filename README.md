@@ -268,7 +268,7 @@ the PC.
   print to the terminal and exit without opening a window. An unknown option starting with `--`
   is reported the same way and ends with exit code 2.
 - `tmop --dump` prints two samples of CPU, memory, disk, network, GPU and the biggest processes
-  and exits.
+  and exits. On Windows it prints into the console it was started from.
 - `tmop --page=<id>`, `--screenshot=<file.png>` and the other options are in `tmop --help`.
 - On Linux, TMOP without an X11 or Wayland session (no `DISPLAY` or `WAYLAND_DISPLAY`, for
   example over plain SSH) says so in one line and exits with code 1.
