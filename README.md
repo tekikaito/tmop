@@ -124,6 +124,12 @@ such as a Raspberry Pi with a 64-bit system, `x64` for everything else):
   without it, start it with `--appimage-extract-and-run` or use the install command.
 - **`TMOP-linux-x64.tar.gz`**: the `tmop` program, `tmop.desktop` and the icons, to unpack
   wherever you like.
+- **`TMOP-v<version>-linux-x64.deb`** (Debian, Ubuntu, Mint) and **`.rpm`** (Fedora, openSUSE):
+  system packages that put `tmop` in `/usr/bin`, with the menu entry and icons. They carry the
+  version in their name, so pick one from the release's file list. Install with
+  `sudo apt install ./TMOP-v<version>-linux-x64.deb` or
+  `sudo dnf install ./TMOP-v<version>-linux-x64.rpm`; the package manager adds the libraries
+  TMOP needs. They are not in a package repository, so they do not update themselves.
 
 TMOP needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later) and runs on X11 and
 Wayland.

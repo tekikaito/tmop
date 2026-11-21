@@ -7,14 +7,16 @@
 #   TMOP-linux-<arch>.tar.gz          the same archive under a version-less name
 #   TMOP-linux-<arch>                 the bare binary, version-less
 #   TMOP-<tag>-linux-<arch>.AppImage  and the version-less TMOP-linux-<arch>.AppImage
+#   TMOP-<tag>-linux-<arch>.deb and .rpm (nfpm, packaging/linux/nfpm.yaml), no version-less twins
 # The version-less names let install.sh and the download page use releases/latest/download/...
-# appimagetool and the AppImage runtime are pinned below by release and sha256 and cached in
+# appimagetool, the AppImage runtime and nfpm are pinned below by release and sha256 and cached in
 # $TMOP_TOOLS_DIR (default ~/.cache/tmop-packaging). Needs bash, curl, tar, gzip and sha256sum,
 # and libxkbcommon-x11 installed (Debian/Ubuntu: libxkbcommon-x11-0), which the AppImage bundles.
 set -euo pipefail
 
 APPIMAGETOOL_VERSION=1.9.1
 RUNTIME_VERSION=20251108
+NFPM_VERSION=2.48.0
 
 usage() {
     echo "usage: packaging/linux/package.sh <tag> <x64|arm64> <binary> <out dir>" >&2
@@ -35,12 +37,18 @@ case "$arch" in
     x64)
         machine=x86_64
         ldconfig_arch=x86-64
+        nfpm_arch=amd64
+        nfpm_asset=x86_64
+        nfpm_sha=6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
         tool_sha=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
         runtime_sha=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
         ;;
     arm64)
         machine=aarch64
         ldconfig_arch=AArch64
+        nfpm_arch=arm64
+        nfpm_asset=arm64
+        nfpm_sha=a9a75213763783b7669719e505474c748c5ad7dc66591a195619deb50f85c2f4
         tool_sha=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
         runtime_sha=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
         ;;
@@ -135,5 +143,20 @@ chmod 755 "$out/$image"
 checksum "$image"
 cp "$out/$image" "$out/TMOP-linux-$arch.AppImage"
 checksum "TMOP-linux-$arch.AppImage"
+
+# .deb and .rpm: the same files as the tar.gz laid out for / (nfpm.yaml), built by a pinned nfpm
+# that runs on this machine's architecture. No version-less twins: the download page and
+# install.sh use the AppImage and tar.gz; these are for apt, dnf and zypper users.
+fetch "$work/nfpm.tar.gz" \
+    "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_$nfpm_asset.tar.gz" \
+    "$nfpm_sha"
+mkdir "$work/nfpm"
+tar -xzf "$work/nfpm.tar.gz" -C "$work/nfpm" nfpm
+for format in deb rpm; do
+    NFPM_ARCH=$nfpm_arch NFPM_VERSION=${tag#v} TMOP_BINARY=$binary TMOP_ROOT=$root \
+        "$work/nfpm/nfpm" package --config "$root/packaging/linux/nfpm.yaml" --packager "$format" \
+        --target "$out/$name.$format"
+    checksum "$name.$format"
+done
 
 ls -l "$out"

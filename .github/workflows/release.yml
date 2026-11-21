@@ -191,6 +191,38 @@ jobs:
           grep -qx 'StartupWMClass=tmop' squashfs-root/tmop.desktop
           test -f squashfs-root/usr/share/icons/hicolor/1024x1024/apps/tmop.png
 
+      # The .deb and .rpm (nfpm, packaging/linux/nfpm.yaml): their metadata and file lists, and on
+      # x64 a real install of the .deb with apt (which also resolves the declared dependencies),
+      # a run of the installed program and its removal.
+      - name: Check the deb and rpm
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          deb="$GITHUB_WORKSPACE/dist/TMOP-$TAG-linux-$ARCH.deb"
+          rpmfile="$GITHUB_WORKSPACE/dist/TMOP-$TAG-linux-$ARCH.rpm"
+          sudo apt-get install -y --no-install-recommends rpm
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | tee "$RUNNER_TEMP/deb-files"
+          rpm -qpi "$rpmfile"
+          rpm -qpl "$rpmfile" | tee "$RUNNER_TEMP/rpm-files"
+          rpm -qpR "$rpmfile"
+          for path in /usr/bin/tmop /usr/share/applications/tmop.desktop /usr/share/doc/tmop/LICENSE \
+              /usr/share/icons/hicolor/64x64/apps/tmop.png /usr/share/icons/hicolor/1024x1024/apps/tmop.png; do
+            grep -q "\.$path\$" "$RUNNER_TEMP/deb-files" || { echo "::error::$path missing from the deb"; exit 1; }
+            grep -qx "$path" "$RUNNER_TEMP/rpm-files" || { echo "::error::$path missing from the rpm"; exit 1; }
+          done
+          test "$(dpkg-deb --field "$deb" Version)" = "${TAG#v}"
+          test "$(rpm -qp --qf '%{VERSION}' "$rpmfile")" = "${TAG#v}"
+          if [ "$ARCH" = x64 ]; then
+            sudo apt-get install -y --no-install-recommends "$deb"
+            test "$(tmop --version)" = "tmop ${TAG#v}"
+            test -f /usr/share/applications/tmop.desktop
+            sudo apt-get remove -y tmop
+            if command -v tmop; then echo "::error::tmop is still installed"; exit 1; fi
+          fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
@@ -307,6 +339,7 @@ jobs:
             expected+=("TMOP-$TAG-windows-$arch.zip" "TMOP-windows-$arch.exe")
             expected+=("TMOP-$TAG-linux-$arch.tar.gz" "TMOP-linux-$arch.tar.gz" "TMOP-linux-$arch")
             expected+=("TMOP-$TAG-linux-$arch.AppImage" "TMOP-linux-$arch.AppImage")
+            expected+=("TMOP-$TAG-linux-$arch.deb" "TMOP-$TAG-linux-$arch.rpm")
             expected+=("tmop-engine-$TAG-$arch.tar.gz")
           done
           expected+=("TMOP-$TAG-windows-x64-server.zip" "TMOP-windows-x64-server.zip")
