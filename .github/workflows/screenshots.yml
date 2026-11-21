@@ -176,7 +176,10 @@ jobs:
           pattern: shots-*
           path: frames
       - name: Make GIFs
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
           mkdir -p out
           for os in windows linux; do
             ffmpeg -loglevel error -framerate 2 -i "frames/shots-$os/anim-%04d.png" \

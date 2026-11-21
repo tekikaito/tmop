@@ -10,7 +10,7 @@ while true; do
   # 0..3 compressors for a few seconds, then a pause: the CPU graph rises and falls.
   jobs_n=$((i % 3))
   for _ in $(seq "$jobs_n"); do
-    (head -c $((60 + (i % 5) * 40))000000 /dev/urandom | gzip -6 >/dev/null) &
+    (head -c $((15 + (i % 5) * 15))000000 /dev/urandom | gzip -6 >/dev/null) &
   done
   # Disk: write and read back a file of varying size.
   head -c $((30 + (i % 4) * 60))000000 /dev/urandom >"$dir/blob.bin" 2>/dev/null
