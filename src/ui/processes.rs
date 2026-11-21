@@ -735,6 +735,16 @@ impl App {
         let max_io = visible.iter().map(|i| rows[*i].read_bps.max(rows[*i].write_bps)).fold(0.0f64, f64::max).max(1.0) as f32;
         let span = samples_text(SPARK_LEN, iv);
         let proc_caps = self.caps.proc;
+        // The pids that host a service, for "Go to services": unknown until the list is read (it is
+        // started when a menu opens).
+        let svc_pids: Option<Vec<u32>> = if self.caps.inventory {
+            self.pro.inv.services.poll();
+            self.pro.inv.services.ok().map(|l| l.iter().map(|s| s.pid).collect())
+        } else {
+            None
+        };
+        let svc_page = self.caps.inventory;
+        let mut want_services = false;
         // Why the Network column has no figures, while it has none.
         let net_reason = process::netio::state().reason();
         let net_off = net_reason.is_some();
@@ -948,7 +958,13 @@ impl App {
                                     }
                                 }
                                 kit::context_menu(&resp, |ui| {
-                                    if let Some(a) = action_menu(ui, r, &proc_caps) {
+                                    let svc = match (svc_page, &svc_pids) {
+                                        (false, _) => Svc::Off,
+                                        (true, None) => Svc::Unknown,
+                                        (true, Some(p)) => Svc::Pids(p),
+                                    };
+                                    want_services = svc_page;
+                                    if let Some(a) = action_menu(ui, r, &proc_caps, svc) {
                                         menu_pick = Some((a, r.clone()));
                                     }
                                 });
@@ -988,10 +1004,21 @@ impl App {
             self.proc.details = true;
             self.proc.details_tab = 0;
         }
+        if want_services && self.pro.inv.services.stale(Duration::from_secs(15)) {
+            self.pro.inv.services.start(crate::pro::inventory::services);
+            ui.ctx().request_repaint_after(Duration::from_millis(300));
+        }
         if let Some((pick, r)) = menu_pick {
             self.selected = Some((r.pid, r.create_time));
             match pick {
                 MenuPick::Do(a) => requested = Some((a, r)),
+                MenuPick::Search => ui.ctx().open_url(egui::OpenUrl::new_tab(process::search_url(&r.name))),
+                MenuPick::Services => {
+                    self.pro.inv.services_pid = Some(r.pid);
+                    self.pro.inv.services_table.filter.clear();
+                    self.page = super::Page::Services;
+                }
+                MenuPick::Dump => self.start_dump(ui.ctx(), &r),
                 MenuPick::Affinity => self.open_affinity(r),
                 MenuPick::Details => {
                     self.proc.details = true;
@@ -1769,10 +1796,27 @@ enum MenuPick {
     Details,
     /// The "Set affinity" dialog for this process.
     Affinity,
+    /// A web search for the process name.
+    Search,
+    /// The Services page, showing the services of this process.
+    Services,
+    /// A memory dump of this process.
+    Dump,
+}
+
+/// What the context menu knows about the services of the system.
+#[derive(Clone, Copy)]
+enum Svc<'a> {
+    /// No Services page here: no "Go to services".
+    Off,
+    /// The list of services is not read yet: the entry is shown disabled.
+    Unknown,
+    /// The pids that host a service.
+    Pids(&'a [u32]),
 }
 
 /// The context menu of a process; `caps` leaves out what the backend cannot do.
-fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps) -> Option<MenuPick> {
+fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps, svc: Svc<'_>) -> Option<MenuPick> {
     let mut out = None;
     kit::menu_header(ui, &format!("{} \u{b7} PID {}", r.name, r.pid));
     if kit::menu_item(ui, "End task", Some("Del"), false) {
@@ -1808,6 +1852,25 @@ fn action_menu(ui: &mut egui::Ui, r: &ProcessRow, caps: &process::ProcCaps) -> O
     }
     if ui.add_enabled_ui(r.path.is_some(), |ui| kit::menu_item(ui, "Open file location", None, false)).inner {
         out = Some(MenuPick::Do(Action::OpenFileLocation));
+    }
+    if caps.properties && ui.add_enabled_ui(r.path.is_some(), |ui| kit::menu_item(ui, "Properties", None, false)).inner {
+        out = Some(MenuPick::Do(Action::Properties));
+    }
+    if kit::menu_item(ui, "Search online", None, false) {
+        out = Some(MenuPick::Search);
+    }
+    let hosts = match svc {
+        Svc::Off => None,
+        Svc::Unknown => Some(false),
+        Svc::Pids(p) => process::hosts_services(p.iter().copied(), r.pid).then_some(true),
+    };
+    if let Some(hosts) = hosts {
+        if ui.add_enabled_ui(hosts, |ui| kit::menu_item(ui, "Go to services", None, false)).inner {
+            out = Some(MenuPick::Services);
+        }
+    }
+    if caps.dump && ui.add_enabled_ui(r.pid != 0 && r.pid != std::process::id(), |ui| kit::menu_item(ui, "Create dump file", None, false)).inner {
+        out = Some(MenuPick::Dump);
     }
     ui.menu_button(RichText::new("Copy").font(theme::ui(13.0)), |ui| {
         let copy = |ui: &mut egui::Ui, label: &str, text: String| {
@@ -2030,7 +2093,7 @@ mod tests {
                         });
                     }
                     let mut out = None;
-                    egui::Area::new(egui::Id::unique("menu-smoke")).show(&ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc));
+                    egui::Area::new(egui::Id::unique("menu-smoke")).show(&ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc, Svc::Pids(&[1, 2])));
                     assert!(out.is_none());
                 });
             }).drop_without_applying_deltas();
