@@ -1015,7 +1015,7 @@ impl App {
                 }
             });
             let ctx = ui.ctx();
-            if self.pending.is_none() && !ctx.egui_wants_keyboard_input() {
+            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() {
                 if key_once(ctx, egui::Key::Delete) {
                     let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
                     requested = Some((action, r.clone()));
