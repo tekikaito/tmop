@@ -262,6 +262,17 @@ the PC.
   reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe" /v Debugger /f
   ```
 
+## Command line
+
+- `tmop --version` (or `-V`) prints the version, `tmop --help` (or `-h`) lists the options. Both
+  print to the terminal and exit without opening a window. An unknown option starting with `--`
+  is reported the same way and ends with exit code 2.
+- `tmop --dump` prints two samples of CPU, memory, disk, network, GPU and the biggest processes
+  and exits.
+- `tmop --page=<id>`, `--screenshot=<file.png>` and the other options are in `tmop --help`.
+- On Linux, TMOP without an X11 or Wayland session (no `DISPLAY` or `WAYLAND_DISPLAY`, for
+  example over plain SSH) says so in one line and exits with code 1.
+
 ## Update or remove
 
 TMOP can tell you about new versions: turn on *Check for updates when TMOP starts* in
