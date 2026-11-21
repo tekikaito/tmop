@@ -1,0 +1,115 @@
+# Takes the README screenshots on GitHub's runners, where nothing personal exists (#87).
+# Manual only: never runs on push or pull request and never commits anything; it only uploads
+# artifacts. TMOP renders its own frames (--screenshot, src/shot.rs); a synthetic load runs in
+# the background so the graphs move (.github/screenshots/).
+name: Screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Screenshots (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-windows
+
+      - name: Build
+        run: cargo build --locked --release
+
+      # No GPU here and Windows offers only OpenGL 1.1: Mesa's llvmpipe beside the exe, exactly as
+      # the release workflow's "Package server" step does (same pinned build). TMOP selects it.
+      - name: Software OpenGL
+        shell: pwsh
+        env:
+          MESA_VERSION: '26.2.7'
+          MESA_SHA256: '19c74aad7b09e682473b8de4c35b47e6498de97b71cae5511a231b8eb02f2b22'
+        run: |
+          $archive = "$env:RUNNER_TEMP\mesa.7z"
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-mingw.7z" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:MESA_SHA256) { Write-Error "Mesa archive checksum mismatch"; exit 1 }
+          7z x -y "-o$env:RUNNER_TEMP\mesa" $archive x64\opengl32.dll x64\libgallium_wgl.dll | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:RUNNER_TEMP\mesa\x64\opengl32.dll", "$env:RUNNER_TEMP\mesa\x64\libgallium_wgl.dll" target\release
+
+      - name: Take the screenshots
+        shell: bash
+        run: bash .github/screenshots/shoot.sh windows target/release/TMOP.exe shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-windows
+          path: shots/*.png
+          if-no-files-found: error
+
+  linux:
+    name: Screenshots (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-linux
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils libxkbcommon-x11-0 libgl1-mesa-dri libglx-mesa0 libegl1
+
+      # Two small public containers so the Docker page shows something.
+      - name: Containers
+        run: |
+          docker info --format '{{.ServerVersion}}'
+          docker run -d --name web -p 8080:80 nginx:alpine
+          docker run -d --name cache redis:alpine
+          docker ps
+
+      - name: Take the screenshots
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a -s "-screen 0 1700x1000x24" bash .github/screenshots/shoot.sh linux target/release/TMOP shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-linux
+          path: shots/*.png
+          if-no-files-found: error
+
+  macos:
+    name: Screenshots (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shots-macos
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Take the screenshots
+        run: bash .github/screenshots/shoot.sh macos target/release/TMOP shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shots-macos
+          path: shots/*.png
+          if-no-files-found: error
