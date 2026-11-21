@@ -8,7 +8,7 @@ i=0
 while true; do
   i=$((i + 1))
   # 0..3 compressors for a few seconds, then a pause: the CPU graph rises and falls.
-  jobs_n=$((i % 4))
+  jobs_n=$((i % 3))
   for _ in $(seq "$jobs_n"); do
     (head -c $((60 + (i % 5) * 40))000000 /dev/urandom | gzip -6 >/dev/null) &
   done

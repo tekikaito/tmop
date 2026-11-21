@@ -37,8 +37,8 @@ if [ "$os" = linux ]; then
   shot summary-light --page=summary --theme=light
 fi
 if [ "$os" = windows ] || [ "$os" = linux ]; then
-  # Frames for the animation, one per data update.
-  shot anim --page=performance --device=cpu --frames=13 --every=1000
+  # Frames for the animation, two per second.
+  shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
 ls -l "$out"
 exit 0
