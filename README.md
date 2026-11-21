@@ -250,9 +250,13 @@ In *Settings*, under *Notification area*:
 
 - **Keep TMOP running in the notification area**: closing or minimizing the window hides it
   next to the clock instead of ending TMOP. Click the icon to show or hide the window; its
-  right-click menu has *Open TMOP* and *Exit*. Starting TMOP again brings the running one to
-  the front. While the window is hidden, TMOP stops sampling unless the flight recorder is
-  writing a recording.
+  right-click menu has *Open TMOP* and *Exit*. Starting TMOP again (on its own, or with only
+  `--page=`) brings the running one to the front; a start with other options (`--record`,
+  `--bench=`, `--disk-root=`, ...) opens a separate window that ends when you close it. An
+  elevated start (*Run as administrator*) takes the place of a TMOP that is not elevated.
+  While the window is hidden, TMOP samples every 5 seconds (at your speed while the flight
+  recorder writes a recording), so the flight recorder keeps a record of that time, and Docker
+  container alerts still arrive as notifications.
 - **Shortcut to open TMOP**: click the field and press a combination with Ctrl, Alt or the
   Windows key, such as Ctrl + Alt + T. TMOP registers it with Windows (`RegisterHotKey`; there
   is no keyboard hook). If another program or Windows already uses it, TMOP says so and the
