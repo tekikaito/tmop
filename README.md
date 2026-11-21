@@ -179,6 +179,9 @@ Confirm with your password and click **Open Anyway** once more. You only have to
   choose *Show disks separately* (it only appears when TMOP finds two or more disks).
 - **Put table columns in the order you like:** drag a column header onto another column, or
   right-click it for *Move left* and *Move right*.
+- **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
+  table as CSV…*. You get the visible columns in their current order and the rows as filtered and
+  sorted, ready for a spreadsheet or a bug report.
 - **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
 
 ## Platforms
