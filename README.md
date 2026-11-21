@@ -168,6 +168,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
 - **Choose which processors a program may use:** on *Processes*, right-click it and choose *Set affinity…* (Windows and Linux; on a Windows PC with several processor groups, meaning more than 64 logical processors, it is hidden). Tick the logical processors it may run on; at least one stays ticked.
+- **Send a specific signal (Linux and macOS):** on *Processes*, right-click a program and open *Send signal* to send exactly one of SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGSTOP or SIGCONT. Unlike *End task*, nothing else follows it (no SIGCONT first, no SIGKILL later). Signals that end a program by default ask first. If the system refuses, Linux offers to retry as administrator (pkexec).
 - **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
 - **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
@@ -207,6 +208,7 @@ showing zeros.
 | Processes: *Set affinity…* (which processors a program may use) | ✔ (hidden with more than one processor group) | ✔ (all threads; others' processes need root) | — (no supported API) |
 | Processes: *Search online*, *Go to services* | ✔ | ✔ | ✔ |
 | Processes: *Properties*, *Create dump file* | ✔ | — | — |
+| Processes: *Send signal* (one chosen signal) | — | ✔ | ✔ |
 | Processes: efficiency mode | ✔ | ✔ as idle scheduling | ✔ as *Background priority* |
 | Processes: other users' processes | ✔ as administrator | End or renice asks for your password (pkexec) | Some details need root |
 | Users, App history, System info, Benchmarks, Flight recorder | ✔ | ✔ | ✔ |

@@ -503,6 +503,12 @@ pub(super) mod sys {
         signal(pid, libc::SIGCONT)
     }
 
+    /// Exactly `sig`, once, to the process started at `start`.
+    pub fn send_signal(pid: u32, start: i64, sig: c_int) -> Result<(), String> {
+        same(pid, start)?;
+        signal(pid, sig)
+    }
+
     fn set(which: c_int, pid: u32, value: c_int) -> Result<(), String> {
         let pid = target(pid)?;
         // SAFETY: setpriority has no memory preconditions.
@@ -626,6 +632,34 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert!(row_of(&mut e, pid).is_none());
+    }
+
+    #[test]
+    fn send_signal_delivers_exactly_that_signal() {
+        use super::super::Signal;
+        use std::os::unix::process::ExitStatusExt;
+        let spawn = || {
+            let child = Command::new("sleep").arg("30").stdin(Stdio::null()).spawn().expect("spawn sleep");
+            let mut e = Enumerator::new();
+            let start = wait_for(&mut e, child.id(), |_| true).create_time;
+            (child, e, start)
+        };
+        for sig in [Signal::Usr1, Signal::Hup, Signal::Int] {
+            let (mut child, _, start) = spawn();
+            let pid = child.id();
+            assert!(sys::send_signal(pid, start + 1, sig.number().unwrap()).unwrap_err().contains("exited"));
+            sys::send_signal(pid, start, sig.number().unwrap()).unwrap();
+            assert_eq!(child.wait().unwrap().signal(), sig.number());
+        }
+        let (mut child, mut e, start) = spawn();
+        let pid = child.id();
+        sys::send_signal(pid, start, Signal::Stop.number().unwrap()).unwrap();
+        wait_for(&mut e, pid, |r| r.status == Status::Suspended);
+        sys::send_signal(pid, start, Signal::Cont.number().unwrap()).unwrap();
+        wait_for(&mut e, pid, |r| r.status == Status::Running);
+        sys::send_signal(pid, start, Signal::Term.number().unwrap()).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(sys::send_signal(1, 1, libc::SIGTERM).unwrap_err().contains("launchd"));
     }
 
     #[test]
