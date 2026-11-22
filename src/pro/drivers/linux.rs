@@ -3,6 +3,7 @@
 //! (`/proc/modules` plus one batched `modinfo`). The parsers are pure and tested on every host.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+use super::control::Control;
 use super::Service;
 use std::collections::HashMap;
 
@@ -117,6 +118,7 @@ pub fn modules_to_services(mods: &[Module], infos: &[ModInfo]) -> Vec<Service> {
                 version,
                 description: field("description"),
                 third_party,
+                control: Default::default(),
             }
         })
         .collect();
@@ -287,6 +289,9 @@ pub fn build_services(units: &[Unit], files: &[(String, String)], show: &[HashMa
             pid: f("MainPID").parse().unwrap_or(0),
             path: exec_path(f("ExecStart")).unwrap_or_default(),
             description: docs_sentence(f("Documentation"), fragment),
+            // Units without details (unit files that are not loaded) are asked anyway: systemctl
+            // loads them for the start and says so if it refuses.
+            control: Control::Systemd { unit: unit.to_string(), user: false, can_start: f("CanStart") != "no", can_stop: f("CanStop") != "no" },
             ..Default::default()
         });
     };
@@ -314,7 +319,7 @@ mod io {
     use std::time::Duration;
 
     const TIMEOUT: Duration = Duration::from_secs(15);
-    const SHOW_PROPS: &str = "Id,Type,MainPID,ExecStart,FragmentPath,Documentation,LoadState,ActiveState,SubState,Description,UnitFileState";
+    const SHOW_PROPS: &str = "Id,Type,MainPID,ExecStart,FragmentPath,Documentation,LoadState,ActiveState,SubState,Description,UnitFileState,CanStart,CanStop";
 
     pub fn services() -> Result<Vec<Service>, String> {
         // sd_booted(): systemd is PID 1 exactly when this directory exists.
@@ -434,6 +439,7 @@ filename:       (builtin)
         assert_eq!((vbox.path.as_str(), vbox.description.as_str()), ("", ""));
         assert_eq!((get("r8188eu").kind.as_str(), get("r8188eu").third_party), ("Staging", false));
         assert!(get("nvidia_uvm").third_party && get("nvidia_uvm").start == "In use");
+        assert!(s.iter().all(|m| m.control == Control::None), "modules are not started or stopped");
         assert_eq!(s.iter().take_while(|x| x.running).count(), 4, "running first");
     }
 
@@ -479,6 +485,8 @@ ActiveState=active
 SubState=exited
 Description=Load AppArmor profiles
 UnitFileState=enabled
+CanStart=yes
+CanStop=no
 
 Type=
 MainPID=0
@@ -523,6 +531,9 @@ UnitFileState=enabled
         let aa = get("apparmor");
         assert_eq!((aa.state, aa.running, aa.kind.as_str(), aa.pid), ("Exited", false, "One-shot", 0));
         assert_eq!(aa.description, "Unit file: /usr/lib/systemd/system/apparmor.service.");
+        assert_eq!(cron.control, Control::Systemd { unit: "cron.service".into(), user: false, can_start: true, can_stop: true });
+        assert_eq!(aa.control, Control::Systemd { unit: "apparmor.service".into(), user: false, can_start: true, can_stop: false });
+        assert!(matches!(&get("rsync").control, Control::Systemd { unit, can_start: true, .. } if unit == "rsync.service"), "a unit file that is not loaded");
         assert_eq!((get("broken").state, get("broken").start.as_str()), ("Failed", "Disabled"));
         // An instance takes its start mode from `systemctl show` (the file is the template).
         assert_eq!((get("getty@tty1").state, get("getty@tty1").start.as_str()), ("Starting", "Enabled"));

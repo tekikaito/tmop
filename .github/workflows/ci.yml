@@ -115,6 +115,13 @@ jobs:
           bin=$(cargo test --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .target.kind[0] == "lib") | .executable')
           sudo TMOP_TEST_REQUIRE_MOUNT=1 "$bin" pro::trash pro::diskdelete
 
+      # Starting and stopping system units needs root: the service-control test runs once more
+      # as root, on a throwaway unit of its own in /run/systemd/system (sudo drops the variable).
+      - name: Test service control as root
+        run: |
+          bin=$(cargo test --locked --lib --no-run --message-format=json | jq -r 'select(.profile.test == true and .target.kind[0] == "lib") | .executable')
+          sudo GITHUB_ACTIONS=true "$bin" pro::drivers::control
+
   linux-arm64:
     name: Build and test (aarch64-unknown-linux-gnu)
     runs-on: ubuntu-22.04-arm

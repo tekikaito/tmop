@@ -10,7 +10,8 @@ use super::theme;
 use super::widgets::{self, Button, Icon};
 use super::{App, FrameData, Page};
 use crate::metrics::Series;
-use crate::pro::inventory::{keys, Sections, StartupApp};
+use crate::pro::drivers::control::{self, Action, Done, Offer};
+use crate::pro::inventory::{keys, Sections, Service, StartupApp};
 use crate::pro::Loader;
 use crate::process::{format_bytes, format_cpu_time, format_rate, ProcessRow};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
@@ -37,6 +38,17 @@ pub struct InventoryState {
     pub services_pid: Option<u32>,
     /// Description and company of the services looked at in the side panel.
     pub svc_info: InfoCache,
+    /// A running Start / Stop / Restart, and the service and action it is for.
+    pub svc_action: Loader<Done>,
+    pub svc_acting: Option<(Service, Action)>,
+    /// The service acted on last, until the list read after the action arrives.
+    pub svc_verify: Option<(String, Action, Done)>,
+    /// What the list read after the last action says about the service (page subtitle).
+    pub svc_note: Option<String>,
+    /// A failed action: (dialog title, the system's message).
+    pub svc_error: Option<(String, String)>,
+    /// A Stop or Restart waiting for confirmation.
+    pub svc_confirm: Option<ServiceConfirm>,
     pub startup: Loader<Vec<StartupApp>>,
     pub startup_table: TableState,
     /// A running Enable / Disable of a startup entry, and the entry as it was before.
@@ -62,6 +74,12 @@ impl Default for InventoryState {
             services_table: TableState::default(),
             services_pid: None,
             svc_info: InfoCache::default(),
+            svc_action: Loader::default(),
+            svc_acting: None,
+            svc_verify: None,
+            svc_note: None,
+            svc_error: None,
+            svc_confirm: None,
             startup: Loader::default(),
             startup_table: TableState::default(),
             startup_switch: Loader::default(),
@@ -226,6 +244,45 @@ fn poll_startup(inv: &mut InventoryState) {
         if let (Some(before), Some(list)) = (inv.startup_verify.take(), inv.startup.ok()) {
             inv.startup_note = Some(verify_note(&before, list));
         }
+    }
+}
+
+/// A Stop or Restart waiting for the user's answer, with the dependents the system reports.
+pub struct ServiceConfirm {
+    pub svc: Service,
+    pub action: Action,
+    pub dependents: Loader<Vec<String>>,
+}
+
+/// Starts `action` on `svc` in the background (the availability is checked again there).
+fn start_service_action(inv: &mut InventoryState, svc: Service, action: Action) {
+    inv.svc_note = None;
+    inv.svc_acting = Some((svc.clone(), action));
+    inv.svc_action.start(move || control::run(&svc, action));
+}
+
+/// Takes in a finished action (re-reading the list after a success, the error dialog after a
+/// failure, the list left as it was) and the list read after it.
+fn poll_services(inv: &mut InventoryState) {
+    if inv.svc_action.poll() {
+        let acting = inv.svc_acting.take();
+        match (inv.svc_action.error(), acting) {
+            (Some(e), Some((s, a))) => inv.svc_error = Some((format!("Could not {} **{}**", a.verb(), s.name), e.to_string())),
+            (Some(e), None) => inv.svc_error = Some(("The service action failed".into(), e.to_string())),
+            (None, Some((s, a))) => {
+                inv.svc_verify = Some((s.name, a, inv.svc_action.ok().cloned().unwrap_or_default()));
+                inv.services.start(crate::pro::inventory::services);
+            }
+            (None, None) => {}
+        }
+    }
+    if inv.services.poll() {
+        if let (Some((name, action, done)), Some(list)) = (inv.svc_verify.take(), inv.services.ok()) {
+            inv.svc_note = Some(control::after_note(&name, action, &done, list));
+        }
+    }
+    if let Some(c) = inv.svc_confirm.as_mut() {
+        c.dependents.poll();
     }
 }
 
@@ -715,13 +772,43 @@ impl App {
 
     pub fn services_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        self.pro.inv.services.poll();
-        let count = self.pro.inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
-        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), Page::Services.shortcut().into()]));
+        poll_services(&mut self.pro.inv);
+        let inv = &self.pro.inv;
+        let acting = inv.svc_action.is_loading();
+        // A list read that is under way could answer for the state from before the action.
+        let busy = acting || inv.services.is_loading() || inv.svc_confirm.is_some();
+        if acting || inv.services.is_loading() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        let count = inv.services.ok().map(|l| format!("{} services", l.len())).unwrap_or_default();
+        let note = match &inv.svc_acting {
+            Some((s, a)) => format!("{} {}\u{2026}", a.progress(), s.name),
+            None => inv.svc_note.clone().unwrap_or_default(),
+        };
+        let privileged = crate::platform::is_elevated();
+        let selected: Option<Service> = inv.services.ok().and_then(|l| l.iter().find(|s| Some(&s.name) == inv.services_table.selected.as_ref()).cloned());
+        let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), note, Page::Services.shortcut().into()]));
         let mut refresh = false;
+        let mut chosen: Option<(Service, Action)> = None;
         let (tools, area) = page_layout(body, 320.0);
         toolbar(ui, tools, |ui| {
-            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
+            refresh = ui.add_enabled_ui(!acting, |ui| widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh))).inner.clicked();
+            // Only a click on these buttons (or the menu items) acts on a service: no key does.
+            for action in Action::ALL.into_iter().filter(|_| control::SUPPORTED) {
+                let why = match control::toolbar_offer(selected.as_ref(), action, privileged, busy) {
+                    Offer::Hidden => continue,
+                    Offer::Greyed(why) => Some(why),
+                    Offer::Offered => None,
+                };
+                let r = ui.add_enabled_ui(why.is_none(), |ui| Button::new(action.label()).show(ui, &pal)).inner;
+                let r = match why {
+                    Some(why) => r.on_disabled_hover_text(why),
+                    None => r,
+                };
+                if r.clicked() {
+                    chosen = selected.clone().map(|s| (s, action));
+                }
+            }
             widgets::search_box(ui, &mut self.pro.inv.services_table.filter, "Filter by name or path", 200.0, &pal);
             if let Some(pid) = self.pro.inv.services_pid {
                 if widgets::button(ui, &format!("PID {pid}  \u{d7}"), &pal, None).on_hover_text("Showing the services of this process; click to show all").clicked() {
@@ -730,14 +817,96 @@ impl App {
             }
         });
         let inv = &mut self.pro.inv;
-        if refresh || inv.services.stale(Duration::from_secs(15)) {
+        if refresh || (!acting && inv.services.stale(Duration::from_secs(15))) {
             inv.services.start(crate::pro::inventory::services);
         }
-        let list: &[crate::pro::inventory::Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
-        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info, inv.services_pid);
+        let list: &[Service] = inv.services.ok().map(|v| v.as_slice()).unwrap_or(&[]);
+        let picked: std::cell::Cell<Option<(usize, Action)>> = std::cell::Cell::new(None);
+        let menu = |i: usize, ui: &mut egui::Ui| {
+            for action in Action::ALL {
+                let why = match control::offer(&list[i], action, privileged) {
+                    Offer::Hidden => continue,
+                    Offer::Greyed(why) => Some(why),
+                    Offer::Offered if busy => Some("Another service action is running"),
+                    Offer::Offered => None,
+                };
+                if ui.add_enabled_ui(why.is_none(), |ui| kit::menu_item(ui, action.label(), None, false)).inner {
+                    picked.set(Some((i, action)));
+                }
+                if let Some(why) = why {
+                    ui.label(egui::RichText::new(why).font(theme::ui(12.0)).color(pal.text_faint));
+                }
+            }
+        };
+        let has_menu = control::SUPPORTED && list.iter().any(|s| s.control != control::Control::None);
+        let open = driver_like_page(ui, area, fd, list, &mut inv.services_table, inv.services.error(), false, &mut self.icons, &mut inv.svc_info, inv.services_pid, has_menu.then_some(&menu as table::RowMenu<'_>));
+        if let Some((i, action)) = picked.get() {
+            chosen = Some((list[i].clone(), action));
+        }
+        if let Some((svc, action)) = chosen {
+            if action.needs_confirm() {
+                let mut dependents = Loader::default();
+                let s = svc.clone();
+                dependents.start(move || control::dependents(&s));
+                inv.svc_confirm = Some(ServiceConfirm { svc, action, dependents });
+            } else {
+                start_service_action(inv, svc, action);
+            }
+        }
         if let Some(sel) = open {
             self.selected = Some(sel);
             self.page = Page::Processes;
+        }
+    }
+
+    /// The Stop / Restart confirmation and the dialog of a failed action with the system's message.
+    pub(super) fn service_dialogs(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        let st = theme::status(pal);
+        let inv = &mut self.pro.inv;
+        if let Some((title, message)) = &inv.svc_error {
+            let mut answer = None;
+            kit::dialog(ctx, "service-action-error", |ui| {
+                ui.spacing_mut().item_spacing.y = 18.0;
+                kit::dialog_header(ui, pal, Some((Icon::Warning, st.danger)), title, message);
+                answer = kit::dialog_buttons(ui, pal, &[kit::DialogButton::Primary("Close")]);
+            });
+            if answer.is_some() || super::processes::key_once(ctx, egui::Key::Escape) {
+                inv.svc_error = None;
+            }
+            return;
+        }
+        let Some(c) = &inv.svc_confirm else { return };
+        let mut answer = None;
+        kit::dialog(ctx, "service-confirm", |ui| {
+            ui.spacing_mut().item_spacing.y = 18.0;
+            let (deps, extra): (&[String], Option<String>) = match c.dependents.get() {
+                None => (&[], Some("Looking for the services that depend on it\u{2026}".into())),
+                Some(Ok(d)) => (d.as_slice(), None),
+                Some(Err(e)) => (&[], Some(format!("The system did not say which services depend on it: {e}"))),
+            };
+            let (title, body, button) = control::confirm_text(c.action, &c.svc, deps, crate::platform::OS);
+            kit::dialog_header(ui, pal, Some((Icon::Warning, st.warn)), &title, &body);
+            if let Some(extra) = extra {
+                ui.label(egui::RichText::new(extra).font(theme::ui(13.0)).color(pal.text_faint));
+            }
+            answer = match kit::dialog_buttons(ui, pal, &[kit::DialogButton::Ghost("Cancel"), kit::DialogButton::Danger(&button)]) {
+                Some(0) => Some(false),
+                // Only once the dependents are known, so the dialog said what stops.
+                Some(_) if c.dependents.get().is_some() => Some(true),
+                _ => None,
+            };
+        });
+        if super::processes::key_once(ctx, egui::Key::Escape) {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                if let Some(c) = inv.svc_confirm.take() {
+                    start_service_action(inv, c.svc, c.action);
+                }
+            }
+            Some(false) => inv.svc_confirm = None,
+            None => {}
         }
     }
 }
