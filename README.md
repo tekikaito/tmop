@@ -65,6 +65,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
 - **Find what is using a file:** if a file cannot be moved or deleted because it is open, choose *Find what's using a file…* in the *More* menu (the dots) or on *Processes*, then type, browse to or drop the file. TMOP lists the programs that have it open, each with *Show in Processes* and *End task*. Only files are checked; on Linux and macOS without administrator rights only your own processes are.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
+- **Check your laptop battery's health:** *Power & Freq* shows a *Battery health* tile with the full charge against the design capacity (in percent and Wh) and the cycle count, where the system reports them.
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.
