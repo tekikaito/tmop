@@ -60,6 +60,10 @@ pub struct General {
     pub confirm_efficiency_mode: bool,
     pub disk_space_suppress_stop_confirm: bool,
     pub show_full_account_name: bool,
+    /// Processes page: new processes flash green and exited ones linger in red. Optional (on).
+    pub highlight_processes: bool,
+    /// How long that highlight lasts, in seconds (1, 2 or 5). Optional (2).
+    pub highlight_seconds: u32,
     /// Windows: read the CPU temperature through the PawnIO driver (opt-in; needs PawnIO
     /// installed and TMOP running as administrator).
     pub pawnio_cpu_temperature: bool,
@@ -235,6 +239,8 @@ impl Default for General {
             confirm_efficiency_mode: true,
             disk_space_suppress_stop_confirm: false,
             show_full_account_name: false,
+            highlight_processes: true,
+            highlight_seconds: 2,
             pawnio_cpu_temperature: false,
             recording_folder: String::new(),
             benchmark_folder: String::new(),
@@ -830,6 +836,33 @@ mod tests {
         assert_eq!(out["window"]["processTreeView"], true);
         assert_eq!(parse(&s.to_json()).settings, s);
         assert!(Settings::from_json(r#"{"version":1,"window":{"processTreeView":"yes"}}"#).is_err());
+    }
+
+    /// `general.highlightProcesses` and `general.highlightSeconds` are new (no migration): an older
+    /// file loads unchanged with the highlight on for 2 s, and both keys round-trip.
+    #[test]
+    fn process_highlight_is_optional() {
+        let old = r#"{"version":1,"general":{"updateSpeed":"slow","showSelfInReports":true},"window":{"processTree":false}}"#;
+        let load = parse(old);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+        let g = &load.settings.general;
+        assert!(g.highlight_processes && g.highlight_seconds == 2);
+        assert!(g.show_self_in_reports && g.update_speed == "slow" && !load.settings.window.process_tree, "the old keys are kept");
+        let expected = Settings { general: General { update_speed: "slow".into(), show_self_in_reports: true, ..General::default() }, window: Window { process_tree: false, ..Window::default() }, ..Settings::default() };
+        assert_eq!(load.settings, expected, "nothing else changes");
+        let s = parse(SAMPLE).settings;
+        assert!(s.general.highlight_processes && s.general.highlight_seconds == 2, "TMOG files take the defaults");
+        let mut s = Settings::default();
+        s.general.highlight_processes = false;
+        s.general.highlight_seconds = 5;
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!((out["general"]["highlightProcesses"].clone(), out["general"]["highlightSeconds"].clone()), (Value::Bool(false), Value::from(5)));
+        let back = parse(&s.to_json());
+        assert!(back.unknown_keys.is_empty());
+        assert_eq!(back.settings, s);
+        assert!(Settings::from_json(r#"{"version":1,"general":{"highlightSeconds":"2"}}"#).is_err());
+        assert!(Settings::from_json(r#"{"version":1,"general":{"highlightProcesses":1}}"#).is_err());
     }
 
     #[test]

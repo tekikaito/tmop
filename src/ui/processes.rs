@@ -11,12 +11,13 @@ use super::widgets::{self, Button, ButtonKind, ButtonSize, Dot, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::pro::connections::{Conn, Proto};
+use crate::process::highlight::{self, Highlights, Mark};
 use crate::process::tree::{self as ptree, TreeRow};
 use crate::process::{self, format_bytes, format_cpu_time, format_rate, Action, Column, Priority, ProcessRow, Status};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, Layout, Rect, RichText, Sense, Stroke};
 use super::widgets::ScrollArea029 as _;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ROW_H: f32 = table::ROW_H;
 const CHILD_H: f32 = 28.0;
@@ -105,6 +106,8 @@ pub struct ProcState {
     conns_table: TableState,
     /// The header search text seen last frame (editing it closes the details view).
     filter_seen: String,
+    /// New and exited processes ("Highlight new and exited processes").
+    pub highlights: Highlights,
 }
 
 enum Entry {
@@ -214,16 +217,29 @@ fn sort_entries(v: &mut [usize], rows: &[ProcessRow], aggs: &HashMap<usize, Agg>
 struct Groups {
     apps: Vec<usize>,
     bg: Vec<usize>,
-    /// Processes of the apps and in the background, the ones nested under an entry included.
-    app_procs: usize,
-    bg_procs: usize,
     children: HashMap<usize, Vec<usize>>,
     /// Totals of each entry with children.
     aggs: HashMap<usize, Agg>,
+    /// Indexed like the rows: the process belongs to an app (windowed, or nested under one).
+    in_app: Vec<bool>,
+}
+
+impl Groups {
+    /// Processes of the apps and in the background among `visible`, the ones nested under an
+    /// entry included and the rows from index `live` on (exited processes still listed) left out.
+    fn live_procs(&self, visible: &[usize], live: usize) -> (usize, usize) {
+        let apps = visible.iter().filter(|i| **i < live && self.in_app[**i]).count();
+        (apps, visible.iter().filter(|i| **i < live).count() - apps)
+    }
 }
 
 fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool) -> Groups {
-    let by_pid: HashMap<u32, usize> = visible.iter().map(|i| (rows[*i].pid, *i)).collect();
+    // The first row with a PID wins: live rows come before exited ones (`Highlights::shown_rows`),
+    // so the new holder of a reused PID is found, not the ghost.
+    let mut by_pid: HashMap<u32, usize> = HashMap::with_capacity(visible.len());
+    for &i in visible {
+        by_pid.entry(rows[i].pid).or_insert(i);
+    }
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut is_child = vec![false; rows.len()];
     if tree {
@@ -252,9 +268,8 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
     let mut apps: Vec<usize> = visible.iter().copied().filter(|i| rows[*i].has_window && !is_child[*i]).collect();
     let mut bg: Vec<usize> = visible.iter().copied().filter(|i| !in_app[*i] && !is_child[*i]).collect();
     sort_entries(&mut apps, rows, &aggs, col, desc);
-    let app_procs = visible.iter().filter(|i| in_app[**i]).count();
     sort_entries(&mut bg, rows, &aggs, col, desc);
-    Groups { apps, bg, app_procs, bg_procs: visible.len() - app_procs, children, aggs }
+    Groups { apps, bg, children, aggs, in_app }
 }
 
 /// The list rows and what they aggregate.
@@ -373,6 +388,49 @@ fn tree_entries(tree: &[TreeRow], filtering: bool) -> Vec<Entry> {
 /// the search or a tab, stays selected but is not one the user can see.
 fn row_listed(entries: &[Entry], rows: &[ProcessRow], k: (u32, i64)) -> bool {
     entries.iter().any(|e| matches!(e, Entry::Row { idx, .. } if (rows[*idx].pid, rows[*idx].create_time) == k))
+}
+
+/// The process an action on `k` (the selection, a context-menu pick, a double click) goes to: a
+/// live process of the snapshot `live` with that exact key. An exited process still listed is
+/// never one, nor the new holder of its reused PID (another creation time, another key).
+fn action_target(live: &[ProcessRow], k: Option<(u32, i64)>) -> Option<&ProcessRow> {
+    let k = k?;
+    live.iter().find(|r| (r.pid, r.create_time) == k)
+}
+
+/// What a key pressed on the selected row asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyPick {
+    /// Delete: End task; Shift+Delete: End task tree.
+    Do(Action),
+    /// Enter: the details view.
+    Details,
+}
+
+/// The keyboard shortcuts of the selection, pressed this frame: only on a live process (of the
+/// snapshot `live`, by exact key) whose row is among the lines `entries` (indices into `rows`)
+/// the table lists. An exited process still listed gets nothing, even when selected.
+fn selection_key<'a>(ctx: &egui::Context, live: &'a [ProcessRow], entries: &[Entry], rows: &[ProcessRow], selected: Option<(u32, i64)>) -> Option<(KeyPick, &'a ProcessRow)> {
+    let r = action_target(live, selected)?;
+    if !row_listed(entries, rows, (r.pid, r.create_time)) {
+        return None;
+    }
+    if key_once(ctx, egui::Key::Delete) {
+        Some((KeyPick::Do(if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask }), r))
+    } else if key_once(ctx, egui::Key::Enter) {
+        Some((KeyPick::Details, r))
+    } else {
+        None
+    }
+}
+
+/// The row tint of a highlight: the palette's status green for a new process, its red for an
+/// exited one, fading with the time left.
+fn mark_tint(m: Mark, st: &theme::Status) -> Color32 {
+    match m {
+        Mark::New(left) => with_alpha(st.ok, 0.24 * left),
+        Mark::Exited(left) => with_alpha(st.danger, 0.08 + 0.16 * left),
+    }
 }
 
 /// Tree view: what Left or Right, pressed this frame, does on line `at` (the selection).
@@ -574,8 +632,9 @@ impl App {
         }
     }
 
-    /// One trend sample per process and snapshot; processes that are gone are dropped.
-    fn update_spark(&mut self, fd: &FrameData<'_>) {
+    /// One trend sample per process and snapshot; processes no longer `shown` (live, or exited
+    /// and still listed) are dropped.
+    fn update_spark(&mut self, fd: &FrameData<'_>, shown: &[ProcessRow]) {
         if self.proc.spark_seq == fd.snap.seq && !self.proc.spark.is_empty() {
             return;
         }
@@ -585,9 +644,25 @@ impl App {
             e.0.push(r.cpu_pct);
             e.1.push(r.private_working_set as f32);
         }
-        let live: HashSet<(u32, i64)> = fd.rows.iter().map(|r| (r.pid, r.create_time)).collect();
-        self.proc.spark.retain(|k, _| live.contains(k));
-        ptree::prune(&mut self.proc.collapsed, fd.rows);
+        let keep: HashSet<(u32, i64)> = shown.iter().map(|r| (r.pid, r.create_time)).collect();
+        self.proc.spark.retain(|k, _| keep.contains(k));
+        ptree::prune(&mut self.proc.collapsed, shown);
+    }
+
+    /// Feeds the snapshot to the highlights (or clears them when off) and returns the highlight
+    /// time. While updates are paused the next snapshot is a baseline, so resuming (or Refresh
+    /// while paused) flashes nothing.
+    fn update_highlights(&mut self, fd: &FrameData<'_>, now: Instant) -> Option<Duration> {
+        let g = &self.settings.general;
+        let Some(hold) = highlight::hold(g.highlight_processes, g.highlight_seconds) else {
+            self.proc.highlights.clear();
+            return None;
+        };
+        if self.settings.update_speed().interval().is_none() {
+            self.proc.highlights.rebase();
+        }
+        self.proc.highlights.observe(fd.snap.seq, fd.rows, now, hold);
+        Some(hold)
     }
 
     /// History of the selected process for the details view.
@@ -618,14 +693,21 @@ impl App {
 
     pub fn processes_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        self.update_spark(fd);
+        // The clock of the highlights: one reading per frame.
+        let now = Instant::now();
+        let hold = self.update_highlights(fd, now);
+        // The rows listed: the live ones (indices below `live_n`), then the exited ones still shown.
+        // Every action looks its target up in `fd.rows` only (`action_target`).
+        let shown_rows = self.proc.highlights.shown_rows(fd.rows);
+        let live_n = fd.rows.len();
+        self.update_spark(fd, &shown_rows);
         self.track_selection(fd);
         if self.proc.filter_seen != self.filter {
             self.proc.filter_seen.clone_from(&self.filter);
             self.proc.details = false;
         }
         let mut requested: Option<(Action, ProcessRow)> = None;
-        let sel_row = self.selected.and_then(|k| fd.rows.iter().find(|r| (r.pid, r.create_time) == k)).cloned();
+        let sel_row = action_target(fd.rows, self.selected).cloned();
         if self.proc.details {
             match &sel_row {
                 Some(r) => {
@@ -645,7 +727,7 @@ impl App {
 
         // ---- model
         let f = self.filter.to_lowercase();
-        let rows = fd.rows;
+        let rows: &[ProcessRow] = &shown_rows;
         let show_self = self.settings.general.show_self_in_reports;
         let listed = |r: &ProcessRow| show_self || r.pid != std::process::id();
         let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], &f)).collect();
@@ -654,13 +736,16 @@ impl App {
         let all = group_rows(rows, &visible, tree, col, desc);
         let view = self.proc.view.min(VIEWS.len() - 1);
         // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
+        // Exited processes still listed are not counted.
+        let live = |i: &&usize| **i < live_n;
+        let (live_apps, live_bg) = all.live_procs(&visible, live_n);
         let counts: [Option<usize>; 6] = [
-            Some(visible.len()),
-            Some(all.app_procs),
-            Some(all.bg_procs),
-            Some(visible.iter().filter(|i| in_view(3, &rows[**i])).count()),
-            Some(visible.iter().filter(|i| in_view(4, &rows[**i])).count()),
-            Some(visible.iter().filter(|i| in_view(5, &rows[**i])).count()),
+            Some(live_apps + live_bg),
+            Some(live_apps),
+            Some(live_bg),
+            Some(visible.iter().filter(live).filter(|i| in_view(3, &rows[**i])).count()),
+            Some(visible.iter().filter(live).filter(|i| in_view(4, &rows[**i])).count()),
+            Some(visible.iter().filter(live).filter(|i| in_view(5, &rows[**i])).count()),
         ];
         let subset;
         // Tree view: every listed process takes part; the filter text and the tab pick the matches,
@@ -687,11 +772,11 @@ impl App {
         match view {
             _ if tree_view => built.entries = tree_entries(&tree_rows, filtering),
             0 => {
-                built.entries.push(Entry::Group("Apps", groups.app_procs));
+                built.entries.push(Entry::Group("Apps", live_apps));
                 for i in &groups.apps {
                     push_root(*i, &tctx, &mut built);
                 }
-                built.entries.push(Entry::Group("Background processes", groups.bg_procs));
+                built.entries.push(Entry::Group("Background processes", live_bg));
                 for i in &groups.bg {
                     push_root(*i, &tctx, &mut built);
                 }
@@ -720,7 +805,7 @@ impl App {
 
         // ---- header
         let title_area = ui.max_rect();
-        let subtitle = format!("  {} \u{b7} {} apps \u{b7} {} processes \u{b7} sorted by {}", if iv.is_some() { format!("live \u{b7} {}", interval_text(iv)) } else { "paused".to_string() }, all.apps.len(), visible.len(), col.title());
+        let subtitle = format!("  {} \u{b7} {} apps \u{b7} {} processes \u{b7} sorted by {}", if iv.is_some() { format!("live \u{b7} {}", interval_text(iv)) } else { "paused".to_string() }, all.apps.iter().filter(live).count(), live_apps + live_bg, col.title());
         let body = self.page_title(ui, &pal, "Processes", &subtitle);
         let st = theme::status(&pal);
         {
@@ -919,6 +1004,7 @@ impl App {
         let mem_color = fd.metric("memory");
         let icons = &mut self.icons;
         let spark = &self.proc.spark;
+        let highlights = &self.proc.highlights;
         let entries = &built.entries;
         let p = ui.painter().clone();
         p.rect_filled(table_rect, 8.0, with_alpha(pal.text, 0.03));
@@ -1038,7 +1124,10 @@ impl App {
                                 };
                                 // Tree view: an ancestor listed only for a match below it is dimmed.
                                 let dim = tree_view && tree_rows.get(row.index()).is_some_and(|t| !t.matched);
-                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st, net_off, tree: tree_view, dim };
+                                // An exited process still listed: drawn in red, no action reaches it.
+                                let ghost = *idx >= live_n;
+                                let mark = hold.and_then(|h| highlights.mark(key, now, h)).filter(|m| ghost == matches!(m, Mark::Exited(_)));
+                                let cx = CellCtx { max_mem, max_io, selected: is_sel, depth: *depth, kids: *kids, open: *open, size: built.size.get(idx).copied().unwrap_or(1), agg, logical, per_core, trend, mem_color, st, net_off, tree: tree_view, dim, mark, exited: ghost };
                                 for (ci, c) in cols.iter().enumerate() {
                                     row.col(|ui| {
                                         if cell_ui(ui, r, *c, &pal, cx, icons, ci == 0, false) {
@@ -1054,14 +1143,19 @@ impl App {
                                     clicked = Some(key);
                                 }
                                 if resp.double_clicked() {
-                                    // While filtering the tree stays open: a double click opens the details.
+                                    // While filtering the tree stays open: a double click opens the details
+                                    // (an exited process has none).
                                     if *kids > 0 && !(tree_view && filtering) {
                                         toggle = Some(key);
-                                    } else {
+                                    } else if !ghost {
                                         open_details = Some(key);
                                     }
                                 }
                                 kit::context_menu(&resp, |ui| {
+                                    if ghost {
+                                        exited_menu(ui, r);
+                                        return;
+                                    }
                                     let svc = match (svc_page, &svc_pids) {
                                         (false, _) => Svc::Off,
                                         (true, None) => Svc::Unknown,
@@ -1082,7 +1176,7 @@ impl App {
         }
         p.rect_stroke(table_rect, 8.0, Stroke::new(1.0_f32, pal.grid), egui::StrokeKind::Outside);
         if let Some(export) = reorder.csv_request() {
-            let text = csv_of(rows, entries, &built.agg, &cols, per_core, logical, net_off, &span);
+            let text = csv_of(rows, live_n, entries, &built.agg, &cols, per_core, logical, net_off, &span);
             super::csv::deliver(ui.ctx(), export, text, "processes");
         }
         if let Some(order) = reorder.finish(ui, table_inner, &pal).and_then(|change| table::reordered(&order_ids, &saved_order, &shown, change)) {
@@ -1109,16 +1203,21 @@ impl App {
         } else if let Some(k) = clicked {
             self.selected = Some(k);
         }
-        if let Some(k) = open_details {
+        if let Some(k) = open_details.filter(|k| action_target(fd.rows, Some(*k)).is_some()) {
             self.selected = Some(k);
             self.proc.details = true;
             self.proc.details_tab = 0;
+        }
+        if hold.is_some() && self.proc.highlights.active() {
+            // The tints fade between snapshots.
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
         if want_services && self.pro.inv.services.stale(Duration::from_secs(15)) {
             self.pro.inv.services.start(crate::pro::inventory::services);
             ui.ctx().request_repaint_after(Duration::from_millis(300));
         }
-        if let Some((pick, r)) = menu_pick {
+        // A pick acts on the live process with the row's exact key, never on an exited row.
+        if let Some((pick, r)) = menu_pick.and_then(|(pick, r)| action_target(fd.rows, Some((r.pid, r.create_time))).map(|live| (pick, live.clone()))) {
             self.selected = Some((r.pid, r.create_time));
             match pick {
                 MenuPick::Do(a) => requested = Some((a, r)),
@@ -1152,18 +1251,20 @@ impl App {
                     requested = Some((Action::EndTask, r.clone()));
                 }
             });
-            let ctx = ui.ctx();
-            if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() && row_listed(&built.entries, rows, (r.pid, r.create_time)) {
-                if key_once(ctx, egui::Key::Delete) {
-                    let action = if ctx.input(|i| i.modifiers.shift) { Action::EndTree } else { Action::EndTask };
-                    requested = Some((action, r.clone()));
-                } else if key_once(ctx, egui::Key::Enter) {
+        }
+        let ctx = ui.ctx();
+        if self.pending.is_none() && !kit::dialog_open(ctx) && !ctx.egui_wants_keyboard_input() {
+            match selection_key(ctx, fd.rows, &built.entries, rows, self.selected) {
+                Some((KeyPick::Do(action), r)) => requested = Some((action, r.clone())),
+                Some((KeyPick::Details, _)) => {
                     self.proc.details = true;
                     self.proc.details_tab = 0;
                 }
+                None => {}
             }
         }
-        if let Some((a, r)) = requested {
+        // Last check before an action runs: its target is live, with this exact key.
+        if let Some((a, r)) = requested.filter(|(_, r)| action_target(fd.rows, Some((r.pid, r.create_time))).is_some()) {
             self.request(a, r);
         }
     }
@@ -1682,6 +1783,10 @@ struct CellCtx<'a> {
     tree: bool,
     /// Tree view while filtering: an ancestor that does not match itself, drawn faint.
     dim: bool,
+    /// A new or exited process: the row is tinted ([`mark_tint`]).
+    mark: Option<Mark>,
+    /// An exited process still listed: its Status reads "Exited".
+    exited: bool,
 }
 
 /// Draws one cell. Returns true when the tree chevron was clicked. `first` / `filler` tell the
@@ -1728,6 +1833,9 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             if heat > 0.03 {
                 p.rect_filled(rect, 0.0, with_alpha(pal.accent, heat * 0.18));
             }
+        }
+        if let Some(m) = cx.mark {
+            p.rect_filled(rect, 0.0, mark_tint(m, &cx.st));
         }
     }
     if filler {
@@ -1848,6 +1956,9 @@ fn cell_ui(ui: &mut egui::Ui, r: &ProcessRow, pc: PCol, pal: &Palette, cx: CellC
             let text = cell_text(r, Column::Pid, &cx);
             ui.painter().text(pos2(rect.left() + 10.0, cy), Align2::LEFT_CENTER, text, font, color);
         }
+        PCol::Data(Column::Status) if cx.exited => {
+            ui.painter().with_clip_rect(rect).text(pos2(rect.left() + 10.0, cy), Align2::LEFT_CENTER, "Exited", theme::ui(13.0), cx.st.danger_text);
+        }
         PCol::Data(Column::Status) => {
             let p = ui.painter().with_clip_rect(rect);
             match r.status {
@@ -1901,15 +2012,19 @@ fn cell_text(r: &ProcessRow, c: Column, cx: &CellCtx<'_>) -> String {
 /// The table as CSV text: the data columns in `cols` (the trend columns only draw), a line per
 /// process row as listed in `entries` (group headings and "+ n more" lines are not data, and
 /// children of a collapsed group or tree node are not listed in the first place). Names carry no
-/// indentation.
+/// indentation. Only live processes are exported: the rows from index `live` on (exited processes
+/// still listed for a moment) are left out.
 #[allow(clippy::too_many_arguments)]
-fn csv_of(rows: &[ProcessRow], entries: &[Entry], agg: &HashMap<usize, Agg>, cols: &[PCol], per_core: bool, logical: usize, net_off: bool, span: &str) -> String {
+fn csv_of(rows: &[ProcessRow], live: usize, entries: &[Entry], agg: &HashMap<usize, Agg>, cols: &[PCol], per_core: bool, logical: usize, net_off: bool, span: &str) -> String {
     let data: Vec<Column> = cols.iter().filter_map(|c| if let PCol::Data(c) = c { Some(*c) } else { None }).collect();
     let header: Vec<String> = cols.iter().filter(|c| !c.is_trend()).map(|c| c.title(span)).collect();
     let mut lines = Vec::new();
     for e in entries {
         if let Entry::Row { idx, depth, kids, open } = e {
-            let cx = CellCtx { max_mem: 1.0, max_io: 1.0, selected: false, depth: *depth, kids: *kids, open: *open, size: 1, agg: agg.get(idx).copied(), logical, per_core, trend: None, mem_color: Color32::TRANSPARENT, st: theme::status(&theme::DARK), net_off, tree: false, dim: false };
+            if *idx >= live {
+                continue;
+            }
+            let cx = CellCtx { max_mem: 1.0, max_io: 1.0, selected: false, depth: *depth, kids: *kids, open: *open, size: 1, agg: agg.get(idx).copied(), logical, per_core, trend: None, mem_color: Color32::TRANSPARENT, st: theme::status(&theme::DARK), net_off, tree: false, dim: false, mark: None, exited: false };
             lines.push(data.iter().map(|c| cell_text(&rows[*idx], *c, &cx)).collect());
         }
     }
@@ -1978,6 +2093,15 @@ enum Svc<'a> {
     Unknown,
     /// The pids that host a service.
     Pids(&'a [u32]),
+}
+
+/// The context menu of an exited process still listed: what it was, and nothing to pick (no
+/// action, no details). Returns nothing by design.
+fn exited_menu(ui: &mut egui::Ui, r: &ProcessRow) {
+    kit::menu_header(ui, &format!("{} \u{b7} PID {}", r.name, r.pid));
+    ui.add_enabled_ui(false, |ui| {
+        kit::menu_item(ui, "Exited \u{b7} no actions", None, false);
+    });
 }
 
 /// The context menu of a process; `caps` leaves out what the backend cannot do.
@@ -2083,10 +2207,10 @@ mod tests {
         let entries = vec![Entry::Group("Apps", 1), Entry::Row { idx: 0, depth: 0, kids: 1, open: false }, Entry::More { key: (10, 1), n: 3 }];
         let agg: HashMap<usize, Agg> = HashMap::from([(0, Agg { cpu: 20.0, mem: 3 << 20, ..Default::default() })]);
         let cols = [PCol::Data(Column::Name), PCol::Data(Column::Cpu), PCol::CpuTrend, PCol::Data(Column::Pid), PCol::Data(Column::Memory)];
-        assert_eq!(csv_of(&rows, &entries, &agg, &cols, false, 4, false, "60 s"), format!("Name,CPU,PID,Memory\r\n'=evil.exe,20.0%,\u{2014},{}\r\n", format_bytes((3 << 20) as f64)));
+        assert_eq!(csv_of(&rows, rows.len(), &entries, &agg, &cols, false, 4, false, "60 s"), format!("Name,CPU,PID,Memory\r\n'=evil.exe,20.0%,\u{2014},{}\r\n", format_bytes((3 << 20) as f64)));
         // An open group lists its own figures and PID, and a child its name quoted.
         let entries = vec![Entry::Row { idx: 1, depth: 1, kids: 0, open: false }];
-        assert_eq!(csv_of(&rows, &entries, &HashMap::new(), &cols[..2], true, 4, false, ""), "Name,CPU\r\n\"child, one\",0.0%\r\n");
+        assert_eq!(csv_of(&rows, rows.len(), &entries, &HashMap::new(), &cols[..2], true, 4, false, ""), "Name,CPU\r\n\"child, one\",0.0%\r\n");
     }
 
     /// A small tree: init > shell > (cargo > rustc, vim), and a lone root.
@@ -2108,11 +2232,11 @@ mod tests {
         let rows = tree_sample();
         let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Cpu)];
         let tree = tree_of_sample(&rows, &HashSet::new());
-        let csv = csv_of(&rows, &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
+        let csv = csv_of(&rows, rows.len(), &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
         assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nrustc,4,40.0%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
         let collapsed: HashSet<(u32, i64)> = [(3, 3)].into_iter().collect();
         let tree = tree_of_sample(&rows, &collapsed);
-        let csv = csv_of(&rows, &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
+        let csv = csv_of(&rows, rows.len(), &tree_entries(&tree, false), &HashMap::new(), &cols, false, 4, false, "");
         assert_eq!(csv, "Name,PID,CPU\r\ninit,1,0.0%\r\nshell,2,0.0%\r\ncargo,3,2.5%\r\nvim,5,0.0%\r\nlone,9,0.0%\r\n");
     }
 
@@ -2189,7 +2313,7 @@ mod tests {
         let filtered = ptree::build(&rows, &members, Some(&pick), (Column::Cpu, true), &HashSet::new());
         assert!(filtered.iter().any(|t| !t.matched) && filtered.iter().map(|t| t.depth).max() == Some(30));
         let full = ptree::build(&rows, &members, None, (Column::Cpu, true), &HashSet::new());
-        let cx_of = |t: &TreeRow| CellCtx { max_mem: 1.0, max_io: 1.0, selected: t.index == 2, depth: t.depth, kids: usize::from(t.has_children), open: t.expanded, size: 1, agg: None, logical: 8, per_core: false, trend: None, mem_color: pal.accent, st, net_off: false, tree: true, dim: !t.matched };
+        let cx_of = |t: &TreeRow| CellCtx { max_mem: 1.0, max_io: 1.0, selected: t.index == 2, depth: t.depth, kids: usize::from(t.has_children), open: t.expanded, size: 1, agg: None, logical: 8, per_core: false, trend: None, mem_color: pal.accent, st, net_off: false, tree: true, dim: !t.matched, mark: None, exited: false };
         let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid), PCol::Data(Column::Status), PCol::Data(Column::Cpu), PCol::CpuTrend, PCol::MemTrend];
         for tree in [&filtered, &full] {
             ctx.run_ui(egui::RawInput::default(), |root| {
@@ -2302,14 +2426,14 @@ mod tests {
         assert_eq!(g.bg, vec![0]);
         assert_eq!(g.children[&0], vec![4]);
         // One app entry with three processes, one background entry with two.
-        assert_eq!((g.app_procs, g.bg_procs), (3, 2));
+        assert_eq!(g.live_procs(&visible, rows.len()), (3, 2));
         let mut members = Vec::new();
         members_of(1, &g.children, &mut members, 0);
         assert_eq!(members, vec![1, 2, 3]);
         let flat = group_rows(&rows, &visible, false, Column::Pid, false);
         assert_eq!(flat.apps, vec![1]);
         assert_eq!(flat.bg.len(), 4);
-        assert_eq!((flat.app_procs, flat.bg_procs), (1, 4));
+        assert_eq!(flat.live_procs(&visible, rows.len()), (1, 4));
     }
 
     #[test]
@@ -2379,6 +2503,120 @@ mod tests {
         assert!(row_listed(&entries, &rows, key(0)) && row_listed(&entries, &rows, key(2)) && !row_listed(&entries, &rows, key(3)));
         // Nothing is listed for a process that is gone.
         assert!(!row_listed(&entries, &rows, (999, 1)));
+    }
+
+    /// A snapshot where app 10 (with children 11 and 12) and lone 20 run, then one where child 12
+    /// and lone 20 have exited and PID 20 went to a new process: the live rows and the highlights.
+    fn exit_sample() -> (Vec<ProcessRow>, Highlights) {
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(2);
+        let mut app = row(10, 1, 5, "app.exe");
+        app.has_window = true;
+        let first = vec![row(1, 0, 1, "init"), app.clone(), row(11, 10, 6, "child.exe"), row(12, 10, 7, "dying.exe"), row(20, 1, 8, "lone.exe")];
+        let mut h = Highlights::default();
+        h.observe(1, &first, t0, hold);
+        let live = vec![row(1, 0, 1, "init"), app, row(11, 10, 6, "child.exe"), row(20, 1, 90, "new holder of 20")];
+        h.observe(2, &live, t0 + Duration::from_millis(500), hold);
+        assert!(h.is_ghost((12, 7)) && h.is_ghost((20, 8)));
+        (live, h)
+    }
+
+    /// No action reaches an exited row: not by its key (the context menu, a double click, the End
+    /// task buttons all look the target up with `action_target`), not by Delete, Shift+Delete or
+    /// Enter while it is selected, and the new holder of its reused PID is a target of its own.
+    #[test]
+    fn exited_rows_are_never_action_targets() {
+        let (live, h) = exit_sample();
+        let shown = h.shown_rows(&live);
+        assert_eq!(shown.len(), live.len() + 2);
+        assert!(action_target(&live, Some((20, 8))).is_none(), "the ghost of 20");
+        assert!(action_target(&live, Some((12, 7))).is_none());
+        assert_eq!(action_target(&live, Some((20, 90))).map(|r| r.name.as_str()), Some("new holder of 20"));
+        assert!(action_target(&live, None).is_none());
+        // Shortcuts, in the flat list where every row (ghosts included) is a line.
+        let visible: Vec<usize> = (0..shown.len()).collect();
+        let g = group_rows(&shown, &visible, false, Column::Pid, false);
+        let (show_all, expanded) = (HashSet::new(), HashSet::new());
+        let t = TreeCtx { rows: &shown, children: &g.children, expanded: &expanded, show_all: &show_all };
+        let mut b = Built::default();
+        for i in g.apps.iter().chain(&g.bg) {
+            push_root(*i, &t, &mut b);
+        }
+        assert!(row_listed(&b.entries, &shown, (20, 8)), "the ghost is listed");
+        let ctx = egui::Context::default();
+        let press = |key: egui::Key, shift: bool, sel: (u32, i64)| {
+            let modifiers = if shift { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+            let ev = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+            let mut out = None;
+            ctx.run_ui(egui::RawInput { events: vec![egui::Event::ModifiersChanged(modifiers), ev(true), ev(false)], ..Default::default() }, |_| out = selection_key(&ctx, &live, &b.entries, &shown, Some(sel)).map(|(k, r)| (k, (r.pid, r.create_time))))
+                .drop_without_applying_deltas();
+            out
+        };
+        for ghost in [(20, 8), (12, 7)] {
+            assert_eq!(press(egui::Key::Delete, false, ghost), None);
+            assert_eq!(press(egui::Key::Delete, true, ghost), None);
+            assert_eq!(press(egui::Key::Enter, false, ghost), None);
+        }
+        assert_eq!(press(egui::Key::Delete, false, (20, 90)), Some((KeyPick::Do(Action::EndTask), (20, 90))));
+        assert_eq!(press(egui::Key::Delete, true, (20, 90)), Some((KeyPick::Do(Action::EndTree), (20, 90))));
+        assert_eq!(press(egui::Key::Enter, false, (11, 6)), Some((KeyPick::Details, (11, 6))));
+    }
+
+    /// Group by app over the shown rows: an exited child keeps its place in its app, the new holder
+    /// of a reused PID is its own entry, and the counts leave exited processes out.
+    #[test]
+    fn exited_rows_keep_their_place_in_the_groups() {
+        let (live, h) = exit_sample();
+        let shown = h.shown_rows(&live);
+        let at = |k: (u32, i64)| shown.iter().position(|r| (r.pid, r.create_time) == k).unwrap();
+        let visible: Vec<usize> = (0..shown.len()).collect();
+        let g = group_rows(&shown, &visible, true, Column::Pid, false);
+        assert_eq!(g.apps, vec![at((10, 5))]);
+        assert_eq!(g.children[&at((10, 5))], vec![at((11, 6)), at((12, 7))], "the exited child stays in its app");
+        let under_init = &g.children[&at((1, 1))];
+        assert!(under_init.contains(&at((20, 8))) && under_init.contains(&at((20, 90))), "both 20s are listed");
+        assert_eq!(g.live_procs(&visible, shown.len()), (3, 3), "all listed rows");
+        assert_eq!(g.live_procs(&visible, live.len()), (2, 2), "app + child; init + the new 20");
+        // A live process whose parent exited still nests under it while it is listed.
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(2);
+        let mut h = Highlights::default();
+        h.observe(1, &[row(1, 0, 1, "init"), row(30, 1, 3, "host"), row(31, 30, 4, "worker")], t0, hold);
+        let live = vec![row(1, 0, 1, "init"), row(31, 30, 4, "worker")];
+        h.observe(2, &live, t0, hold);
+        let shown = h.shown_rows(&live);
+        let g = group_rows(&shown, &(0..shown.len()).collect::<Vec<_>>(), true, Column::Pid, false);
+        assert_eq!(g.children.get(&2), Some(&vec![1]), "worker under its exited host");
+    }
+
+    /// CSV export lists live processes only: exited rows still shown are left out.
+    #[test]
+    fn csv_leaves_exited_rows_out() {
+        let (live, h) = exit_sample();
+        let shown = h.shown_rows(&live);
+        let entries: Vec<Entry> = (0..shown.len()).map(|idx| Entry::Row { idx, depth: 0, kids: 0, open: false }).collect();
+        let cols = [PCol::Data(Column::Name), PCol::Data(Column::Pid)];
+        let csv = csv_of(&shown, live.len(), &entries, &HashMap::new(), &cols, false, 4, false, "");
+        assert_eq!(csv, "Name,PID\r\ninit,1\r\napp.exe,10\r\nchild.exe,11\r\nnew holder of 20,20\r\n");
+    }
+
+    /// The tints are the palette's status green and red, faded by the time left, on every
+    /// built-in palette.
+    #[test]
+    fn mark_tints_follow_the_palette() {
+        for pal in [theme::DARK, theme::LIGHT, theme::CLASSIC_DARK, theme::CLASSIC_LIGHT, theme::HIGH_CONTRAST, theme::NORD, theme::SOLARIZED_LIGHT] {
+            let st = theme::status(&pal);
+            let (new, gone) = (mark_tint(Mark::New(1.0), &st), mark_tint(Mark::Exited(1.0), &st));
+            assert!(new.a() > 0 && gone.a() > 0);
+            let same_hue = |a: Color32, b: Color32| {
+                let (a, b) = (egui::ecolor::Rgba::from(with_alpha(a, 1.0)), egui::ecolor::Rgba::from(with_alpha(b, 1.0)));
+                (a.r() - b.r()).abs() < 0.02 && (a.g() - b.g()).abs() < 0.02 && (a.b() - b.b()).abs() < 0.02
+            };
+            assert!(same_hue(new, st.ok) && same_hue(gone, st.danger));
+            assert_eq!(mark_tint(Mark::New(0.0), &st).a(), 0, "a new mark fades out");
+            assert!(mark_tint(Mark::Exited(0.0), &st).a() > 0, "an exited row stays red until it goes");
+            assert!(mark_tint(Mark::New(0.5), &st).a() < new.a());
+        }
     }
 
     /// While filtering the tree has no arrows: a click where the arrow would be is no toggle.
@@ -2491,7 +2729,8 @@ mod tests {
                     history_strip(ui.painter(), Rect::from_min_size(pos2(10.0, 130.0), vec2(900.0, STRIP_H)), &fd, &pal, None);
                     let mut r = row(10, 4, 1, "chrome.exe");
                     r.path = None;
-                    for (status, depth, kids, selected) in [(Status::Running, 0, 3, false), (Status::NotResponding, 0, 0, true), (Status::Suspended, 1, 0, false), (Status::Running, 2, 1, false)] {
+                    let marks = [None, Some(Mark::New(1.0)), Some(Mark::Exited(0.5)), Some(Mark::New(0.0))];
+                    for ((status, depth, kids, selected), mark) in [(Status::Running, 0, 3, false), (Status::NotResponding, 0, 0, true), (Status::Suspended, 1, 0, false), (Status::Running, 2, 1, false)].into_iter().zip(marks) {
                         r.status = status;
                         let cx = CellCtx {
                             max_mem: 1.0,
@@ -2510,6 +2749,8 @@ mod tests {
                             net_off: true,
                             tree: false,
                             dim: false,
+                            mark,
+                            exited: matches!(mark, Some(Mark::Exited(_))),
                         };
                         let (rect, _) = ui.allocate_exact_size(vec2(300.0, ROW_H), Sense::hover());
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -2522,6 +2763,7 @@ mod tests {
                     let mut out = None;
                     egui::Area::new(egui::Id::unique("menu-smoke")).show(&ctx, |ui| out = action_menu(ui, &r, &crate::platform::Caps::WINDOWS.proc, Svc::Pids(&[1, 2])));
                     assert!(out.is_none());
+                    egui::Area::new(egui::Id::unique("exited-menu-smoke")).show(&ctx, |ui| exited_menu(ui, &r));
                 });
             }).drop_without_applying_deltas();
         }
