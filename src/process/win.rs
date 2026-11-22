@@ -571,18 +571,21 @@ pub(super) mod sys {
                 }
             })
             .expect("an unbounded range")?;
-        // A process that is still starting (its loader has not finished) can fail with
-        // ERROR_BAD_LENGTH for a moment; a few short retries over well under a second cover it.
-        // Any other error, or the same one after the last try, is final.
-        const ERROR_BAD_LENGTH: u32 = 0x8007_0018;
-        let mut tries = 0;
+        // A process that is still starting cannot be dumped yet (see `NOT_READY_CODES`): retry those
+        // errors, briefly, starting the file over each time. Any other error is final at once.
+        let first = Instant::now();
         let done = loop {
-            // SAFETY: both handles are open for the call; no callbacks or extra streams.
-            let done = unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), MiniDumpWithFullMemory, None, None, None) };
+            let done = {
+                // DbgHelp is single threaded: "you must synchronize all concurrent calls"
+                // (MiniDumpWriteDump, Remarks). The UI writes one dump at a time; this makes it hold
+                // for every caller, tests included.
+                let _one = DBGHELP.lock().unwrap_or_else(|e| e.into_inner());
+                // SAFETY: both handles are open for the call; no callbacks or extra streams.
+                unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), MiniDumpWithFullMemory, None, None, None) }
+            };
             match done {
-                Err(ref e) if e.code().0 as u32 == ERROR_BAD_LENGTH && tries < 10 => {
-                    tries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                Err(ref e) if not_ready(e) && first.elapsed() + DUMP_RETRY_EVERY < DUMP_RETRY_FOR => {
+                    std::thread::sleep(DUMP_RETRY_EVERY);
                     // Start the file over: the failed try may have written part of it.
                     use std::io::Seek;
                     if (&file).rewind().is_err() || file.set_len(0).is_err() {
@@ -595,17 +598,51 @@ pub(super) mod sys {
         match done {
             Ok(()) => Ok(path),
             Err(e) => {
-                let msg = err(e);
+                let msg = if not_ready(&e) { DUMP_NOT_READY.to_string() } else { err(e) };
                 drop(file);
                 let _ = std::fs::remove_file(&path);
                 Err(msg)
             }
         }
     }
+
+    /// Serialises `MiniDumpWriteDump` within TMOP (see `create_dump`).
+    static DBGHELP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `MiniDumpWriteDump` errors that mean "this process cannot be read *yet*", not "it cannot be
+    /// dumped". Right after a process is created its loader data (the module list in its PEB) does
+    /// not exist yet or is still being built, and the dump walks that list first, whatever the dump
+    /// type. Microsoft documents the same for `EnumProcessModules`: "If the module list in the target
+    /// process is corrupted or not yet initialized, or if the module list changes during the function
+    /// call [...] EnumProcessModules may fail". Each code below was seen on this machine, not guessed:
+    const NOT_READY_CODES: [u32; 2] = [
+        // ERROR_PARTIAL_COPY: every dump (normal or full memory) of a child created suspended, where
+        // EnumProcessModules fails with the same code; ~8% of dumps taken right after a spawn on a
+        // loaded machine; the v0.17.0 Release run.
+        0x8007_012B,
+        // ERROR_BAD_LENGTH: ~1% of dumps taken right after a spawn (the list is half built); the
+        // v0.16.0 Release run (#140).
+        0x8007_0018,
+    ];
+
+    fn not_ready(e: &windows::core::Error) -> bool {
+        NOT_READY_CODES.contains(&(e.code().0 as u32))
+    }
+
+    /// How long a dump keeps retrying [`NOT_READY_CODES`], counted from the first try (a slow full
+    /// dump that fails late is not repeated). Children started under full CPU load were dumpable
+    /// after at most ~250 ms here, so this leaves a wide margin and still answers quickly for a
+    /// process that never gets ready (one created suspended).
+    const DUMP_RETRY_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+    const DUMP_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// What the user reads when [`NOT_READY_CODES`] outlast the retries.
+    pub(super) const DUMP_NOT_READY: &str =
+        "Windows could not read the program yet: it is still starting (or loading modules). Try the dump again in a moment.";
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::sys;
     use super::*;
     use std::process::{Child, Command, Stdio};
@@ -613,6 +650,35 @@ mod tests {
     /// A child of this test (the only process these tests ever act on) and its creation time.
     fn child() -> (Child, i64) {
         let c = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null()).spawn().unwrap();
+        let h = open(c.id(), PROCESS_QUERY_LIMITED_INFORMATION).unwrap();
+        let start = creation_time(&h).unwrap();
+        (c, start)
+    }
+
+    /// Like [`child`], but returns only once the child has printed its first line: it is running
+    /// its own code, so the loader has finished starting it (a dump does not race its start-up).
+    /// Its output is drained until it ends, so it never blocks on a full pipe.
+    pub(in crate::process) fn started_child() -> (Child, i64) {
+        use std::io::BufRead;
+        let mut c = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::piped()).spawn().unwrap();
+        let out = c.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut tx = Some(tx);
+            for line in std::io::BufReader::new(out).split(b'\n') {
+                let Ok(line) = line else { break };
+                if !line.trim_ascii().is_empty() {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(30)).is_err() {
+            let _ = c.kill();
+            let _ = c.wait();
+            panic!("the child printed nothing within 30 s");
+        }
         let h = open(c.id(), PROCESS_QUERY_LIMITED_INFORMATION).unwrap();
         let start = creation_time(&h).unwrap();
         (c, start)
@@ -694,7 +760,7 @@ mod tests {
 
     #[test]
     fn a_dump_with_the_right_identity_works() {
-        let (mut c, start) = child();
+        let (mut c, start) = started_child();
         let dir = std::env::temp_dir().join(format!("tmop-stale-dump-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let r = sys::create_dump(c.id(), start, "ping.exe", &dir);
@@ -702,5 +768,34 @@ mod tests {
         let _ = c.wait();
         assert!(std::fs::metadata(r.unwrap()).unwrap().len() > 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The extreme of "still starting": a child created suspended has run no code at all, so its
+    /// loader data does not exist. The dump must answer within the retry time, either with a dump
+    /// or with the plain message, and never leave a file behind.
+    #[test]
+    fn a_dump_of_a_process_that_is_still_starting_fails_plainly_and_leaves_no_file() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_SUSPENDED: u32 = 0x4;
+        let mut c = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null()).creation_flags(CREATE_SUSPENDED).spawn().unwrap();
+        let start = creation_time(&open(c.id(), PROCESS_QUERY_LIMITED_INFORMATION).unwrap()).unwrap();
+        let dir = std::env::temp_dir().join(format!("tmop-starting-dump-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = Instant::now();
+        let r = sys::create_dump(c.id(), start, "ping.exe", &dir);
+        let took = t.elapsed();
+        let _ = sys::resume(c.id(), start);
+        let _ = c.kill();
+        let _ = c.wait();
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(took < std::time::Duration::from_secs(10), "the dump gave up in time ({took:?})");
+        match r {
+            Ok(p) => assert_eq!(left, vec![p], "a dump that worked is the only file"),
+            Err(e) => {
+                assert_eq!(e, sys::DUMP_NOT_READY);
+                assert!(left.is_empty(), "a failed dump leaves no file: {left:?}");
+            }
+        }
     }
 }
