@@ -571,8 +571,27 @@ pub(super) mod sys {
                 }
             })
             .expect("an unbounded range")?;
-        // SAFETY: both handles are open for the call; no callbacks or extra streams.
-        let done = unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), MiniDumpWithFullMemory, None, None, None) };
+        // A process that is still starting (its loader has not finished) can fail with
+        // ERROR_BAD_LENGTH for a moment; a few short retries over well under a second cover it.
+        // Any other error, or the same one after the last try, is final.
+        const ERROR_BAD_LENGTH: u32 = 0x8007_0018;
+        let mut tries = 0;
+        let done = loop {
+            // SAFETY: both handles are open for the call; no callbacks or extra streams.
+            let done = unsafe { MiniDumpWriteDump(h.0, pid, HANDLE(file.as_raw_handle()), MiniDumpWithFullMemory, None, None, None) };
+            match done {
+                Err(ref e) if e.code().0 as u32 == ERROR_BAD_LENGTH && tries < 10 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Start the file over: the failed try may have written part of it.
+                    use std::io::Seek;
+                    if (&file).rewind().is_err() || file.set_len(0).is_err() {
+                        break done;
+                    }
+                }
+                _ => break done,
+            }
+        };
         match done {
             Ok(()) => Ok(path),
             Err(e) => {
