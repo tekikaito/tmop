@@ -21,7 +21,7 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 
 /// Width of the section list, and the sections it lists (in page order).
 const NAV_W: f32 = 180.0;
-const SECTIONS: [&str; 8] = ["Appearance", "Graphs", "General", "Window management", "Other options", TASK_MANAGER, "Skins and files", "About"];
+const SECTIONS: [&str; 9] = ["Appearance", "Graphs", "General", "Alerts", "Window management", "Other options", TASK_MANAGER, "Skins and files", "About"];
 /// The section only Windows has (see [`shown_sections`]).
 const TASK_MANAGER: &str = "Task Manager";
 
@@ -522,6 +522,51 @@ fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls:
     controls(&mut child);
 }
 
+/// The Alerts card: a switch, a limit and a time per alert. The temperature alert is left out
+/// where TMOP has no temperature source. Returns whether anything changed.
+fn alerts_rows(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Alerts, thermal: bool, fahrenheit: bool, paused: bool) -> bool {
+    let mut changed = false;
+    hint(ui, pal, "A desktop notification when a value stays above its limit for the time given, then not again until it has dropped well below the limit and at most every 10 minutes. TMOP checks in the background, also while its window is minimized.");
+    if paused {
+        hint(ui, pal, "Update speed is Paused, so no samples arrive and no alert can fire. Choose another speed under General.");
+    }
+    let limit_row = |ui: &mut egui::Ui, label: &str, enabled: &mut bool, above: &mut u32, seconds: &mut u32| {
+        let mut changed = false;
+        row(ui, pal, label, |ui| {
+            changed |= widgets::toggle(ui, enabled, pal).changed();
+            changed |= ui.add(egui::DragValue::new(seconds).range(1..=3600).prefix("for ").suffix(" s")).changed();
+            changed |= ui.add(egui::DragValue::new(above).range(1..=100).suffix(" %")).changed();
+        });
+        changed
+    };
+    changed |= limit_row(ui, "CPU usage above", &mut a.cpu_enabled, &mut a.cpu_above, &mut a.cpu_seconds);
+    changed |= limit_row(ui, "Memory usage above", &mut a.memory_enabled, &mut a.memory_above, &mut a.memory_seconds);
+    if thermal {
+        row(ui, pal, "Temperature above", |ui| {
+            changed |= widgets::toggle(ui, &mut a.temperature_enabled, pal).changed();
+            changed |= ui.add(egui::DragValue::new(&mut a.temperature_seconds).range(1..=3600).prefix("for ").suffix(" s")).changed();
+            // Stored in °C; shown in the temperature unit.
+            if fahrenheit {
+                let mut f = (a.temperature_above_c * 9.0 / 5.0 + 32.0).round();
+                if ui.add(egui::DragValue::new(&mut f).range(86.0..=302.0).max_decimals(0).suffix(" \u{b0}F")).changed() {
+                    a.temperature_above_c = (f - 32.0) * 5.0 / 9.0;
+                    changed = true;
+                }
+            } else {
+                let mut c = a.temperature_above_c.round();
+                if ui.add(egui::DragValue::new(&mut c).range(30.0..=150.0).max_decimals(0).suffix(" \u{b0}C")).changed() {
+                    a.temperature_above_c = c;
+                    changed = true;
+                }
+            }
+        });
+    }
+    if let Some(e) = crate::alerts::failure() {
+        hint(ui, pal, &format!("No desktop notification could be shown: {e}"));
+    }
+    changed
+}
+
 /// A row with an on/off switch at the right.
 pub(super) fn toggle_row(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, label: &str) -> bool {
     toggle_row_hint(ui, pal, on, label, "")
@@ -754,12 +799,15 @@ impl App {
                             changed |= super::updates::settings_rows(ui, &pal, &mut s.general, &mut self.updates);
                         });
                         section(ui, &pal, &mut sections, SECTIONS[3], |ui| {
+                            changed |= alerts_rows(ui, &pal, &mut s.alerts, caps.thermal, s.general.temperature_unit.eq_ignore_ascii_case("fahrenheit"), s.general.update_speed == UpdateSpeed::Paused.token());
+                        });
+                        section(ui, &pal, &mut sections, SECTIONS[4], |ui| {
                             if caps.window_levels {
                                 changed |= toggle_row(ui, &pal, &mut s.window.always_on_top, "Always on top");
                             }
                             changed |= toggle_row(ui, &pal, &mut s.window.uptime_visible, "Show up time in the status bar");
                         });
-                        section(ui, &pal, &mut sections, SECTIONS[4], |ui| {
+                        section(ui, &pal, &mut sections, SECTIONS[5], |ui| {
                             if caps.proc.efficiency {
                                 changed |= toggle_row(ui, &pal, &mut s.general.confirm_efficiency_mode, &format!("Ask before applying {}", crate::process::efficiency_word()));
                             }
@@ -784,7 +832,7 @@ impl App {
                         if caps.taskmgr_replace {
                             section(ui, &pal, &mut sections, TASK_MANAGER, |ui| self.replace_section(ui, &pal));
                         }
-                        section(ui, &pal, &mut sections, SECTIONS[6], |ui| {
+                        section(ui, &pal, &mut sections, SECTIONS[7], |ui| {
                             ui.add_space(2.0);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -1096,7 +1144,7 @@ mod tests {
     #[test]
     fn sections_are_found_by_name() {
         assert_eq!(section_index("graphs"), Some(1));
-        assert_eq!(section_index(" About "), Some(7));
+        assert_eq!(section_index(" About "), Some(8));
         assert_eq!(section_index("nope"), None);
     }
 
