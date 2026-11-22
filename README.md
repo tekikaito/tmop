@@ -74,6 +74,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
   table as CSV…*. You get the visible columns in their current order and the rows as filtered and
   sorted, ready for a spreadsheet or a bug report.
+- **Get told when something runs hot:** in *Settings → Alerts* TMOP sends a desktop notification when CPU usage, memory usage or the temperature stays above a limit you set for a while, naming the busiest process. All three are off by default, they also work while the window is minimized, and the temperature alert appears only where TMOP can read a temperature.
 - **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
 
 ## Privacy
