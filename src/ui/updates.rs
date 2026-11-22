@@ -188,6 +188,7 @@ impl App {
         let buttons: Vec<DialogButton> = match &method {
             Method::InPlace => vec![DialogButton::Ghost("Skip this version"), DialogButton::Secondary("Later"), DialogButton::Primary(if error.is_some() { "Try again" } else { "Update now" })],
             Method::InstallCommand | Method::Homebrew | Method::Scoop => vec![DialogButton::Ghost("Skip this version"), DialogButton::Secondary("Later"), DialogButton::Primary("Copy command")],
+            Method::Nix | Method::SystemPackage => vec![DialogButton::Ghost("Skip this version"), DialogButton::Primary("Later")],
         };
         let answer = kit::dialog(ctx, "update-available", |ui| {
             let body = format!("You have TMOP {}. What's new:", update::current_version());
@@ -203,8 +204,11 @@ impl App {
             ui.hyperlink_to(RichText::new("Open the release page").font(theme::ui(13.0)), &release.page);
             if let Some(cmd) = method.command(&release.repo) {
                 ui.add_space(8.0);
-                ui.label(RichText::new(method.instructions()).font(theme::ui(13.0)).color(pal.text));
+                ui.label(RichText::new(method.instructions(&release.repo)).font(theme::ui(13.0)).color(pal.text));
                 ui.label(RichText::new(cmd).font(theme::mono(12.0)).color(pal.text));
+            } else if method.hint_only() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(method.instructions(&release.repo)).font(theme::ui(13.0)).color(pal.text));
             }
             if installing {
                 ui.add_space(8.0);
@@ -230,6 +234,7 @@ impl App {
             1 => self.updates.offer = None,
             _ => match method {
                 Method::InPlace => self.updates.start_install(release),
+                Method::Nix | Method::SystemPackage => self.updates.offer = None,
                 Method::InstallCommand | Method::Homebrew | Method::Scoop => {
                     ctx.copy_text(method.command(&release.repo).unwrap_or_default());
                     self.status = "Update command copied: paste it in a terminal".into();
