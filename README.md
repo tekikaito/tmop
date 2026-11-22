@@ -41,7 +41,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
   it instead of showing zeros.
 - **More than processes and graphs.** Per-core CPU, memory, disk (each disk on its own if you
   like), network and graphics card, with engines where the system reports them; processes with
-  end task, suspend and priority; services, startup apps, installed apps, connections; table
+  end task, suspend and priority; services, startup apps you can turn on and off, installed apps, connections; table
   columns you can put in any order; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
 - **Skinnable.** Skins, palettes and fonts change how it looks. Skins use the `.tmogskin`
   format, and TMOP can take the place of Windows Task Manager (Ctrl+Shift+Esc, Windows only).
@@ -249,7 +249,8 @@ showing zeros.
 | Processes: efficiency mode | ✔ | ✔ as idle scheduling | ✔ as *Background priority* |
 | Processes: other users' processes | ✔ as administrator | End or renice asks for your password (pkexec) | Some details need root |
 | Users, App history, System info, Benchmarks, Flight recorder | ✔ | ✔ | ✔ |
-| Startup apps | ✔ | Autostart entries and user services | Launch agents and daemons (no Login Items) |
+| Startup apps: list | ✔ | Autostart entries and user services | Launch agents and daemons (no Login Items) |
+| Startup apps: *Enable* / *Disable* (the system's own switch; nothing is deleted) | ✔ (all-users entries need administrator) | Autostart entries, with `Hidden=true` (not systemd units) | With `launchctl` (daemons need root; applies from the next login) |
 | Services | ✔ | systemd units | launchd jobs |
 | Drivers | ✔ | as *Kernel modules* | as *Kernel extensions* |
 | Installed apps | ✔ | Packages (dpkg, rpm, pacman, Flatpak, Snap) | .app bundles and Homebrew |

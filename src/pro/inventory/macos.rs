@@ -157,6 +157,7 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
                 job.enabled = !disabled;
             }
             job.location = label.into();
+            job.switch = super::toggle::Switch::Launchd { label: job.name.clone(), system };
             job.publisher = bundle_vendor(&job.command);
             out.push(job);
         }
