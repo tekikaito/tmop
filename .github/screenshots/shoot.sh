@@ -57,5 +57,37 @@ if [ "$os" = windows ] || [ "$os" = linux ]; then
   # Frames for the animation, two per second.
   shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
+
+# ---- QA pass: every page, at the usual size (1584x877) and at the smallest the window allows (900x600).
+qa() {  # name, size, wait, then TMOP arguments
+  local name="$1" size="$2" wait="$3"; shift 3
+  echo "::group::$name"
+  if "$exe" --screenshot="$out/$name.png" --window-size="$size" --wait="$wait" "$@"; then echo "ok: $name"; else echo "::warning::shot $name failed"; fi
+  echo "::endgroup::"
+}
+qa_all() {  # suffix, size
+  local sfx="$1" size="$2" w=15
+  [ "$sfx" = min ] && w=12
+  for p in summary processes docker system-info app-history startup-apps users services power-and-freq flight-recorder connections installed-apps drivers disk-space benchmarks; do
+    local pw=$w
+    case "$p" in installed-apps|drivers|disk-space|services|app-history) pw=$((w+10));; esac
+    qa "qa-$sfx-page-$p" "$size" "$pw" --page="$p"
+  done
+  for d in cpu memory gpu disk network thermal docker; do
+    qa "qa-$sfx-perf-$d" "$size" $((w+8)) --page=performance --device="$d"
+  done
+  for t in engine containers stacks images volumes networks; do
+    qa "qa-$sfx-docker-$t" "$size" "$w" --page=docker --docker-tab="$t"
+  done
+  for sec in Appearance Graphs General Alerts "Window management" "Other options" "Task Manager" "Skins and files" About; do
+    qa "qa-$sfx-settings-$(echo "$sec" | tr 'A-Z ' 'a-z-')" "$size" 8 --page=settings --settings-section="$sec"
+  done
+  qa "qa-$sfx-popout" "$size" "$w" --popout
+}
+qa_all full $SIZE
+qa_all min 900x600
+for p in summary processes settings; do
+  qa "qa-light-$p" $SIZE 15 --page="$p" --theme=light
+done
 ls -l "$out"
 exit 0
