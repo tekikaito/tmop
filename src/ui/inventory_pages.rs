@@ -790,7 +790,8 @@ impl App {
         let body = self.page_title(ui, &pal, "Services", &subtitle(&[count, crate::pro::drivers::source(crate::pro::drivers::Kind::Services).into(), note, Page::Services.shortcut().into()]));
         let mut refresh = false;
         let mut chosen: Option<(Service, Action)> = None;
-        let (tools, area) = page_layout(body, 320.0);
+        // Refresh, Restart, Stop, Start (about 100 + 3 x 66) and the 200 px filter box, plus the PID chip.
+        let (tools, area) = page_layout(body, 530.0 + if inv.services_pid.is_some() { 110.0 } else { 0.0 });
         toolbar(ui, tools, |ui| {
             refresh = ui.add_enabled_ui(!acting, |ui| widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh))).inner.clicked();
             // Only a click on these buttons (or the menu items) acts on a service: no key does.

@@ -58,6 +58,8 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 | ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
 | **See what starts with your computer** | **Get an alert when something runs hot** |
 | ![The Startup apps page listing three startup entries](docs/screenshots/startup.png) | ![The Alerts card in Settings: CPU, memory and temperature limits](docs/screenshots/settings-alerts.png) |
+| **Start, stop or restart a service** | |
+| ![The Services page with the Restart, Stop and Start buttons above the list](docs/screenshots/services.png) | |
 
 - **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
 - **See which program started which:** on *Processes*, tick *Tree view*. Each process sits under the one that started it; click the arrow, or press Left and Right, to fold a branch in or out. A process whose parent has exited (or whose parent's number now belongs to a newer process) starts a branch of its own. Sorting works among the processes of one branch, and the search box and the tabs above the list keep the processes that match together with the ones above them (shown faint, with every branch open). A folded process shows its own figures, not those of its branch. *Group by app* and *Tree view* are separate views: ticking one turns the other off. TMOP remembers the view; folded branches are forgotten when it closes.
