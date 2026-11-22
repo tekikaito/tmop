@@ -149,6 +149,15 @@ pub fn set_binary(root: HKEY, path: &str, name: &str, data: &[u8]) -> Result<(),
     unsafe { RegSetValueExW(key.0, PCWSTR(wn.as_ptr()), None, REG_BINARY, Some(data)) }.ok().map_err(|e| format!("could not write {name} in {path}: {}", e.message()))
 }
 
+/// Deletes the value `name` of `root\path` (tests only: TMOP itself never deletes values).
+#[cfg(test)]
+pub fn delete_value(root: HKEY, path: &str, name: &str) -> Result<(), String> {
+    use windows::Win32::System::Registry::RegDeleteKeyValueW;
+    let (wp, wn) = (wide(path), wide(name));
+    // SAFETY: NUL-terminated path and name.
+    unsafe { RegDeleteKeyValueW(root, PCWSTR(wp.as_ptr()), PCWSTR(wn.as_ptr())) }.ok().map_err(|e| e.message())
+}
+
 impl Drop for Key {
     fn drop(&mut self) {
         // SAFETY: the key was opened by RegOpenKeyExW.

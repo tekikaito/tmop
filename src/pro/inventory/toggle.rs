@@ -241,7 +241,7 @@ pub fn desktop_enable(text: &[u8]) -> Result<Vec<u8>, String> {
 pub fn xdg_set(path: &Path, user_dir: &Path, system_dirs: &[PathBuf], enable: bool) -> Result<(), String> {
     let name = path.file_name().ok_or_else(|| format!("{} has no file name", path.display()))?;
     let read = |p: &Path| std::fs::read(p).map_err(|e| format!("could not read {}: {e}", p.display()));
-    let write = |p: &Path, b: &[u8]| std::fs::write(p, b).map_err(|e| format!("could not write {}: {e}", p.display()));
+    let write = replace_file;
     if path.parent() == Some(user_dir) {
         let current = read(path)?;
         if !enable {
@@ -261,9 +261,65 @@ pub fn xdg_set(path: &Path, user_dir: &Path, system_dirs: &[PathBuf], enable: bo
     let target = user_dir.join(name);
     let copy = desktop_disable(&read(path)?, DESKTOP_COPY_MARK)?;
     std::fs::create_dir_all(user_dir).map_err(|e| format!("could not create {}: {e}", user_dir.display()))?;
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&target).map_err(|e| format!("could not create {}: {e}", target.display()))?;
-    f.write_all(&copy).map_err(|e| format!("could not write {}: {e}", target.display()))
+    create_file(&target, &copy)
+}
+
+/// A temporary file next to `path` for writing it in one step; removed on drop unless kept.
+struct TempFile(PathBuf, bool);
+
+impl TempFile {
+    fn write(path: &Path, bytes: &[u8]) -> Result<TempFile, String> {
+        let dir = path.parent().ok_or_else(|| format!("{} has no folder", path.display()))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = TempFile(dir.join(format!(".{name}.tmop-{}.tmp", std::process::id())), false);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp.0).map_err(|e| format!("could not create {}: {e}", tmp.0.display()))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| format!("could not write {}: {e}", tmp.0.display()))?;
+        Ok(tmp)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.1 {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+/// Replaces the contents of the existing file `path` in one step: the bytes go to a temporary
+/// file in the same folder, which gets the file's permissions and is then renamed over it, so a
+/// TMOP killed half-way leaves the old file or the new one, never a cut-off one. A symbolic link
+/// stays a link: the file it points to is replaced.
+fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let real = std::fs::canonicalize(path).map_err(|e| format!("could not find {}: {e}", path.display()))?;
+    let perms = std::fs::metadata(&real).map_err(|e| format!("could not read {}: {e}", real.display()))?.permissions();
+    let mut tmp = TempFile::write(&real, bytes)?;
+    std::fs::set_permissions(&tmp.0, perms).map_err(|e| format!("could not set the permissions of {}: {e}", tmp.0.display()))?;
+    std::fs::rename(&tmp.0, &real).map_err(|e| format!("could not replace {}: {e}", real.display()))?;
+    tmp.1 = true;
+    Ok(())
+}
+
+/// Creates `path` with `bytes` in one step and never over an existing file: the temporary file is
+/// hard-linked to the name (which fails if it exists). Where the file system has no hard links,
+/// it is renamed after checking that the name is free.
+fn create_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = TempFile::write(path, bytes)?;
+    let exists = || format!("{} already exists; TMOP does not overwrite it", path.display());
+    match std::fs::hard_link(&tmp.0, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+        Err(_) => {
+            if path.exists() {
+                return Err(exists());
+            }
+            let mut tmp = tmp;
+            std::fs::rename(&tmp.0, path).map_err(|e| format!("could not create {}: {e}", path.display()))?;
+            tmp.1 = true;
+            Ok(())
+        }
+    }
 }
 
 // ---- macOS: launchctl ----
@@ -563,6 +619,175 @@ mod tests {
         assert!(xdg_set(&sys.join("missing.desktop"), &user, std::slice::from_ref(&sys), false).is_err());
         assert!(!user.join("missing.desktop").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn files_are_replaced_in_one_step() {
+        let root = temp("replace");
+        let p = root.join("a.desktop");
+        std::fs::write(&p, "[Desktop Entry]\nName=A\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        xdg_set(&p, &root, &[], false).unwrap();
+        assert!(parse(&std::fs::read(&p).unwrap()).hidden);
+        assert_eq!(names(&root), ["a.desktop"], "no temporary file is left");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777, 0o640, "the permissions are kept");
+        }
+        // A failed write leaves the file as it was and no temporary file.
+        assert!(replace_file(&root.join("missing.desktop"), b"x").is_err());
+        assert_eq!(names(&root), ["a.desktop"]);
+        // Creating never replaces, and cleans up after itself.
+        assert!(create_file(&p, b"other").is_err());
+        assert!(parse(&std::fs::read(&p).unwrap()).hidden);
+        create_file(&root.join("b.desktop"), b"new").unwrap();
+        assert_eq!(names(&root), ["a.desktop", "b.desktop"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_user_file_stays_a_link() {
+        let root = temp("link");
+        let (user, store) = (root.join("autostart"), root.join("dotfiles"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        let text = "[Desktop Entry]\nName=A\n";
+        std::fs::write(store.join("a.desktop"), text).unwrap();
+        std::os::unix::fs::symlink(store.join("a.desktop"), user.join("a.desktop")).unwrap();
+        let p = user.join("a.desktop");
+        xdg_set(&p, &user, &[], false).unwrap();
+        assert!(std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+        assert!(parse(&std::fs::read(store.join("a.desktop")).unwrap()).hidden);
+        xdg_set(&p, &user, &[], true).unwrap();
+        assert_eq!(std::fs::read_to_string(store.join("a.desktop")).unwrap(), text);
+        assert_eq!(names(&store), ["a.desktop"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A line in the test log that `cargo test` does not capture (it only captures `print!`), so
+    /// the CI log shows what the system said.
+    #[allow(dead_code)]
+    fn report(line: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    /// The tests that change the real system run only on GitHub Actions runners (throwaway
+    /// machines); anywhere else they return at once.
+    #[allow(dead_code)]
+    fn on_ci_runner(test: &str) -> bool {
+        let yes = std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
+        if !yes {
+            report(&format!("{test}: skipped, it only runs on GitHub Actions runners"));
+        }
+        yes
+    }
+
+    /// The real registry round trip, on the runner's HKCU under a value name of its own.
+    #[cfg(windows)]
+    #[test]
+    fn ci_only_startup_approved_in_the_registry() {
+        if !on_ci_runner("ci_only_startup_approved_in_the_registry") {
+            return;
+        }
+        use crate::pro::inventory::approved_enabled;
+        use crate::pro::winutil::{self, Key, Value, View};
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let path = format!(r"{}\Run", crate::pro::inventory::STARTUP_APPROVED);
+        let name = format!("tmop-ci-test-{}", std::process::id());
+        /// Deletes the test value however the test ends.
+        struct Cleanup(String, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = winutil::delete_value(HKEY_CURRENT_USER, &self.0, &self.1);
+            }
+        }
+        let _cleanup = Cleanup(path.clone(), name.clone());
+        let read = || match Key::open(HKEY_CURRENT_USER, &path, View::Default).and_then(|k| k.value(&name)) {
+            Some(Value::Bytes(b)) => Some(b),
+            None => None,
+            Some(other) => panic!("not binary: {other:?}"),
+        };
+        let now = || filetime(std::time::SystemTime::now());
+        assert_eq!(read(), None, "the test value must not exist yet");
+        let mut app = StartupApp { name: name.clone(), enabled: true, switch: Switch::Approved { machine: false, sub: "Run", name: name.clone() }, ..Default::default() };
+
+        // No value: Disable writes Task Manager's form with the time of the change.
+        let before = now();
+        set_enabled(&app, false).unwrap();
+        let off = read().expect("Disable wrote a value");
+        report(&format!("registry: disabled value {off:02x?}"));
+        assert_eq!(off.len(), APPROVED_LEN);
+        assert_eq!(&off[..4], &[3, 0, 0, 0]);
+        let t = u64::from_le_bytes(off[4..12].try_into().unwrap());
+        assert!(t >= before && t <= now(), "the FILETIME {t} is the time of the change ({before}..)");
+        assert!(!approved_enabled(&off));
+        app.enabled = false;
+        set_enabled(&app, true).unwrap();
+        let on = read().unwrap();
+        report(&format!("registry: enabled value {on:02x?}"));
+        assert_eq!(on, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(approved_enabled(&on));
+        // Enabling what is enabled writes nothing.
+        set_enabled(&app, true).unwrap();
+        assert_eq!(read().unwrap(), on);
+
+        // A value in the form Settings writes keeps it.
+        winutil::set_binary(HKEY_CURRENT_USER, &path, &name, &[0; 12]).unwrap();
+        app.enabled = true;
+        set_enabled(&app, false).unwrap();
+        let off = read().unwrap();
+        report(&format!("registry: Settings-style value disabled {off:02x?}"));
+        assert_eq!(&off[..4], &[1, 0, 0, 0]);
+        assert_ne!(&off[4..], &[0; 8]);
+        assert!(!approved_enabled(&off));
+        app.enabled = false;
+        set_enabled(&app, true).unwrap();
+        assert_eq!(read().unwrap(), [0; 12]);
+    }
+
+    /// The real `launchctl` round trip in the runner's GUI domain, for a made-up label.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ci_only_launchctl_disable_and_enable() {
+        if !on_ci_runner("ci_only_launchctl_disable_and_enable") {
+            return;
+        }
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let label = format!("com.tekikaito.tmop.ci-test-{}", std::process::id());
+        let domain = format!("gui/{uid}");
+        let state = || -> Result<Option<bool>, String> {
+            let text = crate::platform::run_capture("launchctl", &["print-disabled", &domain], std::time::Duration::from_secs(10))?;
+            Ok(crate::pro::inventory::parse::parse_launchctl_disabled(&text).into_iter().find(|(l, _)| *l == label).map(|(_, off)| off))
+        };
+        report(&format!("launchctl: uid {uid}, print-disabled {domain} before: {:?}", state()));
+        let mut app = StartupApp { name: label.clone(), enabled: true, switch: Switch::Launchd { label: label.clone(), system: false }, ..Default::default() };
+        if let Err(e) = set_enabled(&app, false) {
+            report(&format!("launchctl: SKIPPED, the runner refused `launchctl disable {domain}/{label}`: {e}"));
+            return;
+        }
+        let off = state();
+        report(&format!("launchctl: after disable: {off:?}"));
+        assert_eq!(off, Ok(Some(true)), "print-disabled shows the label as disabled");
+        app.enabled = false;
+        set_enabled(&app, true).unwrap();
+        let on = state();
+        report(&format!("launchctl: after enable: {on:?} (Some(false) = an \"enabled\" override is left behind)"));
+        assert_eq!(on.as_ref().map(|s| s.unwrap_or(false)), Ok(false), "print-disabled no longer shows it as disabled");
     }
 
     #[test]
