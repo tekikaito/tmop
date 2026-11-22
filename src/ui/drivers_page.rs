@@ -44,7 +44,7 @@ impl App {
         }
         let list: &[Service] = self.pro.drivers.ok().map(|v| v.as_slice()).unwrap_or(&[]);
         let mut info = InfoCache::default();
-        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info, None);
+        driver_like_page(ui, area, fd, list, &mut self.pro.drivers_table, self.pro.drivers.error(), true, &mut self.icons, &mut info, None, None);
     }
 }
 
@@ -110,7 +110,7 @@ fn headings(drivers: bool) -> [&'static str; 8] {
 
 /// Shared body of the Drivers and Services pages: stat tiles, the table and, for drivers, the bar
 /// of the selected driver or, for services, the panel that explains the selected service. Returns
-/// the process to open when the panel's process link was clicked.
+/// the process to open when the panel's process link was clicked. `menu` is the rows' context menu.
 #[allow(clippy::too_many_arguments)]
 pub fn driver_like_page(
     ui: &mut egui::Ui,
@@ -123,6 +123,7 @@ pub fn driver_like_page(
     icons: &mut super::icons::IconCache,
     info: &mut InfoCache,
     only_pid: Option<u32>,
+    menu: Option<table::RowMenu<'_>>,
 ) -> Option<(u32, i64)> {
     let pal = &fd.pal;
     let st = theme::status(pal);
@@ -200,7 +201,7 @@ pub fn driver_like_page(
         }
     };
     let key = |i: usize| list[i].name.clone();
-    if let Some(i) = table::show(ui, table_rect, if drivers { "drivers-table" } else { "services-table" }, pal, &cols, &order, state, &key, &cell, icons) {
+    if let Some(i) = table::show_with_menu(ui, table_rect, if drivers { "drivers-table" } else { "services-table" }, pal, &cols, &order, state, &key, &cell, icons, menu) {
         let path = PathBuf::from(&list[i].path);
         if path.exists() {
             kit::reveal_or_report(ui.ctx(), &path);
@@ -393,6 +394,7 @@ mod tests {
             version: "10.0.1".into(),
             description: "A driver".into(),
             third_party: drivers::third_party_company(company),
+            control: drivers::control::Control::Scm { accepted: drivers::control::ACCEPT_STOP },
         }
     }
 
@@ -419,9 +421,9 @@ mod tests {
                 ctx.run_ui(egui::RawInput::default(), |root| {
                     egui::CentralPanel::default().show(root, |ui| {
                         let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(width, 700.0));
-                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, None), None);
-                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, Some(2112)), None);
-                        assert_eq!(driver_like_page(ui, area, &fd, &[], &mut state, Some("no access"), drivers, &mut icons, &mut info, None), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, None, None), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &list, &mut state, None, drivers, &mut icons, &mut info, Some(2112), None), None);
+                        assert_eq!(driver_like_page(ui, area, &fd, &[], &mut state, Some("no access"), drivers, &mut icons, &mut info, None, None), None);
                     });
                 }).drop_without_applying_deltas();
             }

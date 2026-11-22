@@ -1,8 +1,10 @@
 //! Drivers and services. Windows: kernel drivers and Win32 services from the Service Control
 //! Manager (`EnumServicesStatusExW` + `QueryServiceConfigW`), plus file version metadata of the
 //! driver images. Linux: systemd service units and the loaded kernel modules ([`linux`]).
-//! macOS: launchd jobs and the loaded kernel extensions ([`macos`]). Read-only.
+//! macOS: launchd jobs and the loaded kernel extensions ([`macos`]). Services can be started,
+//! stopped and restarted ([`control`]); everything else is read-only.
 
+pub mod control;
 mod linux;
 mod macos;
 
@@ -37,6 +39,8 @@ pub struct Service {
     /// Not from the OS vendor: a company other than Microsoft (Windows drivers), an out-of-tree
     /// or proprietary module (Linux), a bundle id outside `com.apple.` (macOS).
     pub third_party: bool,
+    /// How TMOP can start and stop it (not shown).
+    pub control: control::Control,
 }
 
 /// What the Drivers page lists here, as its title.
@@ -222,6 +226,7 @@ pub fn read(kind: Kind) -> Result<Vec<Service>, String> {
             start: "Unknown".into(),
             kind: kind_name(st.dwServiceType.0).into(),
             pid: st.dwProcessId,
+            control: if kind == Kind::Services { control::Control::Scm { accepted: st.dwControlsAccepted } } else { control::Control::None },
             ..Default::default()
         };
         let wname = wide(&name);
@@ -380,8 +385,13 @@ mod tests {
     fn lists_drivers_and_services() {
         let d = read(Kind::Drivers).unwrap();
         assert!(d.iter().any(|s| s.running && s.kind == "Kernel"));
+        assert!(d.iter().all(|s| s.control == control::Control::None), "drivers are not started or stopped");
         let s = read(Kind::Services).unwrap();
         assert!(s.iter().any(|s| s.running && s.pid != 0));
+        assert!(s.iter().all(|s| matches!(s.control, control::Control::Scm { .. })));
+        // Some running services accept Stop and some (RpcSs) do not.
+        let accepts = |s: &Service| matches!(s.control, control::Control::Scm { accepted } if accepted & control::ACCEPT_STOP != 0);
+        assert!(s.iter().any(|s| s.running && accepts(s)) && s.iter().any(|s| s.running && !accepts(s)));
     }
 
     #[cfg(windows)]

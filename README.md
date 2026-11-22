@@ -41,7 +41,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
   it instead of showing zeros.
 - **More than processes and graphs.** Per-core CPU, memory, disk (each disk on its own if you
   like), network and graphics card, with engines where the system reports them; processes with
-  end task, suspend and priority; services, startup apps you can turn on and off, installed apps, connections; table
+  end task, suspend and priority; services you can start and stop, startup apps you can turn on and off, installed apps, connections; table
   columns you can put in any order; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
 - **Skinnable.** Skins, palettes and fonts change how it looks. Skins use the `.tmogskin`
   format, and TMOP can take the place of Windows Task Manager (Ctrl+Shift+Esc, Windows only).
@@ -66,6 +66,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **Send a specific signal (Linux and macOS):** on *Processes*, right-click a program and open *Send signal* to send exactly one of SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGSTOP or SIGCONT. Unlike *End task*, nothing else follows it (no SIGCONT first, no SIGKILL later). Signals that end a program by default ask first. If the system refuses, Linux offers to retry as administrator (pkexec).
 - **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
 - **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
+- **Start, stop or restart a service:** on *Services*, select it and press *Start*, *Stop* or *Restart* above the list, or right-click it. Only what the service's state allows is offered: a service that does not accept Stop, or (macOS) a KeepAlive job that launchd would start again at once, is greyed out with the reason. Stop and Restart ask first and name the running services that stop with it (Windows). TMOP then reads the service again and shows what the system says, or the system's error. It never asks for more rights: without administrator (Windows) or root (Linux system units, macOS daemons) the buttons are greyed out.
 - **Find what is using a file:** if a file cannot be moved or deleted because it is open, choose *Find what's using a file…* in the *More* menu (the dots) or on *Processes*, then type, browse to or drop the file. TMOP lists the programs that have it open, each with *Show in Processes* and *End task*. Only files are checked; on Linux and macOS without administrator rights only your own processes are.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
 - **Check your laptop battery's health:** *Power & Freq* shows a *Battery health* tile with the full charge against the design capacity (in percent and Wh) and the cycle count, where the system reports them.
@@ -254,6 +255,7 @@ showing zeros.
 | Startup apps: list | ✔ | Autostart entries and user services | Launch agents and daemons (no Login Items) |
 | Startup apps: *Enable* / *Disable* (the system's own switch; nothing is deleted) | ✔ (all-users entries need administrator) | Autostart entries, with `Hidden=true` (not systemd units) | With `launchctl` (daemons need root; applies from the next login) |
 | Services | ✔ | systemd units | launchd jobs |
+| Services: *Start* / *Stop* / *Restart* | ✔ (needs administrator; Stop only where the service accepts it; running dependents stop too) | `systemctl start/stop/restart` (needs root) | `launchctl kickstart` / `kill SIGTERM` / `kickstart -k` on loaded jobs with a job file (daemons need root; no Stop for KeepAlive jobs) |
 | Drivers | ✔ | as *Kernel modules* | as *Kernel extensions* |
 | Installed apps | ✔ | Packages (dpkg, rpm, pacman, Flatpak, Snap) | .app bundles and Homebrew |
 | Connections | ✔ | ✔ (owners of other users' sockets need root) | ✔ (your own processes) |

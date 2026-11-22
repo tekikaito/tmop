@@ -4,6 +4,7 @@
 //! unknown. The parsers are pure and tested on every host.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+use super::control::Control;
 use super::Service;
 use crate::pro::plist::Value;
 use std::collections::HashMap;
@@ -120,6 +121,10 @@ pub fn build_launchd(jobs: &[Job], listed: &[Listed], system_known: bool) -> Vec
             pid: l.and_then(|l| l.pid).unwrap_or(0),
             path: program.to_string(),
             third_party: !label.starts_with("com.apple."),
+            control: match job {
+                Some(j) => Control::Launchd { label: label.to_string(), daemon: j.kind == "Daemon", keep_alive: j.keep_alive },
+                None => Control::Fixed("No job file: TMOP does not know which launchd domain it is in"),
+            },
             ..Default::default()
         }
     };
@@ -186,6 +191,7 @@ pub fn kexts_to_services(kexts: &[Kext], paths: &HashMap<String, String>) -> Vec
             version: k.version.clone(),
             description: String::new(),
             third_party: !k.id.starts_with("com.apple."),
+            control: Default::default(),
         })
         .collect();
     super::sort(&mut out);
@@ -340,6 +346,9 @@ mod tests {
         // A daemon the user's listing cannot see.
         assert_eq!((get("com.apple.mDNSResponder").state, get("com.apple.mDNSResponder").start.as_str()), ("Unknown", "At load"));
         assert_eq!(get("com.apple.off").start, "Disabled");
+        assert_eq!(f.control, Control::Launchd { label: "com.apple.Finder".into(), daemon: false, keep_alive: false });
+        assert_eq!(h.control, Control::Launchd { label: "com.vendor.helper".into(), daemon: true, keep_alive: false });
+        assert!(matches!(get("com.apple.SafariHistoryServiceAgent").control, Control::Fixed(_)), "no job file, no domain");
         let only = get("com.apple.SafariHistoryServiceAgent");
         assert_eq!((only.state, only.kind.as_str(), only.display.as_str(), only.start.as_str()), ("Loaded", "Job", "SafariHistoryServiceAgent", ""));
         assert_eq!(s.iter().filter(|x| x.name == "com.apple.Finder").count(), 1);
@@ -371,6 +380,7 @@ Index Refs Address            Size       Wired      Name (Version) UUID <Linked 
         let bsd = s.iter().find(|x| x.name == "com.apple.kpi.bsd").unwrap();
         assert_eq!((bsd.kind.as_str(), bsd.company.as_str(), bsd.start.as_str(), bsd.third_party), ("Built in", "Apple", "In use", false));
         assert_eq!(vendor("io"), "");
+        assert!(s.iter().all(|k| k.control == Control::None));
     }
 
     #[cfg(target_os = "macos")]

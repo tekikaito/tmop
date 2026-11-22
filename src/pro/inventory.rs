@@ -1,5 +1,6 @@
 //! Inventory pages: System Info, Services and Startup apps. All read-only, except that startup
-//! entries can be turned on and off with the system's own switch ([`toggle`]).
+//! entries can be turned on and off with the system's own switch ([`toggle`]) and services can be
+//! started, stopped and restarted ([`crate::pro::drivers::control`]).
 //!
 //! | | Windows | Linux | macOS |
 //! |---|---|---|---|
