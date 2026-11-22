@@ -880,8 +880,7 @@ mod tests {
     fn dumps_a_child_process_without_clobbering() {
         let dir = std::env::temp_dir().join(format!("tmop-dump-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let (mut child, _) = win::tests::started_child();
         let first = dump::create(child.id(), 0, "ping.exe", &dir);
         let second = dump::create(child.id(), 0, "ping.exe", &dir);
         let _ = child.kill();
