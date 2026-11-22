@@ -1,7 +1,7 @@
 //! Settings (`settings.json`): TMOP's own schema, grouped by section.
 //!
 //! * the file is a JSON object `{ "version": 1, "general": {..}, "window": {..},
-//!   "appearance": {..}, "graphs": {..}, "popout": {..}, "docker": {..} }` with camelCase keys;
+//!   "appearance": {..}, "graphs": {..}, "popout": {..}, "docker": {..}, "alerts": {..} }` with camelCase keys;
 //! * an older `version` is upgraded step by step (1→2→…) by [`MIGRATIONS`];
 //! * a file without `version` is TMOG's format (`schemaVersion` 12, also what TMOP 0.1 wrote) and
 //!   is converted by [`migrate_v12`]; TMOG keys TMOP doesn't implement are dropped;
@@ -40,6 +40,7 @@ pub struct Settings {
     pub graphs: Graphs,
     pub popout: Popout,
     pub docker: Docker,
+    pub alerts: Alerts,
     /// Set when the file is from a newer TMOP, or is an old one that couldn't be backed up:
     /// [`Settings::save`] refuses to overwrite it.
     #[serde(skip)]
@@ -209,6 +210,41 @@ pub struct DockerHost {
     pub description: String,
 }
 
+/// Desktop notifications when CPU usage, memory usage or the temperature stays above a limit
+/// (see [`crate::alerts`]). All off by default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Alerts {
+    pub cpu_enabled: bool,
+    /// Percent.
+    pub cpu_above: u32,
+    /// How long the value must stay above the limit.
+    pub cpu_seconds: u32,
+    pub memory_enabled: bool,
+    pub memory_above: u32,
+    pub memory_seconds: u32,
+    pub temperature_enabled: bool,
+    /// Always °C; the Settings page converts to the temperature unit.
+    pub temperature_above_c: f64,
+    pub temperature_seconds: u32,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Self {
+            cpu_enabled: false,
+            cpu_above: 90,
+            cpu_seconds: 60,
+            memory_enabled: false,
+            memory_above: 90,
+            memory_seconds: 30,
+            temperature_enabled: false,
+            temperature_above_c: 90.0,
+            temperature_seconds: 30,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -219,6 +255,7 @@ impl Default for Settings {
             graphs: Graphs::default(),
             popout: Popout::default(),
             docker: Docker::default(),
+            alerts: Alerts::default(),
             read_only: false,
         }
     }
@@ -678,7 +715,7 @@ mod tests {
         // Unimplemented TMOG keys are gone from the written file.
         let out: Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout", "docker"]);
+        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout", "docker", "alerts"]);
         assert!(!s.to_json().contains("diskLights"));
     }
 
@@ -924,6 +961,36 @@ mod tests {
         let Some(Ok(text)) = tmog_path().map(std::fs::read_to_string) else { return };
         let load = Settings::from_json(&text).expect("TMOG settings should parse");
         assert!(matches!(load.outcome, LoadOutcome::MigratedV12));
+    }
+
+    #[test]
+    fn alerts_are_off_by_default_and_an_old_file_loads_unchanged() {
+        let d = Alerts::default();
+        assert!(!d.cpu_enabled && !d.memory_enabled && !d.temperature_enabled);
+        assert_eq!((d.cpu_above, d.cpu_seconds, d.memory_above, d.memory_seconds), (90, 60, 90, 30));
+        assert_eq!((d.temperature_above_c, d.temperature_seconds), (90.0, 30));
+        // A file written before Alerts existed: no "alerts" section, and the rest is untouched.
+        let load = parse(r#"{"version":1,"general":{"updateSpeed":"high"},"graphs":{"colorKeyed":false}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings.version, VERSION);
+        assert_eq!(load.settings.alerts, d);
+        assert_eq!(load.settings.update_speed(), UpdateSpeed::from_token("high"));
+        assert!(!load.settings.graphs.color_keyed);
+    }
+
+    #[test]
+    fn alerts_roundtrip_and_partial_sections_keep_other_defaults() {
+        let s = Settings { alerts: Alerts { cpu_enabled: true, cpu_above: 80, cpu_seconds: 120, memory_enabled: true, memory_above: 70, memory_seconds: 10, temperature_enabled: true, temperature_above_c: 75.5, temperature_seconds: 45 }, ..Default::default() };
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["alerts"]["cpuEnabled"], true);
+        assert_eq!(out["alerts"]["temperatureAboveC"], 75.5);
+        let load = parse(&s.to_json());
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings, s);
+        let p = parse(r#"{"version":1,"alerts":{"memoryEnabled":true}}"#).settings;
+        assert!(p.alerts.memory_enabled && !p.alerts.cpu_enabled);
+        assert_eq!((p.alerts.memory_above, p.alerts.memory_seconds, p.alerts.cpu_seconds), (90, 30, 60));
     }
 
     #[test]
