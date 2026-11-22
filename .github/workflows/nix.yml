@@ -29,8 +29,16 @@ permissions:
 
 jobs:
   nix:
-    name: Nix build (x86_64-linux)
-    runs-on: ubuntu-24.04
+    name: Nix build (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -40,14 +48,10 @@ jobs:
       - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086
 
       - name: Build
-        run: nix build -L
-
-      - name: Show the lock file
-        if: always()
-        run: cat flake.lock
+        run: nix build -L --no-update-lock-file
 
       - name: Flake check
-        run: nix flake check -L
+        run: nix flake check -L --no-update-lock-file
 
       - name: Version
         run: |
