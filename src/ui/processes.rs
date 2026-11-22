@@ -735,14 +735,18 @@ impl App {
         let mut toggle_tree = false;
         let mut toggle_view = false;
         let mut run_task = false;
+        let mut file_in_use = false;
         let mut end_task = false;
-        let (tools, area) = page_layout(body, if self.caps.run_task { 610.0 } else { 490.0 });
+        let (tools, area) = page_layout(body, (if self.caps.run_task { 610.0 } else { 490.0 }) + if crate::pro::inuse::AVAILABLE { 210.0 } else { 0.0 });
         toolbar(ui, tools, |ui| {
             ui.add_enabled_ui(sel_row.is_some(), |ui| {
                 end_task = Button::primary("End task").show(ui, &pal).clicked();
             });
             if self.caps.run_task {
                 run_task = widgets::button(ui, "Run new task", &pal, Some(Icon::Play)).clicked();
+            }
+            if crate::pro::inuse::AVAILABLE {
+                file_in_use = widgets::button(ui, "Find what's using a file\u{2026}", &pal, Some(Icon::Search)).clicked();
             }
             refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
             // Three views, one at a time: the list, grouped by app, or the tree.
@@ -764,6 +768,9 @@ impl App {
         }
         if run_task {
             self.open_run_task();
+        }
+        if file_in_use {
+            self.open_file_in_use();
         }
         if end_task {
             if let Some(r) = &sel_row {

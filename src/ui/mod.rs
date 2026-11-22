@@ -27,6 +27,7 @@ pub mod process_actions;
 pub mod processes;
 pub mod recorder_page;
 pub mod replace;
+pub mod file_in_use;
 pub mod run_task;
 pub mod settings_page;
 pub mod summary;
@@ -444,6 +445,8 @@ pub struct App {
     pub palettes: PaletteCatalog,
     pub palette_ui: settings_page::PaletteUi,
     pub sampler: Sampler,
+    /// What the alerts on the sampler thread read; kept current from the settings every frame.
+    alert_cfg: std::sync::Arc<std::sync::Mutex<crate::alerts::Config>>,
     pub page: Page,
     pub device: Device,
     pub popout_open: bool,
@@ -456,6 +459,7 @@ pub struct App {
     affinity: Option<affinity_dialog::AffinityDialog>,
     /// The "Run new task" dialog.
     run_task: run_task::RunTaskUi,
+    file_in_use: file_in_use::FileInUseUi,
     /// A process action running as administrator (`pkexec`); its status text arrives here.
     elevated_job: Option<std::sync::mpsc::Receiver<String>>,
     /// A memory dump being written (process name, result), see `start_dump`.
@@ -526,7 +530,12 @@ impl App {
         let display_font = install_display_font(&cc.egui_ctx, &settings.appearance.display_font);
         let ctx = cc.egui_ctx.clone();
         csv::set_owner(&ctx, main_hwnd(cc));
-        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
+        let alert_cfg = std::sync::Arc::new(std::sync::Mutex::new(crate::alerts::Config::from_settings(&settings.alerts, settings.fahrenheit())));
+        let alerts_hook = crate::alerts::hook(alert_cfg.clone());
+        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
+            alerts_hook(snap, rows);
+            ctx.request_repaint();
+        });
         let catalog = skin::scan(&skin::default_skin_dirs());
         let palettes = palette::scan(&palette::default_dir());
         let caps = Caps::get();
@@ -566,6 +575,7 @@ impl App {
             palettes,
             palette_ui: settings_page::PaletteUi::new(main_hwnd(cc)),
             sampler,
+            alert_cfg,
             page,
             device,
             popout_open: popout_only || settings_popout_on,
@@ -576,6 +586,7 @@ impl App {
             pending: None,
             affinity: None,
             run_task: run_task::RunTaskUi::new(main_hwnd(cc)),
+            file_in_use: file_in_use::FileInUseUi::new(main_hwnd(cc)),
             elevated_job: None,
             dump_job: None,
             dump_done: None,
@@ -1168,6 +1179,7 @@ impl App {
             self.startup_error_dialog(ctx, &pal);
             self.affinity_dialog(ctx, &pal);
             self.run_task_dialog(ctx, &pal);
+            self.file_in_use_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
             self.updates_dialog(ctx, &pal);
             self.disk_delete_dialogs(ctx, &pal);
@@ -1179,6 +1191,13 @@ impl App {
 
         // Apply cadence changes and persist.
         self.sampler.set_interval(self.settings.update_speed().interval());
+        {
+            let cfg = crate::alerts::Config::from_settings(&self.settings.alerts, self.settings.fahrenheit());
+            let mut shared = self.alert_cfg.lock().unwrap_or_else(|e| e.into_inner());
+            if *shared != cfg {
+                *shared = cfg;
+            }
+        }
         // Sampled at once, so that switching off closes the device even while updates are paused.
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();

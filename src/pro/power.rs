@@ -2,18 +2,22 @@
 //!
 //! Sources: `PowerGetActiveScheme` and
 //! `PowerRead{AC,DC}ValueIndex` for the processor policy, `GetSystemPowerStatus` and
-//! `CallNtPowerInformation(SystemBatteryState)` for the battery. Per-core clocks come
-//! from the sampler (`CallNtPowerInformation(ProcessorInformation)`).
+//! `CallNtPowerInformation(SystemBatteryState)` for the battery, the battery driver's
+//! `IOCTL_BATTERY_QUERY_INFORMATION` for its health (design capacity, cycles). Per-core clocks
+//! come from the sampler (`CallNtPowerInformation(ProcessorInformation)`).
 //!
 //! Linux reads `/sys/class/power_supply`, power-profiles-daemon (else the ACPI platform
 //! profile) as the schemes and the cpufreq policies (no AC/DC split); macOS reads `pmset`
-//! (settings per power source, Low Power Mode as the scheme) and `ioreg` for the charge rate.
+//! (settings per power source, Low Power Mode as the scheme) and `ioreg` for the charge rate
+//! and the battery health.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod parse;
+#[cfg(windows)]
+mod win;
 
 #[cfg(target_os = "linux")]
 pub use linux::read;
@@ -37,6 +41,29 @@ pub struct Battery {
     pub remaining_mwh: u32,
     pub full_mwh: u32,
     pub seconds_left: Option<u32>,
+    /// Design capacity (mWh), summed over several batteries; `None` when unknown.
+    pub design_mwh: Option<u32>,
+    /// Charge cycles of a single battery; `None` when not reported (a count of 0 is unknown).
+    pub cycles: Option<u32>,
+    /// Health in percent where the driver's capacities are relative units rather than mWh
+    /// (Windows `BATTERY_CAPACITY_RELATIVE`); then `design_mwh` is `None`.
+    pub relative_health: Option<u32>,
+}
+
+impl Battery {
+    /// Full-charge against design capacity in percent; `None` when either is unknown.
+    pub fn health(&self) -> Option<u32> {
+        match self.design_mwh {
+            Some(design) => health_percent(self.full_mwh, design),
+            None => self.relative_health,
+        }
+    }
+}
+
+/// `full` against `design` in percent, rounded and not clamped (new cells often exceed 100%);
+/// `None` when either is 0.
+pub fn health_percent(full: u32, design: u32) -> Option<u32> {
+    (full > 0 && design > 0).then(|| ((full as u64 * 200 + design as u64) / (design as u64 * 2)) as u32)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -195,14 +222,17 @@ pub fn read() -> Result<PowerInfo, String> {
                 CallNtPowerInformation(SystemBatteryState, None, 0, Some(&mut bs as *mut _ as *mut _), std::mem::size_of::<SYSTEM_BATTERY_STATE>() as u32)
             }
             .is_ok();
-            info.battery = Some(Battery {
+            let mut b = Battery {
                 percent: st.BatteryLifePercent.min(100),
                 charging: ok && bs.Charging,
                 rate_mw: if ok { bs.Rate as i32 } else { 0 },
                 remaining_mwh: if ok { bs.RemainingCapacity } else { 0 },
                 full_mwh: if ok { bs.MaxCapacity } else { 0 },
                 seconds_left: (st.BatteryLifeTime != u32::MAX).then_some(st.BatteryLifeTime),
-            });
+                ..Default::default()
+            };
+            parse::apply_cells(&mut b, &win::health());
+            info.battery = Some(b);
         }
     }
     Ok(info)
@@ -224,6 +254,21 @@ mod tests {
         assert_eq!(describe("sleep", 0), "Never");
         assert_eq!(describe("sleep", 1800), "30 min");
         assert!(describe("epp", 0).contains("performance"));
+    }
+
+    #[test]
+    fn health_rounding() {
+        assert_eq!(health_percent(41_200, 47_500), Some(87)); // 86.74
+        assert_eq!(health_percent(42_750, 50_000), Some(86)); // 85.5 rounds up
+        assert_eq!(health_percent(42_740, 50_000), Some(85)); // 85.48
+        assert_eq!(health_percent(52_000, 50_000), Some(104)); // above design, not clamped
+        assert_eq!(health_percent(u32::MAX, u32::MAX), Some(100));
+        assert_eq!(health_percent(0, 50_000), None);
+        assert_eq!(health_percent(41_200, 0), None);
+        let b = Battery { full_mwh: 41_200, design_mwh: Some(47_500), relative_health: Some(50), ..Default::default() };
+        assert_eq!(b.health(), Some(87), "mWh capacities win over a relative health");
+        assert_eq!(Battery { design_mwh: None, ..b.clone() }.health(), Some(50));
+        assert_eq!(Battery::default().health(), None);
     }
 
     #[cfg(windows)]

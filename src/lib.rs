@@ -1,5 +1,6 @@
 //! TMOP (Task Manager OverPowered): a skinnable system monitor for Windows, Linux and macOS.
 
+pub mod alerts;
 pub mod cli;
 pub mod docker;
 pub mod engine;

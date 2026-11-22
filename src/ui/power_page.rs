@@ -44,19 +44,7 @@ impl App {
         let ghz = |mhz: f32| format!("{:.2} GHz", mhz / 1000.0);
         let fastest_mhz = fastest.map(|f| f.1 as f32).unwrap_or(0.0);
         // The battery tile draws its own icon and (coloured) sub line.
-        let mut tiles: Vec<StatTile> = Vec::new();
-        match &battery {
-            Some(b) => {
-                tiles.push(StatTile::new("Battery", format!("{}%", b.percent), ""));
-                let source = match ac {
-                    Some(true) => "Plugged in",
-                    Some(false) => "On battery",
-                    None => "\u{2014}",
-                };
-                tiles.push(StatTile::new("Power source", source, battery_time(b)));
-            }
-            None => tiles.push(StatTile::new("Power source", if ac == Some(false) { "Battery" } else { "AC" }, "No battery reported")),
-        }
+        let mut tiles = battery_tiles(battery.as_ref(), ac);
         // No clock tiles or cards where the OS reports no clocks (Apple Silicon).
         let clocks = self.caps.clocks;
         if clocks {
@@ -297,6 +285,34 @@ fn battery_icon(p: &egui::Painter, rect: Rect, color: Color32, fill: Color32, fr
     }
 }
 
+/// The battery tiles in front of the clock tiles: "Battery" (first, the page draws its icon),
+/// "Power source" and, where the health is known, "Battery health".
+fn battery_tiles(battery: Option<&Battery>, ac: Option<bool>) -> Vec<StatTile> {
+    let Some(b) = battery else {
+        return vec![StatTile::new("Power source", if ac == Some(false) { "Battery" } else { "AC" }, "No battery reported")];
+    };
+    let source = match ac {
+        Some(true) => "Plugged in",
+        Some(false) => "On battery",
+        None => "\u{2014}",
+    };
+    let mut tiles = vec![StatTile::new("Battery", format!("{}%", b.percent), ""), StatTile::new("Power source", source, battery_time(b))];
+    if let Some((value, sub)) = health_tile(b) {
+        tiles.push(StatTile::new("Battery health", value, sub));
+    }
+    tiles
+}
+
+/// The "Battery health" tile's value and sub line, `None` (no tile) when the design capacity
+/// (or the driver's relative health) is unknown. Over 100% is shown as it is.
+fn health_tile(b: &Battery) -> Option<(String, String)> {
+    let percent = b.health()?;
+    let capacities = b.design_mwh.map(|d| format!("{:.1} of {:.1} Wh design", b.full_mwh as f64 / 1000.0, d as f64 / 1000.0));
+    let cycles = b.cycles.map(|c| if c == 1 { "1 cycle".to_string() } else { format!("{c} cycles") });
+    let sub: Vec<String> = capacities.into_iter().chain(cycles).collect();
+    Some((format!("{percent}%"), sub.join(" \u{b7} ")))
+}
+
 /// What the "Power source" tile says under "Plugged in" / "On battery".
 fn battery_time(b: &Battery) -> String {
     if b.charging {
@@ -341,10 +357,38 @@ mod tests {
 
     #[test]
     fn battery_text() {
-        let b = Battery { percent: 82, charging: true, rate_mw: 41_200, remaining_mwh: 40_000, full_mwh: 50_000, seconds_left: None };
+        let b = Battery { percent: 82, charging: true, rate_mw: 41_200, remaining_mwh: 40_000, full_mwh: 50_000, seconds_left: None, ..Default::default() };
         assert_eq!(battery_time(&b), "full in 14 min");
         assert_eq!(battery_time(&Battery { seconds_left: Some(1500), ..b.clone() }), "full in 25 min");
         assert_eq!(battery_time(&Battery { charging: false, seconds_left: Some(5400), ..b.clone() }), "1 h 30 min left");
         assert_eq!(battery_time(&Battery { charging: false, percent: 100, ..b }), "Fully charged");
+    }
+
+    fn labels(tiles: &[StatTile]) -> Vec<&str> {
+        tiles.iter().map(|t| t.label.as_str()).collect()
+    }
+
+    #[test]
+    fn health_tile_only_with_a_design_capacity() {
+        let worn = Battery { percent: 64, full_mwh: 41_200, design_mwh: Some(47_500), cycles: Some(312), ..Default::default() };
+        let tiles = battery_tiles(Some(&worn), Some(false));
+        assert_eq!(labels(&tiles), ["Battery", "Power source", "Battery health"]);
+        assert_eq!((tiles[2].value.as_str(), tiles[2].sub.as_str()), ("87%", "41.2 of 47.5 Wh design \u{b7} 312 cycles"));
+        // No cycle count: the cycle part is left out, no "0 cycles".
+        assert_eq!(health_tile(&Battery { cycles: None, ..worn.clone() }), Some(("87%".into(), "41.2 of 47.5 Wh design".into())));
+        assert_eq!(health_tile(&Battery { cycles: Some(1), ..worn.clone() }).unwrap().1, "41.2 of 47.5 Wh design \u{b7} 1 cycle");
+        // A new cell above its design is shown as it is.
+        assert_eq!(health_tile(&Battery { full_mwh: 52_000, design_mwh: Some(50_000), ..worn.clone() }).unwrap().0, "104%");
+        // Unknown design (or no full charge to compare): no tile at all.
+        let unknown = Battery { design_mwh: None, ..worn.clone() };
+        assert_eq!(health_tile(&unknown), None);
+        assert_eq!(labels(&battery_tiles(Some(&unknown), Some(true))), ["Battery", "Power source"]);
+        assert_eq!(health_tile(&Battery { full_mwh: 0, ..worn.clone() }), None);
+        assert_eq!(health_tile(&Battery { design_mwh: Some(0), ..worn.clone() }), None);
+        // Relative capacities (Windows): the percent only, plus the cycles where known.
+        let relative = Battery { full_mwh: 0, design_mwh: None, relative_health: Some(93), cycles: None, ..worn };
+        assert_eq!(health_tile(&relative), Some(("93%".into(), String::new())));
+        // No battery: only the power source.
+        assert_eq!(labels(&battery_tiles(None, Some(true))), ["Power source"]);
     }
 }

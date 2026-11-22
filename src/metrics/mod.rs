@@ -545,8 +545,9 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    /// Starts the background sampler. `on_sample` runs after each publication (repaint hook).
-    pub fn start(interval: Option<Duration>, history_len: usize, on_sample: impl Fn() + Send + 'static) -> Self {
+    /// Starts the background sampler. `on_sample` runs on the sampler thread after each publication
+    /// (repaint hook, alerts) with the sample and the process list that were published.
+    pub fn start(interval: Option<Duration>, history_len: usize, on_sample: impl Fn(&Snapshot, &[ProcessRow]) + Send + 'static) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             latest: Arc::new(Snapshot::default()),
             history: Arc::new(History::new(history_len)),
@@ -573,13 +574,14 @@ impl Sampler {
                             let (mut snap, procs) = collector.collect();
                             // Invariant: CPU% normalisers divide by it.
                             snap.cpu.logical_count = snap.cpu.logical_count.max(1);
+                            let (snap, procs) = (Arc::new(snap), Arc::new(procs));
                             if let Ok(mut g) = shared.lock() {
                                 // Copy-on-write: clones only if a frame still holds the old one.
                                 Arc::make_mut(&mut g.history).push(&snap);
-                                g.latest = Arc::new(snap);
-                                g.processes = Arc::new(procs);
+                                g.latest = snap.clone();
+                                g.processes = procs.clone();
                             }
-                            on_sample();
+                            on_sample(&snap, &procs);
                         }
                         std::thread::sleep(Duration::from_millis(25));
                     }

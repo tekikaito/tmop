@@ -6,14 +6,17 @@
 [![License: GPL-3.0](https://img.shields.io/github/license/tekikaito/tmop)](LICENSE)
 ![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 
+**TMOP is a free task manager and system monitor for Windows, Linux and macOS.** Processes with a tree view, per-core CPU, graphics card, disks, a Docker page and skins, and no telemetry.
+
 TMOP shows what your computer is doing: how busy the processor, memory, disk, network and
-graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
-macOS**, is free and open source, and needs no installer.
+graphics card are, which programs are running, and much more. It is free and open source, and
+needs no installer.
 
 ![TMOP's Performance page on Windows: the CPU graph and one graph per logical processor moving live](docs/screenshots/performance.gif)
 
-*Still images of the same app on Windows:
-[Summary](docs/screenshots/summary.png) · [Performance](docs/screenshots/performance.png).*
+| Windows | Linux | macOS |
+|---|---|---|
+| ![TMOP's Summary page on Windows](docs/screenshots/summary.png) | ![TMOP's Summary page on Linux, light theme](docs/screenshots/linux-summary-light.png) | ![TMOP's Summary page on macOS](docs/screenshots/macos-summary.png) |
 
 **[Download TMOP](https://tekikaito.github.io/tmop/)** · [All install options](#get-tmop) ·
 [Release notes](https://github.com/tekikaito/tmop/releases)
@@ -45,6 +48,37 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **No installer, no telemetry.** TMOP is one program, and it sends no data (see
   [Privacy](#privacy)).
 
+
+## What you can do with it
+
+| See your computer's performance live | Find and close programs |
+|---|---|
+| ![Performance graphs](docs/screenshots/performance.png) | ![List of running programs](docs/screenshots/processes.png) |
+| **Test how fast your computer is** | **Keep a small monitor on your desktop** |
+| ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
+
+- **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
+- **See which program started which:** on *Processes*, tick *Tree view*. Each process sits under the one that started it; click the arrow, or press Left and Right, to fold a branch in or out. A process whose parent has exited (or whose parent's number now belongs to a newer process) starts a branch of its own. Sorting works among the processes of one branch, and the search box and the tabs above the list keep the processes that match together with the ones above them (shown faint, with every branch open). A folded process shows its own figures, not those of its branch. *Group by app* and *Tree view* are separate views: ticking one turns the other off. TMOP remembers the view; folded branches are forgotten when it closes.
+- **Choose which processors a program may use:** on *Processes*, right-click it and choose *Set affinity…* (Windows and Linux; on a Windows PC with several processor groups, meaning more than 64 logical processors, it is hidden). Tick the logical processors it may run on; at least one stays ticked.
+- **Send a specific signal (Linux and macOS):** on *Processes*, right-click a program and open *Send signal* to send exactly one of SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGSTOP or SIGCONT. Unlike *End task*, nothing else follows it (no SIGCONT first, no SIGKILL later). Signals that end a program by default ask first. If the system refuses, Linux offers to retry as administrator (pkexec).
+- **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
+- **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
+- **Find what is using a file:** if a file cannot be moved or deleted because it is open, choose *Find what's using a file…* in the *More* menu (the dots) or on *Processes*, then type, browse to or drop the file. TMOP lists the programs that have it open, each with *Show in Processes* and *End task*. Only files are checked; on Linux and macOS without administrator rights only your own processes are.
+- **Find out what fills your disk:** go to *Disk Space* and start a scan.
+- **Check your laptop battery's health:** *Power & Freq* shows a *Battery health* tile with the full charge against the design capacity (in percent and Wh) and the cycle count, where the system reports them.
+- **See which programs start with your computer, which apps are installed** and a lot more in the
+  menu on the left.
+- **Open the small desktop monitor** with the *Popout* button at the bottom left.
+- **See each disk on its own:** right-click the *Disk* card on *Performance* or *Summary* and
+  choose *Show disks separately* (it only appears when TMOP finds two or more disks).
+- **Put table columns in the order you like:** drag a column header onto another column, or
+  right-click it for *Move left* and *Move right*.
+- **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
+  table as CSV…*. You get the visible columns in their current order and the rows as filtered and
+  sorted, ready for a spreadsheet or a bug report.
+- **Get told when something runs hot:** in *Settings → Alerts* TMOP sends a desktop notification when CPU usage, memory usage or the temperature stays above a limit you set for a while, naming the busiest process. All three are off by default, they also work while the window is minimized, and the temperature alert appears only where TMOP can read a temperature.
+- **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
+
 ## Privacy
 
 TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
@@ -53,6 +87,7 @@ update check (*Settings → General*, off by default), which asks GitHub for the
 TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
 check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
 (for example an image you pull). TMOP also connects to the Docker hosts you add yourself.
+
 
 ## Get TMOP
 
@@ -80,6 +115,9 @@ scoop install tmop
 `scoop update tmop` keeps it up to date. Use either Scoop or the command above, not both: each
 installs its own copy.
 
+<details>
+<summary>Windows: download by hand, and if it doesn't start</summary>
+
 To download it by hand instead:
 
 1. Open the **[release page](https://github.com/tekikaito/tmop/releases/latest)**.
@@ -103,6 +141,8 @@ more processor time than on a graphics card. To keep that low, TMOP turns off hi
 visuals there (it redraws when new data arrives) and lets Mesa use at most 4 threads (set
 `LP_NUM_THREADS` to choose another number). Its updates replace only `TMOP.exe`.
 
+</details>
+
 ### Linux (x86_64 and ARM64)
 
 In a terminal:
@@ -114,6 +154,10 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 That puts `tmop` in `~/.local/bin`, adds TMOP to your applications menu with its icon, and
 checks the download's SHA-256. It needs no root. Add `-s -- --appimage` after `sh` to install
 the AppImage instead of the plain program.
+
+
+<details>
+<summary>Linux: download by hand, packages and requirements</summary>
 
 To download it by hand instead, take one of these from the
 **[release page](https://github.com/tekikaito/tmop/releases/latest)** (`arm64` for ARM computers
@@ -133,6 +177,8 @@ such as a Raspberry Pi with a 64-bit system, `x64` for everything else):
 
 TMOP needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later) and runs on X11 and
 Wayland.
+
+</details>
 
 ### macOS 11 or newer (Apple Silicon and Intel)
 
@@ -154,6 +200,10 @@ brew install tekikaito/tmop/tmop
 That puts TMOP.app in `/Applications`, also without the prompt, and `brew upgrade` keeps it up to
 date. Use either Homebrew or the install command, not both: each installs its own copy.
 
+
+<details>
+<summary>macOS: download by hand, and if macOS blocks it</summary>
+
 To download it by hand instead, take **`TMOP-macos-universal.dmg`** from the
 **[release page](https://github.com/tekikaito/tmop/releases/latest)**, open it and drag TMOP onto
 *Applications*. One app runs on Apple Silicon and Intel Macs.
@@ -164,32 +214,7 @@ Security*, scroll down to *Security* and click **Open Anyway** next to *"TMOP" w
 Confirm with your password and click **Open Anyway** once more. You only have to do this once.
 (On macOS 14 and older, Control-click TMOP in *Applications*, choose *Open* and confirm.)
 
-## What you can do with it
-
-| See your computer's performance live | Find and close programs |
-|---|---|
-| ![Performance graphs](docs/screenshots/performance.png) | ![List of running programs](docs/screenshots/processes.png) |
-| **Test how fast your computer is** | **Keep a small monitor on your desktop** |
-| ![Speed test results](docs/screenshots/benchmarks.png) | ![Small monitor window](docs/screenshots/popout.png) |
-
-- **Close a program that hangs:** go to *Processes*, right-click it and choose *End task*.
-- **See which program started which:** on *Processes*, tick *Tree view*. Each process sits under the one that started it; click the arrow, or press Left and Right, to fold a branch in or out. A process whose parent has exited (or whose parent's number now belongs to a newer process) starts a branch of its own. Sorting works among the processes of one branch, and the search box and the tabs above the list keep the processes that match together with the ones above them (shown faint, with every branch open). A folded process shows its own figures, not those of its branch. *Group by app* and *Tree view* are separate views: ticking one turns the other off. TMOP remembers the view; folded branches are forgotten when it closes.
-- **Choose which processors a program may use:** on *Processes*, right-click it and choose *Set affinity…* (Windows and Linux; on a Windows PC with several processor groups, meaning more than 64 logical processors, it is hidden). Tick the logical processors it may run on; at least one stays ticked.
-- **Send a specific signal (Linux and macOS):** on *Processes*, right-click a program and open *Send signal* to send exactly one of SIGTERM, SIGKILL, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGSTOP or SIGCONT. Unlike *End task*, nothing else follows it (no SIGCONT first, no SIGKILL later). Signals that end a program by default ask first. If the system refuses, Linux offers to retry as administrator (pkexec).
-- **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
-- **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
-- **Find out what fills your disk:** go to *Disk Space* and start a scan.
-- **See which programs start with your computer, which apps are installed** and a lot more in the
-  menu on the left.
-- **Open the small desktop monitor** with the *Popout* button at the bottom left.
-- **See each disk on its own:** right-click the *Disk* card on *Performance* or *Summary* and
-  choose *Show disks separately* (it only appears when TMOP finds two or more disks).
-- **Put table columns in the order you like:** drag a column header onto another column, or
-  right-click it for *Move left* and *Move right*.
-- **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
-  table as CSV…*. You get the visible columns in their current order and the rows as filtered and
-  sorted, ready for a spreadsheet or a bug report.
-- **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
+</details>
 
 ## Platforms
 

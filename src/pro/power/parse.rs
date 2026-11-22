@@ -1,5 +1,5 @@
 //! Pure parsers behind the Linux (sysfs, power-profiles-daemon) and macOS (`pmset`, `ioreg`)
-//! power readers (tested on every host).
+//! power readers and the Windows battery health (tested on every host).
 
 use super::{describe, Battery, PolicyRow};
 use crate::pro::sysfmt::Plist;
@@ -23,10 +23,20 @@ pub fn supply(attr: Attr) -> Supply {
     let mut s = Supply { online: num("online").map(|v| v == 1), ..Default::default() };
     if kind == "Battery" && attr("scope").is_none_or(|s| s != "Device") && attr("present").is_none_or(|p| p == "1") {
         // energy_* in µWh and power_now in µW, or charge_* in µAh and current_now in µA (times µV).
-        let volts = num("voltage_now").map(|v| v as f64 / 1e6);
-        let wh = |e: &str, c: &str| num(e).map(|v| v as f64 / 1e6).or_else(|| Some(num(c)? as f64 / 1e6 * volts?));
+        // Charges become energies at the design voltage where the driver gives one (as upower
+        // does), else at the present voltage; one voltage for all of them keeps full against
+        // design a true ratio. The power uses the present voltage.
+        let positive = |k: &str| num(k).filter(|v| *v > 0);
+        let volts = positive("voltage_now").map(|v| v as f64 / 1e6);
+        let cap_volts = positive("voltage_min_design").map(|v| v as f64 / 1e6).or(volts);
+        let wh = |e: &str, c: &str| num(e).map(|v| v as f64 / 1e6).or_else(|| Some(num(c)? as f64 / 1e6 * cap_volts?));
         let now = wh("energy_now", "charge_now");
         let full = wh("energy_full", "charge_full");
+        // A design capacity of 0 is a driver that does not know it.
+        let design = positive("energy_full_design").map(|v| v as f64 / 1e6).or_else(|| Some(positive("charge_full_design")? as f64 / 1e6 * cap_volts?));
+        // Many laptops report cycle_count as 0 (or not at all) because the firmware does not
+        // count cycles; 0 is treated as unknown rather than as a new battery.
+        let cycles = positive("cycle_count").map(|c| c as u32);
         let watts = num("power_now").map(|v| v.unsigned_abs() as f64 / 1e6).or_else(|| Some(num("current_now")?.unsigned_abs() as f64 / 1e6 * volts?));
         let status = attr("status").unwrap_or_default();
         let charging = status == "Charging";
@@ -48,6 +58,9 @@ pub fn supply(attr: Attr) -> Supply {
             remaining_mwh: now.map(|e| (e * 1000.0) as u32).unwrap_or(0),
             full_mwh: full.map(|e| (e * 1000.0) as u32).unwrap_or(0),
             seconds_left,
+            design_mwh: design.map(|e| (e * 1000.0) as u32).filter(|d| *d > 0),
+            cycles,
+            relative_health: None,
         });
     }
     s.kind = kind;
@@ -72,6 +85,12 @@ pub fn combine(supplies: &[Supply]) -> (Option<bool>, Option<Battery>) {
                 remaining_mwh: now,
                 full_mwh: full,
                 seconds_left: many.iter().filter_map(|b| b.seconds_left).reduce(|a, b| a + b),
+                // Design capacities are summed like the full charges, but only when every
+                // battery reports one (a partial sum would understate the design and inflate
+                // the health). No single cycle count describes several batteries: none is shown.
+                design_mwh: many.iter().map(|b| b.design_mwh).sum(),
+                cycles: None,
+                relative_health: None,
             })
         }
     };
@@ -173,6 +192,90 @@ pub fn ioreg_battery(p: &Plist) -> Option<(i32, u32, u32)> {
     Some(((amps * v).round() as i32, (now * v) as u32, (full * v) as u32))
 }
 
+/// Design capacity (mWh) and cycle count from the same `ioreg` output, each `None` when not
+/// reported. The design is converted at the present `Voltage`, like the full charge of
+/// [`ioreg_battery`], so the two give a true ratio. It is left out when the full charge that
+/// [`ioreg_battery`] pairs it with is not in mAh: on Apple Silicon `MaxCapacity` is a percentage,
+/// so without `AppleRawMaxCapacity` a `MaxCapacity` of 100 or less beside a larger design is not
+/// a capacity. A `CycleCount` of 0 counts as unknown, as on the other systems.
+pub fn ioreg_health(p: &Plist) -> (Option<u32>, Option<u32>) {
+    let b = p.array().first().unwrap_or(p);
+    let positive = |d: &Plist, k: &str| d.get(k).and_then(Plist::int).filter(|v| *v > 0);
+    let cycles = positive(b, "CycleCount").or_else(|| b.get("BatteryData").and_then(|d| positive(d, "CycleCount"))).and_then(|c| u32::try_from(c).ok());
+    let design_mah = positive(b, "DesignCapacity").or_else(|| b.get("BatteryData").and_then(|d| positive(d, "DesignCapacity")));
+    let full_is_mah = match (positive(b, "AppleRawMaxCapacity"), positive(b, "MaxCapacity"), design_mah) {
+        (Some(_), _, _) => true,
+        (None, Some(max), Some(design)) => !(max <= 100 && design > 100),
+        _ => false,
+    };
+    let design = match (design_mah, positive(b, "Voltage")) {
+        (Some(mah), Some(mv)) if full_is_mah => u32::try_from(mah * mv / 1000).ok().filter(|d| *d > 0),
+        _ => None,
+    };
+    (design, cycles)
+}
+
+/// One battery's `BATTERY_INFORMATION` from the Windows battery driver, the fields health needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cell {
+    /// `BATTERY_CAPACITY_RELATIVE`: the capacities are in the driver's own units, not mWh.
+    pub relative: bool,
+    pub designed: u32,
+    pub full_charged: u32,
+    /// 0 when the battery does not count cycles.
+    pub cycles: u32,
+}
+
+/// The health facts of all of the Windows batteries together.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CellHealth {
+    /// Summed design and full-charge capacities in mWh, both or neither.
+    pub capacities: Option<(u32, u32)>,
+    /// Health in percent when the capacities are relative (no mWh to show).
+    pub relative_health: Option<u32>,
+    pub cycles: Option<u32>,
+}
+
+/// The Windows battery driver's "unknown" for a capacity (`BATTERY_UNKNOWN_CAPACITY`, 0xFFFFFFFF;
+/// the Windows reader checks at compile time that it matches). Defined here because this module
+/// builds on every system. Also treated as unknown for `CycleCount`.
+pub const BATTERY_UNKNOWN: u32 = u32::MAX;
+
+/// A driver value that means something: neither 0 nor [`BATTERY_UNKNOWN`].
+fn known(v: u32) -> Option<u32> {
+    (v != 0 && v != BATTERY_UNKNOWN).then_some(v)
+}
+
+/// Several batteries are summed (as the system's composite battery does). Each must report a
+/// design and a full charge (0 and [`BATTERY_UNKNOWN`] are unknown), and all in the same kind of
+/// unit, else nothing is known; a sum that does not fit is unknown too, never a clamped value.
+/// A cycle count is kept only for a single battery that counts cycles.
+pub fn cell_health(cells: &[Cell]) -> CellHealth {
+    let mut h = CellHealth { cycles: match cells {
+        [one] => known(one.cycles),
+        _ => None,
+    }, ..Default::default() };
+    let sum = |f: fn(&Cell) -> u32| cells.iter().try_fold(0u32, |acc, c| acc.checked_add(known(f(c))?)).and_then(known);
+    let (Some(design), Some(full)) = (sum(|c| c.designed), sum(|c| c.full_charged)) else { return h };
+    if cells.iter().all(|c| !c.relative) {
+        h.capacities = Some((design, full));
+    } else if cells.iter().all(|c| c.relative) {
+        h.relative_health = super::health_percent(full, design);
+    }
+    h
+}
+
+/// Puts the Windows health facts into the battery. The driver's full-charge capacity replaces
+/// the one of `SystemBatteryState` so that full and design come from the same source.
+pub fn apply_cells(b: &mut Battery, h: &CellHealth) {
+    if let Some((design, full)) = h.capacities {
+        b.design_mwh = Some(design);
+        b.full_mwh = full;
+    }
+    b.relative_health = h.relative_health;
+    b.cycles = h.cycles;
+}
+
 /// `pmset -g custom`: the settings per source, ("AC Power" | "Battery Power" | "UPS Power", pairs).
 pub fn parse_pmset_custom(text: &str) -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
@@ -271,6 +374,123 @@ mod tests {
     }
 
     #[test]
+    fn sysfs_health() {
+        // A ThinkPad-style energy battery (µWh), worn to 86.7%, 312 cycles.
+        let t14 = [
+            ("type", "Battery"),
+            ("status", "Discharging"),
+            ("present", "1"),
+            ("technology", "Li-poly"),
+            ("cycle_count", "312"),
+            ("voltage_min_design", "11580000"),
+            ("voltage_now", "12110000"),
+            ("power_now", "6510000"),
+            ("energy_full_design", "47520000"),
+            ("energy_full", "41210000"),
+            ("energy_now", "30120000"),
+            ("capacity", "73"),
+        ];
+        let b = supply(&sysfs(&t14)).battery.unwrap();
+        assert_eq!((b.design_mwh, b.full_mwh, b.cycles, b.health()), (Some(47_520), 41_210, Some(312), Some(87)));
+        // Firmware that does not count cycles reports 0: unknown, not a new battery.
+        let mut no_cycles = t14.to_vec();
+        no_cycles[4] = ("cycle_count", "0");
+        assert_eq!(supply(&sysfs(&no_cycles)).battery.unwrap().cycles, None);
+        // No design file at all, or a design of 0: health unknown.
+        let no_design: Vec<_> = t14.iter().copied().filter(|(k, _)| *k != "energy_full_design" && *k != "cycle_count").collect();
+        let b = supply(&sysfs(&no_design)).battery.unwrap();
+        assert_eq!((b.design_mwh, b.cycles, b.health()), (None, None, None));
+        let mut zero_design = t14.to_vec();
+        zero_design[8] = ("energy_full_design", "0");
+        assert_eq!(supply(&sysfs(&zero_design)).battery.unwrap().health(), None);
+
+        // A charge battery (µAh), converted at the design voltage for full and design alike, so
+        // the health is the charge ratio: 3680 / 4000 mAh = 92%.
+        let charge = [
+            ("type", "Battery"),
+            ("status", "Charging"),
+            ("cycle_count", "57"),
+            ("voltage_min_design", "7600000"),
+            ("voltage_now", "8350000"),
+            ("current_now", "1500000"),
+            ("charge_full_design", "4000000"),
+            ("charge_full", "3680000"),
+            ("charge_now", "1840000"),
+        ];
+        let b = supply(&sysfs(&charge)).battery.unwrap();
+        assert_eq!((b.design_mwh, b.full_mwh, b.remaining_mwh, b.rate_mw, b.cycles, b.health()), (Some(30_400), 27_968, 13_984, 12_525, Some(57), Some(92)));
+        // Without voltage_min_design the present voltage converts all capacities.
+        let b = supply(&sysfs(&charge[..2].iter().chain(&charge[4..]).copied().collect::<Vec<_>>())).battery.unwrap();
+        assert_eq!((b.design_mwh, b.full_mwh, b.health()), (Some(33_400), 30_728, Some(92)));
+        // Without any voltage a charge cannot become an energy: no design, no health.
+        let no_volts: Vec<_> = charge.iter().copied().filter(|(k, _)| !k.starts_with("voltage")).collect();
+        assert_eq!(supply(&sysfs(&no_volts)).battery.unwrap().health(), None);
+        // A new cell above its design is kept as it is.
+        let fresh = supply(&sysfs(&[("type", "Battery"), ("energy_full_design", "50000000"), ("energy_full", "52300000"), ("energy_now", "52300000")])).battery.unwrap();
+        assert_eq!(fresh.health(), Some(105));
+
+        // Two batteries: capacities summed, no cycle count; one without a design: unknown.
+        let a = Supply { kind: "Battery".into(), battery: Some(Battery { full_mwh: 20_000, design_mwh: Some(24_000), cycles: Some(100), ..Default::default() }), ..Default::default() };
+        let b2 = Supply { kind: "Battery".into(), battery: Some(Battery { full_mwh: 22_000, design_mwh: Some(23_000), cycles: Some(80), ..Default::default() }), ..Default::default() };
+        let both = combine(&[a.clone(), b2.clone()]).1.unwrap();
+        assert_eq!((both.full_mwh, both.design_mwh, both.cycles, both.health()), (42_000, Some(47_000), None, Some(89)));
+        let mut c = b2;
+        c.battery.as_mut().unwrap().design_mwh = None;
+        assert_eq!(combine(&[a.clone(), c]).1.unwrap().design_mwh, None);
+        // A single battery keeps its cycles.
+        assert_eq!(combine(&[a]).1.unwrap().cycles, Some(100));
+    }
+
+    #[test]
+    fn windows_cells() {
+        let worn = Cell { relative: false, designed: 57_000, full_charged: 49_420, cycles: 0 };
+        assert_eq!(cell_health(&[worn]), CellHealth { capacities: Some((57_000, 49_420)), relative_health: None, cycles: None });
+        assert_eq!(cell_health(&[Cell { cycles: 245, ..worn }]).cycles, Some(245));
+        // Two batteries (ThinkPad internal + bay): summed, no cycle count.
+        let bay = Cell { relative: false, designed: 23_200, full_charged: 20_010, cycles: 30 };
+        assert_eq!(cell_health(&[Cell { cycles: 245, ..worn }, bay]), CellHealth { capacities: Some((80_200, 69_430)), relative_health: None, cycles: None });
+        // A battery with an unknown design spoils the sum.
+        assert_eq!(cell_health(&[worn, Cell { designed: 0, ..bay }]).capacities, None);
+        assert_eq!(cell_health(&[Cell { full_charged: 0, ..worn }]).capacities, None);
+        // Relative capacities (some UPS and tablet drivers): the percent only.
+        let rel = Cell { relative: true, designed: 100, full_charged: 91, cycles: 0 };
+        assert_eq!(cell_health(&[rel]), CellHealth { capacities: None, relative_health: Some(91), cycles: None });
+        // Mixed units cannot be added up.
+        assert_eq!(cell_health(&[rel, worn]), CellHealth::default());
+        assert_eq!(cell_health(&[]), CellHealth::default());
+
+        // BATTERY_UNKNOWN_CAPACITY (0xFFFFFFFF) is unknown like 0: no tile, never millions of Wh.
+        let unknown = BATTERY_UNKNOWN;
+        assert_eq!(cell_health(&[Cell { designed: unknown, ..worn }]).capacities, None);
+        assert_eq!(cell_health(&[Cell { full_charged: unknown, ..worn }]).capacities, None);
+        assert_eq!(cell_health(&[Cell { designed: unknown, full_charged: unknown, ..worn }]), CellHealth::default());
+        assert_eq!(cell_health(&[Cell { relative: true, designed: unknown, ..rel }]).relative_health, None);
+        assert_eq!(cell_health(&[Cell { cycles: unknown, ..worn }]).cycles, None);
+        // One of two batteries unknown spoils the sum.
+        assert_eq!(cell_health(&[worn, Cell { designed: unknown, ..bay }]), CellHealth::default());
+        assert_eq!(cell_health(&[worn, Cell { full_charged: unknown, ..bay }]), CellHealth::default());
+        // A sum that does not fit in u32 (or lands on the sentinel) is unknown, not clamped.
+        let huge = Cell { relative: false, designed: 3_000_000_000, full_charged: 2_900_000_000, cycles: 0 };
+        assert_eq!(cell_health(&[huge, huge]), CellHealth::default());
+        let edge = Cell { relative: false, designed: u32::MAX - 10, full_charged: 10, cycles: 0 };
+        assert_eq!(cell_health(&[edge, Cell { designed: 10, ..edge }]).capacities, None);
+        let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
+        apply_cells(&mut b, &cell_health(&[Cell { designed: unknown, cycles: unknown, ..worn }]));
+        assert_eq!((b.full_mwh, b.design_mwh, b.cycles, b.health()), (49_000, None, None, None));
+
+        // Applied to the battery: the driver's full charge replaces SystemBatteryState's.
+        let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
+        apply_cells(&mut b, &cell_health(&[Cell { cycles: 245, ..worn }]));
+        assert_eq!((b.full_mwh, b.design_mwh, b.cycles, b.health()), (49_420, Some(57_000), Some(245), Some(87)));
+        let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
+        apply_cells(&mut b, &cell_health(&[rel]));
+        assert_eq!((b.full_mwh, b.design_mwh, b.health()), (49_000, None, Some(91)));
+        let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
+        apply_cells(&mut b, &CellHealth::default());
+        assert_eq!((b.full_mwh, b.health()), (49_000, None));
+    }
+
+    #[test]
     fn profiles() {
         let text = "  performance:\n    CpuDriver:\tamd_pstate\n    PlatformDriver:\tplatform_profile\n    Degraded:   no\n\n* balanced:\n    CpuDriver:\tamd_pstate\n\n  power-saver:\n    CpuDriver:\tamd_pstate\n";
         assert_eq!(parse_profiles(text), [("performance".to_string(), false), ("balanced".to_string(), true), ("power-saver".to_string(), false)]);
@@ -329,5 +549,59 @@ mod tests {
         let p = parse_plist_xml("<plist><array><dict><key>Voltage</key><integer>12000</integer><key>InstantAmperage</key><integer>18446744073709550616</integer><key>AppleRawCurrentCapacity</key><integer>4000</integer><key>AppleRawMaxCapacity</key><integer>5000</integer></dict></array></plist>").unwrap();
         assert_eq!(ioreg_battery(&p), Some((-12_000, 48_000, 60_000)));
         assert_eq!(ioreg_battery(&Plist::Array(vec![])), None);
+    }
+
+    fn smart_battery(pairs: &[(&str, &str)]) -> Plist {
+        let body: String = pairs
+            .iter()
+            .map(|(k, v)| if v.starts_with('<') { format!("<key>{k}</key>{v}") } else { format!("<key>{k}</key><integer>{v}</integer>") })
+            .collect();
+        parse_plist_xml(&format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><array><dict>{body}</dict></array></plist>")).unwrap()
+    }
+
+    #[test]
+    fn ioreg_health_sources() {
+        // Apple Silicon (MacBook Air M2): MaxCapacity is a percentage, the mAh are in
+        // AppleRawMaxCapacity; DesignCapacity and CycleCount at the top level.
+        let m2 = smart_battery(&[
+            ("AppleRawCurrentCapacity", "3021"),
+            ("AppleRawMaxCapacity", "4123"),
+            ("CurrentCapacity", "73"),
+            ("MaxCapacity", "100"),
+            ("DesignCapacity", "4563"),
+            ("CycleCount", "211"),
+            ("Voltage", "12571"),
+            ("InstantAmperage", "18446744073709550361"),
+            ("IsCharging", "<false/>"),
+        ]);
+        let (rate, _now, full) = ioreg_battery(&m2).unwrap();
+        let (design, cycles) = ioreg_health(&m2);
+        assert_eq!((design, cycles), (Some(57_361), Some(211)));
+        assert!(rate < 0);
+        let b = Battery { full_mwh: full, design_mwh: design, ..Default::default() };
+        assert_eq!((full, b.health()), (51_830, Some(90)));
+        // Intel (MacBook Pro 2019): MaxCapacity is in mAh, no AppleRawMaxCapacity.
+        let intel = smart_battery(&[("CurrentCapacity", "4200"), ("MaxCapacity", "5603"), ("DesignCapacity", "6669"), ("CycleCount", "523"), ("Voltage", "12436"), ("Amperage", "0")]);
+        let full = ioreg_battery(&intel).unwrap().2;
+        let (design, cycles) = ioreg_health(&intel);
+        assert_eq!((design, cycles), (Some(82_935), Some(523)));
+        assert_eq!(Battery { full_mwh: full, design_mwh: design, ..Default::default() }.health(), Some(84));
+        // Newer macOS keeps DesignCapacity and CycleCount only inside BatteryData.
+        let nested = smart_battery(&[
+            ("AppleRawMaxCapacity", "4123"),
+            ("AppleRawCurrentCapacity", "3021"),
+            ("Voltage", "12571"),
+            ("BatteryData", "<dict><key>DesignCapacity</key><integer>4563</integer><key>CycleCount</key><integer>12</integer></dict>"),
+        ]);
+        assert_eq!(ioreg_health(&nested), (Some(57_361), Some(12)));
+        // A percentage MaxCapacity without the raw value is no capacity: no design shown.
+        let percent_only = smart_battery(&[("CurrentCapacity", "73"), ("MaxCapacity", "100"), ("DesignCapacity", "4563"), ("CycleCount", "211"), ("Voltage", "12571")]);
+        assert_eq!(ioreg_health(&percent_only), (None, Some(211)));
+        // Zero, negative and missing values: unknown.
+        let odd = smart_battery(&[("AppleRawMaxCapacity", "4123"), ("DesignCapacity", "0"), ("CycleCount", "0"), ("Voltage", "12571")]);
+        assert_eq!(ioreg_health(&odd), (None, None));
+        let no_volts = smart_battery(&[("AppleRawMaxCapacity", "4123"), ("DesignCapacity", "4563"), ("CycleCount", "-1")]);
+        assert_eq!(ioreg_health(&no_volts), (None, None));
+        assert_eq!(ioreg_health(&Plist::Array(vec![])), (None, None));
     }
 }
