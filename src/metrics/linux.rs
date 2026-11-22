@@ -206,8 +206,8 @@ impl Collector {
         let mut gpus = self.gpus();
         gpus.extend(intel.devs);
         snap.gpu = procfs::fold_gpus(&gpus);
-        if snap.gpu.lower_bound {
-            snap.gpu.note = super::intel_gpu::hidden_note(intel.hidden);
+        if gpus.iter().any(|d| d.partial) {
+            snap.gpu.note = Some(super::intel_gpu::PARTIAL_NOTE.to_string());
         }
         snap.thermal = self.thermal();
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));

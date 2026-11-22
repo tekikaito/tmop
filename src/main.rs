@@ -121,7 +121,7 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
     }
     writeln!(out, "GPU      {} processes", s.gpu.processes.len())?;
     if let Some(note) = &s.gpu.note {
-        writeln!(out, "GPU      {}{note}", if s.gpu.lower_bound { "lower bound: " } else { "" })?;
+        writeln!(out, "GPU      {note}")?;
     }
     let cpu_temp = s.thermal.cpu.as_ref().map(|(label, c)| format!("{label} {c:.1} C"));
     writeln!(out, "Thermal  {}  cpu {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), s.thermal.sources)?;

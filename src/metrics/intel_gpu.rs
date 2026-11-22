@@ -4,8 +4,10 @@
 //! clients' `drm-resident-*` where the driver prints it.
 //!
 //! The kernel has no unprivileged system-wide busy counter for these drivers, so only the clients
-//! of processes whose `/proc/<pid>/fd` TMOP may read count: without root the user's own. The
-//! others are counted ([`Reading::hidden`]) and every device then reads as a lower bound.
+//! of processes whose `/proc/<pid>/fd` TMOP may read count: without root the user's own (where
+//! the compositor, browsers and games run). The others are counted ([`Reading::hidden`], kernel
+//! threads left out) and the devices are then marked [`GpuDev::partial`], which the Performance
+//! card states in one plain line ([`PARTIAL_NOTE`]); the figures themselves stay plain numbers.
 //!
 //! Cost: a GPU client is found by its descriptor linking to `/dev/dri/*`. Listing every
 //! descriptor of every process each tick is what costs; so a process's descriptors are listed
@@ -263,7 +265,7 @@ impl IntelGpus {
                     dev.vram_used = sum(|k| k.starts_with("vram") || k.starts_with("local"));
                     dev.shared_used = sum(|k| k.starts_with("system") || k == "gtt");
                     dev.clock_mhz = clock(d);
-                    dev.lower_bound = hidden > 0;
+                    dev.partial = hidden > 0;
                     self.last.insert(d.id.clone(), DevState { at: now, clients: busy.state, reading: dev.clone() });
                     r.devs.push(dev);
                 }
@@ -280,11 +282,10 @@ fn clock(d: &Device) -> Option<u32> {
     read(path)?.trim().parse().ok()
 }
 
-/// The plain note for a GPU figure that may be low: TMOP could not read every process.
-pub fn hidden_note(hidden: usize) -> Option<String> {
-    let who = if hidden == 1 { "1 process of another user".to_string() } else { format!("{hidden} processes of other users") };
-    (hidden > 0).then(|| format!("Intel GPU usage is at least the figure shown: {who} could not be read. Run TMOP as root (sudo) to include them."))
-}
+/// What the Performance GPU card and `--dump` say when some processes could not be read. No
+/// count: nearly all of them are system daemons that never open the GPU, and from outside their
+/// `/proc/<pid>/fd` there is no reliable way to tell, so a number would only alarm.
+pub const PARTIAL_NOTE: &str = "Intel GPU usage counts the programs TMOP may read. Programs of other users are not included.";
 
 #[cfg(test)]
 mod tests {
@@ -376,7 +377,7 @@ drm-engine-video-enhance:   0 ns
         assert_eq!((d.shared_used, d.vram_used), (Some(4096 * 1024), None));
         // Only process 200 is hidden: kernel threads have no descriptors to hide.
         assert_eq!(r.hidden, if root_user { 0 } else { 1 });
-        assert_eq!(d.lower_bound, !root_user);
+        assert_eq!(d.partial, !root_user);
 
         // One second later the client kept render busy for 400 ms and both video engines for
         // 1.5 s together (capacity 2: 75 %).
@@ -464,8 +465,8 @@ drm-engine-video-enhance:   0 ns
         assert!(kernel_thread(55, Some("55 (kworker/0:1-events) I 2 0 0")));
         assert!(!kernel_thread(900, Some("900 (a) b) (c) S 1 900 900")));
         assert!(!kernel_thread(901, None));
-        assert_eq!(hidden_note(0), None);
-        assert!(hidden_note(1).unwrap().contains("1 process of another user could not be read"));
-        assert!(hidden_note(12).unwrap().contains("at least") && hidden_note(12).unwrap().contains("12 processes of other users"));
+        // Calm and exact: no count, no advice to run a GUI app as root.
+        assert!(PARTIAL_NOTE.contains("Programs of other users are not included."));
+        assert!(!PARTIAL_NOTE.contains("root") && !PARTIAL_NOTE.contains("sudo") && !PARTIAL_NOTE.bytes().any(|b| b.is_ascii_digit()));
     }
 }

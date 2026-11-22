@@ -239,7 +239,7 @@ showing zeros.
 | Disks separately or grouped (right-click the Disk card) | ✔ | ✔ | ✔ |
 | Disk used / total storage, disk firmware revision (*Performance*) | ✔ | ✔ | — |
 | Memory speed (*Performance → Memory*, *System Info*) | ✔ | Only where normal users may read the DMI table (most systems: root only) | — |
-| Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; Intel (i915 from Linux 5.19, xe from 6.11) with engines, counted from the programs TMOP may read: without root only your own, shown as "≥" with a note | Usage and memory, no engines |
+| Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; Intel (i915 from Linux 5.19, xe from 6.11) with engines, counted from the programs TMOP may read (without root your own, where the desktop, browsers and games run; as root all of them) | Usage and memory, no engines |
 | Clock speeds | ✔ | ✔ | Intel Macs; none on Apple Silicon |
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |

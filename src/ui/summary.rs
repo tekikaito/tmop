@@ -221,7 +221,7 @@ impl App {
         let disk_c = ring_color(&st, fd.metric("disk"), v.levels[2]);
         let gpu_c = ring_color(&st, fd.metric("gpu"), v.levels[3]);
         let s = fd.snap;
-        let gpu_text = if s.gpu.available { format!("GPU {}{:.0}%", s.gpu.at_least(), fd.smooth.gpu) } else { "GPU \u{2014}".to_string() };
+        let gpu_text = if s.gpu.available { format!("GPU {:.0}%", fd.smooth.gpu) } else { "GPU \u{2014}".to_string() };
         let items = [
             (format!("CPU {:.0}%", fd.smooth.cpu), cpu_c, v.levels[0]),
             (format!("Memory {:.0}%", fd.smooth.memory), mem_c, v.levels[1]),
@@ -320,7 +320,7 @@ impl App {
         let gpu_footer = if s.gpu.available || s.gpu.dedicated_used > 0 { format!("VRAM {}", vram_text(s.gpu.dedicated_used, s.gpu.dedicated_total)) } else { "No GPU engine counters".to_string() };
         let (net_value, net_unit) = if s.net_known() { split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps)) } else { ("\u{2014}".to_string(), String::new()) };
         let disk_value = if s.disk_known() { (format!("{:.0}", fd.smooth.disk), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
-        let gpu_value = if s.gpu.available { (format!("{}{:.0}", s.gpu.at_least(), fd.smooth.gpu), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
+        let gpu_value = if s.gpu.available { (format!("{:.0}", fd.smooth.gpu), "%".to_string()) } else { ("\u{2014}".to_string(), String::new()) };
         let st = theme::status(&pal);
         let lc = |base: Color32, l: Level| ring_color(&st, base, l);
         let gpu_cards: Vec<Res<'_>> = if fd.gpus_separated {
@@ -769,7 +769,7 @@ impl App {
         let (tiles_x, tiles_y, tiles_w) = if wide { (x + lw + GAP_X, y, rw) } else { (x, y + h + GAP_X, rw) };
         let th = if wide { (h - GAP_X) / 2.0 } else { tile_h };
         let tw = (tiles_w - GAP_X) / 2.0;
-        let gpu_value = if s.gpu.available { format!("{}{:.0}", s.gpu.at_least(), fd.smooth.gpu) } else { "\u{2014}".to_string() };
+        let gpu_value = if s.gpu.available { format!("{:.0}", fd.smooth.gpu) } else { "\u{2014}".to_string() };
         let tiles = [
             ("CPU", Device::Cpu, format!("{:.0}", fd.smooth.cpu), 0usize, String::new()),
             ("Memory", Device::Memory, format!("{:.0}", fd.smooth.memory), 1, format!("{} free", format_bytes(s.memory.available as f64))),
