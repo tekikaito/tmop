@@ -46,10 +46,30 @@ fn key(r: &ProcessRow) -> Key {
     (r.pid, r.create_time)
 }
 
-/// What is left of a highlight that started at `since` and lasts `hold`, or `None` when it is over.
-fn left(since: Instant, now: Instant, hold: Duration) -> Option<f32> {
+/// A highlight fades in this many steps over its hold time, not continuously: the page redraws for
+/// it only at a step boundary ([`Highlights::next_change`]), so each highlight costs at most this
+/// many extra frames (three changes of strength and the end), however long it lasts.
+pub const STEPS: u32 = 4;
+
+/// The step a highlight that started at `since` and lasts `hold` is in at `now` (0 = just now),
+/// `STEPS` once it is over.
+fn step(since: Instant, now: Instant, hold: Duration) -> u32 {
     let age = now.saturating_duration_since(since);
-    (age < hold).then(|| 1.0 - age.as_secs_f32() / hold.as_secs_f32().max(f32::EPSILON))
+    (1..=STEPS).take_while(|j| hold * *j / STEPS <= age).count() as u32
+}
+
+/// What is left of a highlight that started at `since` and lasts `hold`, in steps of `1 / STEPS`
+/// (1.0 in the first step, `1 / STEPS` in the last), or `None` when it is over.
+pub fn left(since: Instant, now: Instant, hold: Duration) -> Option<f32> {
+    let k = step(since, now, hold);
+    (k < STEPS).then(|| 1.0 - k as f32 / STEPS as f32)
+}
+
+/// How long from `now` until the highlight that started at `since` next changes (a step boundary,
+/// the last one being its end), or `None` when it is over.
+pub fn until_change(since: Instant, now: Instant, hold: Duration) -> Option<Duration> {
+    let k = step(since, now, hold);
+    (k < STEPS).then(|| (since + hold * (k + 1) / STEPS).saturating_duration_since(now))
 }
 
 #[derive(Default)]
@@ -127,9 +147,15 @@ impl Highlights {
         self.ghosts.iter().any(|g| key(&g.row) == k)
     }
 
-    /// Something is highlighted (the page redraws to fade it).
+    /// Something is highlighted.
     pub fn active(&self) -> bool {
         !self.born.is_empty() || !self.ghosts.is_empty()
+    }
+
+    /// How long from `now` until some highlight changes its step or ends: when the page has to
+    /// draw again for them (and not before). `None` when nothing is highlighted.
+    pub fn next_change(&self, now: Instant, hold: Duration) -> Option<Duration> {
+        self.born.values().copied().chain(self.ghosts.iter().map(|g| g.since)).filter_map(|t| until_change(t, now, hold)).min()
     }
 
     /// The rows the page lists: `live`, then the ghosts. Live rows come first, so a lookup by
@@ -325,6 +351,66 @@ mod tests {
         assert!(!h.active() && h.ghosts().is_empty());
         h.observe(4, &base(), ms(t0, 600), HOLD);
         assert!(!h.active(), "after clear the next snapshot is a baseline");
+    }
+
+    /// The fade is stepped: over a whole hold, sampled every millisecond, a highlight takes at most
+    /// `STEPS` strengths, and the next change is always the next step boundary (the last one its end).
+    #[test]
+    fn the_fade_has_few_steps_and_says_when_it_changes() {
+        let t0 = Instant::now();
+        for hold in [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(5), Duration::from_millis(1003)] {
+            let mut seen: Vec<f32> = Vec::new();
+            for m in 0..=hold.as_millis() as u64 + 5 {
+                let now = ms(t0, m);
+                match left(t0, now, hold) {
+                    Some(v) => {
+                        if !seen.contains(&v) {
+                            seen.push(v);
+                        }
+                        let d = until_change(t0, now, hold).expect("a running highlight changes later");
+                        assert!(d > Duration::ZERO);
+                        // It is the first boundary after now, and nothing changes before it.
+                        let at = now + d;
+                        let k = (1..=STEPS).find(|j| t0 + hold * *j / STEPS > now).unwrap();
+                        assert_eq!(at, t0 + hold * k / STEPS, "{hold:?} at {m} ms");
+                        assert_eq!(left(t0, at - Duration::from_nanos(1), hold), Some(v));
+                        assert_ne!(left(t0, at, hold), Some(v));
+                    }
+                    None => assert_eq!(until_change(t0, now, hold), None),
+                }
+            }
+            assert!(seen.len() as u32 <= STEPS, "{hold:?}: {seen:?}");
+            assert_eq!(seen.first(), Some(&1.0));
+            assert_eq!(left(t0, t0 + hold, hold), None, "over at the hold");
+        }
+        // The page: the next repaint is the nearest change among all highlights, none when idle.
+        let mut h = Highlights::default();
+        assert_eq!(h.next_change(t0, HOLD), None);
+        h.observe(1, &base(), t0, HOLD);
+        let mut next = base();
+        next.retain(|r| r.pid != 20);
+        h.observe(2, &next, t0, HOLD);
+        next.push(row(30, 1, 9, "new"));
+        h.observe(3, &next, ms(t0, 300), HOLD);
+        // Ghost of 20 since t0 (boundary at 500 ms), new 30 since 300 ms (boundary at 800 ms).
+        assert_eq!(h.next_change(ms(t0, 300), HOLD), Some(Duration::from_millis(200)));
+        assert_eq!(h.next_change(ms(t0, 600), HOLD), Some(Duration::from_millis(200)));
+        assert_eq!(h.next_change(ms(t0, 1900), HOLD), Some(Duration::from_millis(100)), "the ghost ends at 2 s");
+        h.observe(3, &next, ms(t0, 2000), HOLD);
+        assert_eq!(h.next_change(ms(t0, 2000), HOLD), Some(Duration::from_millis(300)), "30 ends at 2.3 s");
+        h.observe(3, &next, ms(t0, 2300), HOLD);
+        assert_eq!(h.next_change(ms(t0, 2300), HOLD), None);
+        // Each highlight costs at most STEPS wake-ups: follow next_change from start to end.
+        let mut h = Highlights::default();
+        h.observe(1, &base(), t0, HOLD);
+        h.observe(2, &next, t0, HOLD);
+        let (mut now, mut wakeups) = (t0, 0);
+        while let Some(d) = h.next_change(now, HOLD) {
+            now += d;
+            wakeups += 1;
+            h.observe(2, &next, now, HOLD);
+        }
+        assert!(wakeups <= STEPS, "{wakeups}");
     }
 
     #[test]

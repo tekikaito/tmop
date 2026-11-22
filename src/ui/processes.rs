@@ -136,12 +136,14 @@ impl Agg {
     }
 }
 
-fn agg_of(i: usize, rows: &[ProcessRow], children: &HashMap<usize, Vec<usize>>, depth: usize) -> Agg {
-    let r = &rows[i];
-    let mut a = Agg::own(r);
+/// Totals of `i` and every process below it. Rows from index `live` on are exited processes still
+/// listed: a dead process uses nothing, so they add nothing (their own row still shows its last
+/// values).
+fn agg_of(i: usize, rows: &[ProcessRow], live: usize, children: &HashMap<usize, Vec<usize>>, depth: usize) -> Agg {
+    let mut a = if i < live { Agg::own(&rows[i]) } else { Agg::default() };
     if depth < 32 {
         for c in children.get(&i).into_iter().flatten() {
-            let b = agg_of(*c, rows, children, depth + 1);
+            let b = agg_of(*c, rows, live, children, depth + 1);
             a.cpu += b.cpu;
             a.mem += b.mem;
             a.read += b.read;
@@ -233,7 +235,9 @@ impl Groups {
     }
 }
 
-fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool) -> Groups {
+/// Groups `visible`; rows from index `live` on are exited processes still listed, which add nothing
+/// to the totals (see [`agg_of`]).
+fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool, live: usize) -> Groups {
     // The first row with a PID wins: live rows come before exited ones (`Highlights::shown_rows`),
     // so the new holder of a reused PID is found, not the ghost.
     let mut by_pid: HashMap<u32, usize> = HashMap::with_capacity(visible.len());
@@ -254,7 +258,7 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
         }
     }
     // Totals of every group, the ones its row shows; groups sort by them.
-    let aggs: HashMap<usize, Agg> = children.keys().map(|&i| (i, agg_of(i, rows, &children, 0))).collect();
+    let aggs: HashMap<usize, Agg> = children.keys().map(|&i| (i, agg_of(i, rows, live, &children, 0))).collect();
     for v in children.values_mut() {
         sort_entries(v, rows, &aggs, col, desc);
     }
@@ -287,6 +291,8 @@ struct TreeCtx<'a> {
     children: &'a HashMap<usize, Vec<usize>>,
     expanded: &'a HashSet<(u32, i64)>,
     show_all: &'a HashSet<(u32, i64)>,
+    /// Rows from this index on are exited processes still listed (no totals).
+    live: usize,
 }
 
 fn push_entry(i: usize, depth: usize, t: &TreeCtx<'_>, out: &mut Built) {
@@ -299,7 +305,7 @@ fn push_entry(i: usize, depth: usize, t: &TreeCtx<'_>, out: &mut Built) {
         members_of(i, t.children, &mut all, 0);
         out.size.insert(i, all.len());
         if !open || depth == 0 {
-            out.agg.insert(i, agg_of(i, t.rows, t.children, 0));
+            out.agg.insert(i, agg_of(i, t.rows, t.live, t.children, 0));
         }
     }
     if open && depth < 16 {
@@ -733,7 +739,7 @@ impl App {
         let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], &f)).collect();
         let (col, desc) = self.sort;
         let tree = tree_on && !tree_view && f.is_empty();
-        let all = group_rows(rows, &visible, tree, col, desc);
+        let all = group_rows(rows, &visible, tree, col, desc, live_n);
         let view = self.proc.view.min(VIEWS.len() - 1);
         // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
         // Exited processes still listed are not counted.
@@ -760,7 +766,7 @@ impl App {
         };
         let (groups, sub_roots): (&Groups, Vec<usize>) = if view >= 3 && !tree_view {
             let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
-            subset = group_rows(rows, &ids, tree, col, desc);
+            subset = group_rows(rows, &ids, tree, col, desc, live_n);
             let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
             sort_entries(&mut roots, rows, &subset.aggs, col, desc);
             (&subset, roots)
@@ -768,7 +774,7 @@ impl App {
             (&all, Vec::new())
         };
         let mut built = Built::default();
-        let tctx = TreeCtx { rows, children: &groups.children, expanded: &self.proc.expanded, show_all: &self.proc.show_all };
+        let tctx = TreeCtx { rows, children: &groups.children, expanded: &self.proc.expanded, show_all: &self.proc.show_all, live: live_n };
         match view {
             _ if tree_view => built.entries = tree_entries(&tree_rows, filtering),
             0 => {
@@ -800,7 +806,7 @@ impl App {
         let sel_info = sel_row.as_ref().and_then(|r| rows.iter().position(|x| (x.pid, x.create_time) == (r.pid, r.create_time))).map(|i| {
             let mut members = Vec::new();
             members_of(i, &groups.children, &mut members, 0);
-            (agg_of(i, rows, &groups.children, 0), members.len())
+            (agg_of(i, rows, live_n, &groups.children, 0), members.len())
         });
 
         // ---- header
@@ -1208,9 +1214,10 @@ impl App {
             self.proc.details = true;
             self.proc.details_tab = 0;
         }
-        if hold.is_some() && self.proc.highlights.active() {
-            // The tints fade between snapshots.
-            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        // The tints fade in steps: one redraw at the next step boundary or end, none in between
+        // (and none at all while another page is shown, as this runs only here).
+        if let Some(d) = hold.and_then(|h| self.proc.highlights.next_change(now, h)) {
+            ui.ctx().request_repaint_after(d);
         }
         if want_services && self.pro.inv.services.stale(Duration::from_secs(15)) {
             self.pro.inv.services.start(crate::pro::inventory::services);
@@ -2420,7 +2427,7 @@ mod tests {
         a.has_window = true;
         let rows = vec![row(1, 0, 1, "explorer.exe"), a, row(11, 10, 6, "chrome.exe"), row(12, 11, 7, "chrome.exe"), row(20, 1, 8, "svc.exe")];
         let visible: Vec<usize> = (0..rows.len()).collect();
-        let g = group_rows(&rows, &visible, true, Column::Pid, false);
+        let g = group_rows(&rows, &visible, true, Column::Pid, false, rows.len());
         assert_eq!(g.apps, vec![1]);
         assert_eq!(g.children[&1], vec![2]);
         assert_eq!(g.bg, vec![0]);
@@ -2430,7 +2437,7 @@ mod tests {
         let mut members = Vec::new();
         members_of(1, &g.children, &mut members, 0);
         assert_eq!(members, vec![1, 2, 3]);
-        let flat = group_rows(&rows, &visible, false, Column::Pid, false);
+        let flat = group_rows(&rows, &visible, false, Column::Pid, false, rows.len());
         assert_eq!(flat.apps, vec![1]);
         assert_eq!(flat.bg.len(), 4);
         assert_eq!(flat.live_procs(&visible, rows.len()), (1, 4));
@@ -2450,13 +2457,13 @@ mod tests {
         let rows = vec![host, child, lone];
         let visible = vec![0, 1, 2];
         for col in [Column::Cpu, Column::Disk, Column::DiskRead] {
-            let g = group_rows(&rows, &visible, true, col, true);
+            let g = group_rows(&rows, &visible, true, col, true, rows.len());
             assert_eq!(g.bg, vec![0, 2], "{col:?} descending");
-            let g = group_rows(&rows, &visible, true, col, false);
+            let g = group_rows(&rows, &visible, true, col, false, rows.len());
             assert_eq!(g.bg, vec![2, 0], "{col:?} ascending");
         }
         // Without grouping each process sorts by its own value.
-        let flat = group_rows(&rows, &visible, false, Column::Cpu, true);
+        let flat = group_rows(&rows, &visible, false, Column::Cpu, true, rows.len());
         assert_eq!(flat.bg, vec![1, 2, 0]);
     }
 
@@ -2474,9 +2481,9 @@ mod tests {
         let key = |i: usize| (rows[i].pid, rows[i].create_time);
         let listed = |b: &Built, i: usize| row_listed(&b.entries, &rows, key(i));
         let build = |tree: bool, expanded: &HashSet<(u32, i64)>| {
-            let g = group_rows(&rows, &visible, tree, Column::Pid, false);
+            let g = group_rows(&rows, &visible, tree, Column::Pid, false, rows.len());
             let show_all = HashSet::new();
-            let t = TreeCtx { rows: &rows, children: &g.children, expanded, show_all: &show_all };
+            let t = TreeCtx { rows: &rows, children: &g.children, expanded, show_all: &show_all, live: rows.len() };
             let mut b = Built::default();
             for i in g.apps.iter().chain(&g.bg) {
                 push_root(*i, &t, &mut b);
@@ -2535,9 +2542,9 @@ mod tests {
         assert!(action_target(&live, None).is_none());
         // Shortcuts, in the flat list where every row (ghosts included) is a line.
         let visible: Vec<usize> = (0..shown.len()).collect();
-        let g = group_rows(&shown, &visible, false, Column::Pid, false);
+        let g = group_rows(&shown, &visible, false, Column::Pid, false, live.len());
         let (show_all, expanded) = (HashSet::new(), HashSet::new());
-        let t = TreeCtx { rows: &shown, children: &g.children, expanded: &expanded, show_all: &show_all };
+        let t = TreeCtx { rows: &shown, children: &g.children, expanded: &expanded, show_all: &show_all, live: live.len() };
         let mut b = Built::default();
         for i in g.apps.iter().chain(&g.bg) {
             push_root(*i, &t, &mut b);
@@ -2570,7 +2577,7 @@ mod tests {
         let shown = h.shown_rows(&live);
         let at = |k: (u32, i64)| shown.iter().position(|r| (r.pid, r.create_time) == k).unwrap();
         let visible: Vec<usize> = (0..shown.len()).collect();
-        let g = group_rows(&shown, &visible, true, Column::Pid, false);
+        let g = group_rows(&shown, &visible, true, Column::Pid, false, live.len());
         assert_eq!(g.apps, vec![at((10, 5))]);
         assert_eq!(g.children[&at((10, 5))], vec![at((11, 6)), at((12, 7))], "the exited child stays in its app");
         let under_init = &g.children[&at((1, 1))];
@@ -2585,8 +2592,60 @@ mod tests {
         let live = vec![row(1, 0, 1, "init"), row(31, 30, 4, "worker")];
         h.observe(2, &live, t0, hold);
         let shown = h.shown_rows(&live);
-        let g = group_rows(&shown, &(0..shown.len()).collect::<Vec<_>>(), true, Column::Pid, false);
+        let g = group_rows(&shown, &(0..shown.len()).collect::<Vec<_>>(), true, Column::Pid, false, live.len());
         assert_eq!(g.children.get(&2), Some(&vec![1]), "worker under its exited host");
+    }
+
+    /// An exited process adds nothing to a group's totals (a dead process uses no CPU or memory),
+    /// neither on screen nor in the CSV of a collapsed group, nor where groups sort by those
+    /// totals; its own row keeps its last values.
+    #[test]
+    fn exited_members_add_nothing_to_group_totals() {
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(2);
+        let busy = |mut r: ProcessRow, cpu: f32, mem: u64| {
+            r.cpu_pct = cpu;
+            r.private_working_set = mem;
+            r.read_bps = 1e6;
+            r
+        };
+        let mut app = busy(row(10, 1, 5, "app.exe"), 1.0, 100);
+        app.has_window = true;
+        let first = vec![row(1, 0, 1, "init"), app.clone(), busy(row(11, 10, 6, "child.exe"), 2.0, 200), busy(row(12, 10, 7, "dying.exe"), 50.0, 5000), busy(row(30, 1, 8, "host.exe"), 0.0, 0), busy(row(31, 30, 9, "worker.exe"), 4.0, 40)];
+        let mut h = Highlights::default();
+        h.observe(1, &first, t0, hold);
+        // dying.exe (in the app) and host.exe (a parent with a live worker) exit.
+        let live = vec![row(1, 0, 1, "init"), app, busy(row(11, 10, 6, "child.exe"), 2.0, 200), busy(row(31, 30, 9, "worker.exe"), 4.0, 40)];
+        h.observe(2, &live, t0, hold);
+        let shown = h.shown_rows(&live);
+        let at = |k: (u32, i64)| shown.iter().position(|r| (r.pid, r.create_time) == k).unwrap();
+        let visible: Vec<usize> = (0..shown.len()).collect();
+        let g = group_rows(&shown, &visible, true, Column::Cpu, true, live.len());
+        let a = g.aggs[&at((10, 5))];
+        assert_eq!((a.cpu, a.mem, a.read), (3.0, 300, 2e6), "app + child, not the exited 50 %");
+        let host = g.aggs[&at((30, 8))];
+        assert_eq!((host.cpu, host.mem), (4.0, 40), "an exited parent totals its live worker only");
+        // A plain row sorts by the figure it shows: the exited leaf keeps its place by its last 50 %.
+        assert_eq!(g.children[&at((10, 5))], vec![at((12, 7)), at((11, 6))]);
+        // Groups sort by their live totals: the app (3 %) ranks below worker.exe (4 %), which it
+        // would not with the exited member's 50 %.
+        let mut order = vec![at((10, 5)), at((31, 9))];
+        sort_entries(&mut order, &shown, &g.aggs, Column::Cpu, true);
+        assert_eq!(order, [at((31, 9)), at((10, 5))]);
+        // The exited row alone still shows its last values.
+        assert_eq!(shown[at((12, 7))].cpu_pct, 50.0);
+        // Collapsed app in the list and in the CSV.
+        let (expanded, show_all) = (HashSet::new(), HashSet::new());
+        let t = TreeCtx { rows: &shown, children: &g.children, expanded: &expanded, show_all: &show_all, live: live.len() };
+        let mut b = Built::default();
+        push_root(at((10, 5)), &t, &mut b);
+        assert_eq!(b.agg[&at((10, 5))].cpu, 3.0);
+        let cols = [PCol::Data(Column::Name), PCol::Data(Column::Cpu), PCol::Data(Column::Memory)];
+        let csv = csv_of(&shown, live.len(), &b.entries, &b.agg, &cols, false, 4, false, "");
+        assert_eq!(csv, format!("Name,CPU,Memory\r\napp.exe,3.0%,{}\r\n", format_bytes(300.0)));
+        // With every row live the same group totals everything.
+        let g = group_rows(&shown, &visible, true, Column::Cpu, true, shown.len());
+        assert_eq!(g.aggs[&at((10, 5))].cpu, 53.0);
     }
 
     /// CSV export lists live processes only: exited rows still shown are left out.
@@ -2640,18 +2699,18 @@ mod tests {
             rows.push(row(11 + k, 10, 6 + k as i64, "child.exe"));
         }
         let visible: Vec<usize> = (0..rows.len()).collect();
-        let g = group_rows(&rows, &visible, true, Column::Pid, false);
+        let g = group_rows(&rows, &visible, true, Column::Pid, false, rows.len());
         let mut expanded = HashSet::new();
         expanded.insert((10, 5));
         let mut show_all = HashSet::new();
-        let t = TreeCtx { rows: &rows, children: &g.children, expanded: &expanded, show_all: &show_all };
+        let t = TreeCtx { rows: &rows, children: &g.children, expanded: &expanded, show_all: &show_all, live: rows.len() };
         let mut b = Built::default();
         push_root(0, &t, &mut b);
         assert_eq!(b.entries.len(), 1 + SHOWN_MEMBERS + 1);
         assert!(matches!(b.entries.last(), Some(Entry::More { n: 5, .. })));
         assert_eq!(b.size[&0], 9);
         show_all.insert((10, 5));
-        let t = TreeCtx { rows: &rows, children: &g.children, expanded: &expanded, show_all: &show_all };
+        let t = TreeCtx { rows: &rows, children: &g.children, expanded: &expanded, show_all: &show_all, live: rows.len() };
         let mut b = Built::default();
         push_root(0, &t, &mut b);
         assert_eq!(b.entries.len(), 9);
