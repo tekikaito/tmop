@@ -15,9 +15,12 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows::Win32::System::Power::{
-    BatteryInformation, BATTERY_CAPACITY_RELATIVE, BATTERY_INFORMATION, BATTERY_QUERY_INFORMATION, BATTERY_TAG_INVALID, IOCTL_BATTERY_QUERY_INFORMATION, IOCTL_BATTERY_QUERY_TAG,
+    BatteryInformation, BATTERY_CAPACITY_RELATIVE, BATTERY_INFORMATION, BATTERY_UNKNOWN_CAPACITY, BATTERY_QUERY_INFORMATION, BATTERY_TAG_INVALID, IOCTL_BATTERY_QUERY_INFORMATION, IOCTL_BATTERY_QUERY_TAG,
 };
 use windows::Win32::System::IO::DeviceIoControl;
+
+// The portable parser's sentinel is the driver's.
+const _: () = assert!(super::parse::BATTERY_UNKNOWN == BATTERY_UNKNOWN_CAPACITY);
 
 /// How long a reading is reused.
 const KEEP: Duration = Duration::from_secs(300);

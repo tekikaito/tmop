@@ -236,19 +236,27 @@ pub struct CellHealth {
     pub cycles: Option<u32>,
 }
 
+/// The Windows battery driver's "unknown" for a capacity (`BATTERY_UNKNOWN_CAPACITY`, 0xFFFFFFFF;
+/// the Windows reader checks at compile time that it matches). Defined here because this module
+/// builds on every system. Also treated as unknown for `CycleCount`.
+pub const BATTERY_UNKNOWN: u32 = u32::MAX;
+
+/// A driver value that means something: neither 0 nor [`BATTERY_UNKNOWN`].
+fn known(v: u32) -> Option<u32> {
+    (v != 0 && v != BATTERY_UNKNOWN).then_some(v)
+}
+
 /// Several batteries are summed (as the system's composite battery does). Each must report a
-/// design and a full charge, and all in the same kind of unit, else nothing is known. A cycle
-/// count is kept only for a single battery that counts cycles.
+/// design and a full charge (0 and [`BATTERY_UNKNOWN`] are unknown), and all in the same kind of
+/// unit, else nothing is known; a sum that does not fit is unknown too, never a clamped value.
+/// A cycle count is kept only for a single battery that counts cycles.
 pub fn cell_health(cells: &[Cell]) -> CellHealth {
     let mut h = CellHealth { cycles: match cells {
-        [one] => Some(one.cycles).filter(|c| *c > 0),
+        [one] => known(one.cycles),
         _ => None,
     }, ..Default::default() };
-    if cells.is_empty() || cells.iter().any(|c| c.designed == 0 || c.full_charged == 0) {
-        return h;
-    }
-    let sum = |f: fn(&Cell) -> u32| cells.iter().map(f).fold(0u32, u32::saturating_add);
-    let (design, full) = (sum(|c| c.designed), sum(|c| c.full_charged));
+    let sum = |f: fn(&Cell) -> u32| cells.iter().try_fold(0u32, |acc, c| acc.checked_add(known(f(c))?)).and_then(known);
+    let (Some(design), Some(full)) = (sum(|c| c.designed), sum(|c| c.full_charged)) else { return h };
     if cells.iter().all(|c| !c.relative) {
         h.capacities = Some((design, full));
     } else if cells.iter().all(|c| c.relative) {
@@ -450,6 +458,25 @@ mod tests {
         // Mixed units cannot be added up.
         assert_eq!(cell_health(&[rel, worn]), CellHealth::default());
         assert_eq!(cell_health(&[]), CellHealth::default());
+
+        // BATTERY_UNKNOWN_CAPACITY (0xFFFFFFFF) is unknown like 0: no tile, never millions of Wh.
+        let unknown = BATTERY_UNKNOWN;
+        assert_eq!(cell_health(&[Cell { designed: unknown, ..worn }]).capacities, None);
+        assert_eq!(cell_health(&[Cell { full_charged: unknown, ..worn }]).capacities, None);
+        assert_eq!(cell_health(&[Cell { designed: unknown, full_charged: unknown, ..worn }]), CellHealth::default());
+        assert_eq!(cell_health(&[Cell { relative: true, designed: unknown, ..rel }]).relative_health, None);
+        assert_eq!(cell_health(&[Cell { cycles: unknown, ..worn }]).cycles, None);
+        // One of two batteries unknown spoils the sum.
+        assert_eq!(cell_health(&[worn, Cell { designed: unknown, ..bay }]), CellHealth::default());
+        assert_eq!(cell_health(&[worn, Cell { full_charged: unknown, ..bay }]), CellHealth::default());
+        // A sum that does not fit in u32 (or lands on the sentinel) is unknown, not clamped.
+        let huge = Cell { relative: false, designed: 3_000_000_000, full_charged: 2_900_000_000, cycles: 0 };
+        assert_eq!(cell_health(&[huge, huge]), CellHealth::default());
+        let edge = Cell { relative: false, designed: u32::MAX - 10, full_charged: 10, cycles: 0 };
+        assert_eq!(cell_health(&[edge, Cell { designed: 10, ..edge }]).capacities, None);
+        let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
+        apply_cells(&mut b, &cell_health(&[Cell { designed: unknown, cycles: unknown, ..worn }]));
+        assert_eq!((b.full_mwh, b.design_mwh, b.cycles, b.health()), (49_000, None, None, None));
 
         // Applied to the battery: the driver's full charge replaces SystemBatteryState's.
         let mut b = Battery { percent: 60, full_mwh: 49_000, ..Default::default() };
