@@ -1,4 +1,4 @@
-//! Pure parsers for the Linux backend's `/proc` and `/sys` files, and the folds that turn their
+//! Pure parsers for the Linux backen's `/proc` and `/sys` files, and the folds that turn their
 //! readings into samples. No I/O here (`linux.rs` reads the files), so the fixture tests run on
 //! every host.
 
@@ -319,7 +319,7 @@ pub fn fold_thermal(chips: &[HwmonChip], zones: Vec<(String, f32)>) -> ThermalSa
     t
 }
 
-/// One GPU's reading: amdgpu sysfs or NVML.
+/// One GPU's reading: amdgpu sysfs, Intel DRM fdinfo or NVML.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuDev {
     /// (engine, %); the busiest is the device's utilisation.
@@ -336,6 +336,8 @@ pub struct GpuDev {
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,
+    /// Its figures cover only the processes TMOP could read (Intel fdinfo without root).
+    pub partial: bool,
 }
 
 /// Utilisation and engines of the busiest device; dedicated memory summed over all (as Windows
@@ -363,6 +365,7 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
             temperature_c: d.temperature_c,
             power_w: d.power_w,
             clock_mhz: d.clock_mhz,
+            partial: d.partial,
         })
         .collect();
     super::common::group_memory(&mut g);

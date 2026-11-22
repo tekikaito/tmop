@@ -5,7 +5,8 @@
 //!   `base_frequency` / `amd_pstate_nominal_freq`), else `/proc/cpuinfo` "cpu MHz" (static).
 //! * Memory: `/proc/meminfo`. Disk: `/proc/diskstats`, whole physical disks (`/sys/block`).
 //! * Network: `/sys/class/net/<if>/statistics`, up interfaces backed by a device.
-//! * GPU: amdgpu sysfs (`gpu_busy_percent`, `mem_info_vram_used`) and NVIDIA NVML (`dlopen`).
+//! * GPU: amdgpu sysfs (`gpu_busy_percent`, `mem_info_vram_used`), Intel i915 / xe DRM client
+//!   stats in `/proc/<pid>/fdinfo` ([`super::intel_gpu`]) and NVIDIA NVML (`dlopen`).
 //! * Thermal: hwmon (`k10temp`, `zenpower`, `coretemp` for the CPU) and `thermal_zone*`.
 //! * Uptime `/proc/uptime`, open files `/proc/sys/fs/file-nr`, threads `/proc/loadavg`.
 //!
@@ -25,8 +26,8 @@ use std::time::{Duration, Instant};
 pub const SOURCES: Sources = Sources {
     disk: "Active time (all physical disks, /proc/diskstats)",
     network: "Throughput (all adapters, sysfs)",
-    gpu: "Busiest engine of the busiest GPU (amdgpu sysfs, NVIDIA NVML)",
-    no_gpu: "No GPU utilization was reported (amdgpu and NVIDIA GPUs are supported).",
+    gpu: "Busiest engine of the busiest GPU (amdgpu sysfs, Intel DRM fdinfo, NVIDIA NVML)",
+    no_gpu: "No GPU utilization was reported (AMD, Intel and NVIDIA GPUs are supported).",
     thermal: "hwmon sensors and thermal zones",
     thermal_hint: "Load the k10temp or coretemp module (lm-sensors) for a CPU temperature",
     sensor: "hwmon",
@@ -147,6 +148,8 @@ pub struct Collector {
     sleepy: HashMap<PathBuf, (Instant, GpuDev)>,
     sleepy_temps: HashMap<PathBuf, (Instant, Vec<(String, f32)>)>,
     nvidia_last: Option<(Instant, Vec<GpuDev>)>,
+    /// Intel GPUs (i915, xe) from the DRM clients in `/proc/<pid>/fdinfo`.
+    intel: super::intel_gpu::IntelGpus,
     procs: Enumerator,
 }
 
@@ -183,6 +186,7 @@ impl Collector {
             sleepy: HashMap::new(),
             sleepy_temps: HashMap::new(),
             nvidia_last: None,
+            intel: super::intel_gpu::IntelGpus::new("/"),
             procs: Enumerator::new(),
         }
     }
@@ -198,13 +202,19 @@ impl Collector {
         }
         self.disk(&mut snap);
         self.network(&mut snap);
-        snap.gpu = procfs::fold_gpus(&self.gpus());
+        let intel = self.intel.read(Instant::now());
+        let mut gpus = self.gpus();
+        gpus.extend(intel.devs);
+        snap.gpu = procfs::fold_gpus(&gpus);
+        if gpus.iter().any(|d| d.partial) {
+            snap.gpu.note = Some(super::intel_gpu::PARTIAL_NOTE.to_string());
+        }
         snap.thermal = self.thermal();
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));
         snap.thread_count = read("/proc/loadavg").and_then(|l| procfs::parse_loadavg_threads(&l)).unwrap_or(0);
         snap.process_count = fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).count()).unwrap_or(0);
-        // No per-process GPU source yet (DRM fdinfo), so the GPU column stays 0.
-        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &HashMap::new()) {
+        // The GPU column: Intel clients only (amdgpu and NVML give no per-process figure here).
+        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &intel.by_pid) {
             Ok((rows, _)) => rows,
             Err(e) => {
                 snap.errors.push(e);

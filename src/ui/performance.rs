@@ -585,6 +585,9 @@ impl App {
                 if !s.gpu.available {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, SOURCES.no_gpu, theme::ui(12.0), theme::status(&pal).warn);
                     cy += 22.0;
+                } else if let Some(note) = s.gpu.note.as_deref().filter(|_| one.is_none_or(|(_, a)| a.partial)) {
+                    // The one place that says what the figures leave out.
+                    cy += widgets::text_wrapped(&p, pos2(ix, cy), note, theme::ui(12.0), pal.text_faint, iw, 3).height() + 8.0;
                 }
                 for (e, v) in engines.iter().take(6) {
                     widgets::text_fit(&p, pos2(ix, cy + 8.0), Align2::LEFT_CENTER, e, theme::ui(12.0), pal.text_dim, 130.0);

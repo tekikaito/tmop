@@ -24,7 +24,10 @@
 //! * Processes: `NtQuerySystemInformation(SystemProcessInformation)`.
 
 pub mod common;
+pub mod drm_fdinfo;
 pub mod hwinfo;
+#[cfg(target_os = "linux")]
+mod intel_gpu;
 pub mod pawnio;
 pub mod procfs;
 #[cfg(any(windows, target_os = "linux"))]
@@ -169,6 +172,9 @@ pub struct GpuSample {
     /// What each process uses of each GPU (Windows, while [`gpu_detail`] is on); a process on two
     /// GPUs has an entry for each.
     pub processes: Vec<GpuProcessUsage>,
+    /// One plain sentence about what the figures leave out, when they do (Linux Intel GPUs:
+    /// other users' programs). Shown on the Performance GPU card and by `--dump` only.
+    pub note: Option<String>,
 }
 
 /// One GPU. A figure its source does not report is `None`, never 0.
@@ -189,6 +195,8 @@ pub struct GpuAdapter {
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,
+    /// Its figures cover only the processes TMOP could read ([`GpuSample::note`] says so).
+    pub partial: bool,
 }
 
 /// One process on one GPU.

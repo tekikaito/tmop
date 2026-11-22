@@ -239,7 +239,7 @@ showing zeros.
 | Disks separately or grouped (right-click the Disk card) | ✔ | ✔ | ✔ |
 | Disk used / total storage, disk firmware revision (*Performance*) | ✔ | ✔ | — |
 | Memory speed (*Performance → Memory*, *System Info*) | ✔ | Only where normal users may read the DMI table (most systems: root only) | — |
-| Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; not Intel yet | Usage and memory, no engines |
+| Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; Intel (i915 from Linux 5.19, xe from 6.11) with engines, counted from the programs TMOP may read (without root your own, where the desktop, browsers and games run; as root all of them) | Usage and memory, no engines |
 | Clock speeds | ✔ | ✔ | Intel Macs; none on Apple Silicon |
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
@@ -371,7 +371,7 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   to run beside PawnIO. TMOP also reads HWiNFO's sensors when *Shared Memory Support* is on there.
   The PawnIO modules TMOP carries are LGPL-2.1-or-later (licence and source in `assets/pawnio`).
 - Otherwise, run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
-  owners, protected folders) need root or, on macOS, *Full Disk Access*; TMOP says so where it
+  owners, protected folders, on Linux the Intel graphics usage of other users' programs) need root or, on macOS, *Full Disk Access*; TMOP says so where it
   matters. After updating TMOP on macOS, remove it from *Full Disk Access* and add it again:
   macOS ties the permission to the exact build, so the switch can stay on but no longer apply.
 - TMOP is an independent project. It is inspired by *Task Manager TMOG* but is not connected to
