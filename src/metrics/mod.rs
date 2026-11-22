@@ -27,7 +27,7 @@ pub mod common;
 pub mod drm_fdinfo;
 pub mod hwinfo;
 #[cfg(target_os = "linux")]
-mod intel_gpu;
+mod drm_clients;
 pub mod pawnio;
 pub mod procfs;
 #[cfg(any(windows, target_os = "linux"))]
