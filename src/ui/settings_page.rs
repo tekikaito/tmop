@@ -30,6 +30,9 @@ fn shown_sections(caps: &Caps) -> Vec<&'static str> {
     SECTIONS.into_iter().filter(|s| *s != TASK_MANAGER || caps.taskmgr_replace).collect()
 }
 
+/// The choices of `general.highlightSeconds` (Settings → General → Highlight duration).
+const HIGHLIGHT_SECS: [u32; 3] = [1, 2, 5];
+
 /// The accent swatches after "Palette default": (name, `appearance.accent`).
 const ACCENTS: [(&str, &str); 4] = [("Teal", "#5EEAD4"), ("Indigo", "#8B9CFF"), ("Pink", "#FFB4C8"), ("Amber", "#F5B86B")];
 
@@ -774,6 +777,16 @@ impl App {
                             });
                             changed |= toggle_row(ui, &pal, &mut s.general.show_self_in_reports, "Show TMOP in reports");
                             changed |= toggle_row(ui, &pal, &mut s.general.per_core_cpu_statistics, "Per core CPU statistics");
+                            changed |= toggle_row_hint(ui, &pal, &mut s.general.highlight_processes, "Highlight new and exited processes", "Processes page: a process that starts shows in green, one that exits stays a moment in red.");
+                            row(ui, &pal, "Highlight duration", |ui| {
+                                let active = HIGHLIGHT_SECS.iter().position(|v| *v == s.general.highlight_seconds).unwrap_or(1);
+                                ui.add_enabled_ui(s.general.highlight_processes, |ui| {
+                                    if let Some(i) = widgets::segmented(ui, &["1 s", "2 s", "5 s"], active, &pal, false) {
+                                        s.general.highlight_seconds = HIGHLIGHT_SECS[i];
+                                        changed = true;
+                                    }
+                                });
+                            });
                             if caps.pawnio {
                                 changed |= toggle_row_hint(
                                     ui,

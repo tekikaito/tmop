@@ -14,6 +14,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
 pub mod affinity;
+pub mod highlight;
 pub mod netio;
 mod procfs;
 pub mod tree;
