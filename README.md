@@ -179,6 +179,7 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 - **Look up, inspect or dump a program:** on *Processes*, right-click it. *Search online* opens a web search for its name (only the name is sent). *Go to services* shows the services it hosts on the *Services* page (only for a process that hosts one). On Windows, *Properties* opens the file's Properties dialog, and *Create dump file* writes a full memory dump to your temp folder (it holds everything the program had in memory, so keep it private).
 - **Start a program:** on *Processes*, press *Run new task*, type a program (on Windows also a document, folder or web address) or pick one with *Browse…*, and press Enter. On Windows, *Run as administrator* starts it with full rights; on Linux and macOS the line is split like a shell would, without running one.
 - **Find out what fills your disk:** go to *Disk Space* and start a scan.
+- **Check your laptop battery's health:** *Power & Freq* shows a *Battery health* tile with the full charge against the design capacity (in percent and Wh) and the cycle count, where the system reports them.
 - **See which programs start with your computer, which apps are installed** and a lot more in the
   menu on the left.
 - **Open the small desktop monitor** with the *Popout* button at the bottom left.

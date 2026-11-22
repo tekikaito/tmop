@@ -50,6 +50,7 @@ features = [
     "Win32_System_Time",
     "Win32_System_Performance",
     "Win32_System_Power",
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_System_ProcessStatus",
     "Win32_System_LibraryLoader",
     "Win32_System_Diagnostics_ToolHelp",
