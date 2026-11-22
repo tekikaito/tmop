@@ -1,0 +1,66 @@
+name: Nix
+
+# Builds the flake (flake.nix) and runs the result without a window. Separate from CI so it
+# neither slows the required jobs nor blocks them.
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - packaging/linux/**
+      - .github/workflows/nix.yml
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - packaging/linux/**
+      - .github/workflows/nix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    name: Nix build (x86_64-linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # cachix/install-nix-action v31.11.5, pinned by commit. Installs Nix only: no binary
+      # cache and no secrets.
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086
+
+      - name: Build
+        run: nix build -L
+
+      - name: Show the lock file
+        if: always()
+        run: cat flake.lock
+
+      - name: Flake check
+        run: nix flake check -L
+
+      - name: Version
+        run: |
+          out=$(./result/bin/tmop --version)
+          echo "$out"
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          case "$out" in *"$want"*) ;; *) echo "expected version $want" >&2; exit 1 ;; esac
+
+      - name: Dump (no window)
+        run: ./result/bin/tmop --dump
+
+      - name: Desktop file and icons
+        run: |
+          test -f result/share/applications/tmop.desktop
+          test -f result/share/icons/hicolor/256x256/apps/tmop.png
+          readelf -d result/bin/tmop | grep -E 'RUNPATH|RPATH'
