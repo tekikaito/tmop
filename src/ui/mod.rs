@@ -27,6 +27,7 @@ pub mod process_actions;
 pub mod processes;
 pub mod recorder_page;
 pub mod replace;
+pub mod file_in_use;
 pub mod run_task;
 pub mod settings_page;
 pub mod summary;
@@ -456,6 +457,7 @@ pub struct App {
     affinity: Option<affinity_dialog::AffinityDialog>,
     /// The "Run new task" dialog.
     run_task: run_task::RunTaskUi,
+    file_in_use: file_in_use::FileInUseUi,
     /// A process action running as administrator (`pkexec`); its status text arrives here.
     elevated_job: Option<std::sync::mpsc::Receiver<String>>,
     /// A memory dump being written (process name, result), see `start_dump`.
@@ -576,6 +578,7 @@ impl App {
             pending: None,
             affinity: None,
             run_task: run_task::RunTaskUi::new(main_hwnd(cc)),
+            file_in_use: file_in_use::FileInUseUi::new(main_hwnd(cc)),
             elevated_job: None,
             dump_job: None,
             dump_done: None,
@@ -1167,6 +1170,7 @@ impl App {
             self.dump_dialog(ctx, &pal);
             self.affinity_dialog(ctx, &pal);
             self.run_task_dialog(ctx, &pal);
+            self.file_in_use_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);
             self.updates_dialog(ctx, &pal);
             self.disk_delete_dialogs(ctx, &pal);

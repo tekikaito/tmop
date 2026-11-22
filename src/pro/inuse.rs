@@ -6,15 +6,107 @@
 //! visible, which is enough for a warning. Holders read "name (PID n)".
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Most files checked per call.
 pub const MAX_FILES: usize = 64;
 
+/// Whether this system can tell which processes hold a file (the others hide the feature).
+pub const AVAILABLE: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+
+/// A process that holds a file open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Holder {
+    pub pid: u32,
+    pub name: String,
+    /// Start time of the process in the backend's own unit, where it reports one (Windows: a
+    /// FILETIME). Not comparable between systems.
+    pub start: Option<u64>,
+}
+
+impl Holder {
+    /// "name (PID n)", as the delete dialogs list it.
+    pub fn label(&self) -> String {
+        format!("{} (PID {})", self.name, self.pid)
+    }
+}
+
+/// Holders ordered by PID, each PID once (the first entry of a PID wins).
+pub fn normalize(mut holders: Vec<Holder>) -> Vec<Holder> {
+    holders.sort_by_key(|h| h.pid);
+    holders.dedup_by_key(|h| h.pid);
+    holders
+}
+
+/// Why a path cannot be checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathProblem {
+    Empty,
+    Missing,
+    Folder,
+}
+
+impl PathProblem {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Empty => "Type or pick the file to check.",
+            Self::Missing => "That file does not exist.",
+            Self::Folder => "That is a folder: only files can be checked.",
+        }
+    }
+}
+
+/// The file named by `text` (surrounding quotes and spaces are dropped, as "Copy as path" adds
+/// them), or why it cannot be checked.
+pub fn check_path(text: &str) -> Result<PathBuf, PathProblem> {
+    let t = text.trim();
+    let t = t.strip_prefix('"').and_then(|r| r.strip_suffix('"')).unwrap_or(t).trim();
+    if t.is_empty() {
+        return Err(PathProblem::Empty);
+    }
+    let p = PathBuf::from(t);
+    match std::fs::metadata(&p) {
+        Ok(m) if m.is_dir() => Err(PathProblem::Folder),
+        Ok(_) => Ok(p),
+        // A file whose metadata is refused (access denied) still exists: let the search try.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(p),
+        Err(_) => Err(PathProblem::Missing),
+    }
+}
+
+/// Windows error codes of the Restart Manager that deserve their own words.
+pub fn rm_error_message(code: u32) -> String {
+    match code {
+        5 => "Access denied: run TMOP as administrator to check this file.".into(),
+        32 | 33 => "The file is locked by the system and cannot be checked.".into(),
+        c => format!("Windows could not check this file (error {c})."),
+    }
+}
+
+/// The processes holding `path` open. `Err` is a sentence for the user (Windows only: Linux and
+/// macOS skip the processes they may not read, see the module docs).
+pub fn find(path: &Path) -> Result<Vec<Holder>, String> {
+    #[cfg(windows)]
+    {
+        super::restartmgr::holders(path).map(normalize).map_err(rm_error_message)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut m = holders_of(std::slice::from_ref(&path.to_path_buf()));
+        Ok(normalize(m.remove(path).unwrap_or_default()))
+    }
+}
+
+/// Holders per file (only files that are in use appear), as "name (PID n)". At most [`MAX_FILES`]
+/// files are checked.
+pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+    holders_of(files).into_iter().map(|(f, h)| (f, h.iter().map(Holder::label).collect())).collect()
+}
+
 /// Holders per file (only files that are in use appear). At most [`MAX_FILES`] files are checked.
 #[cfg(windows)]
-pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
-    super::restartmgr::in_use(files)
+pub fn holders_of(files: &[PathBuf]) -> HashMap<PathBuf, Vec<Holder>> {
+    super::restartmgr::holders_of(files)
 }
 
 /// One file-backed line of `/proc/<pid>/maps`.
@@ -84,9 +176,9 @@ fn wanted(files: &[PathBuf]) -> Vec<Wanted> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+pub fn holders_of(files: &[PathBuf]) -> HashMap<PathBuf, Vec<Holder>> {
     let want = wanted(files);
-    let mut out: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut out: HashMap<PathBuf, Vec<Holder>> = HashMap::new();
     if want.is_empty() {
         return out;
     }
@@ -116,7 +208,7 @@ pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
         if hit.iter().any(|h| *h) {
             let name = std::fs::read_to_string(dir.join("comm")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
             for (_, w) in want.iter().enumerate().filter(|(i, _)| hit[*i]) {
-                out.entry(w.path.clone()).or_default().push(format!("{name} (PID {pid})"));
+                out.entry(w.path.clone()).or_default().push(Holder { pid, name: name.clone(), start: None });
             }
         }
     }
@@ -140,11 +232,11 @@ const _: () = assert!(std::mem::size_of::<VnodeFdInfoWithPath>() == 1200);
 const PIDFD_VNODE_PATH: libc::c_int = 2;
 
 #[cfg(target_os = "macos")]
-pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+pub fn holders_of(files: &[PathBuf]) -> HashMap<PathBuf, Vec<Holder>> {
     use libc::c_int;
     use std::mem::size_of;
     let want = wanted(files);
-    let mut out: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut out: HashMap<PathBuf, Vec<Holder>> = HashMap::new();
     if want.is_empty() {
         return out;
     }
@@ -190,7 +282,7 @@ pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
             let len = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
             let name = if len > 0 { String::from_utf8_lossy(&name[..len as usize]).into_owned() } else { "?".into() };
             for (_, w) in want.iter().enumerate().filter(|(i, _)| hit[*i]) {
-                out.entry(w.path.clone()).or_default().push(format!("{name} (PID {pid})"));
+                out.entry(w.path.clone()).or_default().push(Holder { pid: pid as u32, name: name.clone(), start: None });
             }
         }
     }
@@ -198,7 +290,7 @@ pub fn in_use(files: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub fn in_use(_: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+pub fn holders_of(_: &[PathBuf]) -> HashMap<PathBuf, Vec<Holder>> {
     HashMap::new()
 }
 
@@ -233,6 +325,75 @@ garbage
         assert_eq!(dev_numbers(dev), (8, 300));
         let big = ((0x1234u64 & !0xfff) << 32) | ((0x1234u64 & 0xfff) << 8);
         assert_eq!(dev_numbers(big), (0x1234, 0));
+    }
+
+    fn holder(pid: u32, name: &str) -> Holder {
+        Holder { pid, name: name.into(), start: None }
+    }
+
+    #[test]
+    fn holders_read_as_the_delete_dialog_lists_them() {
+        assert_eq!(holder(42, "notepad.exe").label(), "notepad.exe (PID 42)");
+        assert_eq!(Holder { pid: 2, name: "y z".into(), start: Some(9) }.label(), "y z (PID 2)");
+    }
+
+    #[test]
+    fn holders_are_sorted_and_listed_once() {
+        let got = normalize(vec![holder(9, "b"), holder(3, "a"), holder(9, "b-again"), holder(5, "c")]);
+        assert_eq!(got.iter().map(|h| h.pid).collect::<Vec<_>>(), [3, 5, 9]);
+        assert_eq!(got[2].name, "b");
+        assert!(normalize(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn paths_are_validated() {
+        let dir = std::env::temp_dir();
+        assert_eq!(check_path(""), Err(PathProblem::Empty));
+        assert_eq!(check_path("   "), Err(PathProblem::Empty));
+        assert_eq!(check_path("\"\""), Err(PathProblem::Empty));
+        assert_eq!(check_path(&dir.to_string_lossy()), Err(PathProblem::Folder));
+        let gone = dir.join(format!("tmop-gone-{}.tmp", std::process::id()));
+        assert_eq!(check_path(&gone.to_string_lossy()), Err(PathProblem::Missing));
+        let file = dir.join(format!("tmop-check-path-{}.tmp", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        let plain = check_path(&format!("  {}  ", file.display()));
+        let quoted = check_path(&format!("\"{}\"", file.display()));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(plain, Ok(file.clone()));
+        assert_eq!(quoted, Ok(file));
+        for p in [PathProblem::Empty, PathProblem::Missing, PathProblem::Folder] {
+            assert!(!p.message().is_empty());
+        }
+    }
+
+    #[test]
+    fn restart_manager_errors_have_words() {
+        assert!(rm_error_message(5).starts_with("Access denied"));
+        assert!(rm_error_message(32).contains("locked"));
+        assert!(rm_error_message(1234).contains("1234"));
+    }
+
+    #[test]
+    fn a_closed_file_does_not_list_this_process() {
+        let p = std::env::temp_dir().join(format!("tmop-free-{}.tmp", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        let got = find(&p);
+        let _ = std::fs::remove_file(&p);
+        // Restart Manager can be unavailable (an error is a fine answer then).
+        if let Ok(h) = got {
+            assert!(!h.iter().any(|x| x.pid == std::process::id()), "{h:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn find_lists_this_process() {
+        let p = std::env::temp_dir().join(format!("tmop-find-{}.tmp", std::process::id()));
+        let f = std::fs::File::create(&p).unwrap();
+        let got = find(&p);
+        drop(f);
+        let _ = std::fs::remove_file(&p);
+        assert!(got.unwrap().iter().any(|h| h.pid == std::process::id() && !h.name.is_empty()));
     }
 
     /// This test holds a temp file open and must find itself among its holders.
