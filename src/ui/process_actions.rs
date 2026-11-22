@@ -128,11 +128,11 @@ impl App {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let (pid, name, ctx) = (row.pid, row.name.clone(), ctx.clone());
+        let (pid, start, name, ctx) = (row.pid, row.create_time, row.name.clone(), ctx.clone());
         let spawned = std::thread::Builder::new().name("tmop-dump".into()).spawn({
             let name = name.clone();
             move || {
-                let r = process::dump::create(pid, &name, &std::env::temp_dir());
+                let r = process::dump::create(pid, start, &name, &std::env::temp_dir());
                 let _ = tx.send(r);
                 ctx.request_repaint();
             }

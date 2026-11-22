@@ -767,17 +767,17 @@ pub mod dump {
     }
 
     /// Writes a full memory dump of `pid` into `dir` (never over an existing file) and returns
-    /// where it went. Blocks while the dump is written: call it off the UI thread.
+    /// where it went; `start` is the row create_time, re-checked against the live process (0: unknown, unchecked). Blocks while the dump is written: call it off the UI thread.
     #[cfg(windows)]
-    pub fn create(pid: u32, name: &str, dir: &Path) -> Result<PathBuf, String> {
+    pub fn create(pid: u32, start: i64, name: &str, dir: &Path) -> Result<PathBuf, String> {
         if pid == std::process::id() {
             return Err("refusing to dump TMOP itself".into());
         }
-        super::imp::sys::create_dump(pid, name, dir)
+        super::imp::sys::create_dump(pid, start, name, dir)
     }
 
     #[cfg(not(windows))]
-    pub fn create(_pid: u32, _name: &str, _dir: &Path) -> Result<PathBuf, String> {
+    pub fn create(_pid: u32, _start: i64, _name: &str, _dir: &Path) -> Result<PathBuf, String> {
         Err(format!("not available on {}", crate::platform::os_name()))
     }
 }
@@ -881,11 +881,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let first = dump::create(child.id(), "ping.exe", &dir);
-        let second = dump::create(child.id(), "ping.exe", &dir);
+        let first = dump::create(child.id(), 0, "ping.exe", &dir);
+        let second = dump::create(child.id(), 0, "ping.exe", &dir);
         let _ = child.kill();
         let _ = child.wait();
-        let own = dump::create(std::process::id(), "tmop", &dir);
+        let own = dump::create(std::process::id(), 0, "tmop", &dir);
         let (first, second) = (first.unwrap(), second.unwrap());
         assert_eq!(first.file_name().unwrap(), "ping.exe.DMP");
         assert_eq!(second.file_name().unwrap(), "ping.exe (1).DMP");
