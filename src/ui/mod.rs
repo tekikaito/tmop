@@ -1165,6 +1165,7 @@ impl App {
             });
             self.confirm_dialog(ctx, &pal);
             self.dump_dialog(ctx, &pal);
+            self.startup_error_dialog(ctx, &pal);
             self.affinity_dialog(ctx, &pal);
             self.run_task_dialog(ctx, &pal);
             self.replace_dialog(ctx, &pal);

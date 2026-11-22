@@ -1,4 +1,5 @@
-//! Inventory pages: System Info, Services and Startup apps. All read-only.
+//! Inventory pages: System Info, Services and Startup apps. All read-only, except that startup
+//! entries can be turned on and off with the system's own switch ([`toggle`]).
 //!
 //! | | Windows | Linux | macOS |
 //! |---|---|---|---|
@@ -13,6 +14,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod parse;
+pub mod toggle;
 
 #[cfg(target_os = "linux")]
 pub use linux::{cpu_details, startup_apps, system_info};
@@ -62,7 +64,13 @@ pub struct StartupApp {
     pub location: String,
     pub enabled: bool,
     pub publisher: String,
+    /// What turns the entry on and off (not shown).
+    pub switch: toggle::Switch,
 }
+
+/// The key (under HKCU or HKLM) of Explorer's switches for the Run keys and Startup folders.
+#[cfg(windows)]
+pub(crate) const STARTUP_APPROVED: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved";
 
 /// Executable path at the start of a command line: the quoted part, else (on Windows) up to the
 /// first executable extension, else the first word.
@@ -84,7 +92,8 @@ pub fn command_path(cmd: &str) -> String {
     c.split_whitespace().next().unwrap_or("").to_string()
 }
 
-/// `StartupApproved` values: an odd first byte means disabled.
+/// `StartupApproved` values: an odd first byte means disabled (no Microsoft documentation; see
+/// [`toggle::approved_value`] for the layout and where it comes from).
 pub fn approved_enabled(bytes: &[u8]) -> bool {
     bytes.first().map(|b| b & 1 == 0).unwrap_or(true)
 }
@@ -326,8 +335,7 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
     use super::winutil::{Key, Value, View};
     use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     const RUN: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    const APPROVED: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved";
-    let approved = |root: HKEY, sub: &str| -> Vec<(String, Value)> { Key::open(root, &format!(r"{APPROVED}\{sub}"), View::Default).map(|k| k.values()).unwrap_or_default() };
+    let approved = |root: HKEY, sub: &str| -> Vec<(String, Value)> { Key::open(root, &format!(r"{STARTUP_APPROVED}\{sub}"), View::Default).map(|k| k.values()).unwrap_or_default() };
     let is_enabled = |list: &[(String, Value)], name: &str| -> bool {
         match list.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
             Some((_, Value::Bytes(b))) => approved_enabled(b),
@@ -335,7 +343,7 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
         }
     };
     let mut out = Vec::new();
-    let sources: [(HKEY, View, &str, &str); 3] = [
+    let sources: [(HKEY, View, &str, &'static str); 3] = [
         (HKEY_CURRENT_USER, View::Default, "Registry: current user", "Run"),
         (HKEY_LOCAL_MACHINE, View::Wow64_64, "Registry: all users", "Run"),
         (HKEY_LOCAL_MACHINE, View::Wow64_32, "Registry: all users (32-bit)", "Run32"),
@@ -352,6 +360,7 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
             out.push(StartupApp {
                 enabled: is_enabled(&appr, &name),
                 publisher: super::drivers::file_version(&path).map(|v| v.company).unwrap_or_default(),
+                switch: toggle::Switch::Approved { machine: root == HKEY_LOCAL_MACHINE, sub: approved_sub, name: name.clone() },
                 name,
                 command: cmd,
                 location: label.into(),
@@ -372,7 +381,14 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
                 continue;
             }
             let name = file.rsplit_once('.').map(|(n, _)| n.to_string()).unwrap_or(file.clone());
-            out.push(StartupApp { enabled: is_enabled(&appr, &file), publisher: String::new(), name, command: e.path().display().to_string(), location: label.into() });
+            out.push(StartupApp {
+                enabled: is_enabled(&appr, &file),
+                publisher: String::new(),
+                name,
+                command: e.path().display().to_string(),
+                location: label.into(),
+                switch: toggle::Switch::Approved { machine: root == HKEY_LOCAL_MACHINE, sub: "StartupFolder", name: file.clone() },
+            });
         }
     }
     out.sort_by(|a, b| b.enabled.cmp(&a.enabled).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));

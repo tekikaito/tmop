@@ -136,6 +136,19 @@ impl Key {
     }
 }
 
+/// Writes the REG_BINARY value `name` of `root\path` (the key is created when missing), in the
+/// default view. The error carries the system's message ("Access is denied." and the like).
+pub fn set_binary(root: HKEY, path: &str, name: &str, data: &[u8]) -> Result<(), String> {
+    use windows::Win32::System::Registry::{RegCreateKeyExW, RegSetValueExW, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE};
+    let (wp, wn) = (wide(path), wide(name));
+    let mut h = HKEY::default();
+    // SAFETY: valid NUL-terminated path; `h` receives the handle, closed by `Key` on drop.
+    unsafe { RegCreateKeyExW(root, PCWSTR(wp.as_ptr()), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut h, None) }.ok().map_err(|e| format!("could not open {path}: {}", e.message()))?;
+    let key = Key(h);
+    // SAFETY: an open key, a NUL-terminated name and a byte slice.
+    unsafe { RegSetValueExW(key.0, PCWSTR(wn.as_ptr()), None, REG_BINARY, Some(data)) }.ok().map_err(|e| format!("could not write {name} in {path}: {}", e.message()))
+}
+
 impl Drop for Key {
     fn drop(&mut self) {
         // SAFETY: the key was opened by RegOpenKeyExW.

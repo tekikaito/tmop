@@ -2,6 +2,7 @@
 //! XDG autostart entries and enabled `systemd --user` services.
 
 use super::parse::{self, CacheInfo, SysCpu};
+use super::toggle::Switch;
 use super::{keys, CpuDetails, Sections, StartupApp};
 use crate::pro::sysfmt::{self, env_value};
 use std::collections::HashMap;
@@ -227,18 +228,20 @@ pub fn cpu_details() -> CpuDetails {
     d
 }
 
-/// `$XDG_CONFIG_HOME/autostart` (user) and each `$XDG_CONFIG_DIRS/autostart` (all users).
-fn autostart_dirs() -> Vec<(PathBuf, &'static str)> {
-    let mut dirs = Vec::new();
+/// `$XDG_CONFIG_HOME/autostart` (the user's, if there is a config home) and each
+/// `$XDG_CONFIG_DIRS/autostart` (all users), most important first.
+pub(super) fn autostart_folders() -> (Option<PathBuf>, Vec<PathBuf>) {
     let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute());
     let user = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| home.map(|h| h.join(".config")));
-    if let Some(u) = user {
-        dirs.push((u.join("autostart"), "Autostart: current user"));
-    }
     let system = std::env::var("XDG_CONFIG_DIRS").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/etc/xdg".into());
-    for d in system.split(':').filter(|d| d.starts_with('/')) {
-        dirs.push((Path::new(d).join("autostart"), "Autostart: all users"));
-    }
+    (user.map(|u| u.join("autostart")), system.split(':').filter(|d| d.starts_with('/')).map(|d| Path::new(d).join("autostart")).collect())
+}
+
+/// [`autostart_folders`] with their locations and true for the user's.
+fn autostart_dirs() -> Vec<(PathBuf, &'static str, bool)> {
+    let (user, system) = autostart_folders();
+    let mut dirs: Vec<(PathBuf, &'static str, bool)> = user.into_iter().map(|u| (u, "Autostart: current user", true)).collect();
+    dirs.extend(system.into_iter().map(|d| (d, "Autostart: all users", false)));
     dirs
 }
 
@@ -246,7 +249,7 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
     let current = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     // The first directory holding a file name wins (the user's copy overrides the system one).
     let mut by_file: HashMap<String, StartupApp> = HashMap::new();
-    for (dir, label) in autostart_dirs() {
+    for (dir, label, user) in autostart_dirs() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
             let file = e.file_name().to_string_lossy().into_owned();
@@ -260,7 +263,14 @@ pub fn startup_apps() -> Result<Vec<StartupApp>, String> {
                 continue;
             }
             let name = if entry.name.is_empty() { file.trim_end_matches(".desktop").to_string() } else { entry.name.clone() };
-            let app = StartupApp { name, command: sysfmt::exec_command(&entry.exec), location: label.into(), enabled: !entry.hidden && entry.autostart_enabled, publisher: String::new() };
+            let app = StartupApp {
+                name,
+                command: sysfmt::exec_command(&entry.exec),
+                location: label.into(),
+                enabled: !entry.hidden && entry.autostart_enabled,
+                publisher: String::new(),
+                switch: Switch::Desktop { path: e.path(), user },
+            };
             by_file.insert(file, app);
         }
     }
@@ -285,7 +295,14 @@ fn systemd_user_units() -> Vec<StartupApp> {
         .iter()
         .map(|u| {
             let (desc, cmd) = shown.iter().find(|s| &s.0 == u).map(|s| (s.1.clone(), s.2.clone())).unwrap_or_default();
-            StartupApp { name: if desc.is_empty() { u.clone() } else { desc }, command: if cmd.is_empty() { u.clone() } else { cmd }, location: "systemd: current user".into(), enabled: true, publisher: String::new() }
+            StartupApp {
+                name: if desc.is_empty() { u.clone() } else { desc },
+                command: if cmd.is_empty() { u.clone() } else { cmd },
+                location: "systemd: current user".into(),
+                enabled: true,
+                publisher: String::new(),
+                switch: Switch::Fixed("systemd user units are switched with systemctl, not by TMOP"),
+            }
         })
         .collect()
 }

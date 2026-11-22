@@ -39,6 +39,15 @@ pub struct InventoryState {
     pub svc_info: InfoCache,
     pub startup: Loader<Vec<StartupApp>>,
     pub startup_table: TableState,
+    /// A running Enable / Disable of a startup entry, and the entry as it was before.
+    pub startup_switch: Loader<()>,
+    pub startup_switching: Option<StartupApp>,
+    /// The entry changed last, until the list read after the change arrives.
+    pub startup_verify: Option<StartupApp>,
+    /// What the list read after the last change says about the entry (page subtitle).
+    pub startup_note: Option<String>,
+    /// A failed change: (dialog title, the system's message).
+    pub startup_error: Option<(String, String)>,
     pub users_table: TableState,
     pub history: AppHistory,
     pub history_table: TableState,
@@ -55,6 +64,11 @@ impl Default for InventoryState {
             svc_info: InfoCache::default(),
             startup: Loader::default(),
             startup_table: TableState::default(),
+            startup_switch: Loader::default(),
+            startup_switching: None,
+            startup_verify: None,
+            startup_note: None,
+            startup_error: None,
             // Busiest first, as in the design.
             users_table: TableState::sorted_by(3, true),
             history: AppHistory::default(),
@@ -162,6 +176,56 @@ impl AppHistory {
             }
         }
         out
+    }
+}
+
+/// The table key of a startup entry.
+fn startup_key(a: &StartupApp) -> String {
+    format!("{}|{}", a.location, a.name)
+}
+
+/// The Enable / Disable action for the selected entry: its label and why it is greyed out.
+fn switch_action(app: Option<&StartupApp>, privileged: bool, busy: bool) -> (&'static str, Option<&'static str>) {
+    let Some(app) = app else { return ("Enable / Disable", Some("Select an entry first")) };
+    let label = if app.enabled { "Disable" } else { "Enable" };
+    let why = crate::pro::inventory::toggle::unavailable(app, privileged).or(busy.then_some("Reading the startup entries\u{2026}"));
+    (label, why)
+}
+
+/// What the list read after a change says about the changed entry.
+fn verify_note(before: &StartupApp, list: &[StartupApp]) -> String {
+    let want = !before.enabled;
+    let word = |on: bool| if on { "enabled" } else { "disabled" };
+    // On Linux turning off an all-users entry makes it a user entry: found by name then.
+    let now = list.iter().find(|a| a.switch == before.switch).or_else(|| list.iter().find(|a| a.name == before.name));
+    match now {
+        Some(a) if a.enabled == want => {
+            let when = if crate::platform::OS == crate::platform::Os::MacOs { "from the next login" } else { "from the next sign-in" };
+            format!("{} {}, {when}", before.name, word(want))
+        }
+        Some(a) => format!("{} still reads as {}", before.name, word(a.enabled)),
+        None => format!("{} is no longer listed", before.name),
+    }
+}
+
+/// Takes in a finished Enable / Disable (re-reading the list after a success, the error dialog
+/// after a failure) and the list read after it.
+fn poll_startup(inv: &mut InventoryState) {
+    if inv.startup_switch.poll() {
+        let before = inv.startup_switching.take();
+        match (inv.startup_switch.error(), before) {
+            (Some(e), Some(b)) => inv.startup_error = Some((format!("Could not {} **{}**", if b.enabled { "disable" } else { "enable" }, b.name), e.to_string())),
+            (Some(e), None) => inv.startup_error = Some(("Could not switch the entry".into(), e.to_string())),
+            (None, before) => {
+                inv.startup_verify = before;
+                inv.startup.start(crate::pro::inventory::startup_apps);
+            }
+        }
+    }
+    if inv.startup.poll() {
+        if let (Some(before), Some(list)) = (inv.startup_verify.take(), inv.startup.ok()) {
+            inv.startup_note = Some(verify_note(&before, list));
+        }
     }
 }
 
@@ -417,14 +481,34 @@ impl App {
 
     pub fn startup_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
         let pal = fd.pal;
-        self.pro.inv.startup.poll();
-        let count = self.pro.inv.startup.ok().map(|l| format!("{} entries", l.len())).unwrap_or_default();
+        poll_startup(&mut self.pro.inv);
+        let inv = &self.pro.inv;
+        let switching = inv.startup_switch.is_loading();
+        let busy = switching || inv.startup.is_loading();
+        if busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        let count = inv.startup.ok().map(|l| format!("{} entries", l.len())).unwrap_or_default();
         let boot = format!("last boot {}", boot_label(crate::platform::local_time(), fd.snap.uptime));
-        let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, Page::StartupApps.shortcut().into()]));
+        let note = inv.startup_note.clone().unwrap_or_default();
+        let privileged = crate::platform::is_elevated();
+        let selected: Option<StartupApp> = inv.startup.ok().and_then(|l| l.iter().find(|a| Some(startup_key(a)) == inv.startup_table.selected).cloned());
+        let body = self.page_title(ui, &pal, "Startup apps", &subtitle(&[count, boot, note, Page::StartupApps.shortcut().into()]));
         let mut refresh = false;
-        let (tools, area) = page_layout(body, 340.0);
+        let mut switch: Option<StartupApp> = None;
+        let (tools, area) = page_layout(body, 450.0);
         toolbar(ui, tools, |ui| {
-            refresh = widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh)).clicked();
+            // A Refresh during a change could answer for the list from before it.
+            refresh = ui.add_enabled_ui(!switching, |ui| widgets::button(ui, "Refresh", &pal, Some(Icon::Refresh))).inner.clicked();
+            let (label, why) = switch_action(selected.as_ref(), privileged, busy);
+            let r = ui.add_enabled_ui(why.is_none(), |ui| Button::new(label).show(ui, &pal)).inner;
+            let r = match why {
+                Some(why) => r.on_disabled_hover_text(why),
+                None => r,
+            };
+            if r.clicked() {
+                switch = selected.clone();
+            }
             widgets::search_box(ui, &mut self.pro.inv.startup_table.filter, "Filter by name or command", 220.0, &pal);
         });
         let inv = &mut self.pro.inv;
@@ -461,7 +545,7 @@ impl App {
         });
         let cols = [Col::text("Name", 240.0), Col::text("Publisher", 220.0), Col::text("Status", 110.0).rigid(), Col::text("Location", 220.0), Col::text("Command", 500.0)];
         let windir = std::env::var("windir").unwrap_or_default().to_lowercase();
-        let key = |i: usize| format!("{}|{}", list[i].location, list[i].name);
+        let key = |i: usize| startup_key(&list[i]);
         let cell = |i: usize, col: usize| -> Cell {
             let a = &list[i];
             match col {
@@ -483,8 +567,44 @@ impl App {
                 _ => Cell::new(&a.command).mono().color(pal.text_dim),
             }
         };
+        // Only a click on the menu item (or the toolbar button) switches an entry: no key does.
+        let chosen: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+        let menu = |i: usize, ui: &mut egui::Ui| {
+            let (label, why) = switch_action(Some(&list[i]), privileged, busy);
+            if ui.add_enabled_ui(why.is_none(), |ui| kit::menu_item(ui, label, None, false)).inner {
+                chosen.set(Some(i));
+            }
+            if let Some(why) = why {
+                ui.label(egui::RichText::new(why).font(theme::ui(12.0)).color(pal.text_faint));
+            }
+        };
         let icons = &mut self.icons;
-        table::show(ui, table_rect, "startup-table", &pal, &cols, &order, &mut inv.startup_table, &key, &cell, icons);
+        table::show_with_menu(ui, table_rect, "startup-table", &pal, &cols, &order, &mut inv.startup_table, &key, &cell, icons, Some(&menu));
+        if let Some(i) = chosen.get() {
+            switch = Some(list[i].clone());
+        }
+        if let Some(app) = switch {
+            // The availability is checked again where the change is made.
+            let enable = !app.enabled;
+            inv.startup_note = None;
+            inv.startup_switching = Some(app.clone());
+            inv.startup_switch.start(move || crate::pro::inventory::toggle::set_enabled(&app, enable));
+        }
+    }
+
+    /// The dialog of a failed Enable / Disable with the system's message.
+    pub(super) fn startup_error_dialog(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        let Some((title, message)) = &self.pro.inv.startup_error else { return };
+        let st = theme::status(pal);
+        let mut answer = None;
+        kit::dialog(ctx, "startup-switch-error", |ui| {
+            ui.spacing_mut().item_spacing.y = 18.0;
+            kit::dialog_header(ui, pal, Some((Icon::Warning, st.danger)), title, message);
+            answer = kit::dialog_buttons(ui, pal, &[kit::DialogButton::Primary("Close")]);
+        });
+        if answer.is_some() || super::processes::key_once(ctx, egui::Key::Escape) {
+            self.pro.inv.startup_error = None;
+        }
     }
 
     pub fn users_page(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>) {
@@ -711,6 +831,35 @@ fn subtitle_free(parts: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pro::inventory::toggle::Switch;
+
+    fn entry(name: &str, enabled: bool, switch: Switch) -> StartupApp {
+        StartupApp { name: name.into(), enabled, switch, location: "L".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn switch_actions() {
+        let hkcu = Switch::Approved { machine: false, sub: "Run", name: "A".into() };
+        assert_eq!(switch_action(None, true, false), ("Enable / Disable", Some("Select an entry first")));
+        assert_eq!(switch_action(Some(&entry("A", true, hkcu.clone())), false, false), ("Disable", None));
+        assert_eq!(switch_action(Some(&entry("A", false, hkcu.clone())), false, false), ("Enable", None));
+        assert!(switch_action(Some(&entry("A", false, hkcu)), false, true).1.is_some(), "not while busy");
+        let hklm = Switch::Approved { machine: true, sub: "Run32", name: "A".into() };
+        assert_eq!(switch_action(Some(&entry("A", true, hklm)), false, false).1, Some("Needs administrator"));
+    }
+
+    #[test]
+    fn verify_notes_say_what_the_list_read_after_the_change_shows() {
+        let before = entry("A", true, Switch::Approved { machine: false, sub: "Run", name: "A".into() });
+        let off = StartupApp { enabled: false, ..before.clone() };
+        assert!(verify_note(&before, std::slice::from_ref(&off)).starts_with("A disabled, from the next"));
+        assert_eq!(verify_note(&before, std::slice::from_ref(&before)), "A still reads as enabled");
+        assert_eq!(verify_note(&before, &[]), "A is no longer listed");
+        // An all-users autostart entry turned off shows up as the user's copy.
+        let sys = entry("B", true, Switch::Desktop { path: "/etc/xdg/autostart/b.desktop".into(), user: false });
+        let copy = entry("B", false, Switch::Desktop { path: "/home/u/.config/autostart/b.desktop".into(), user: true });
+        assert!(verify_note(&sys, &[copy]).starts_with("B disabled"));
+    }
 
     fn row(pid: u32, name: &str, ct: i64, cpu_time: u64) -> ProcessRow {
         ProcessRow { pid, name: name.into(), create_time: ct, cpu_time, io_bps: 100.0, private_working_set: 10, ..Default::default() }
