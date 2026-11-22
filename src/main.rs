@@ -170,7 +170,7 @@ mod scr {
                     Box::new(|cc| {
                         theme::install_fonts(&cc.egui_ctx, None);
                         let ctx = cc.egui_ctx.clone();
-                        let sampler = Sampler::start(Some(std::time::Duration::from_millis(500)), history_capacity(30), move || ctx.request_repaint());
+                        let sampler = Sampler::start(Some(std::time::Duration::from_millis(500)), history_capacity(30), move |_, _| ctx.request_repaint());
                         Ok(Box::new(Saver { sampler, start: std::time::Instant::now(), origin: None, colors: metric_colors() }))
                     }),
                 )

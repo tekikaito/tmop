@@ -6,14 +6,17 @@
 [![License: GPL-3.0](https://img.shields.io/github/license/tekikaito/tmop)](LICENSE)
 ![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 
+**TMOP is a free task manager and system monitor for Windows, Linux and macOS.** Processes with a tree view, per-core CPU, graphics card, disks, a Docker page and skins, and no telemetry.
+
 TMOP shows what your computer is doing: how busy the processor, memory, disk, network and
-graphics card are, which programs are running, and much more. It runs on **Windows, Linux and
-macOS**, is free and open source, and needs no installer.
+graphics card are, which programs are running, and much more. It is free and open source, and
+needs no installer.
 
 ![TMOP's Performance page on Windows: the CPU graph and one graph per logical processor moving live](docs/screenshots/performance.gif)
 
-*Still images of the same app on Windows:
-[Summary](docs/screenshots/summary.png) · [Performance](docs/screenshots/performance.png).*
+| Windows | Linux | macOS |
+|---|---|---|
+| ![TMOP's Summary page on Windows](docs/screenshots/summary.png) | ![TMOP's Summary page on Linux, light theme](docs/screenshots/linux-summary-light.png) | ![TMOP's Summary page on macOS](docs/screenshots/macos-summary.png) |
 
 **[Download TMOP](https://tekikaito.github.io/tmop/)** · [All install options](#get-tmop) ·
 [Release notes](https://github.com/tekikaito/tmop/releases)
@@ -45,124 +48,6 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **No installer, no telemetry.** TMOP is one program, and it sends no data (see
   [Privacy](#privacy)).
 
-## Privacy
-
-TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
-update check (*Settings → General*, off by default), which asks GitHub for the newest release
-(through `curl`). On Windows its only internet requests go to GitHub: that update check if you turn it on, downloading
-TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
-check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
-(for example an image you pull). TMOP also connects to the Docker hosts you add yourself.
-
-## Get TMOP
-
-**[Download TMOP](https://tekikaito.github.io/tmop/)**: the page picks the right file for your
-computer. Or install it with one command, which also keeps it up to date when you run it again.
-
-### Windows 10 and 11
-
-In PowerShell:
-
-```powershell
-irm https://tekikaito.github.io/tmop/install.ps1 | iex
-```
-
-That puts TMOP in the Start menu, and you remove it in *Settings → Apps*. No administrator
-permission is needed.
-
-Or, if you use [Scoop](https://scoop.sh):
-
-```powershell
-scoop bucket add tmop https://github.com/tekikaito/tmop
-scoop install tmop
-```
-
-`scoop update tmop` keeps it up to date. Use either Scoop or the command above, not both: each
-installs its own copy.
-
-To download it by hand instead:
-
-1. Open the **[release page](https://github.com/tekikaito/tmop/releases/latest)**.
-2. Under **Assets**, click **`TMOP-windows-x64.exe`**.
-   (Only if your PC has an ARM processor, for example a Snapdragon laptop, take
-   `TMOP-windows-arm64.exe` instead. Not sure? Choose x64.)
-3. Move it to a place you like, such as your desktop, and double-click it.
-
-**Windows shows a blue "Windows protected your PC" window?** That happens with new programs
-that Windows doesn't know yet. Click **More info**, then **Run anyway**. You only have to do this
-once.
-
-**TMOP doesn't open?** It shows a message saying why and saves it in
-`%LOCALAPPDATA%\TMOP\startup-error.log`; please add that file to a bug report. TMOP draws its
-window with OpenGL 2.0 or newer, which needs a graphics driver.
-
-**On a server or virtual machine without a graphics driver** (only the *Microsoft Basic Display
-Adapter*), take **`TMOP-windows-x64-server.zip`** from the release page instead and unpack it.
-It is the same TMOP with Mesa's software OpenGL next to it, which draws on the CPU, so it uses
-more processor time than on a graphics card. To keep that low, TMOP turns off high frequency
-visuals there (it redraws when new data arrives) and lets Mesa use at most 4 threads (set
-`LP_NUM_THREADS` to choose another number). Its updates replace only `TMOP.exe`.
-
-### Linux (x86_64 and ARM64)
-
-In a terminal:
-
-```sh
-curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
-```
-
-That puts `tmop` in `~/.local/bin`, adds TMOP to your applications menu with its icon, and
-checks the download's SHA-256. It needs no root. Add `-s -- --appimage` after `sh` to install
-the AppImage instead of the plain program.
-
-To download it by hand instead, take one of these from the
-**[release page](https://github.com/tekikaito/tmop/releases/latest)** (`arm64` for ARM computers
-such as a Raspberry Pi with a 64-bit system, `x64` for everything else):
-
-- **`TMOP-linux-x64.AppImage`**: one file. Make it executable (*Properties → Allow executing file
-  as program*, or `chmod +x TMOP-linux-x64.AppImage`) and double-click it. AppImages need FUSE;
-  without it, start it with `--appimage-extract-and-run` or use the install command.
-- **`TMOP-linux-x64.tar.gz`**: the `tmop` program, `tmop.desktop` and the icons, to unpack
-  wherever you like.
-- **`TMOP-v<version>-linux-x64.deb`** (Debian, Ubuntu, Mint) and **`.rpm`** (Fedora, openSUSE):
-  system packages that put `tmop` in `/usr/bin`, with the menu entry and icons. They carry the
-  version in their name, so pick one from the release's file list. Install with
-  `sudo apt install ./TMOP-v<version>-linux-x64.deb` or
-  `sudo dnf install ./TMOP-v<version>-linux-x64.rpm`; the package manager adds the libraries
-  TMOP needs. They are not in a package repository, so they do not update themselves.
-
-TMOP needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later) and runs on X11 and
-Wayland.
-
-### macOS 11 or newer (Apple Silicon and Intel)
-
-In Terminal:
-
-```sh
-curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
-```
-
-That puts TMOP.app in `~/Applications` (the *Applications* folder in your home folder) and checks
-the download's SHA-256. Apps installed this way start without the "could not verify" prompt.
-
-Or, if you use [Homebrew](https://brew.sh):
-
-```sh
-brew install tekikaito/tmop/tmop
-```
-
-That puts TMOP.app in `/Applications`, also without the prompt, and `brew upgrade` keeps it up to
-date. Use either Homebrew or the install command, not both: each installs its own copy.
-
-To download it by hand instead, take **`TMOP-macos-universal.dmg`** from the
-**[release page](https://github.com/tekikaito/tmop/releases/latest)**, open it and drag TMOP onto
-*Applications*. One app runs on Apple Silicon and Intel Macs.
-
-**macOS says "Apple could not verify TMOP is free of malware"?** TMOP isn't notarized by Apple,
-so macOS asks before the first start. Click **Done**, open *System Settings → Privacy &
-Security*, scroll down to *Security* and click **Open Anyway** next to *"TMOP" was blocked*.
-Confirm with your password and click **Open Anyway** once more. You only have to do this once.
-(On macOS 14 and older, Control-click TMOP in *Applications*, choose *Open* and confirm.)
 
 ## What you can do with it
 
@@ -190,7 +75,145 @@ Confirm with your password and click **Open Anyway** once more. You only have to
 - **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
   table as CSV…*. You get the visible columns in their current order and the rows as filtered and
   sorted, ready for a spreadsheet or a bug report.
+- **Get told when something runs hot:** in *Settings → Alerts* TMOP sends a desktop notification when CPU usage, memory usage or the temperature stays above a limit you set for a while, naming the busiest process. All three are off by default, they also work while the window is minimized, and the temperature alert appears only where TMOP can read a temperature.
 - **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
+
+## Privacy
+
+TMOP itself sends no data. On Linux and macOS it makes no internet requests unless you turn on the
+update check (*Settings → General*, off by default), which asks GitHub for the newest release
+(through `curl`). On Windows its only internet requests go to GitHub: that update check if you turn it on, downloading
+TMOP's own Docker engine when you set it up, and checking for a newer engine release (switch the
+check off on the Docker page's *Engine* tab). A Docker engine downloads only what you ask it to
+(for example an image you pull). TMOP also connects to the Docker hosts you add yourself.
+
+
+## Get TMOP
+
+**[Download TMOP](https://tekikaito.github.io/tmop/)**: the page picks the right file for your
+computer. Or install it with one command, which also keeps it up to date when you run it again.
+
+### Windows 10 and 11
+
+In PowerShell:
+
+```powershell
+irm https://tekikaito.github.io/tmop/install.ps1 | iex
+```
+
+That puts TMOP in the Start menu, and you remove it in *Settings → Apps*. No administrator
+permission is needed.
+
+Or, if you use [Scoop](https://scoop.sh):
+
+```powershell
+scoop bucket add tmop https://github.com/tekikaito/tmop
+scoop install tmop
+```
+
+`scoop update tmop` keeps it up to date. Use either Scoop or the command above, not both: each
+installs its own copy.
+
+<details>
+<summary>Windows: download by hand, and if it doesn't start</summary>
+
+To download it by hand instead:
+
+1. Open the **[release page](https://github.com/tekikaito/tmop/releases/latest)**.
+2. Under **Assets**, click **`TMOP-windows-x64.exe`**.
+   (Only if your PC has an ARM processor, for example a Snapdragon laptop, take
+   `TMOP-windows-arm64.exe` instead. Not sure? Choose x64.)
+3. Move it to a place you like, such as your desktop, and double-click it.
+
+**Windows shows a blue "Windows protected your PC" window?** That happens with new programs
+that Windows doesn't know yet. Click **More info**, then **Run anyway**. You only have to do this
+once.
+
+**TMOP doesn't open?** It shows a message saying why and saves it in
+`%LOCALAPPDATA%\TMOP\startup-error.log`; please add that file to a bug report. TMOP draws its
+window with OpenGL 2.0 or newer, which needs a graphics driver.
+
+**On a server or virtual machine without a graphics driver** (only the *Microsoft Basic Display
+Adapter*), take **`TMOP-windows-x64-server.zip`** from the release page instead and unpack it.
+It is the same TMOP with Mesa's software OpenGL next to it, which draws on the CPU, so it uses
+more processor time than on a graphics card. To keep that low, TMOP turns off high frequency
+visuals there (it redraws when new data arrives) and lets Mesa use at most 4 threads (set
+`LP_NUM_THREADS` to choose another number). Its updates replace only `TMOP.exe`.
+
+</details>
+
+### Linux (x86_64 and ARM64)
+
+In a terminal:
+
+```sh
+curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
+```
+
+That puts `tmop` in `~/.local/bin`, adds TMOP to your applications menu with its icon, and
+checks the download's SHA-256. It needs no root. Add `-s -- --appimage` after `sh` to install
+the AppImage instead of the plain program.
+
+
+<details>
+<summary>Linux: download by hand, packages and requirements</summary>
+
+To download it by hand instead, take one of these from the
+**[release page](https://github.com/tekikaito/tmop/releases/latest)** (`arm64` for ARM computers
+such as a Raspberry Pi with a 64-bit system, `x64` for everything else):
+
+- **`TMOP-linux-x64.AppImage`**: one file. Make it executable (*Properties → Allow executing file
+  as program*, or `chmod +x TMOP-linux-x64.AppImage`) and double-click it. AppImages need FUSE;
+  without it, start it with `--appimage-extract-and-run` or use the install command.
+- **`TMOP-linux-x64.tar.gz`**: the `tmop` program, `tmop.desktop` and the icons, to unpack
+  wherever you like.
+- **`TMOP-v<version>-linux-x64.deb`** (Debian, Ubuntu, Mint) and **`.rpm`** (Fedora, openSUSE):
+  system packages that put `tmop` in `/usr/bin`, with the menu entry and icons. They carry the
+  version in their name, so pick one from the release's file list. Install with
+  `sudo apt install ./TMOP-v<version>-linux-x64.deb` or
+  `sudo dnf install ./TMOP-v<version>-linux-x64.rpm`; the package manager adds the libraries
+  TMOP needs. They are not in a package repository, so they do not update themselves.
+
+TMOP needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later) and runs on X11 and
+Wayland.
+
+</details>
+
+### macOS 11 or newer (Apple Silicon and Intel)
+
+In Terminal:
+
+```sh
+curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
+```
+
+That puts TMOP.app in `~/Applications` (the *Applications* folder in your home folder) and checks
+the download's SHA-256. Apps installed this way start without the "could not verify" prompt.
+
+Or, if you use [Homebrew](https://brew.sh):
+
+```sh
+brew install tekikaito/tmop/tmop
+```
+
+That puts TMOP.app in `/Applications`, also without the prompt, and `brew upgrade` keeps it up to
+date. Use either Homebrew or the install command, not both: each installs its own copy.
+
+
+<details>
+<summary>macOS: download by hand, and if macOS blocks it</summary>
+
+To download it by hand instead, take **`TMOP-macos-universal.dmg`** from the
+**[release page](https://github.com/tekikaito/tmop/releases/latest)**, open it and drag TMOP onto
+*Applications*. One app runs on Apple Silicon and Intel Macs.
+
+**macOS says "Apple could not verify TMOP is free of malware"?** TMOP isn't notarized by Apple,
+so macOS asks before the first start. Click **Done**, open *System Settings → Privacy &
+Security*, scroll down to *Security* and click **Open Anyway** next to *"TMOP" was blocked*.
+Confirm with your password and click **Open Anyway** once more. You only have to do this once.
+(On macOS 14 and older, Control-click TMOP in *Applications*, choose *Open* and confirm.)
+
+</details>
 
 ## Platforms
 
