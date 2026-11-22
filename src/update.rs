@@ -231,13 +231,17 @@ pub enum Method {
     Homebrew,
     /// Windows: installed with Scoop, which owns the version folders.
     Scoop,
+    /// Linux: run from the Nix store; `nix` owns the files, so nothing is downloaded here.
+    Nix,
+    /// Linux: the `.deb` or `.rpm` package (`/usr/bin/tmop`); nothing is downloaded here.
+    SystemPackage,
 }
 
 impl Method {
     /// The command that updates TMOP from `repo`; none for [`Method::InPlace`].
     pub fn command(self, repo: &str) -> Option<String> {
         match self {
-            Method::InPlace => None,
+            Method::InPlace | Method::Nix | Method::SystemPackage => None,
             Method::InstallCommand => Some(format!("curl -fsSL {}install.sh | sh", pages_url(repo))),
             Method::Homebrew => Some("brew upgrade --cask tmop".into()),
             Method::Scoop => Some("scoop update tmop".into()),
@@ -245,13 +249,20 @@ impl Method {
     }
 
     /// What to do with [`Method::command`], for the dialog.
-    pub fn instructions(self) -> &'static str {
+    pub fn instructions(self, repo: &str) -> String {
         match self {
-            Method::InPlace => "",
-            Method::InstallCommand => "Installed with the install command? Run it again in a terminal to update. Otherwise download the new version from the release page.",
-            Method::Homebrew => "TMOP was installed with Homebrew. To update, run this in a terminal:",
-            Method::Scoop => "TMOP was installed with Scoop. To update, run this in a terminal:",
+            Method::InPlace => String::new(),
+            Method::InstallCommand => "Installed with the install command? Run it again in a terminal to update. Otherwise download the new version from the release page.".into(),
+            Method::Homebrew => "TMOP was installed with Homebrew. To update, run this in a terminal:".into(),
+            Method::Scoop => "TMOP was installed with Scoop. To update, run this in a terminal:".into(),
+            Method::Nix => format!("TMOP runs from the Nix store. To update, run `nix flake update tmop` if it is an input of your flake, or `nix run github:{repo} --refresh`. TMOP does not replace its own files here."),
+            Method::SystemPackage => "TMOP was installed from a .deb or .rpm package. To update, download the new .deb or .rpm from the release page and install it with your package manager. TMOP does not replace its own files here.".into(),
         }
+    }
+
+    /// True when the dialog only shows [`Method::instructions`] and has nothing to copy or run.
+    pub fn hint_only(self) -> bool {
+        matches!(self, Method::Nix | Method::SystemPackage)
     }
 }
 
@@ -300,6 +311,28 @@ fn is_scoop_install() -> bool {
     })
 }
 
+/// The update method of a Linux or macOS install, from facts the caller gathered: `exe` is the
+/// executable's canonical path (symlinks resolved by the caller, see [`method`]), `home` is
+/// `$HOME`, `appimage` is whether `$APPIMAGE` is set, `cask` whether a Homebrew Caskroom folder
+/// of TMOP exists. Pure: no file system or environment access.
+pub fn unix_method(repo: &str, exe: &str, home: Option<&str>, appimage: bool, cask: bool) -> Method {
+    if repo.eq_ignore_ascii_case(HOMEBREW_REPO) && cask {
+        return Method::Homebrew;
+    }
+    if appimage {
+        return Method::InstallCommand;
+    }
+    if exe.starts_with("/nix/store/") {
+        return Method::Nix;
+    }
+    let in_home = home.map(|h| h.trim_end_matches('/')).filter(|h| !h.is_empty()).is_some_and(|h| exe.strip_prefix(h).is_some_and(|r| r.starts_with('/')));
+    // The `.deb` and `.rpm` (packaging/linux/nfpm.yaml) install exactly `/usr/bin/tmop`.
+    if exe == "/usr/bin/tmop" && !in_home {
+        return Method::SystemPackage;
+    }
+    Method::InstallCommand
+}
+
 /// How to update the running copy from `repo`. The Homebrew cask only follows its own repository.
 pub fn method(repo: &str) -> Method {
     if cfg!(windows) {
@@ -308,10 +341,10 @@ pub fn method(repo: &str) -> Method {
         } else {
             Method::InPlace
         }
-    } else if repo.eq_ignore_ascii_case(HOMEBREW_REPO) && ["/opt/homebrew/Caskroom/tmop", "/usr/local/Caskroom/tmop"].iter().any(|d| Path::new(d).is_dir()) {
-        Method::Homebrew
     } else {
-        Method::InstallCommand
+        let exe = std::env::current_exe().ok().map(|e| std::fs::canonicalize(&e).unwrap_or(e).to_string_lossy().into_owned()).unwrap_or_default();
+        let cask = ["/opt/homebrew/Caskroom/tmop", "/usr/local/Caskroom/tmop"].iter().any(|d| Path::new(d).is_dir());
+        unix_method(repo, &exe, std::env::var("HOME").ok().as_deref(), std::env::var_os("APPIMAGE").is_some(), cask)
     }
 }
 
@@ -524,6 +557,47 @@ mod tests {
         // Ordinary install locations.
         assert!(!is_scoop_exe(r"C:\Program Files\TMOP\TMOP.exe", &no_env, none));
         assert!(!is_scoop_exe("", &no_env, none));
+    }
+
+    #[test]
+    fn unix_methods() {
+        let r = "tekikaito/tmop";
+        let home = Some("/home/me");
+        let m = |exe: &str, appimage, cask| unix_method(r, exe, home, appimage, cask);
+        // Canonicalisation happens in `method`, outside this function: a symlink such as
+        // /run/current-system/sw/bin/tmop arrives here as its /nix/store target.
+        assert_eq!(m("/nix/store/abc-tmop-0.8.0/bin/tmop", false, false), Method::Nix);
+        assert_eq!(m("/home/me/.nix-profile/bin/tmop", false, false), Method::InstallCommand, "an unresolved symlink is not Nix");
+        assert_eq!(m("/home/me/nix/store/x/tmop", false, false), Method::InstallCommand);
+        // .deb / .rpm
+        assert_eq!(m("/usr/bin/tmop", false, false), Method::SystemPackage);
+        assert_eq!(unix_method(r, "/usr/bin/tmop", Some("/usr"), false, false), Method::InstallCommand, "under $HOME");
+        assert_eq!(m("/usr/local/bin/tmop", false, false), Method::InstallCommand);
+        assert_eq!(m("/usr/bin/tmop-other", false, false), Method::InstallCommand);
+        // install.sh, AppImage, tar.gz: unchanged
+        assert_eq!(m("/home/me/.local/bin/tmop", false, false), Method::InstallCommand);
+        assert_eq!(m("/tmp/.mount_TMOPab/usr/bin/tmop", true, false), Method::InstallCommand);
+        assert_eq!(m("/usr/bin/tmop", true, false), Method::InstallCommand, "APPIMAGE set");
+        assert_eq!(unix_method(r, "/nix/store/a/bin/tmop", None, false, false), Method::Nix);
+        assert_eq!(unix_method(r, "", None, false, false), Method::InstallCommand);
+        // macOS
+        assert_eq!(m("/Applications/TMOP.app/Contents/MacOS/tmop", false, true), Method::Homebrew);
+        assert_eq!(m("/Applications/TMOP.app/Contents/MacOS/tmop", false, false), Method::InstallCommand);
+        assert_eq!(unix_method("someone/fork", "/x/tmop", home, false, true), Method::InstallCommand, "cask follows only tekikaito/tmop");
+    }
+
+    #[test]
+    fn hints_of_packaged_installs() {
+        let r = "tekikaito/tmop";
+        assert!(Method::Nix.hint_only() && Method::SystemPackage.hint_only());
+        assert!(!Method::InstallCommand.hint_only() && !Method::InPlace.hint_only() && !Method::Homebrew.hint_only() && !Method::Scoop.hint_only());
+        assert_eq!(Method::Nix.command(r), None);
+        assert_eq!(Method::SystemPackage.command(r), None);
+        let nix = Method::Nix.instructions(r);
+        assert!(nix.contains("nix flake update tmop") && nix.contains("nix run github:tekikaito/tmop --refresh"));
+        let pkg = Method::SystemPackage.instructions(r);
+        assert!(pkg.contains(".deb") && pkg.contains(".rpm") && pkg.contains("release page"));
+        assert_eq!(Method::InstallCommand.instructions(r), "Installed with the install command? Run it again in a terminal to update. Otherwise download the new version from the release page.");
     }
 
     #[test]

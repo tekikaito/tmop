@@ -179,7 +179,8 @@ such as a Raspberry Pi with a 64-bit system, `x64` for everything else):
   version in their name, so pick one from the release's file list. Install with
   `sudo apt install ./TMOP-v<version>-linux-x64.deb` or
   `sudo dnf install ./TMOP-v<version>-linux-x64.rpm`; the package manager adds the libraries
-  TMOP needs. They are not in a package repository, so they do not update themselves.
+  TMOP needs. They are not in a package repository, so they do not update themselves: the update
+  dialog tells you to download the new `.deb` or `.rpm` from the release page.
 
 TMOP needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later) and runs on X11 and
 Wayland.
@@ -196,7 +197,8 @@ The flake builds TMOP from source, so the first run compiles for a few minutes. 
 `inputs.tmop.url = "github:tekikaito/tmop";` to your flake and put
 `inputs.tmop.packages.${pkgs.stdenv.hostPlatform.system}.default` in
 `environment.systemPackages` (NixOS) or `home.packages` (home-manager); that also adds the menu
-entry and icons. Updates come from `nix flake update tmop`, not from the app.
+entry and icons. Updates come from `nix flake update tmop` (or `nix run github:tekikaito/tmop --refresh`),
+not from the app: its update dialog only shows these commands.
 
 What was tested: CI builds the flake on x86_64 and ARM64 Linux and runs the result's `--version`
 and `--dump` (no window), and checks the menu entry and icons are installed. TMOP's window
@@ -354,6 +356,9 @@ command also expects the fork's GitHub Pages site with `install.sh`).
 - **Installed with Scoop (Windows)?** Update with `scoop update tmop`: TMOP does not replace
   its own exe there, its update dialog shows that command (with a Copy command button). Remove with
   `scoop uninstall tmop`.
+- **Installed from a `.deb` or `.rpm`, or with Nix (Linux)?** TMOP does not replace its own files
+  there: its update dialog shows how to update (download the new package from the release page;
+  `nix flake update tmop`).
 - **Installed with Homebrew (macOS)?** Update with `brew upgrade --cask tmop` (or just
   `brew upgrade`), remove with `brew uninstall --cask tmop`; add `--zap` to also remove your
   settings.
