@@ -27,7 +27,24 @@ shot summary --page=summary
 shot performance-cpu --page=performance --device=cpu
 shot performance-memory --page=performance --device=memory
 shot performance-disk --page=performance --device=disk
-shot processes --page=processes
+# The Processes page in tree view with the new/exited highlight (held 5 s). The settings live in a
+# private folder of their own; two harmless `sleep` processes are staged so a green row (a process
+# that started) and a red one (one that exited a moment ago) are really there at the shot.
+home="${RUNNER_TEMP:-/tmp}/tmop-shot-tree"
+case "$os" in
+  windows) cfg="$home/TMOP" ;;
+  macos) cfg="$home/Library/Application Support/TMOP" ;;
+  *) cfg="$home/config/tmop" ;;
+esac
+mkdir -p "$cfg"
+echo '{"version":1,"general":{"highlightProcesses":true,"highlightSeconds":5},"window":{"processTreeView":true}}' >"$cfg/settings.json"
+( sleep 22; sleep 4 & sleep 4; sleep 60 & wait ) >/dev/null 2>&1 &
+stage_pid=$!
+shot processes --page=processes --shot-home="$home" --wait=30
+kill $stage_pid 2>/dev/null
+shot startup --page=startup
+shot power --page=power
+shot settings-alerts --page=settings --settings-section=alerts --wait=10
 if [ "$os" = windows ]; then
   shot services --page=services
   shot settings-graphs --page=settings --settings-section=graphs --wait=10
