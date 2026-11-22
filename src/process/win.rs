@@ -13,7 +13,7 @@ use windows::Win32::System::Threading::{
     HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_ACCESS_RIGHTS, PROCESS_CREATION_FLAGS,
     PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
     PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
-    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS,
+    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS, GetProcessTimes,
 };
 
 pub(crate) const SYSTEM_PROCESS_INFORMATION_CLASS: u32 = 5;
@@ -296,6 +296,41 @@ fn open(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> windows::core::Result<OwnedH
     unsafe { OpenProcess(access, false, pid).map(OwnedHandle) }
 }
 
+/// What a stale row gets when the process it described is gone or its PID now names another one.
+const ENDED: &str = "That process has already ended.";
+
+/// The creation time of the process behind `h`, in the units of `ProcessRow::create_time`
+/// (100 ns ticks since 1601, as `NtQuerySystemInformation` reports it). Needs
+/// `PROCESS_QUERY_LIMITED_INFORMATION`.
+fn creation_time(h: &OwnedHandle) -> windows::core::Result<i64> {
+    use windows::Win32::Foundation::FILETIME;
+    let zero = FILETIME::default();
+    let (mut created, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: `h` is an open process handle with query access and all four out pointers are valid.
+    unsafe { GetProcessTimes(h.0, &mut created, &mut exit, &mut kernel, &mut user)? };
+    Ok(((created.dwHighDateTime as i64) << 32) | created.dwLowDateTime as i64)
+}
+
+/// Opens `pid` with `access` and checks, on that same handle, that it is still the process the row
+/// described (`start` = its create_time), so there is no gap between the check and the action. A
+/// `start` of 0 means the row never knew it (the idle process, a process whose times could not be
+/// read): that keeps the earlier behaviour and acts on the PID unchecked. A PID that no longer
+/// exists reads as ended too. The handle closes when dropped, on every path.
+fn open_same(pid: u32, start: i64, access: PROCESS_ACCESS_RIGHTS) -> Result<OwnedHandle, String> {
+    const ERROR_INVALID_PARAMETER: u32 = 0x8007_0057;
+    let h = open(pid, access | PROCESS_QUERY_LIMITED_INFORMATION).map_err(|e| {
+        if e.code().0 as u32 == ERROR_INVALID_PARAMETER {
+            ENDED.to_string()
+        } else {
+            sys::err(e)
+        }
+    })?;
+    if start != 0 && creation_time(&h).map_err(sys::err)? != start {
+        return Err(ENDED.into());
+    }
+    Ok(h)
+}
+
 fn resolve_identity(pid: u32, descriptions: &mut HashMap<String, Option<String>>) -> Identity {
     if pid == 0 || pid == 4 {
         return Identity { user: Some("SYSTEM".into()), ..Default::default() };
@@ -409,7 +444,7 @@ pub(super) mod sys {
         }
     }
 
-    fn err(e: windows::core::Error) -> String {
+    pub(super) fn err(e: windows::core::Error) -> String {
         if e.code().0 as u32 == 0x8007_0005 {
             "Access denied".into()
         } else {
@@ -425,31 +460,32 @@ pub(super) mod sys {
         }
     }
 
-    // `_start` (the creation time) is not re-checked: unchanged Windows behaviour.
-    pub fn terminate(pid: u32, _start: i64) -> Result<(), String> {
-        let h = open(pid, PROCESS_TERMINATE).map_err(err)?;
+    // Every action opens the process with `open_same`: the row creation time (`start`) is compared
+    // with the live process on the handle the action then uses.
+    pub fn terminate(pid: u32, start: i64) -> Result<(), String> {
+        let h = open_same(pid, start, PROCESS_TERMINATE)?;
         unsafe { TerminateProcess(h.0, 1).map_err(err) }
     }
 
-    pub fn suspend(pid: u32, _start: i64) -> Result<(), String> {
-        let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
+    pub fn suspend(pid: u32, start: i64) -> Result<(), String> {
+        let h = open_same(pid, start, PROCESS_SUSPEND_RESUME)?;
         nt(unsafe { NtSuspendProcess(h.0) }, "NtSuspendProcess")
     }
 
-    pub fn resume(pid: u32, _start: i64) -> Result<(), String> {
-        let h = open(pid, PROCESS_SUSPEND_RESUME).map_err(err)?;
+    pub fn resume(pid: u32, start: i64) -> Result<(), String> {
+        let h = open_same(pid, start, PROCESS_SUSPEND_RESUME)?;
         nt(unsafe { NtResumeProcess(h.0) }, "NtResumeProcess")
     }
 
-    pub fn set_priority(pid: u32, _start: i64, p: Priority) -> Result<(), String> {
-        let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
+    pub fn set_priority(pid: u32, start: i64, p: Priority) -> Result<(), String> {
+        let h = open_same(pid, start, PROCESS_SET_INFORMATION)?;
         unsafe { SetPriorityClass(h.0, priority_class(p)).map_err(err) }
     }
 
     /// Efficiency mode = EcoQoS (execution-speed throttling) + idle priority, as
     /// Windows Task Manager does; turning it off hands throttling back to the system.
-    pub fn set_efficiency(pid: u32, _start: i64, on: bool) -> Result<(), String> {
-        let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
+    pub fn set_efficiency(pid: u32, start: i64, on: bool) -> Result<(), String> {
+        let h = open_same(pid, start, PROCESS_SET_INFORMATION)?;
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
@@ -474,8 +510,8 @@ pub(super) mod sys {
     }
 
     /// The processors of the system (group 0) and the ones `pid` may use now.
-    pub fn get(pid: u32, _start: i64) -> Result<(Vec<usize>, Vec<usize>), String> {
-        let h = open(pid, PROCESS_QUERY_LIMITED_INFORMATION).map_err(err)?;
+    pub fn get(pid: u32, start: i64) -> Result<(Vec<usize>, Vec<usize>), String> {
+        let h = open_same(pid, start, PROCESS_QUERY_LIMITED_INFORMATION)?;
         let (mut process, mut system) = (0usize, 0usize);
         // SAFETY: both out pointers are valid for the call.
         unsafe { GetProcessAffinityMask(h.0, &mut process, &mut system).map_err(err)? };
@@ -483,9 +519,9 @@ pub(super) mod sys {
     }
 
     /// Binds `pid` to `cpus` (numbers within group 0).
-    pub fn set(pid: u32, _start: i64, cpus: &[usize]) -> Result<(), String> {
+    pub fn set(pid: u32, start: i64, cpus: &[usize]) -> Result<(), String> {
         let mask = affinity::cpus_to_mask(cpus).ok_or("a processor outside the first 64 cannot be set")?;
-        let h = open(pid, PROCESS_SET_INFORMATION).map_err(err)?;
+        let h = open_same(pid, start, PROCESS_SET_INFORMATION)?;
         // SAFETY: a handle with PROCESS_SET_INFORMATION and a plain mask.
         unsafe { SetProcessAffinityMask(h.0, mask as usize).map_err(err) }
     }
@@ -518,12 +554,12 @@ pub(super) mod sys {
 
     /// Writes a full memory dump of `pid` to a new file in `dir` (`MiniDumpWriteDump`); a failed
     /// dump leaves no file behind.
-    pub fn create_dump(pid: u32, name: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    pub fn create_dump(pid: u32, start: i64, name: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::System::Diagnostics::Debug::{MiniDumpWithFullMemory, MiniDumpWriteDump};
         use windows::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
         const PROCESS_VM_READ: PROCESS_ACCESS_RIGHTS = PROCESS_ACCESS_RIGHTS(0x10);
-        let h = open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ).map_err(err)?;
+        let h = open_same(pid, start, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
         // `create_new` fails if the name is taken meanwhile: try the next one.
         let (file, path) = (0u32..)
             .find_map(|n| {
@@ -546,5 +582,106 @@ pub(super) mod sys {
                 Err(msg)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sys;
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+
+    /// A child of this test (the only process these tests ever act on) and its creation time.
+    fn child() -> (Child, i64) {
+        let c = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null()).spawn().unwrap();
+        let h = open(c.id(), PROCESS_QUERY_LIMITED_INFORMATION).unwrap();
+        let start = creation_time(&h).unwrap();
+        (c, start)
+    }
+
+    fn alive(c: &mut Child) -> bool {
+        c.try_wait().unwrap().is_none()
+    }
+
+    #[test]
+    fn creation_time_matches_the_enumerator() {
+        let (mut c, start) = child();
+        let rows = Enumerator::new().collect(4, &HashMap::new()).unwrap().0;
+        let _ = c.kill();
+        let _ = c.wait();
+        assert_eq!(rows.iter().find(|r| r.pid == c.id()).map(|r| r.create_time), Some(start));
+    }
+
+    #[test]
+    fn a_stale_identity_is_refused_by_every_action() {
+        let (mut c, start) = child();
+        let (pid, stale) = (c.id(), start + 1);
+        let dir = std::env::temp_dir().join(format!("tmop-stale-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let refused = |r: Result<(), String>| assert_eq!(r.unwrap_err(), ENDED);
+        refused(sys::suspend(pid, stale));
+        refused(sys::resume(pid, stale));
+        refused(sys::set_priority(pid, stale, Priority::Idle));
+        refused(sys::set_efficiency(pid, stale, true));
+        refused(sys::set(pid, stale, &[0]));
+        assert_eq!(sys::get(pid, stale).unwrap_err(), ENDED);
+        assert_eq!(sys::create_dump(pid, stale, "ping.exe", &dir).unwrap_err(), ENDED);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "a refused dump leaves no file");
+        refused(sys::terminate(pid, stale));
+        assert!(alive(&mut c), "nothing was done to the live child");
+        let _ = c.kill();
+        let _ = c.wait();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exited_process_is_refused_whether_or_not_its_pid_is_still_held() {
+        let (mut c, start) = child();
+        let pid = c.id();
+        c.kill().unwrap();
+        c.wait().unwrap();
+        // Our handle to the child is still open: the pid cannot be reused yet, a wrong identity is refused.
+        assert_eq!(sys::terminate(pid, start + 1).unwrap_err(), ENDED);
+        drop(c);
+        // Handle gone: the pid is free (ended), already another program's (its start differs, or it
+        // cannot be opened), or the dead process lingers because something else holds it open (the
+        // identity still matches, and an action on a dead process fails): an error in every case.
+        assert!(sys::terminate(pid, start).is_err());
+        assert!(sys::suspend(pid, start).is_err());
+    }
+
+    #[test]
+    fn the_right_identity_acts_on_a_live_child() {
+        let (mut c, start) = child();
+        let pid = c.id();
+        sys::suspend(pid, start).unwrap();
+        sys::resume(pid, start).unwrap();
+        sys::set_priority(pid, start, Priority::BelowNormal).unwrap();
+        sys::set_efficiency(pid, start, true).unwrap();
+        sys::set_efficiency(pid, start, false).unwrap();
+        let (_all, current) = sys::get(pid, start).unwrap();
+        sys::set(pid, start, &current).unwrap();
+        assert!(alive(&mut c));
+        sys::terminate(pid, start).unwrap();
+        assert!(c.wait().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_start_keeps_the_unchecked_behaviour() {
+        let (mut c, _) = child();
+        sys::terminate(c.id(), 0).unwrap();
+        assert!(c.wait().is_ok());
+    }
+
+    #[test]
+    fn a_dump_with_the_right_identity_works() {
+        let (mut c, start) = child();
+        let dir = std::env::temp_dir().join(format!("tmop-stale-dump-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = sys::create_dump(c.id(), start, "ping.exe", &dir);
+        let _ = c.kill();
+        let _ = c.wait();
+        assert!(std::fs::metadata(r.unwrap()).unwrap().len() > 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
