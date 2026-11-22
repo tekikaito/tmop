@@ -186,6 +186,22 @@ Wayland.
 
 </details>
 
+#### Nix and NixOS (x86_64 and ARM64)
+
+```sh
+nix run github:tekikaito/tmop
+```
+
+The flake builds TMOP from source, so the first run compiles for a few minutes. To keep it, add
+`inputs.tmop.url = "github:tekikaito/tmop";` to your flake and put
+`inputs.tmop.packages.${pkgs.stdenv.hostPlatform.system}.default` in
+`environment.systemPackages` (NixOS) or `home.packages` (home-manager); that also adds the menu
+entry and icons. Updates come from `nix flake update tmop`, not from the app.
+
+What was tested: CI builds the flake on x86_64 and ARM64 Linux and runs the result's `--version`
+and `--dump` (no window), and checks the menu entry and icons are installed. TMOP's window
+has not been seen on NixOS yet, so the graphics drivers and Wayland/X11 there are untested.
+
 ### macOS 11 or newer (Apple Silicon and Intel)
 
 In Terminal:
