@@ -19,6 +19,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 struct Found {
     path: PathBuf,
     result: Result<Vec<Holder>, String>,
+    /// The (pid, create_time) of the process each holder was matched to when the result arrived
+    /// (`None`: no matching process). Filled on the UI thread, see [`resolve`].
+    ids: Vec<Option<(u32, i64)>>,
 }
 
 /// The dialog, closed or open.
@@ -60,10 +63,48 @@ struct HolderRow<'a> {
     process: Option<&'a ProcessRow>,
 }
 
-/// Pairs each holder with the running process of the same PID; a holder that has ended since the
-/// search has none (its buttons stay off).
-fn holder_rows<'a>(holders: &'a [Holder], procs: &'a [ProcessRow]) -> Vec<HolderRow<'a>> {
-    holders.iter().map(|holder| HolderRow { holder, process: procs.iter().find(|p| p.pid == holder.pid) }).collect()
+/// A name as the table could show it: lower case, without ".exe".
+fn plain_name(s: &str) -> String {
+    let s = s.trim().to_lowercase();
+    s.strip_suffix(".exe").map_or(s.clone(), str::to_string)
+}
+
+/// Whether `row` is the process `h` describes. The PID must match, and then:
+/// - when the backend reported a start time (Windows, a FILETIME), it must equal the row's
+///   `create_time` (the same kernel timestamp, same unit); the name is not compared there, since
+///   Restart Manager reports a friendly application name, not the image name;
+/// - otherwise (Linux and macOS, whose backends give the process name but no start time, and
+///   whose table units differ per system) the names must be related: equal ignoring case and
+///   ".exe", or one the start of the other (`comm` is cut at 15 characters).
+fn same_process(h: &Holder, row: &ProcessRow) -> bool {
+    if h.pid != row.pid {
+        return false;
+    }
+    if let Some(start) = h.start {
+        return u64::try_from(row.create_time).is_ok_and(|t| t == start);
+    }
+    let (a, b) = (plain_name(&h.name), plain_name(&row.name));
+    !a.is_empty() && !b.is_empty() && (a == b || a.starts_with(&b) || b.starts_with(&a))
+}
+
+/// The identity (pid, create_time) of the process each holder is right now, once, when the
+/// result arrives.
+fn resolve(holders: &[Holder], procs: &[ProcessRow]) -> Vec<Option<(u32, i64)>> {
+    holders.iter().map(|h| procs.iter().find(|p| same_process(h, p)).map(|p| (p.pid, p.create_time))).collect()
+}
+
+/// Pairs each holder with the process of its resolved identity, as long as a process with
+/// exactly that (pid, create_time) exists; a holder that has ended (or whose PID was reused)
+/// has none and its buttons stay off.
+fn holder_rows<'a>(holders: &'a [Holder], ids: &[Option<(u32, i64)>], procs: &'a [ProcessRow]) -> Vec<HolderRow<'a>> {
+    holders
+        .iter()
+        .enumerate()
+        .map(|(i, holder)| {
+            let process = ids.get(i).copied().flatten().and_then(|(pid, t)| procs.iter().find(|p| p.pid == pid && p.create_time == t));
+            HolderRow { holder, process }
+        })
+        .collect()
 }
 
 /// The faint line under the results: without root, Linux and macOS see only the user's own
@@ -98,7 +139,10 @@ impl App {
         let ui_state = &mut self.file_in_use;
         if let Some(rx) = &ui_state.job {
             match rx.try_recv() {
-                Ok(f) => {
+                Ok(mut f) => {
+                    if let Ok(h) = &f.result {
+                        f.ids = resolve(h, &procs);
+                    }
                     ui_state.found = Some(f);
                     ui_state.job = None;
                 }
@@ -168,7 +212,7 @@ impl App {
                 ui.label(egui::RichText::new(summary(&f.path, &f.result)).font(theme::semibold(13.0)).color(color));
                 if let Ok(holders) = &f.result {
                     egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
-                        for (i, r) in holder_rows(holders, &procs).iter().enumerate() {
+                        for (i, r) in holder_rows(holders, &f.ids, &procs).iter().enumerate() {
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -231,7 +275,7 @@ impl App {
                     let repaint = ctx.clone();
                     let spawned = std::thread::Builder::new().name("tmop-file-in-use".into()).spawn(move || {
                         let result = inuse::find(&path);
-                        let _ = tx.send(Found { path, result });
+                        let _ = tx.send(Found { path, result, ids: Vec::new() });
                         repaint.request_repaint();
                     });
                     match spawned {
@@ -245,7 +289,10 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Some((i, end)) = act {
-            let row = ui_state.found.as_ref().and_then(|f| f.result.as_ref().ok()).and_then(|h| holder_rows(h, &procs).get(i).and_then(|r| r.process.cloned()));
+            // Looked up in the table of this frame by the identity fixed when the result arrived,
+            // so a reused PID is never acted on. The Windows backend does not re-check the start
+            // time itself, which is why this check matters.
+            let row = ui_state.found.as_ref().and_then(|f| f.result.as_ref().ok().and_then(|h| holder_rows(h, &f.ids, &procs).get(i).and_then(|r| r.process.cloned())));
             match row {
                 Some(row) if end => self.request(Action::EndTask, row),
                 Some(row) => {
@@ -267,19 +314,62 @@ mod tests {
         Holder { pid, name: name.into(), start: None }
     }
 
-    fn proc(pid: u32) -> ProcessRow {
-        ProcessRow { pid, create_time: 5, ..Default::default() }
+    fn named(pid: u32, name: &str, create_time: i64) -> ProcessRow {
+        ProcessRow { pid, name: name.into(), create_time, ..Default::default() }
     }
 
     #[test]
     fn holders_meet_their_running_processes() {
         let holders = [holder(10, "a"), holder(20, "gone")];
-        let procs = [proc(10), proc(30)];
-        let rows = holder_rows(&holders, &procs);
+        let procs = [named(10, "a", 5), named(30, "c", 5)];
+        let ids = resolve(&holders, &procs);
+        assert_eq!(ids, [Some((10, 5)), None]);
+        let rows = holder_rows(&holders, &ids, &procs);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].process.map(|p| p.pid), Some(10));
         assert!(rows[1].process.is_none(), "a vanished process keeps its row without a target");
-        assert!(holder_rows(&[], &procs).is_empty());
+        assert!(holder_rows(&[], &[], &procs).is_empty());
+    }
+
+    #[test]
+    fn a_reused_pid_with_another_name_is_not_the_holder() {
+        let holders = [holder(10, "backup-tool")];
+        let before = [named(10, "backup-tool", 5)];
+        let ids = resolve(&holders, &before);
+        assert_eq!(ids, [Some((10, 5))]);
+        // The holder exits and an unrelated program gets PID 10: the row turns "ended".
+        let after = [named(10, "calc", 99)];
+        assert!(holder_rows(&holders, &ids, &after)[0].process.is_none());
+        assert_eq!(resolve(&holders, &after), [None]);
+    }
+
+    #[test]
+    fn a_reused_pid_with_the_same_name_but_another_start_is_not_the_holder() {
+        let holders = [holder(10, "tool")];
+        let ids = resolve(&holders, &[named(10, "tool", 5)]);
+        let after = [named(10, "tool", 99)];
+        assert!(holder_rows(&holders, &ids, &after)[0].process.is_none());
+        // With a reported start time the start decides, whatever the name.
+        let h = Holder { pid: 10, name: "Friendly App Name".into(), start: Some(5) };
+        assert!(same_process(&h, &named(10, "app.exe", 5)));
+        assert!(!same_process(&h, &named(10, "app.exe", 6)));
+        assert!(!same_process(&h, &named(11, "app.exe", 5)));
+        assert!(!same_process(&h, &named(10, "app.exe", -5)));
+    }
+
+    #[test]
+    fn names_are_compared_loosely_but_never_empty() {
+        assert!(same_process(&holder(1, "Notepad.EXE"), &named(1, "notepad", 1)));
+        assert!(same_process(&holder(1, "a-very-long-proc"), &named(1, "a-very-long-process-name", 1)));
+        assert!(!same_process(&holder(1, ""), &named(1, "", 1)));
+        assert!(!same_process(&holder(1, "vim"), &named(1, "emacs", 1)));
+    }
+
+    #[test]
+    fn a_process_that_vanished_after_the_result_has_no_row() {
+        let holders = [holder(10, "tool")];
+        let ids = resolve(&holders, &[named(10, "tool", 5)]);
+        assert!(holder_rows(&holders, &ids, &[])[0].process.is_none());
     }
 
     #[test]

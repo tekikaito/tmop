@@ -445,6 +445,8 @@ pub struct App {
     pub palettes: PaletteCatalog,
     pub palette_ui: settings_page::PaletteUi,
     pub sampler: Sampler,
+    /// What the alerts on the sampler thread read; kept current from the settings every frame.
+    alert_cfg: std::sync::Arc<std::sync::Mutex<crate::alerts::Config>>,
     pub page: Page,
     pub device: Device,
     pub popout_open: bool,
@@ -528,7 +530,12 @@ impl App {
         let display_font = install_display_font(&cc.egui_ctx, &settings.appearance.display_font);
         let ctx = cc.egui_ctx.clone();
         csv::set_owner(&ctx, main_hwnd(cc));
-        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move || ctx.request_repaint());
+        let alert_cfg = std::sync::Arc::new(std::sync::Mutex::new(crate::alerts::Config::from_settings(&settings.alerts, settings.fahrenheit())));
+        let alerts_hook = crate::alerts::hook(alert_cfg.clone());
+        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
+            alerts_hook(snap, rows);
+            ctx.request_repaint();
+        });
         let catalog = skin::scan(&skin::default_skin_dirs());
         let palettes = palette::scan(&palette::default_dir());
         let caps = Caps::get();
@@ -568,6 +575,7 @@ impl App {
             palettes,
             palette_ui: settings_page::PaletteUi::new(main_hwnd(cc)),
             sampler,
+            alert_cfg,
             page,
             device,
             popout_open: popout_only || settings_popout_on,
@@ -1182,6 +1190,13 @@ impl App {
 
         // Apply cadence changes and persist.
         self.sampler.set_interval(self.settings.update_speed().interval());
+        {
+            let cfg = crate::alerts::Config::from_settings(&self.settings.alerts, self.settings.fahrenheit());
+            let mut shared = self.alert_cfg.lock().unwrap_or_else(|e| e.into_inner());
+            if *shared != cfg {
+                *shared = cfg;
+            }
+        }
         // Sampled at once, so that switching off closes the device even while updates are paused.
         if crate::metrics::pawnio::set_enabled(self.caps.pawnio && self.settings.general.pawnio_cpu_temperature) {
             self.sampler.refresh();
