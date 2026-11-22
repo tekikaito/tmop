@@ -312,7 +312,7 @@ impl App {
                 dashed_second: false,
             },
             Device::Gpu => DevView {
-                value: if s.gpu.available { format!("{:.0}%", s.gpu.utilization_pct) } else { "\u{2014}".to_string() },
+                value: if s.gpu.available { format!("{}{:.0}%", s.gpu.at_least(), s.gpu.utilization_pct) } else { "\u{2014}".to_string() },
                 lines: vec![(&fd.hist.gpu, c, (0.0, 100.0))],
                 dashed_second: false,
             },
@@ -560,7 +560,8 @@ impl App {
                     Some((_, a)) => (a.dedicated_total, (a.shared_used, a.shared_total)),
                     None => (s.gpu.dedicated_total, (s.gpu.shared_used, s.gpu.shared_total)),
                 };
-                let value = if s.gpu.available { (format!("{shown_util:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
+                let at_least = if one.map_or(s.gpu.lower_bound, |(_, a)| a.lower_bound) { "\u{2265}" } else { "" };
+                let value = if s.gpu.available { (format!("{at_least}{shown_util:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
                 let sub = if one.is_some() { "Busiest engine of this GPU" } else { SOURCES.gpu };
                 let hd = Head { title: &title, sub: sub.into(), value, side: String::new() };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
@@ -585,6 +586,9 @@ impl App {
                 if !s.gpu.available {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, SOURCES.no_gpu, theme::ui(12.0), theme::status(&pal).warn);
                     cy += 22.0;
+                } else if let Some(note) = s.gpu.note.as_deref().filter(|_| one.is_none_or(|(_, a)| a.lower_bound)) {
+                    // Why the figures carry a "≥": said plainly, never a silent 0 %.
+                    cy += widgets::text_wrapped(&p, pos2(ix, cy), note, theme::ui(12.0), pal.text_faint, iw, 3).height() + 8.0;
                 }
                 for (e, v) in engines.iter().take(6) {
                     widgets::text_fit(&p, pos2(ix, cy + 8.0), Align2::LEFT_CENTER, e, theme::ui(12.0), pal.text_dim, 130.0);

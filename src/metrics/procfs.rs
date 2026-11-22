@@ -319,7 +319,7 @@ pub fn fold_thermal(chips: &[HwmonChip], zones: Vec<(String, f32)>) -> ThermalSa
     t
 }
 
-/// One GPU's reading: amdgpu sysfs or NVML.
+/// One GPU's reading: amdgpu sysfs, Intel DRM fdinfo or NVML.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuDev {
     /// (engine, %); the busiest is the device's utilisation.
@@ -336,6 +336,8 @@ pub struct GpuDev {
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,
+    /// The figures may be low: some of the device's users could not be read (Intel fdinfo).
+    pub lower_bound: bool,
 }
 
 /// Utilisation and engines of the busiest device; dedicated memory summed over all (as Windows
@@ -345,6 +347,9 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
     let mut g = GpuSample { dedicated_used: devs.iter().filter_map(|d| d.vram_used).sum(), ..Default::default() };
     if let Some(d) = devs.iter().filter(|d| !d.engines.is_empty()).max_by(|a, b| busy(a).total_cmp(&busy(b))) {
         g.available = true;
+        // A busier GPU that may read low could be the busiest one: the figure is a lower bound
+        // when any device's is.
+        g.lower_bound = devs.iter().any(|d| d.lower_bound);
         g.utilization_pct = busy(d).clamp(0.0, 100.0);
         g.engines = d.engines.iter().map(|(e, v)| (e.clone(), v.clamp(0.0, 100.0))).collect();
     }
@@ -363,6 +368,7 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
             temperature_c: d.temperature_c,
             power_w: d.power_w,
             clock_mhz: d.clock_mhz,
+            lower_bound: d.lower_bound,
         })
         .collect();
     super::common::group_memory(&mut g);

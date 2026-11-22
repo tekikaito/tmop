@@ -74,7 +74,8 @@ impl App {
                 readouts.push(("DISK", format!("{:.0}%", self.smooth.disk)));
             }
             if snap.gpu.available {
-                readouts.push(("GPU", format!("{:.0}%", self.smooth.gpu)));
+                // "≥" where some processes could not be read (the Performance card says why).
+                readouts.push(("GPU", format!("{}{:.0}%", snap.gpu.at_least(), self.smooth.gpu)));
             }
             let show_readouts = full.width() >= READOUTS_MIN_W;
             if show_readouts {
