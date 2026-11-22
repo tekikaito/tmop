@@ -165,6 +165,10 @@ impl App {
                     close = true;
                 }
                 close |= self.replace_menu_item(ui);
+                if crate::pro::inuse::AVAILABLE && kit::menu_item(ui, "Find what's using a file\u{2026}", None, false) {
+                    self.open_file_in_use();
+                    close = true;
+                }
                 let label = if self.popout_open { "Popout: On" } else { "Popout: Off" };
                 if kit::menu_item(ui, label, None, false) {
                     let open = !self.popout_open;
