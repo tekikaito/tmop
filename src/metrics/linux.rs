@@ -6,7 +6,8 @@
 //! * Memory: `/proc/meminfo`. Disk: `/proc/diskstats`, whole physical disks (`/sys/block`).
 //! * Network: `/sys/class/net/<if>/statistics`, up interfaces backed by a device.
 //! * GPU: amdgpu sysfs (`gpu_busy_percent`, `mem_info_vram_used`), Intel i915 / xe DRM client
-//!   stats in `/proc/<pid>/fdinfo` ([`super::intel_gpu`]) and NVIDIA NVML (`dlopen`).
+//!   stats in `/proc/<pid>/fdinfo` ([`super::drm_clients`], which also gives the Processes
+//!   column for Intel and amdgpu) and NVIDIA NVML (`dlopen`).
 //! * Thermal: hwmon (`k10temp`, `zenpower`, `coretemp` for the CPU) and `thermal_zone*`.
 //! * Uptime `/proc/uptime`, open files `/proc/sys/fs/file-nr`, threads `/proc/loadavg`.
 //!
@@ -148,8 +149,9 @@ pub struct Collector {
     sleepy: HashMap<PathBuf, (Instant, GpuDev)>,
     sleepy_temps: HashMap<PathBuf, (Instant, Vec<(String, f32)>)>,
     nvidia_last: Option<(Instant, Vec<GpuDev>)>,
-    /// Intel GPUs (i915, xe) from the DRM clients in `/proc/<pid>/fdinfo`.
-    intel: super::intel_gpu::IntelGpus,
+    /// The DRM clients in `/proc/<pid>/fdinfo`: Intel GPUs (i915, xe) and the Processes column
+    /// (Intel and amdgpu).
+    drm: super::drm_clients::DrmClients,
     procs: Enumerator,
 }
 
@@ -186,7 +188,7 @@ impl Collector {
             sleepy: HashMap::new(),
             sleepy_temps: HashMap::new(),
             nvidia_last: None,
-            intel: super::intel_gpu::IntelGpus::new("/"),
+            drm: super::drm_clients::DrmClients::new("/"),
             procs: Enumerator::new(),
         }
     }
@@ -202,19 +204,17 @@ impl Collector {
         }
         self.disk(&mut snap);
         self.network(&mut snap);
-        let intel = self.intel.read(Instant::now());
+        let drm = self.drm.read(Instant::now());
         let mut gpus = self.gpus();
-        gpus.extend(intel.devs);
+        gpus.extend(drm.devs);
         snap.gpu = procfs::fold_gpus(&gpus);
-        if gpus.iter().any(|d| d.partial) {
-            snap.gpu.note = Some(super::intel_gpu::PARTIAL_NOTE.to_string());
-        }
+        snap.gpu.note = super::drm_clients::note(&gpus).map(str::to_string);
         snap.thermal = self.thermal();
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));
         snap.thread_count = read("/proc/loadavg").and_then(|l| procfs::parse_loadavg_threads(&l)).unwrap_or(0);
         snap.process_count = fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).count()).unwrap_or(0);
-        // The GPU column: Intel clients only (amdgpu and NVML give no per-process figure here).
-        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &intel.by_pid) {
+        // The GPU column: Intel and amdgpu clients (NVML gives no per-process figure here).
+        let rows = match self.procs.collect(snap.cpu.logical_count.max(1), &drm.by_pid) {
             Ok((rows, _)) => rows,
             Err(e) => {
                 snap.errors.push(e);

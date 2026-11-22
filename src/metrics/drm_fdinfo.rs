@@ -1,14 +1,15 @@
 //! DRM client usage stats: the `drm-*` lines a DRM driver prints in `/proc/<pid>/fdinfo/<fd>` for
 //! an open GPU device, and the busy shares between two readings. Pure functions, so they are
-//! tested on every platform; the Linux reader is [`super::intel_gpu`].
+//! tested on every platform; the Linux reader is [`super::drm_clients`].
 //!
 //! The format is the kernel's "DRM client usage stats" (`Documentation/gpu/drm-usage-stats.rst`):
 //! * `drm-driver` names the driver; `drm-client-id` identifies one open `struct drm_file`, which
 //!   several descriptors and processes may share, unique per device (`drm-pdev`), so a client is
 //!   counted once per (device, client id).
-//! * `drm-engine-<e>: <n> ns` is the time the client kept engine class `e` busy (i915, since Linux
-//!   5.19). `drm-cycles-<e>` with `drm-total-cycles-<e>` are busy cycles and a GPU timestamp in the
-//!   same unit (xe, since 6.11): the share is computed in the GPU's clock, not the wall clock.
+//! * `drm-engine-<e>: <n> ns` is the time the client kept engine class `e` busy (i915 and amdgpu,
+//!   both since Linux 5.19; amdgpu prints an engine only once the client has used it).
+//!   `drm-cycles-<e>` with `drm-total-cycles-<e>` are busy cycles and a GPU timestamp in the same
+//!   unit (xe, since 6.11): the share is computed in the GPU's clock, not the wall clock.
 //! * `drm-engine-capacity-<e>` is how many identical engines the class has (1 when absent); the
 //!   busy figure is their sum, so the share is divided by it.
 //! * Counters need not be monotonic: a lower value than before means the previous one stands
@@ -178,8 +179,9 @@ pub struct DeviceBusy {
     /// (engine class key, %) for every class a current client reports, by key; summed over the
     /// clients and clamped to 0..=100.
     pub engines: Vec<(String, f32)>,
-    /// Each client's busiest class (%), by client id; only clients read both times.
-    pub clients: HashMap<u64, f32>,
+    /// Each client's (engine class key, %) shares, by client id; only clients read both times.
+    /// Not clamped: [`process_busy`] sums them per process first.
+    pub clients: HashMap<u64, Vec<(String, f64)>>,
     /// What to compare the next reading with.
     pub state: HashMap<u64, Client>,
 }
@@ -202,8 +204,7 @@ pub fn device_busy(prev: &HashMap<u64, Client>, cur: impl IntoIterator<Item = Cl
                 for (name, s) in &shares {
                     *sums.entry(name.clone()).or_insert(0.0) += s;
                 }
-                let top = shares.iter().map(|s| s.1).fold(0.0, f64::max);
-                out.clients.insert(c.id, top.clamp(0.0, 100.0) as f32);
+                out.clients.insert(c.id, shares);
                 c
             }
             None => c,
@@ -211,6 +212,28 @@ pub fn device_busy(prev: &HashMap<u64, Client>, cur: impl IntoIterator<Item = Cl
         out.state.insert(c.id, c);
     }
     out.engines = sums.into_iter().map(|(n, s)| (n, s.clamp(0.0, 100.0) as f32)).collect();
+    out
+}
+
+/// One client's share of one engine class: (pid, device id, engine class key, %).
+pub type ProcessShare = (u32, String, String, f64);
+
+/// The Processes column: per process, its clients' shares are added up per (device, engine
+/// class), as the device figure adds up all clients, and the busiest (device, engine class)
+/// counts, clamped to 100 %. So a process busy on two GPUs shows the busier one (two devices are
+/// not added up, as the system figure is the busiest GPU, not a sum), and one with two clients
+/// on the same engine of one GPU shows their sum.
+pub fn process_busy(shares: impl IntoIterator<Item = ProcessShare>) -> HashMap<u32, f32> {
+    let mut sums: HashMap<(u32, String, String), f64> = HashMap::new();
+    for (pid, dev, engine, v) in shares {
+        *sums.entry((pid, dev, engine)).or_insert(0.0) += v;
+    }
+    let mut out: HashMap<u32, f32> = HashMap::new();
+    for ((pid, _, _), v) in sums {
+        let v = v.clamp(0.0, 100.0) as f32;
+        let e = out.entry(pid).or_insert(0.0);
+        *e = e.max(v);
+    }
     out
 }
 
@@ -400,7 +423,7 @@ drm-engine-capacity-ccs:        4
         let prev: HashMap<u64, Client> = [(1, one(1, 0)), (2, one(2, 0))].into();
         let d = device_busy(&prev, [one(1, 2_000_000_000), one(2, 2_000_000_000)], 1_000_000_000);
         assert_eq!(d.engines, vec![("video".to_string(), 100.0)]);
-        assert_eq!((d.clients[&1], d.clients[&2]), (100.0, 100.0));
+        assert_eq!((d.clients[&1].clone(), d.clients[&2].clone()), (vec![("video".to_string(), 100.0)], vec![("video".to_string(), 100.0)]));
         // One client, one of the two engines busy: 50 %.
         let d = device_busy(&prev, [one(1, 1_000_000_000)], 1_000_000_000);
         assert_eq!(d.engines, vec![("video".to_string(), 50.0)]);
@@ -434,7 +457,7 @@ drm-engine-capacity-ccs:        4
         // A GPU timestamp that went back (xe) starts that engine afresh instead of stalling.
         let xe = |c: u64, t: u64| parse(&format!("drm-driver: xe\ndrm-client-id: 1\ndrm-cycles-rcs: {c}\ndrm-total-cycles-rcs: {t}\n")).unwrap();
         let d = device_busy(&[(1, xe(5_000, 1_000_000))].into(), [xe(10, 100)], 1);
-        assert!(d.clients[&1] == 0.0 && d.state[&1].engines["rcs"].total_cycles == Some(100));
+        assert!(d.clients[&1].is_empty() && d.state[&1].engines["rcs"].total_cycles == Some(100));
         let d = device_busy(&d.state, [xe(60, 200)], 1);
         assert_eq!(d.engines, vec![("rcs".to_string(), 50.0)]);
     }
@@ -475,5 +498,79 @@ drm-engine-capacity-ccs:        4
     #[test]
     fn engine_names_read_like_the_other_gpus() {
         assert_eq!(["render", "rcs", "copy", "bcs", "video", "vcs", "video-enhance", "vecs", "ccs", "other", "x"].map(intel_engine_name), ["Render", "Render", "Copy", "Copy", "Video", "Video", "Video enhance", "Video enhance", "Compute", "Other", "x"]);
+    }
+
+    /// An amdgpu client as `drm_show_fdinfo()` (`drivers/gpu/drm/drm_file.c`) and
+    /// `amdgpu_show_fdinfo()` (`drivers/gpu/drm/amd/amdgpu/amdgpu_fdinfo.c`) print it: their
+    /// format strings with made-up values (the kernel documents no amdgpu example). Memory via
+    /// `drm_print_memory_stats()` (sizes in KiB / MiB when divisible); an engine is printed only
+    /// once it has been used, here `gfx` and `dec`.
+    pub const AMDGPU_SRC: &str = "pos:\t0
+flags:\t02100002
+mnt_id:\t24
+ino:\t1066
+drm-driver:\tamdgpu
+drm-client-id:\t1042
+drm-pdev:\t0000:03:00.0
+pasid:\t32771
+drm-total-vram:\t188 MiB
+drm-shared-vram:\t0
+drm-resident-vram:\t188 MiB
+drm-purgeable-vram:\t0
+drm-total-gtt:\t2 MiB
+drm-shared-gtt:\t0
+drm-resident-gtt:\t2 MiB
+drm-purgeable-gtt:\t0
+drm-total-cpu:\t0
+drm-shared-cpu:\t0
+drm-resident-cpu:\t0
+drm-purgeable-cpu:\t0
+drm-memory-vram:\t192512 KiB
+drm-memory-gtt: \t2048 KiB
+drm-memory-cpu: \t0 KiB
+amd-evicted-vram:\t0 KiB
+amd-requested-vram:\t192512 KiB
+amd-requested-gtt:\t2048 KiB
+drm-engine-gfx:\t1563841002 ns
+drm-engine-dec:\t41188213 ns
+";
+
+    #[test]
+    fn amdgpu_source_format_parses() {
+        let c = parse(AMDGPU_SRC).unwrap();
+        assert_eq!((c.driver.as_str(), c.pdev.as_deref(), c.id), ("amdgpu", Some("0000:03:00.0"), 1042));
+        // No capacity key in amdgpu: 1. `pasid`, the legacy `drm-memory-*` and `amd-*` keys are
+        // not engines or regions.
+        assert_eq!(c.engines.keys().map(String::as_str).collect::<Vec<_>>(), ["dec", "gfx"]);
+        assert_eq!(c.engines["gfx"], eng(Some(1563841002), None, None, 1));
+        assert_eq!(c.regions.keys().map(String::as_str).collect::<Vec<_>>(), ["cpu", "gtt", "vram"]);
+        assert_eq!(c.regions["vram"].resident, Some(188 << 20));
+        // Half a second later: gfx busy 300 ms, dec idle, and `enc` printed for the first time.
+        let b = parse(&format!("{}\ndrm-engine-enc:\t9000000000 ns\n", with(AMDGPU_SRC, "drm-engine-gfx", 1563841002 + 300_000_000))).unwrap();
+        let d = device_busy(&[(1042, c)].into(), [b], 500_000_000);
+        let shares: BTreeMap<&str, f64> = d.clients[&1042].iter().map(|(k, v)| (k.as_str(), v.round())).collect();
+        // An engine seen for the first time has nothing to compare with: no spike from its total.
+        assert_eq!(shares, [("dec", 0.0), ("gfx", 60.0)].into());
+        assert_eq!(d.engines, [("dec".to_string(), 0.0), ("enc".into(), 0.0), ("gfx".into(), 60.0)]);
+    }
+
+    #[test]
+    fn a_process_counts_its_busiest_engine_on_its_busiest_gpu() {
+        let s = |pid: u32, dev: &str, e: &str, v: f64| (pid, dev.to_string(), e.to_string(), v);
+        let p = process_busy([
+            // Two clients of one process on the same engine of one GPU add up...
+            s(1, "card0", "gfx", 30.0),
+            s(1, "card0", "gfx", 25.0),
+            // ...different engines do not (they run side by side): the busiest counts.
+            s(1, "card0", "dec", 40.0),
+            // Hybrid laptop: busy on both GPUs, the busier one counts, not the sum.
+            s(2, "card0", "render", 30.0),
+            s(2, "card1", "gfx", 45.0),
+            // Never above 100 % (amdgpu has no capacity key for its several compute queues).
+            s(3, "card1", "compute", 180.0),
+            s(4, "card1", "gfx", 0.0),
+        ]);
+        assert_eq!(p, [(1, 55.0), (2, 45.0), (3, 100.0), (4, 0.0)].into());
+        assert!(process_busy([]).is_empty());
     }
 }

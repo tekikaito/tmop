@@ -247,6 +247,7 @@ showing zeros.
 | Processes: *Tree view* (parent and child processes) | ✔ | ✔ | ✔ |
 | Processes: *Run new task* | ✔ opens programs, documents and addresses like the Run dialog | ✔ programs, started without a shell | ✔ programs, started without a shell |
 | Processes: Network column (bytes per second per process) | ✔ as administrator | — | — |
+| Processes: GPU column | ✔ | Intel (i915, xe) and AMD (amdgpu, Linux 5.19 or newer), for the programs TMOP may read (without root your own); not NVIDIA | — |
 | Processes: *Set affinity…* (which processors a program may use) | ✔ (hidden with more than one processor group) | ✔ (all threads; others' processes need root) | — (no supported API) |
 | Processes: *Search online*, *Go to services* | ✔ | ✔ | ✔ |
 | Processes: *Properties*, *Create dump file* | ✔ | — | — |
