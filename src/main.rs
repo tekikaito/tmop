@@ -134,6 +134,11 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
     for p in top.iter().take(5) {
         writeln!(out, "  {:>6} {:<28} {:>10} KB  user {}", p.pid, p.name, p.private_working_set / 1024, opt(p.user.as_deref()))?;
     }
+    // The entries of the Processes page with Group by app, largest first.
+    let all: Vec<usize> = (0..procs.len()).collect();
+    let groups = tmop::process::group::groups(tmop::platform::OS, &procs, &all);
+    let largest: Vec<String> = groups.iter().take(8).map(|(i, n)| format!("{} ({}) {n}", procs[*i].name, procs[*i].pid)).collect();
+    writeln!(out, "Groups   {} by app, largest: {}", groups.len(), largest.join(", "))?;
     for e in &s.errors {
         writeln!(out, "error: {e}")?;
     }

@@ -11,6 +11,8 @@ use super::widgets::{self, Button, ButtonKind, ButtonSize, Dot, Icon};
 use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::pro::connections::{Conn, Proto};
+use crate::platform::{Os, OS};
+use crate::process::group as pgroup;
 use crate::process::highlight::{self, Highlights, Mark};
 use crate::process::tree::{self as ptree, TreeRow};
 use crate::process::{self, format_bytes, format_cpu_time, format_rate, Action, Column, Priority, ProcessRow, Status};
@@ -186,11 +188,7 @@ fn mark_app(i: usize, children: &HashMap<usize, Vec<usize>>, in_app: &mut [bool]
 
 /// Parent of row `i` among the processes in `by_pid` (the creation time must not precede the parent's).
 fn parent_in(rows: &[ProcessRow], by_pid: &HashMap<u32, usize>, i: usize) -> Option<usize> {
-    let r = &rows[i];
-    if r.pid == 0 || r.pid == 4 || r.parent_pid == r.pid {
-        return None;
-    }
-    by_pid.get(&r.parent_pid).copied().filter(|p| rows[*p].create_time <= r.create_time && rows[*p].pid != 0)
+    pgroup::real_parent(OS, rows, by_pid, i)
 }
 
 /// Sorts entries by `col`; an entry in `aggs` (a group) sorts by the totals it shows instead of its
@@ -245,9 +243,10 @@ impl Groups {
     }
 }
 
-/// Groups `visible`; rows from index `live` on are exited processes still listed, which add nothing
-/// to the totals (see [`agg_of`]).
-fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool, live: usize) -> Groups {
+/// Groups `visible` as on `os` (which links fold a process into a group: [`pgroup::group_parent`]);
+/// rows from index `live` on are exited processes still listed, which add nothing to the totals
+/// (see [`agg_of`]).
+fn group_rows(os: Os, rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, desc: bool, live: usize) -> Groups {
     // The first row with a PID wins: live rows come before exited ones (`Highlights::shown_rows`),
     // so the new holder of a reused PID is found, not the ghost.
     let mut by_pid: HashMap<u32, usize> = HashMap::with_capacity(visible.len());
@@ -258,12 +257,11 @@ fn group_rows(rows: &[ProcessRow], visible: &[usize], tree: bool, col: Column, d
     let mut is_child = vec![false; rows.len()];
     if tree {
         for &i in visible {
-            if let Some(p) = parent_in(rows, &by_pid, i) {
-                // Windowed processes always start their own app entry.
-                if !rows[i].has_window {
-                    children.entry(p).or_default().push(i);
-                    is_child[i] = true;
-                }
+            // Windowed processes always start their own app entry; off Windows so do the
+            // processes the init system or a service manager started.
+            if let Some(p) = pgroup::group_parent(os, rows, &by_pid, i) {
+                children.entry(p).or_default().push(i);
+                is_child[i] = true;
             }
         }
     }
@@ -749,7 +747,7 @@ impl App {
         let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], &f)).collect();
         let (col, desc) = self.sort;
         let tree = tree_on && !tree_view && f.is_empty();
-        let all = group_rows(rows, &visible, tree, col, desc, live_n);
+        let all = group_rows(OS, rows, &visible, tree, col, desc, live_n);
         let view = self.proc.view.min(VIEWS.len() - 1);
         // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
         // Exited processes still listed are not counted.
@@ -776,7 +774,7 @@ impl App {
         };
         let (groups, sub_roots): (&Groups, Vec<usize>) = if view >= 3 && !tree_view {
             let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
-            subset = group_rows(rows, &ids, tree, col, desc, live_n);
+            subset = group_rows(OS, rows, &ids, tree, col, desc, live_n);
             let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
             sort_entries(&mut roots, rows, &subset.aggs, col, desc);
             (&subset, roots)
@@ -1666,25 +1664,20 @@ fn proto_text(c: &Conn) -> &'static str {
     }
 }
 
-/// The app a process belongs to (the windowed ancestor, or the top of its tree) and how many
-/// processes it has.
+/// The app a process belongs to (its group in *Group by app*: the windowed ancestor, or the top of
+/// its group) and how many processes it has.
 fn app_group(rows: &[ProcessRow], by_pid: &HashMap<u32, usize>, i: usize) -> (String, usize) {
     let mut root = i;
     for _ in 0..32 {
-        if rows[root].has_window {
-            break;
-        }
-        match parent_in(rows, by_pid, root) {
+        match pgroup::group_parent(OS, rows, by_pid, root) {
             Some(p) => root = p,
             None => break,
         }
     }
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (k, r) in rows.iter().enumerate() {
-        if !r.has_window {
-            if let Some(p) = parent_in(rows, by_pid, k) {
-                children.entry(p).or_default().push(k);
-            }
+    for k in 0..rows.len() {
+        if let Some(p) = pgroup::group_parent(OS, rows, by_pid, k) {
+            children.entry(p).or_default().push(k);
         }
     }
     let mut members = Vec::new();
@@ -2447,7 +2440,7 @@ mod tests {
         a.has_window = true;
         let rows = vec![row(1, 0, 1, "explorer.exe"), a, row(11, 10, 6, "chrome.exe"), row(12, 11, 7, "chrome.exe"), row(20, 1, 8, "svc.exe")];
         let visible: Vec<usize> = (0..rows.len()).collect();
-        let g = group_rows(&rows, &visible, true, Column::Pid, false, rows.len());
+        let g = group_rows(Os::Windows, &rows, &visible, true, Column::Pid, false, rows.len());
         assert_eq!(g.apps, vec![1]);
         assert_eq!(g.children[&1], vec![2]);
         assert_eq!(g.bg, vec![0]);
@@ -2457,10 +2450,59 @@ mod tests {
         let mut members = Vec::new();
         members_of(1, &g.children, &mut members, 0);
         assert_eq!(members, vec![1, 2, 3]);
-        let flat = group_rows(&rows, &visible, false, Column::Pid, false, rows.len());
+        let flat = group_rows(Os::Windows, &rows, &visible, false, Column::Pid, false, rows.len());
         assert_eq!(flat.apps, vec![1]);
         assert_eq!(flat.bg.len(), 4);
         assert_eq!(flat.live_procs(&visible, rows.len()), (1, 4));
+    }
+
+    /// Linux: the processes started by init or the user manager head groups of their own, and what
+    /// a group row totals is what End task tree on that row would end (its real process tree).
+    #[test]
+    fn linux_groups_start_below_init_and_match_end_task_tree() {
+        let busy = |mut r: ProcessRow, cpu: f32| {
+            r.cpu_pct = cpu;
+            r.private_working_set = 1000;
+            r
+        };
+        let rows = vec![
+            row(1, 0, 1, "systemd"),
+            row(2, 0, 1, "kthreadd"),
+            row(4, 2, 1, "kworker/R-rcu_gp"),
+            row(5, 2, 1, "kworker/0:0"),
+            busy(row(500, 1, 20, "sshd"), 0.5),
+            busy(row(900, 500, 90, "sshd"), 1.0),
+            busy(row(906, 900, 92, "bash"), 2.0),
+            busy(row(700, 1, 40, "containerd-shim-runc-v2"), 0.1),
+            busy(row(710, 700, 41, "nginx"), 3.0),
+            row(1500, 1, 50, "systemd"),
+            busy(row(1510, 1500, 51, "pipewire"), 4.0),
+        ];
+        let visible: Vec<usize> = (0..rows.len()).collect();
+        let g = group_rows(Os::Linux, &rows, &visible, true, Column::Pid, false, rows.len());
+        let heads: Vec<&str> = g.bg.iter().map(|i| rows[*i].name.as_str()).collect();
+        assert_eq!(heads, ["systemd", "kthreadd", "sshd", "containerd-shim-runc-v2", "systemd", "pipewire"]);
+        assert!(g.apps.is_empty());
+        for &head in &g.bg {
+            let mut members = Vec::new();
+            members_of(head, &g.children, &mut members, 0);
+            let mut pids: Vec<u32> = members.iter().map(|i| rows[*i].pid).collect();
+            let a = agg_of(head, &rows, rows.len(), &g.children, 0);
+            assert_eq!(a.cpu, members.iter().map(|i| rows[*i].cpu_pct).sum::<f32>());
+            // The launchers are rows of their own; End task tree on them reaches further (its
+            // dialog names the count), so the comparison holds for the other groups.
+            if pgroup::is_launcher(Os::Linux, &rows[head]) {
+                assert_eq!(members.len(), 1);
+                continue;
+            }
+            let mut tree = process::tree_of(&rows, rows[head].pid);
+            pids.sort();
+            tree.sort();
+            assert_eq!(pids, tree, "{}", rows[head].name);
+        }
+        // The same table grouped as on Windows: init takes everything but the kernel threads.
+        let w = group_rows(Os::Windows, &rows, &visible, true, Column::Pid, false, rows.len());
+        assert_eq!(w.bg.iter().map(|i| rows[*i].pid).collect::<Vec<_>>(), [1, 2, 4]);
     }
 
     #[test]
@@ -2477,13 +2519,13 @@ mod tests {
         let rows = vec![host, child, lone];
         let visible = vec![0, 1, 2];
         for col in [Column::Cpu, Column::Disk, Column::DiskRead] {
-            let g = group_rows(&rows, &visible, true, col, true, rows.len());
+            let g = group_rows(Os::Windows, &rows, &visible, true, col, true, rows.len());
             assert_eq!(g.bg, vec![0, 2], "{col:?} descending");
-            let g = group_rows(&rows, &visible, true, col, false, rows.len());
+            let g = group_rows(Os::Windows, &rows, &visible, true, col, false, rows.len());
             assert_eq!(g.bg, vec![2, 0], "{col:?} ascending");
         }
         // Without grouping each process sorts by its own value.
-        let flat = group_rows(&rows, &visible, false, Column::Cpu, true, rows.len());
+        let flat = group_rows(Os::Windows, &rows, &visible, false, Column::Cpu, true, rows.len());
         assert_eq!(flat.bg, vec![1, 2, 0]);
     }
 
@@ -2501,7 +2543,7 @@ mod tests {
         let key = |i: usize| (rows[i].pid, rows[i].create_time);
         let listed = |b: &Built, i: usize| row_listed(&b.entries, &rows, key(i));
         let build = |tree: bool, expanded: &HashSet<(u32, i64)>| {
-            let g = group_rows(&rows, &visible, tree, Column::Pid, false, rows.len());
+            let g = group_rows(Os::Windows, &rows, &visible, tree, Column::Pid, false, rows.len());
             let show_all = HashSet::new();
             let t = TreeCtx { rows: &rows, children: &g.children, expanded, show_all: &show_all, live: rows.len() };
             let mut b = Built::default();
@@ -2562,7 +2604,7 @@ mod tests {
         assert!(action_target(&live, None).is_none());
         // Shortcuts, in the flat list where every row (ghosts included) is a line.
         let visible: Vec<usize> = (0..shown.len()).collect();
-        let g = group_rows(&shown, &visible, false, Column::Pid, false, live.len());
+        let g = group_rows(Os::Windows, &shown, &visible, false, Column::Pid, false, live.len());
         let (show_all, expanded) = (HashSet::new(), HashSet::new());
         let t = TreeCtx { rows: &shown, children: &g.children, expanded: &expanded, show_all: &show_all, live: live.len() };
         let mut b = Built::default();
@@ -2597,7 +2639,7 @@ mod tests {
         let shown = h.shown_rows(&live);
         let at = |k: (u32, i64)| shown.iter().position(|r| (r.pid, r.create_time) == k).unwrap();
         let visible: Vec<usize> = (0..shown.len()).collect();
-        let g = group_rows(&shown, &visible, true, Column::Pid, false, live.len());
+        let g = group_rows(Os::Windows, &shown, &visible, true, Column::Pid, false, live.len());
         assert_eq!(g.apps, vec![at((10, 5))]);
         assert_eq!(g.children[&at((10, 5))], vec![at((11, 6)), at((12, 7))], "the exited child stays in its app");
         let under_init = &g.children[&at((1, 1))];
@@ -2612,7 +2654,7 @@ mod tests {
         let live = vec![row(1, 0, 1, "init"), row(31, 30, 4, "worker")];
         h.observe(2, &live, t0, hold);
         let shown = h.shown_rows(&live);
-        let g = group_rows(&shown, &(0..shown.len()).collect::<Vec<_>>(), true, Column::Pid, false, live.len());
+        let g = group_rows(Os::Windows, &shown, &(0..shown.len()).collect::<Vec<_>>(), true, Column::Pid, false, live.len());
         assert_eq!(g.children.get(&2), Some(&vec![1]), "worker under its exited host");
     }
 
@@ -2640,7 +2682,7 @@ mod tests {
         let shown = h.shown_rows(&live);
         let at = |k: (u32, i64)| shown.iter().position(|r| (r.pid, r.create_time) == k).unwrap();
         let visible: Vec<usize> = (0..shown.len()).collect();
-        let g = group_rows(&shown, &visible, true, Column::Cpu, true, live.len());
+        let g = group_rows(Os::Windows, &shown, &visible, true, Column::Cpu, true, live.len());
         let a = g.aggs[&at((10, 5))];
         assert_eq!((a.cpu, a.mem, a.read), (3.0, 300, 2e6), "app + child, not the exited 50 %");
         let host = g.aggs[&at((30, 8))];
@@ -2664,7 +2706,7 @@ mod tests {
         let csv = csv_of(&shown, live.len(), &b.entries, &b.agg, &cols, false, 4, false, "");
         assert_eq!(csv, format!("Name,CPU,Memory\r\napp.exe,3.0%,{}\r\n", format_bytes(300.0)));
         // With every row live the same group totals everything.
-        let g = group_rows(&shown, &visible, true, Column::Cpu, true, shown.len());
+        let g = group_rows(Os::Windows, &shown, &visible, true, Column::Cpu, true, shown.len());
         assert_eq!(g.aggs[&at((10, 5))].cpu, 53.0);
     }
 
@@ -2719,7 +2761,7 @@ mod tests {
             rows.push(row(11 + k, 10, 6 + k as i64, "child.exe"));
         }
         let visible: Vec<usize> = (0..rows.len()).collect();
-        let g = group_rows(&rows, &visible, true, Column::Pid, false, rows.len());
+        let g = group_rows(Os::Windows, &rows, &visible, true, Column::Pid, false, rows.len());
         let mut expanded = HashSet::new();
         expanded.insert((10, 5));
         let mut show_all = HashSet::new();
