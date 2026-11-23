@@ -29,9 +29,6 @@ impl App {
         }
         let s = fd.snap;
         let fastest = fastest_core(&s.cpu.per_core_mhz);
-        if let Some((_, mhz)) = fastest {
-            self.pro.power_fastest.push(s.seq, mhz as f32, fd.hist.clock.capacity);
-        }
         let max = s.cpu.max_mhz.unwrap_or(0) as f32;
         let base = s.cpu.base_mhz.or(s.cpu.max_mhz).unwrap_or(0) as f32;
         let cur = fd.smooth.clock;
@@ -219,7 +216,7 @@ impl App {
             empty_state(&p, content, &pal, "Collecting samples\u{2026}");
             return;
         }
-        let fastest = self.pro.power_fastest.series();
+        let fastest = Some(&fd.hist.clock_max).filter(|s| s.max() > 0.0);
         let hi = fd.hist.clock.max().max(fastest.map_or(0.0, |s| s.max())).max(base).max(1000.0);
         let step = if hi > 7000.0 { 2000.0 } else { 1000.0 };
         let top = widgets::eased(ui.ctx(), "power-top", (hi / step).ceil() * step);
