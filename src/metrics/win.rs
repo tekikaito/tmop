@@ -5,7 +5,7 @@ use super::common::{cpu_brand, deci_celsius, descriptor_text, disk_deltas, disk_
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
@@ -190,8 +190,9 @@ pub struct Collector {
     /// Registry `~MHz` of CPU 0 (read once).
     reg_mhz: Option<u32>,
     hwinfo: HwinfoCache,
-    /// The GPUs DXGI listed, and when.
-    dxgi: Option<(Instant, Vec<KnownAdapter>)>,
+    /// The GPUs DXGI listed, and when, with the ids of those driving a display and whether the
+    /// machine has a battery (both for [`wddm_poll`]).
+    dxgi: Option<(Instant, Vec<KnownAdapter>, HashSet<String>, bool)>,
     /// Only while [`gpu_detail`] is on; the inner `None` means it could not be opened.
     gpu_detail_pdh: Option<Option<Pdh>>,
     nvml: Option<Option<Nvml>>,
@@ -453,8 +454,8 @@ const DXGI_PERIOD: Duration = Duration::from_secs(30);
 /// The main temperature the driver of the GPU with LUID (`high`, `low`) reports to Windows:
 /// `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)`, WDDM 2.4 and later, what Task Manager shows
 /// as "GPU Temperature". Needs no elevation. None when the driver reports none (0) or the query
-/// fails (older drivers). Called only for a GPU at work ([`wddm_poll`]): the documentation does
-/// not say whether opening and asking an adapter wakes one that is powered down.
+/// fails (older drivers). Called only when [`wddm_poll`] says so: the documentation does not say
+/// whether opening and asking an adapter wakes one that is powered down.
 fn wddm_temperature(high: i32, low: u32) -> Option<f32> {
     use windows::Wdk::Graphics::Direct3D::{
         D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
@@ -551,7 +552,8 @@ impl Collector {
     fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)], gpu_shared: Option<Vec<(String, f64)>>) {
         // Re-listed now and then: LUIDs change with a driver reset or an eGPU.
         if self.dxgi.as_ref().is_none_or(|d| d.0.elapsed() >= DXGI_PERIOD) {
-            self.dxgi = Some((Instant::now(), dxgi_adapters()));
+            let (listed, displays) = dxgi_adapters();
+            self.dxgi = Some((Instant::now(), listed, displays, has_battery()));
         }
         let detail = gpu_detail();
         if !detail {
@@ -595,9 +597,12 @@ impl Collector {
         // only of a GPU at work, see `wddm_poll`), then HWiNFO by name.
         let now = Instant::now();
         self.wddm_temps.retain(|id, _| adapters.iter().any(|a| a.id == *id));
+        // Both refreshed with the GPU list (every DXGI_PERIOD); unknown counts as a laptop.
+        let (displays, battery) = self.dxgi.as_ref().map_or((None, true), |d| (Some(&d.2), d.3));
         for a in &mut adapters {
             let last = self.wddm_temps.get(&a.id).copied();
-            let reading = match wddm_poll(&a.engines, last.map(|l| now.saturating_duration_since(l.0))) {
+            let drives_display = displays.is_some_and(|d| d.contains(&a.id));
+            let reading = match wddm_poll(&a.engines, battery, drives_display, last.map(|l| now.saturating_duration_since(l.0))) {
                 TempPoll::Ask => {
                     let c = parse_luid(&a.id).and_then(|(high, low)| wddm_temperature(high, low));
                     match c {
@@ -939,15 +944,17 @@ fn process_memory(dedicated: &[(String, f64)], shared: &[(String, f64)]) -> Hash
     out
 }
 
-/// The hardware GPUs DXGI lists, in its order. Its software rasteriser (WARP) and Microsoft's
-/// virtual adapters are not GPUs a user would look for.
-fn dxgi_adapters() -> Vec<KnownAdapter> {
+/// The hardware GPUs DXGI lists, in its order, and the ids of those with an output (a display)
+/// attached: `IDXGIAdapter::EnumOutputs(0)` succeeds. Its software rasteriser (WARP) and
+/// Microsoft's virtual adapters are not GPUs a user would look for.
+fn dxgi_adapters() -> (Vec<KnownAdapter>, HashSet<String>) {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
     const VENDOR_MICROSOFT: u32 = 0x1414;
     // SAFETY: plain COM creation and queries; the adapter description is a value.
     unsafe {
-        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return Vec::new() };
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return (Vec::new(), HashSet::new()) };
         let mut out = Vec::new();
+        let mut displays = HashSet::new();
         // Read once, when there is a GPU to look up.
         let mut drivers: Option<Vec<(String, u64)>> = None;
         for i in 0.. {
@@ -962,10 +969,24 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
             let dedicated = d.DedicatedVideoMemory as u64;
             let drivers = drivers.get_or_insert_with(display_driver_memory);
             let total = super::common::physical_vram(&name, dedicated, drivers).unwrap_or(dedicated);
+            // Output 0 is the first one; the returned interface is released when dropped.
+            if adapter.EnumOutputs(0).is_ok() {
+                displays.insert(id.clone());
+            }
             out.push((id, name, Some(total), Some(d.SharedSystemMemory as u64)));
         }
-        out
+        (out, displays)
     }
+}
+
+/// Whether this machine has a system battery: `GetSystemPowerStatus` `BatteryFlag` is not 128
+/// ("No system battery"). Unknown (255) counts as a battery, so an unreadable status never
+/// lets TMOP ask an idle laptop GPU.
+fn has_battery() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut st = SYSTEM_POWER_STATUS::default();
+    // SAFETY: writes the struct passed.
+    unsafe { GetSystemPowerStatus(&mut st) }.is_err() || st.BatteryFlag != 128
 }
 
 /// (driver name, physical memory size) of each display driver, from the display adapter class in
@@ -1024,13 +1045,30 @@ mod tests {
     /// temperature or none. Prints what this machine reports (`--nocapture`).
     #[test]
     fn wddm_temperature_of_each_listed_gpu() {
-        for (id, name, _, _) in dxgi_adapters() {
+        for (id, name, _, _) in dxgi_adapters().0 {
             let (high, low) = parse_luid(&id).expect("DXGI ids carry the LUID");
             let t = wddm_temperature(high, low);
             println!("{id} {name}: {t:?}");
             assert!(t.is_none_or(|c| c > 0.0 && c <= 200.0), "{t:?}");
         }
         assert_eq!(wddm_temperature(-1, 0xffff_fff0), None, "no such adapter");
+    }
+
+    /// The collector as the app runs it (GPU detail and so NVML off): every GPU's temperature is
+    /// WDDM's or none, never another source's, and a plausible figure. Prints what this machine
+    /// reports and why (`--nocapture`).
+    #[test]
+    fn collector_gpu_temperatures_without_nvml() {
+        let (listed, displays) = dxgi_adapters();
+        println!("battery {} displays {displays:?} of {:?}", has_battery(), listed.iter().map(|k| &k.0).collect::<Vec<_>>());
+        let mut c = Collector::new();
+        let _ = c.collect();
+        let (snap, _) = c.collect();
+        for a in &snap.gpu.adapters {
+            println!("{} {}: {:?}", a.id, a.name, a.temps);
+            assert!(a.temps.iter().all(|t| t.source == "WDDM" || t.source == "HWiNFO"), "{:?}", a.temps);
+            assert!(a.temps.iter().all(|t| t.c > 0.0 && t.c <= 200.0));
+        }
     }
 
     #[test]

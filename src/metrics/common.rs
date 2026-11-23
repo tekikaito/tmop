@@ -409,11 +409,13 @@ pub enum TempPoll {
 }
 
 /// Microsoft's documentation does not say whether asking an adapter for its performance data
-/// powers it up, so an adapter is asked only while this sample shows it at work (an engine above
-/// 0 %), when it is powered anyway. An idle one keeps its last reading for [`WDDM_TEMP_HOLD`],
-/// then shows none: a hybrid laptop's discrete GPU stays free to power down.
-pub fn wddm_poll(engines: &[(String, f32)], last_age: Option<std::time::Duration>) -> TempPoll {
-    if engines.iter().any(|e| e.1 > 0.0) {
+/// powers it up. Only a GPU that can power down is at stake: the idle discrete GPU of a
+/// battery-powered (hybrid) laptop. So an adapter is asked when any of these holds: this sample
+/// shows it at work (an engine above 0 %); the machine has no battery (a desktop); or it drives a
+/// display (an attached output: a GPU scanning out to a monitor is powered). Otherwise it keeps its
+/// last reading for [`WDDM_TEMP_HOLD`], then shows none, and is not opened.
+pub fn wddm_poll(engines: &[(String, f32)], has_battery: bool, drives_display: bool, last_age: Option<std::time::Duration>) -> TempPoll {
+    if engines.iter().any(|e| e.1 > 0.0) || !has_battery || drives_display {
         TempPoll::Ask
     } else if last_age.is_some_and(|a| a <= WDDM_TEMP_HOLD) {
         TempPoll::Keep
@@ -740,13 +742,18 @@ mod tests {
         let busy = [("3D".to_string(), 0.0), ("Copy".to_string(), 0.4)];
         let idle = [("3D".to_string(), 0.0), ("Copy".to_string(), 0.0)];
         let s = Duration::from_secs;
-        assert_eq!(wddm_poll(&busy, None), TempPoll::Ask);
-        assert_eq!(wddm_poll(&busy, Some(s(1))), TempPoll::Ask);
-        assert_eq!(wddm_poll(&idle, Some(s(1))), TempPoll::Keep);
-        assert_eq!(wddm_poll(&idle, Some(WDDM_TEMP_HOLD)), TempPoll::Keep);
-        assert_eq!(wddm_poll(&idle, Some(WDDM_TEMP_HOLD + s(1))), TempPoll::Drop);
-        assert_eq!(wddm_poll(&idle, None), TempPoll::Drop, "never asked: no reading, no handle opened");
-        assert_eq!(wddm_poll(&[], None), TempPoll::Drop);
+        // Any one reason to ask is enough, whatever the last reading: (engines, battery, display).
+        for (engines, battery, display) in [(&busy, true, false), (&busy, false, true), (&idle, false, false), (&idle, true, true), (&idle, false, true)] {
+            for last in [None, Some(s(1)), Some(WDDM_TEMP_HOLD + s(1))] {
+                assert_eq!(wddm_poll(engines, battery, display, last), TempPoll::Ask, "{engines:?} battery {battery} display {display} {last:?}");
+            }
+        }
+        // The one case left alone: a laptop (battery), the GPU idle and driving no display.
+        assert_eq!(wddm_poll(&idle, true, false, Some(s(1))), TempPoll::Keep);
+        assert_eq!(wddm_poll(&idle, true, false, Some(WDDM_TEMP_HOLD)), TempPoll::Keep);
+        assert_eq!(wddm_poll(&idle, true, false, Some(WDDM_TEMP_HOLD + s(1))), TempPoll::Drop);
+        assert_eq!(wddm_poll(&idle, true, false, None), TempPoll::Drop, "never asked: no reading, no handle opened");
+        assert_eq!(wddm_poll(&[], true, false, None), TempPoll::Drop);
     }
 
     #[test]

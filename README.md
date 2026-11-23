@@ -260,7 +260,7 @@ showing zeros.
 | Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; Intel (i915 from Linux 5.19, xe from 6.11) with engines, counted from the programs TMOP may read (without root your own, where the desktop, browsers and games run; as root all of them) | Usage and memory, no engines |
 | Clock speeds | ✔ | ✔ | Intel Macs; none on Apple Silicon |
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
-| GPU temperature (*Performance → GPU*, *Thermals*) | GPU temperature where the graphics driver reports one to Windows (WDDM 2.4 or newer, the figure Task Manager shows), asked only while the card is at work so an idle laptop GPU can power down (an idle card keeps its last reading for 30 s, then shows none); NVIDIA also through NVML while the GPU detail is open; hot spot and memory (junction) temperatures only from HWiNFO with *Shared Memory Support* on | AMD (amdgpu: GPU, hot spot, memory), Intel (xe: GPU package and memory; i915: GPU package, on cards that report it), NVIDIA (NVML: GPU) | — |
+| GPU temperature (*Performance → GPU*, *Thermals*) | GPU temperature where the graphics driver reports one to Windows (WDDM 2.4 or newer, the figure Task Manager shows) (on a laptop, not while the card is idle and drives no display); NVIDIA also through NVML while the GPU detail is open; hot spot and memory (junction) temperatures only from HWiNFO with *Shared Memory Support* on | AMD (amdgpu: GPU, hot spot, memory), Intel (xe: GPU package and memory; i915: GPU package, on cards that report it), NVIDIA (NVML: GPU) | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
 | Processes: end task, end tree, suspend, priority | ✔ | ✔ (raising priority needs root; no *Realtime*) | ✔ (no *Realtime*) |
 | Processes: *Tree view* (parent and child processes) | ✔ | ✔ | ✔ |
@@ -394,8 +394,9 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   to run beside PawnIO. TMOP also reads HWiNFO's sensors when *Shared Memory Support* is on there.
   The PawnIO modules TMOP carries are LGPL-2.1-or-later (licence and source in `assets/pawnio`).
 - **GPU temperature on Windows:** TMOP shows the temperature the graphics driver reports to
-  Windows, without administrator rights, while the card is at work (an idle card is not asked, so
-  a laptop's graphics card can power down). Hot spot and memory junction temperatures are not part
+  Windows, without administrator rights. On a laptop (a PC with a battery) a graphics card that
+  is idle and drives no display is not asked, so it can power down; it shows its last reading for
+  30 s, then none. Hot spot and memory junction temperatures are not part
   of that report; TMOP shows them when HWiNFO runs with *Shared Memory Support* on.
 - Otherwise, run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
   owners, protected folders, on Linux the Intel graphics usage of other users' programs) need root or, on macOS, *Full Disk Access*; TMOP says so where it

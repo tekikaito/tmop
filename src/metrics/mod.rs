@@ -19,8 +19,8 @@
 //! * Network: `GetIfTable2` octet deltas.
 //! * GPU: PDH `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage`.
 //!   GPU temperature: NVML while it is open, else the driver's report to Windows
-//!   (`D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` by LUID, asked only of a GPU whose
-//!   engines show work this sample, the last reading kept 30 s after); hot spot and memory
+//!   (`D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` by LUID; on a machine with a battery
+//!   an idle GPU driving no display is not asked, see `common::wddm_poll`); hot spot and memory
 //!   temperatures from HWiNFO's shared memory when it runs, matched to a GPU by name.
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin); CPU
 //!   temperature from the PawnIO driver when switched on in Settings ([`pawnio`]), else from
