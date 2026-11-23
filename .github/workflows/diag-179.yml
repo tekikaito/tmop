@@ -21,21 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - { name: loop-test, mode: loop, load: 'no' }
+          - { name: loop-test-load, mode: loop, load: 'yes' }
           - { name: stubborn, mode: stubborn }
-          - { name: old-close, mode: old }
     steps:
       - uses: actions/checkout@v7
-      # The new tests against the close shipped in main (the app-exit test needs the new API,
-      # so it is cut out, and the UI files that call the new API are taken from main too).
-      - name: Old close
-        if: matrix.mode == 'old'
-        run: |
-          git fetch --depth 1 origin main
-          awk '/^\/\/\/ The app-exit path/{skip=1} /^\/\/\/ Waits up to 10 seconds/{skip=0} !skip' tests/docker_exec.rs > "$RUNNER_TEMP/docker_exec.rs"
-          git checkout FETCH_HEAD -- .
-          rm -f tests/docker_exec_diag.rs
-          cp "$RUNNER_TEMP/docker_exec.rs" tests/docker_exec.rs
-          git diff --stat
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -43,19 +33,37 @@ jobs:
           save-if: false
       - name: Build tests
         run: |
-          cargo test --locked --test docker_exec $( [ -f tests/docker_exec_diag.rs ] && echo --test docker_exec_diag ) --test docker_files --no-run --message-format=json > build.json || { jq -r 'select(.reason == "compiler-message") | .message.rendered' build.json; exit 1; }
+          cargo test --locked --test docker_exec --test docker_exec_diag --test docker_files --no-run --message-format=json > build.json || { jq -r 'select(.reason == "compiler-message") | .message.rendered' build.json; exit 1; }
           for t in docker_exec docker_exec_diag docker_files; do
             echo "BIN_$t=$(jq -r --arg t $t 'select(.profile.test == true and .target.name == $t) | .executable' build.json)" >> "$GITHUB_ENV"
           done
-      - name: New tests on the old close
-        if: matrix.mode == 'old'
+      # The closing tests alone (no load), or the whole docker_exec suite on 8 threads with
+      # every core busy and the docker_files suite looping beside it. Fails on any failure.
+      - name: Loop the tests
+        if: matrix.mode == 'loop'
         run: |
-          "$BIN_docker_exec" clos --test-threads 1 --nocapture 2>&1 | grep -vE '^\s*$' || true
+          bin=$BIN_docker_exec
+          if [ "${{ matrix.load }}" = yes ]; then
+            for _ in $(seq $(nproc)); do (while :; do :; done) & done
+            other=$BIN_docker_files
+            (while :; do "$other" >/dev/null 2>&1; done) &
+          fi
+          fail=0
+          for i in $(seq 300); do
+            if [ "${{ matrix.load }}" = yes ]; then
+              out=$("$bin" --test-threads 8 2>&1) || { fail=$((fail+1)); echo "FAIL run $i"; echo "$out" | grep -A14 'stdout ----'; }
+            else
+              out=$("$bin" clos 2>&1) || { fail=$((fail+1)); echo "FAIL run $i"; echo "$out" | grep -A14 'stdout ----'; }
+            fi
+          done
+          echo "$out" | grep '^test ' | sort
+          echo "LOOP SUMMARY load=${{ matrix.load }} runs=300 failures=$fail"
+          docker ps -a --filter name=tmop-test- --format '{{.Names}}' | xargs -r docker rm -f
+          [ "$fail" -eq 0 ]
       - name: Stubborn scenario
         if: matrix.mode == 'stubborn'
         run: |
-          docker version --format 'server {{.Server.Version}}'
-          for m in product traced init leaf orphan; do
-            DIAG_STUBBORN=$m DIAG_ITERS=10 "$BIN_docker_exec_diag" diag_stubborn --nocapture 2>&1 | grep --line-buffered -E '^DIAG|panicked' || true
+          for m in product traced init; do
+            DIAG_STUBBORN=$m DIAG_ITERS=50 "$BIN_docker_exec_diag" diag_stubborn --nocapture 2>&1 | grep --line-buffered -E '^DIAG SUMMARY|trace|panicked' || true
           done
           docker ps -a --filter name=tmop-test- --format '{{.Names}}' | xargs -r docker rm -f
