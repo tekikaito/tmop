@@ -29,12 +29,17 @@ jobs:
             load: 'yes'
           - { name: diag-product-1, mode: diag, variants: 'product:300:1' }
           - { name: diag-product-4, mode: diag, variants: 'product:300:4' }
-          - { name: diag-drop-ctrl-d, mode: diag, variants: 'drop:20:1 ctrl_d:100:1' }
-          - { name: diag-ctrl-c-d, mode: diag, variants: 'ctrl_c_d:300:1' }
-          - { name: diag-ctrl-c-d-4, mode: diag, variants: 'ctrl_c_d:300:4' }
-          - { name: diag-ctrl-c-wait-d, mode: diag, variants: 'ctrl_c_wait_d:300:1' }
+          - { name: old-close, mode: old }
     steps:
       - uses: actions/checkout@v7
+      # The new tests against the close shipped in main (the app-exit test needs the new API).
+      - name: Old close
+        if: matrix.mode == 'old'
+        run: |
+          git fetch --depth 1 origin main
+          git show FETCH_HEAD:src/docker/exec.rs > src/docker/exec.rs
+          awk '/^\/\/\/ The app-exit path/{skip=1} /^\/\/\/ Waits up to 10 seconds/{skip=0} !skip' tests/docker_exec.rs > t && mv t tests/docker_exec.rs
+          git diff --stat
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -62,11 +67,15 @@ jobs:
               # The whole docker_exec suite in parallel, as in CI, on a busy machine.
               out=$("$bin" --test-threads 8 2>&1) || { fail=$((fail+1)); echo "FAIL run $i"; echo "$out" | grep -A12 'stdout ----'; }
             else
-              out=$("$bin" closing_the_session_ends_the_shell --exact 2>&1) || { fail=$((fail+1)); echo "FAIL run $i"; echo "$out" | grep -A12 'stdout ----'; }
+              out=$("$bin" clos 2>&1) || { fail=$((fail+1)); echo "FAIL run $i"; echo "$out" | grep -A12 'stdout ----'; }
             fi
           done
           echo "LOOP SUMMARY load=${{ matrix.load }} runs=300 failures=$fail"
           docker ps -a --filter name=tmop-test- --format '{{.Names}}' | xargs -r docker rm -f
+      - name: New tests on the old close
+        if: matrix.mode == 'old'
+        run: |
+          "$BIN_docker_exec" clos --test-threads 1 --nocapture 2>&1 | grep -E '^test |session processes|still running|took|panicked|^    [0-9]+ |test result' || true
       - name: Diagnostics
         if: matrix.mode == 'diag'
         run: |
