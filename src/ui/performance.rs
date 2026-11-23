@@ -715,7 +715,7 @@ impl App {
             Device::Network => {
                 let c = fd.metric("network");
                 let (num, unit) = if s.net_known() { split_unit(&format_rate(s.network.rx_bps + s.network.tx_bps)) } else { ("\u{2014}".to_string(), String::new()) };
-                let hd = Head { title: "Network", sub: SOURCES.network.into(), value: (num, unit), side: format!("{:.2}% of link", s.network.utilization_pct) };
+                let hd = Head { title: "Network", sub: SOURCES.network.into(), value: (num, unit), side: if s.network.link_bps > 0.0 { format!("{:.2}% of link", s.network.utilization_pct) } else { String::new() } };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
                 let lines = [PlotLine::new(&fd.hist.net_rx, c, (0.0, m)), PlotLine::new(&fd.hist.net_tx, c, (0.0, m)).dashed(c)];
