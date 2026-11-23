@@ -82,16 +82,26 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
             text: format_rate(s.network.rx_bps + s.network.tx_bps),
             aux: format!("\u{2193}{} \u{2191}{}", format_rate(s.network.rx_bps), format_rate(s.network.tx_bps)),
         },
-        Quadrant::Thermal => match s.thermal.max_c() {
-            Some(c) => Reading {
+        Quadrant::Thermal => match s.thermal.hottest() {
+            Some(h) => Reading {
                 quadrant: q,
                 fraction: Some((sm.thermal / 100.0).clamp(0.0, 1.0)),
-                text: if fahrenheit { format!("{:.0}\u{b0}F", c * 9.0 / 5.0 + 32.0) } else { format!("{c:.0}\u{b0}C") },
-                aux: crate::metrics::SOURCES.sensor.into(),
+                text: if fahrenheit { format!("{:.0}\u{b0}F", h.c * 9.0 / 5.0 + 32.0) } else { format!("{:.0}\u{b0}C", h.c) },
+                aux: thermal_caption(&h),
             },
             None => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: "no sensor".into() },
         },
         Quadrant::Power => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: String::new() },
+    }
+}
+
+/// What the TEMP tile's reading is and where it comes from: "CPU · PawnIO", "GPU · WDDM"; a zone
+/// by its source alone ("ACPI zone"), as zone names are long.
+fn thermal_caption(h: &crate::metrics::Hottest) -> String {
+    if h.what == "CPU" || h.what == "GPU" {
+        format!("{} \u{b7} {}", h.what, h.source)
+    } else {
+        h.source.clone()
     }
 }
 
@@ -1010,6 +1020,14 @@ pub fn classic_skin(pal: &Palette, metrics: &MetricColors) -> Skin {
 mod tests {
     use super::*;
     use crate::skin::contrast;
+
+    #[test]
+    fn the_temp_tile_names_its_sensor_and_source() {
+        let h = |what: &str, source: &str| crate::metrics::Hottest { what: what.into(), c: 60.0, source: source.into() };
+        assert_eq!(thermal_caption(&h("GPU", "WDDM")), "GPU \u{b7} WDDM");
+        assert_eq!(thermal_caption(&h("CPU", "PawnIO")), "CPU \u{b7} PawnIO");
+        assert_eq!(thermal_caption(&h("\\_TZ.TZ00", "ACPI zone")), "ACPI zone");
+    }
 
     #[test]
     fn square_corners_have_no_radius() {

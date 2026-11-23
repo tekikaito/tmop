@@ -1,11 +1,11 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, deci_celsius, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, gpu_sources, gpu_thermal, merge_sensors, offer_hwinfo_temps, parse_luid, wddm_poll, group_disks, TempPoll, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
@@ -190,11 +190,14 @@ pub struct Collector {
     /// Registry `~MHz` of CPU 0 (read once).
     reg_mhz: Option<u32>,
     hwinfo: HwinfoCache,
-    /// The GPUs DXGI listed, and when.
-    dxgi: Option<(Instant, Vec<KnownAdapter>)>,
+    /// The GPUs DXGI listed, and when, with the ids of those driving a display and whether the
+    /// machine has a battery (both for [`wddm_poll`]).
+    dxgi: Option<(Instant, Vec<KnownAdapter>, HashSet<String>, bool)>,
     /// Only while [`gpu_detail`] is on; the inner `None` means it could not be opened.
     gpu_detail_pdh: Option<Option<Pdh>>,
     nvml: Option<Option<Nvml>>,
+    /// The last WDDM temperature of each GPU (adapter id -> when, °C), for while it is idle.
+    wddm_temps: HashMap<String, (Instant, f32)>,
     /// Opt-in PawnIO CPU temperature (closed while the Settings switch is off).
     pawnio: super::pawnio::Source,
     /// The disks read directly, until PDH's PhysicalDisk counters have shown traffic.
@@ -448,10 +451,43 @@ impl DiskSpaces {
 /// How often the GPU list is taken again.
 const DXGI_PERIOD: Duration = Duration::from_secs(30);
 
+/// The main temperature the driver of the GPU with LUID (`high`, `low`) reports to Windows:
+/// `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)`, WDDM 2.4 and later, what Task Manager shows
+/// as "GPU Temperature". Needs no elevation. None when the driver reports none (0) or the query
+/// fails (older drivers). Called only when [`wddm_poll`] says so: the documentation does not say
+/// whether opening and asking an adapter wakes one that is powered down.
+fn wddm_temperature(high: i32, low: u32) -> Option<f32> {
+    use windows::Wdk::Graphics::Direct3D::{
+        D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
+    };
+    use windows::Win32::Foundation::LUID;
+    let mut open = D3DKMT_OPENADAPTERFROMLUID { AdapterLuid: LUID { LowPart: low, HighPart: high }, hAdapter: 0 };
+    // SAFETY: the structures are the windows crate's (Microsoft's metadata of d3dkmthk.h), the
+    // out-pointers are valid locals for the call, and the size passed is the buffer's.
+    unsafe {
+        if D3DKMTOpenAdapterFromLuid(&mut open).is_err() {
+            return None;
+        }
+        // Physical adapter 0: a linked adapter's first GPU.
+        let mut perf = D3DKMT_ADAPTER_PERFDATA { PhysicalAdapterIndex: 0, ..Default::default() };
+        let mut q = D3DKMT_QUERYADAPTERINFO {
+            hAdapter: open.hAdapter,
+            Type: KMTQAITYPE_ADAPTERPERFDATA,
+            pPrivateDriverData: (&mut perf as *mut D3DKMT_ADAPTER_PERFDATA).cast(),
+            PrivateDriverDataSize: std::mem::size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
+        };
+        let ok = D3DKMTQueryAdapterInfo(&mut q).is_ok();
+        let _ = D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER { hAdapter: open.hAdapter });
+        ok.then(|| deci_celsius(perf.Temperature)).flatten()
+    }
+}
+
 /// Last HWiNFO read; the mapping is polled at most every 2 s (30 s while not running).
 struct HwinfoCache {
     at: Option<Instant>,
     cpu: Option<(String, f32)>,
+    /// Its GPU temperatures, matched to the GPUs by name in [`Collector::gpu_adapters`].
+    gpu: Vec<super::hwinfo::GpuReading>,
     status: String,
     running: bool,
 }
@@ -498,10 +534,11 @@ impl Collector {
             pdh,
             procs: Enumerator::new(),
             reg_mhz: registry_base_mhz(),
-            hwinfo: HwinfoCache { at: None, cpu: None, status: "not running".into(), running: false },
+            hwinfo: HwinfoCache { at: None, cpu: None, gpu: Vec::new(), status: "not running".into(), running: false },
             dxgi: None,
             gpu_detail_pdh: None,
             nvml: None,
+            wddm_temps: HashMap::new(),
             pawnio: super::pawnio::Source::default(),
             disk_ioctl: None,
             pdh_disk_proven: false,
@@ -515,7 +552,8 @@ impl Collector {
     fn gpu_adapters(&mut self, snap: &mut Snapshot, engines: &[(String, f64)], gpu_mem: &[(String, f64)], gpu_shared: Option<Vec<(String, f64)>>) {
         // Re-listed now and then: LUIDs change with a driver reset or an eGPU.
         if self.dxgi.as_ref().is_none_or(|d| d.0.elapsed() >= DXGI_PERIOD) {
-            self.dxgi = Some((Instant::now(), dxgi_adapters()));
+            let (listed, displays) = dxgi_adapters();
+            self.dxgi = Some((Instant::now(), listed, displays, has_battery()));
         }
         let detail = gpu_detail();
         if !detail {
@@ -554,6 +592,38 @@ impl Collector {
                 merge_sensors(&mut adapters, &n.read());
             }
         }
+        // Temperatures, best source first: NVML (above, only while the GPU detail is shown, as
+        // before), the driver's own report to Windows by LUID (what Task Manager shows; asked
+        // only of a GPU at work, see `wddm_poll`), then HWiNFO by name.
+        let now = Instant::now();
+        self.wddm_temps.retain(|id, _| adapters.iter().any(|a| a.id == *id));
+        // Both refreshed with the GPU list (every DXGI_PERIOD); unknown counts as a laptop.
+        let (displays, battery) = self.dxgi.as_ref().map_or((None, true), |d| (Some(&d.2), d.3));
+        for a in &mut adapters {
+            let last = self.wddm_temps.get(&a.id).copied();
+            let drives_display = displays.is_some_and(|d| d.contains(&a.id));
+            let reading = match wddm_poll(&a.engines, battery, drives_display, last.map(|l| now.saturating_duration_since(l.0))) {
+                TempPoll::Ask => {
+                    let c = parse_luid(&a.id).and_then(|(high, low)| wddm_temperature(high, low));
+                    match c {
+                        Some(c) => self.wddm_temps.insert(a.id.clone(), (now, c)),
+                        None => self.wddm_temps.remove(&a.id),
+                    };
+                    c
+                }
+                TempPoll::Keep => last.map(|l| l.1),
+                TempPoll::Drop => {
+                    self.wddm_temps.remove(&a.id);
+                    None
+                }
+            };
+            if let Some(c) = reading {
+                a.offer_temp(GpuTempKind::Gpu, c, "WDDM");
+            }
+        }
+        offer_hwinfo_temps(&mut adapters, &self.hwinfo.gpu);
+        snap.thermal.gpu = gpu_thermal(&adapters);
+        snap.thermal.sources.push_str(&format!(" \u{b7} {}", gpu_sources(&adapters)));
         snap.gpu.adapters = adapters;
         snap.gpu.processes = processes;
         super::common::group_memory(&mut snap.gpu);
@@ -727,14 +797,18 @@ impl Collector {
             self.hwinfo.at = Some(Instant::now());
             self.hwinfo.running = true;
             self.hwinfo.cpu = None;
+            self.hwinfo.gpu.clear();
             match super::hwinfo::read() {
-                Ok(r) => match super::hwinfo::cpu_temp(&r) {
-                    Some(t) => {
-                        self.hwinfo.status = t.0.clone();
-                        self.hwinfo.cpu = Some(t);
+                Ok(r) => {
+                    self.hwinfo.gpu = super::hwinfo::gpu_temps(&r);
+                    match super::hwinfo::cpu_temp(&r) {
+                        Some(t) => {
+                            self.hwinfo.status = t.0.clone();
+                            self.hwinfo.cpu = Some(t);
+                        }
+                        None => self.hwinfo.status = "no CPU temperature reading".into(),
                     }
-                    None => self.hwinfo.status = "no CPU temperature reading".into(),
-                },
+                }
                 Err(super::hwinfo::Error::NotRunning) => {
                     self.hwinfo.status = "not running".into();
                     self.hwinfo.running = false;
@@ -743,6 +817,7 @@ impl Collector {
             }
         }
         let (pawnio_cpu, pawnio) = self.pawnio.sample(super::pawnio::enabled());
+        snap.thermal.cpu_source = if pawnio_cpu.is_some() { Some("PawnIO".into()) } else { self.hwinfo.cpu.as_ref().map(|_| "HWiNFO".into()) };
         snap.thermal.cpu = pawnio_cpu.or_else(|| self.hwinfo.cpu.clone());
         let acpi = match snap.thermal.zones.len() {
             0 => "no zones".to_string(),
@@ -869,15 +944,17 @@ fn process_memory(dedicated: &[(String, f64)], shared: &[(String, f64)]) -> Hash
     out
 }
 
-/// The hardware GPUs DXGI lists, in its order. Its software rasteriser (WARP) and Microsoft's
-/// virtual adapters are not GPUs a user would look for.
-fn dxgi_adapters() -> Vec<KnownAdapter> {
+/// The hardware GPUs DXGI lists, in its order, and the ids of those with an output (a display)
+/// attached: `IDXGIAdapter::EnumOutputs(0)` succeeds. Its software rasteriser (WARP) and
+/// Microsoft's virtual adapters are not GPUs a user would look for.
+fn dxgi_adapters() -> (Vec<KnownAdapter>, HashSet<String>) {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
     const VENDOR_MICROSOFT: u32 = 0x1414;
     // SAFETY: plain COM creation and queries; the adapter description is a value.
     unsafe {
-        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return Vec::new() };
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return (Vec::new(), HashSet::new()) };
         let mut out = Vec::new();
+        let mut displays = HashSet::new();
         // Read once, when there is a GPU to look up.
         let mut drivers: Option<Vec<(String, u64)>> = None;
         for i in 0.. {
@@ -892,10 +969,24 @@ fn dxgi_adapters() -> Vec<KnownAdapter> {
             let dedicated = d.DedicatedVideoMemory as u64;
             let drivers = drivers.get_or_insert_with(display_driver_memory);
             let total = super::common::physical_vram(&name, dedicated, drivers).unwrap_or(dedicated);
+            // Output 0 is the first one; the returned interface is released when dropped.
+            if adapter.EnumOutputs(0).is_ok() {
+                displays.insert(id.clone());
+            }
             out.push((id, name, Some(total), Some(d.SharedSystemMemory as u64)));
         }
-        out
+        (out, displays)
     }
+}
+
+/// Whether this machine has a system battery: `GetSystemPowerStatus` `BatteryFlag` is not 128
+/// ("No system battery"). Unknown (255) counts as a battery, so an unreadable status never
+/// lets TMOP ask an idle laptop GPU.
+fn has_battery() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut st = SYSTEM_POWER_STATUS::default();
+    // SAFETY: writes the struct passed.
+    unsafe { GetSystemPowerStatus(&mut st) }.is_err() || st.BatteryFlag != 128
 }
 
 /// (driver name, physical memory size) of each display driver, from the display adapter class in
@@ -948,6 +1039,36 @@ mod tests {
         assert!((g.utilization_pct - 55.0).abs() < 0.01);
         assert_eq!(per[&1], 40.0);
         assert_eq!(per[&1234], 30.0);
+    }
+
+    /// Every GPU DXGI lists can be asked, by the LUID its id carries; a reading is a plausible
+    /// temperature or none. Prints what this machine reports (`--nocapture`).
+    #[test]
+    fn wddm_temperature_of_each_listed_gpu() {
+        for (id, name, _, _) in dxgi_adapters().0 {
+            let (high, low) = parse_luid(&id).expect("DXGI ids carry the LUID");
+            let t = wddm_temperature(high, low);
+            println!("{id} {name}: {t:?}");
+            assert!(t.is_none_or(|c| c > 0.0 && c <= 200.0), "{t:?}");
+        }
+        assert_eq!(wddm_temperature(-1, 0xffff_fff0), None, "no such adapter");
+    }
+
+    /// The collector as the app runs it (GPU detail and so NVML off): every GPU's temperature is
+    /// WDDM's or none, never another source's, and a plausible figure. Prints what this machine
+    /// reports and why (`--nocapture`).
+    #[test]
+    fn collector_gpu_temperatures_without_nvml() {
+        let (listed, displays) = dxgi_adapters();
+        println!("battery {} displays {displays:?} of {:?}", has_battery(), listed.iter().map(|k| &k.0).collect::<Vec<_>>());
+        let mut c = Collector::new();
+        let _ = c.collect();
+        let (snap, _) = c.collect();
+        for a in &snap.gpu.adapters {
+            println!("{} {}: {:?}", a.id, a.name, a.temps);
+            assert!(a.temps.iter().all(|t| t.source == "WDDM" || t.source == "HWiNFO"), "{:?}", a.temps);
+            assert!(a.temps.iter().all(|t| t.c > 0.0 && t.c <= 200.0));
+        }
     }
 
     #[test]

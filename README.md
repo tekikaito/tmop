@@ -82,7 +82,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
 - **Take a table with you:** right-click a column header and choose *Copy table as CSV* or *Save
   table as CSV…*. You get the visible columns in their current order and the rows as filtered and
   sorted, ready for a spreadsheet or a bug report.
-- **Get told when something runs hot:** in *Settings → Alerts* TMOP sends a desktop notification when CPU usage, memory usage or the temperature stays above a limit you set for a while, naming the busiest process. All three are off by default, they also work while the window is minimized, and the temperature alert appears only where TMOP can read a temperature.
+- **Get told when something runs hot:** in *Settings → Alerts* TMOP sends a desktop notification when CPU usage, memory usage or the temperature stays above a limit you set for a while, naming the busiest process. All three are off by default, they also work while the window is minimized, and the temperature alert appears only where TMOP can read a temperature. It watches the hottest reading of the CPU, the board sensors and the graphics card's own temperature, and the notification names it ("Hottest: GPU 92°C (WDDM)"). A graphics card's hot spot and memory temperatures are shown but not watched: they run well above the card's own temperature in normal use.
 - **Manage your Docker containers:** a *Docker* page shows your containers, images and volumes, with logs, stats and files; you can start, stop and remove them. On Windows it works with Docker Desktop or with TMOP's own engine, which you set up on the page's *Engine* tab (it needs WSL 2; without Docker installed, first switch on *Settings → Other options → Show the Docker page*). On Linux and macOS it uses the Docker you already run (Docker Engine, rootless Docker, Podman, Docker Desktop, Colima or OrbStack); its *Local Docker* tab shows which one TMOP found and how to start it.
 
 ## Privacy
@@ -260,6 +260,7 @@ showing zeros.
 | Graphics card | ✔ with engines (3D, copy, video …) | AMD and NVIDIA (with NVIDIA's own driver), with engines where the driver reports them; Intel (i915 from Linux 5.19, xe from 6.11) with engines, counted from the programs TMOP may read (without root your own, where the desktop, browsers and games run; as root all of them) | Usage and memory, no engines |
 | Clock speeds | ✔ | ✔ | Intel Macs; none on Apple Silicon |
 | Temperatures (*Thermals*) | ✔ | ✔ | — |
+| GPU temperature (*Performance → GPU*, *Thermals*) | GPU temperature where the graphics driver reports one to Windows (WDDM 2.4 or newer, the figure Task Manager shows) (on a laptop, not while the card is idle and drives no display); NVIDIA also through NVML while the GPU detail is open; hot spot and memory (junction) temperatures only from HWiNFO with *Shared Memory Support* on | AMD (amdgpu: GPU, hot spot, memory), Intel (xe: GPU package and memory; i915: GPU package, on cards that report it), NVIDIA (NVML: GPU) | — |
 | Power & Freq | ✔ power plans | Battery, governor, power profile | Battery and power settings |
 | Processes: end task, end tree, suspend, priority | ✔ | ✔ (raising priority needs root; no *Realtime*) | ✔ (no *Realtime*) |
 | Processes: *Tree view* (parent and child processes) | ✔ | ✔ | ✔ |
@@ -392,6 +393,11 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   PawnIO* and run TMOP as administrator. It is off by default. Some anti-cheat software refuses
   to run beside PawnIO. TMOP also reads HWiNFO's sensors when *Shared Memory Support* is on there.
   The PawnIO modules TMOP carries are LGPL-2.1-or-later (licence and source in `assets/pawnio`).
+- **GPU temperature on Windows:** TMOP shows the temperature the graphics driver reports to
+  Windows, without administrator rights. On a laptop (a PC with a battery) a graphics card that
+  is idle and drives no display is not asked, so it can power down; it shows its last reading for
+  30 s, then none. Hot spot and memory junction temperatures are not part
+  of that report; TMOP shows them when HWiNFO runs with *Shared Memory Support* on.
 - Otherwise, run TMOP as your normal user. On Linux and macOS some details (other users' processes, socket
   owners, protected folders, on Linux the Intel graphics usage of other users' programs) need root or, on macOS, *Full Disk Access*; TMOP says so where it
   matters. After updating TMOP on macOS, remove it from *Full Disk Access* and add it again:

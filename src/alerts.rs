@@ -1,12 +1,15 @@
 //! Alerts: a desktop notification when CPU usage, memory usage or the temperature stays above a
-//! limit (Settings → Alerts).
+//! limit (Settings → Alerts). The temperature is the hottest reading TMOP has
+//! ([`crate::metrics::ThermalSample::max_c`]): CPU, board sensors and each GPU's own temperature.
+//! A GPU's hot spot and memory (junction) readings are not watched: they run well above the core
+//! in normal use. The notice names the sensor that is hottest ("Hottest: GPU 92°C (WDDM)").
 //!
 //! The decision is a pure state machine, [`Tracker`]: samples and the time they arrived in,
 //! [`Event`]s out. [`Monitor`] runs one tracker per [`Metric`] over a [`Snapshot`] and words the
 //! notification. [`hook`] is the thin shell the sampler thread calls; [`send`] shows the
 //! notification through [`crate::platform::notify`].
 
-use crate::metrics::Snapshot;
+use crate::metrics::{Hottest, Snapshot};
 use crate::process::{format_bytes, ProcessRow};
 use crate::settings::Alerts;
 use std::sync::{Arc, Mutex};
@@ -217,21 +220,27 @@ impl Monitor {
             };
             let rule = cfg.rule(m);
             if self.trackers[m.index()].step(rule, now, value) == Some(Event::Fire) {
-                out.push(Notice { metric: m, title: m.title().into(), body: body(m, rule, cfg.fahrenheit, rows) });
+                let hottest = if m == Metric::Temperature { snap.thermal.hottest() } else { None };
+                out.push(Notice { metric: m, title: m.title().into(), body: body(m, rule, cfg.fahrenheit, rows, hottest.as_ref()) });
             }
         }
         out
     }
 }
 
-/// "Above 90% for 1 min. Busiest: chrome.exe (45%)".
-fn body(m: Metric, rule: &Rule, fahrenheit: bool, rows: &[ProcessRow]) -> String {
+/// "Above 90% for 1 min. Busiest: chrome.exe (45%)", "Above 90°C for 30 s. Hottest: GPU 92°C
+/// (WDDM)".
+fn body(m: Metric, rule: &Rule, fahrenheit: bool, rows: &[ProcessRow], hottest: Option<&Hottest>) -> String {
+    let degrees = |c: f32| if fahrenheit { format!("{:.0}\u{b0}F", c * 9.0 / 5.0 + 32.0) } else { format!("{c:.0}\u{b0}C") };
     let limit = match m {
-        Metric::Temperature if fahrenheit => format!("{:.0}\u{b0}F", rule.limit * 9.0 / 5.0 + 32.0),
-        Metric::Temperature => format!("{:.0}\u{b0}C", rule.limit),
+        Metric::Temperature => degrees(rule.limit),
         _ => format!("{:.0}%", rule.limit),
     };
     let mut text = format!("Above {limit} for {}.", duration_text(rule.hold));
+    // Which sensor it is: a GPU at its limit is not the processor.
+    if let Some(h) = hottest.filter(|_| m == Metric::Temperature) {
+        text.push_str(&format!(" Hottest: {} {} ({})", h.what, degrees(h.c), h.source));
+    }
     let busiest = match m {
         Metric::Cpu => rows.iter().filter(|r| r.pid != 0).max_by(|a, b| a.cpu_pct.total_cmp(&b.cpu_pct)).map(|r| (r, format!("{:.0}%", r.cpu_pct))),
         Metric::Memory => rows.iter().filter(|r| r.pid != 0).max_by_key(|r| r.private_working_set).map(|r| (r, format_bytes(r.private_working_set as f64))),
@@ -564,8 +573,33 @@ mod tests {
     #[test]
     fn temperature_notice_uses_the_users_unit() {
         let rule = Rule { enabled: true, limit: 90.0, hold: s(30), margin: MARGIN_C };
-        assert_eq!(body(Metric::Temperature, &rule, false, &[]), "Above 90\u{b0}C for 30 s.");
-        assert_eq!(body(Metric::Temperature, &rule, true, &[]), "Above 194\u{b0}F for 30 s.");
+        assert_eq!(body(Metric::Temperature, &rule, false, &[], None), "Above 90\u{b0}C for 30 s.");
+        assert_eq!(body(Metric::Temperature, &rule, true, &[], None), "Above 194\u{b0}F for 30 s.");
+        let gpu = Hottest { what: "GPU".into(), c: 92.0, source: "WDDM".into() };
+        assert_eq!(body(Metric::Temperature, &rule, false, &[], Some(&gpu)), "Above 90\u{b0}C for 30 s. Hottest: GPU 92\u{b0}C (WDDM)");
+        assert_eq!(body(Metric::Temperature, &rule, true, &[], Some(&gpu)), "Above 194\u{b0}F for 30 s. Hottest: GPU 198\u{b0}F (WDDM)");
+    }
+
+    /// The alert watches the GPU's own temperature but not its hot spot or memory, which run hot
+    /// in normal use; the notice names the sensor that is hot.
+    #[test]
+    fn the_temperature_alert_counts_the_gpu_core_and_names_it() {
+        use crate::metrics::{GpuTempKind, GpuThermal};
+        let a = Alerts { temperature_enabled: true, temperature_seconds: 1, ..Default::default() };
+        let cfg = Config::from_settings(&a, false);
+        let g = |kind, c| GpuThermal { label: String::new(), kind, c, source: "HWiNFO" };
+        let mut warm = snap(0.0, 0.0, Some(50.0));
+        warm.thermal.gpu = vec![g(GpuTempKind::Gpu, 70.0), g(GpuTempKind::MemoryJunction, 98.0), g(GpuTempKind::HotSpot, 95.0)];
+        let mut m = Monitor::default();
+        for at in 0..10 {
+            assert!(m.observe(s(at), &cfg, &warm, &[]).is_empty(), "a healthy card's memory junction");
+        }
+        let mut hot = warm.clone();
+        hot.thermal.gpu[0].c = 93.0;
+        assert!(m.observe(s(10), &cfg, &hot, &[]).is_empty());
+        let n = m.observe(s(11), &cfg, &hot, &[]);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].body, "Above 90\u{b0}C for 1 s. Hottest: GPU 93\u{b0}C (HWiNFO)");
     }
 
     #[test]

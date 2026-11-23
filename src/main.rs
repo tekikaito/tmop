@@ -65,8 +65,9 @@ fn pairs(v: &[(String, f32)], unit: &str) -> String {
 
 /// One GPU adapter as labelled fields; absent readings are `n/a`.
 fn adapter_text(a: &tmop::metrics::GpuAdapter) -> String {
+    let temps = if a.temps.is_empty() { "n/a".to_string() } else { a.temps.iter().map(|t| format!("{} {:.1} C ({})", t.kind.label(), t.c, t.source)).collect::<Vec<_>>().join(", ") };
     format!(
-        "id {}  name {}  utilization {:.1}%  engines {}  dedicated {} / {} bytes  shared {} / {} bytes  temp {} C  power {} W  clock {} MHz",
+        "id {}  name {}  utilization {:.1}%  engines {}  dedicated {} / {} bytes  shared {} / {} bytes  temps {temps}  power {} W  clock {} MHz",
         a.id,
         a.name,
         a.utilization_pct,
@@ -75,7 +76,6 @@ fn adapter_text(a: &tmop::metrics::GpuAdapter) -> String {
         opt(a.dedicated_total),
         opt(a.shared_used),
         opt(a.shared_total),
-        opt(a.temperature_c.map(|t| format!("{t:.1}"))),
         opt(a.power_w.map(|w| format!("{w:.1}"))),
         opt(a.clock_mhz),
     )
@@ -124,7 +124,9 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "GPU      {note}")?;
     }
     let cpu_temp = s.thermal.cpu.as_ref().map(|(label, c)| format!("{label} {c:.1} C"));
-    writeln!(out, "Thermal  {}  cpu {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), s.thermal.sources)?;
+    let gpu_temps: Vec<(String, f32)> = s.thermal.gpu.iter().map(|g| (g.label.clone(), g.c)).collect();
+    let hottest = s.thermal.hottest().map(|h| format!("{} {:.1} C ({})", h.what, h.c, h.source));
+    writeln!(out, "Thermal  {}  cpu {}  gpu {}  hottest {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), pairs(&gpu_temps, " C"), opt(hottest), s.thermal.sources)?;
     let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
     writeln!(out, "Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count)?;
     let mut top: Vec<_> = procs.iter().collect();

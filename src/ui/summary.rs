@@ -309,7 +309,8 @@ impl App {
         let net = net_total(fd.hist);
         let net_peak = net.max().max(1024.0 * 100.0);
         let frac = |f: f32| (f / 100.0).clamp(0.0, 1.0);
-        let temp = s.thermal.max_c().map(|c| self.temp(c));
+        // Under the CPU: the CPU's and the board's readings, not a GPU's.
+        let temp = s.thermal.board_max_c().map(|c| self.temp(c));
         let ghz = s.cpu.current_mhz.filter(|_| self.caps.clocks).map(|m| format!("{:.2} GHz", m as f32 / 1000.0));
         let cpu_footer = match (ghz, temp) {
             (Some(g), Some(t)) => format!("{g} \u{b7} {t}"),
