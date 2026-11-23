@@ -40,15 +40,54 @@ const HANGUP_POLL: Duration = Duration::from_millis(20);
 pub const SESSION_ENV: &str = "TMOP_SESSION";
 /// Length of a marker in hex digits.
 const MARKER_LEN: usize = 32;
-/// Sends SIGHUP to every process except PID 1 and itself whose environment holds `$0`, the
-/// `TMOP_SESSION=<marker>` entry, passed as an argument and matched as a fixed string. All
-/// markers have the same length, so one session's entry never matches another's.
+/// Hangs up the session's processes: those whose environment holds `$0`, the
+/// `TMOP_SESSION=<marker>` entry, passed as an argument and matched as a fixed string (all
+/// markers have the same length, so one session's entry never matches another's). PID 1 and
+/// the script itself are never signalled.
+///
+/// The processes are hung up from the leaves up: each round signals only the members that
+/// have no member child, then waits until they are gone (reaped by their parent, which is a
+/// member still alive) before the next round. Signalling a parent first would hand its
+/// children to the container's PID 1 when it dies, and their exit then sends PID 1 a
+/// SIGCHLD; a PID 1 such as busybox `sh -c "sleep 60"` ends on that signal (its sleep
+/// returns early and the shell exits with status 0), which stopped the container (#179).
+/// A member that survives SIGHUP (nohup) is left alone; its parent is still hung up.
 #[doc(hidden)]
 pub const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
-for d in /proc/[0-9]*; do
-  p=${d#/proc/}
-  [ "$p" = 1 ] || [ "$p" = "$$" ] && continue
-  grep -qF "$0" "$d/environ" 2>/dev/null && kill -HUP "$p" 2>/dev/null
+entry=$0 self=$$ sent=" "
+members() {
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}
+    [ "$p" = 1 ] || [ "$p" = "$self" ] && continue
+    case "$sent" in *" $p "*) continue ;; esac
+    grep -qF "$entry" "$d/environ" 2>/dev/null && echo "$p"
+  done
+}
+ppid() {
+  while read -r k v rest; do [ "$k" = PPid: ] && echo "$v" && return; done < "/proc/$1/status"
+}
+round=0
+while [ $round -lt 32 ]; do
+  round=$((round + 1))
+  all=$(members)
+  [ -z "$all" ] && exit 0
+  parents=" "
+  for p in $all; do parents="$parents$(ppid "$p" 2>/dev/null) "; done
+  leaves=
+  for p in $all; do
+    case "$parents" in *" $p "*) ;; *) leaves="$leaves $p" ;; esac
+  done
+  [ -z "$leaves" ] && leaves=$all
+  for p in $leaves; do kill -HUP "$p" 2>/dev/null; done
+  sent="$sent${leaves# } "
+  n=0
+  while [ $n -lt 20 ]; do
+    left=
+    for p in $leaves; do [ -d "/proc/$p" ] && left=1; done
+    [ -z "$left" ] && break
+    sleep 0.05 2>/dev/null || sleep 1
+    n=$((n + 1))
+  done
 done
 exit 0"#;
 const TIMED_OUT: &str = "The engine did not answer in time";
