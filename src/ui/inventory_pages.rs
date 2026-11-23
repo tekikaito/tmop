@@ -399,11 +399,21 @@ impl App {
         let version = get(keys::OS, keys::VERSION);
         // "Windows" over "11 Pro 24H2", "macOS" over "Sequoia 15.1", "Linux" over "Ubuntu 24.04.5 LTS".
         let os = crate::platform::os_name();
-        let os_value = subtitle_free(&[edition.strip_prefix(&format!("{os} ")).unwrap_or(&edition).to_string(), version.clone()]);
+        let os_full = subtitle_free(&[edition.strip_prefix(&format!("{os} ")).unwrap_or(&edition).to_string(), version.clone()]);
         let build_word = if crate::platform::OS == crate::platform::Os::Linux { "kernel" } else { "build" };
+        // The tile is as wide as the grid makes it; the OS name is cut by dropping parts, not letters.
+        let tile_cols = (((area.width() + STAT_GAP) / (190.0 + STAT_GAP)).floor() as usize).clamp(1, 4);
+        let tile_w = (area.width() - STAT_GAP * (tile_cols - 1) as f32) / tile_cols as f32;
+        let options = os_value_options(os, &edition, &version);
+        let (os_value, os_moved) = options
+            .iter()
+            .find(|(v, _)| widgets::text_width(&p, v, theme::light(24.0)) <= tile_w - 32.0)
+            .or(options.last())
+            .cloned()
+            .unwrap_or_default();
         let installed = get(keys::CPU_MEM, keys::INSTALLED_MEM);
         let tiles = [
-            StatTile::new(os, os_value, format!("{build_word} {}", get(keys::OS, keys::BUILD))),
+            StatTile::new(os, os_value, subtitle_free(&[os_moved, format!("{build_word} {}", get(keys::OS, keys::BUILD))])),
             StatTile::new("Processor", format!("{} threads", s.cpu.logical_count), if s.cpu.name.is_empty() { get(keys::CPU_MEM, keys::PROCESSOR) } else { s.cpu.name.clone() }).bar(fd.smooth.cpu / 100.0, pal.accent),
             StatTile::new("Memory", format_bytes(s.memory.total as f64), if installed.is_empty() { String::new() } else { format!("{installed} installed") }).bar(fd.smooth.memory / 100.0, theme::darken_for(&pal, theme::INDIGO)),
             StatTile::new("Up time", super::fmt_hms(s.uptime), subtitle(&[computer, format!("last boot {}", boot_label(crate::platform::local_time(), s.uptime))])),
@@ -422,6 +432,9 @@ impl App {
                 let (rect, _) = ui.allocate_exact_size(vec2(w, total), Sense::hover());
                 let p = ui.painter().clone();
                 let used = kit::stat_grid(&p, rect, &pal, &tiles, 190.0);
+                if !os_full.is_empty() {
+                    ui.interact(Rect::from_min_size(rect.min, vec2(tile_w, STAT_TILE_H)), ui.scope_id().with("os-tile"), Sense::hover()).on_hover_text(os_full.clone());
+                }
                 let top = rect.top() + used + BLOCK_GAP;
                 for (((title, items), (c, y)), h) in sections.iter().zip(&at).zip(&heights) {
                     let r = Rect::from_min_size(pos2(rect.left() + *c as f32 * (card_w + CARD_GAP), top + y), vec2(card_w, *h));
@@ -998,10 +1011,46 @@ fn subtitle_free(parts: &[String]) -> String {
     parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" ")
 }
 
+/// `s` without a trailing parenthesised part: "26.04.1 LTS (Resolute Raccoon)" -> "26.04.1 LTS".
+fn without_codename(s: &str) -> &str {
+    match s.trim_end().strip_suffix(')').and_then(|t| t.rfind(" (").map(|i| &t[..i])) {
+        Some(head) if !head.trim().is_empty() => head.trim_end(),
+        _ => s.trim(),
+    }
+}
+
+/// The OS tile's value, widest first, each with what it left out of the tile's second line:
+/// "Ubuntu 26.04.1 LTS (Resolute Raccoon)", then without the codename, then the name alone
+/// (the version moves to the sub line). The page takes the first that fits; the full text is the
+/// tile's tooltip and the details table.
+fn os_value_options(os: &str, edition: &str, version: &str) -> Vec<(String, String)> {
+    let name = edition.strip_prefix(&format!("{os} ")).unwrap_or(edition).trim();
+    let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    let short_version = without_codename(version);
+    let mut out = vec![(join(&[name, version.trim()]), String::new()), (join(&[name, short_version]), String::new()), (join(&[without_codename(name)]), short_version.to_string())];
+    out.dedup_by(|b, a| a.0 == b.0);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pro::inventory::toggle::Switch;
+
+    #[test]
+    fn os_values_drop_the_codename_then_the_version() {
+        let o = os_value_options("Linux", "Ubuntu", "26.04.1 LTS (Resolute Raccoon)");
+        assert_eq!(o[0].0, "Ubuntu 26.04.1 LTS (Resolute Raccoon)");
+        assert_eq!(o[1].0, "Ubuntu 26.04.1 LTS");
+        assert_eq!(o[2], ("Ubuntu".to_string(), "26.04.1 LTS".to_string()));
+        let w = os_value_options("Windows", "Windows Server 2025 Datacenter", "24H2");
+        assert_eq!(w, [("Server 2025 Datacenter 24H2".to_string(), String::new()), ("Server 2025 Datacenter".to_string(), "24H2".to_string())]);
+        // Nothing to drop, nothing known.
+        assert_eq!(os_value_options("macOS", "Sequoia", "15.1").len(), 2);
+        assert_eq!(os_value_options("Linux", "", "")[0].0, "");
+        assert_eq!(without_codename("(only)"), "(only)");
+        assert_eq!(without_codename("a (b) (c)"), "a (b)");
+    }
 
     fn entry(name: &str, enabled: bool, switch: Switch) -> StartupApp {
         StartupApp { name: name.into(), enabled, switch, location: "L".into(), ..Default::default() }

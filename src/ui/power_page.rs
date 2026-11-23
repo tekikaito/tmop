@@ -110,10 +110,15 @@ impl App {
             let n = fd.smooth.per_core_mhz.len();
             // Without a reported maximum the bars scale to the fastest core seen.
             let scale = bar_scale(max, &fd.smooth.per_core_mhz);
+            // The title and the right-hand text share the card's width: the long form only where it fits.
+            let fits = |s: &str| widgets::text_width(&p, "PER-CORE CLOCK", theme::semibold(11.0)) * 1.3 + widgets::text_width(&p, s, theme::mono(12.0)) + 44.0 + 24.0 <= mid[1].width();
+            let long = format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0);
+            let short = format!("{n} cores");
             let right = match (n, scale) {
                 (0, _) => String::new(),
-                (_, Some(_)) if max > 0.0 => format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0),
-                _ => format!("{n} cores"),
+                (_, Some(_)) if max > 0.0 && fits(&long) => long,
+                _ if fits(&short) => short,
+                _ => String::new(),
             };
             let content = section_card(&p, mid[1], &pal, "Per-core clock", &right);
             match scale {

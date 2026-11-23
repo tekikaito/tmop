@@ -29,6 +29,10 @@ pub struct ProState {
     pub conns_view: usize,
     pub apps: Loader<Vec<InstalledApp>>,
     pub apps_table: TableState,
+    /// Sizes of the installed apps where the list comes without them (macOS), and whether they
+    /// were applied to the list that is shown.
+    pub apps_sizes: Loader<Vec<(String, u64)>>,
+    pub apps_sized: bool,
     pub drivers: Loader<Vec<Service>>,
     pub drivers_table: TableState,
     pub volumes: Loader<Vec<Volume>>,
