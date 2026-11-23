@@ -139,16 +139,33 @@ pub(super) fn page_layout(body: Rect, need: f32) -> (Rect, Rect) {
         let toolbar = Rect::from_min_max(pos2(body.right() - need, bottom - TOOLBAR_H), pos2(body.right(), bottom));
         (toolbar, Rect::from_min_max(pos2(left, body.top() + 8.0), body.max))
     } else {
-        let toolbar = Rect::from_min_max(pos2(left, body.top() + 2.0), pos2(body.right(), body.top() + 2.0 + TOOLBAR_H));
+        // Controls that do not fit in one row wrap onto a second one (see [`toolbar`]).
+        let rows = toolbar_rows(body.right() - left, need) as f32;
+        let h = rows * TOOLBAR_H + (rows - 1.0) * TOOLBAR_ROW_GAP;
+        let toolbar = Rect::from_min_max(pos2(left, body.top() + 2.0), pos2(body.right(), body.top() + 2.0 + h));
         (toolbar, Rect::from_min_max(pos2(left, toolbar.bottom() + 12.0), body.max))
+    }
+}
+
+const TOOLBAR_ROW_GAP: f32 = 8.0;
+
+/// Rows a toolbar of `need` px takes in `width` px (controls are wrapped, never cut).
+pub(super) fn toolbar_rows(width: f32, need: f32) -> usize {
+    if need <= width {
+        1
+    } else {
+        // Wrapping wastes some of every row, so allow for it.
+        (need / (width - 40.0).max(1.0)).ceil() as usize
     }
 }
 
 /// Runs `add` right to left inside `rect` (the toolbar of [`page_layout`]): the first control added
 /// ends up at the right edge.
 pub(super) fn toolbar<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
+    // A rect taller than one row wraps its controls (right to left, row by row).
+    let wrap = rect.height() > TOOLBAR_H + 1.0;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center).with_main_wrap(wrap)), |ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, TOOLBAR_ROW_GAP);
         add(ui)
     })
     .inner
@@ -385,6 +402,17 @@ mod tests {
         let narrow = Rect::from_min_size(pos2(100.0, 64.0), vec2(900.0, 600.0));
         let (tb, area) = page_layout(narrow, 800.0);
         assert!(tb.top() >= narrow.top() && area.top() > tb.bottom(), "on a row of its own");
+    }
+
+    #[test]
+    fn a_toolbar_too_wide_for_a_row_wraps() {
+        assert_eq!(toolbar_rows(765.0, 600.0), 1);
+        assert_eq!(toolbar_rows(765.0, 820.0), 2);
+        let narrow = Rect::from_min_size(pos2(100.0, 64.0), vec2(777.0, 500.0));
+        let (tb, area) = page_layout(narrow, 820.0);
+        assert!(tb.height() >= 2.0 * TOOLBAR_H && area.top() > tb.bottom());
+        let (tb, _) = page_layout(narrow, 600.0);
+        assert_eq!(tb.height(), TOOLBAR_H);
     }
 
     #[test]

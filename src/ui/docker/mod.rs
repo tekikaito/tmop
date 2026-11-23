@@ -455,10 +455,14 @@ impl App {
             tables::show(self, ui, cols[0], fd);
             detail::detail_area(self, ui, cols[1], fd);
         } else {
-            let detail_h = (content.height() * 0.5).clamp(240.0, 340.0);
-            let rows = kit::vsplit(content, &[-1.0, detail_h], 14.0);
+            // The list keeps its rows in a short window; the aside shrinks (or goes) instead.
+            let want = (content.height() * 0.5).clamp(240.0, 340.0);
+            let (_, detail_h) = kit::stacked_heights(content.height(), 14.0, want, 140.0, 110.0);
+            let rows = kit::vsplit(content, &[-1.0, detail_h], if detail_h > 0.0 { 14.0 } else { 0.0 });
             tables::show(self, ui, rows[0], fd);
-            detail::detail_area(self, ui, rows[1], fd);
+            if detail_h > 0.0 {
+                detail::detail_area(self, ui, rows[1], fd);
+            }
         }
         dialogs::show(self, ui.ctx(), fd);
     }

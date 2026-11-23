@@ -41,6 +41,22 @@ pub fn vsplit(rect: Rect, heights: &[f32], gap: f32) -> Vec<Rect> {
         .collect()
 }
 
+/// Least height a list keeps beside a details panel: its header and about four rows.
+pub const MIN_LIST_H: f32 = 160.0;
+
+/// Heights `(list, detail)` of a list with a details panel below it in `avail` px (`gap` between
+/// them). The list keeps at least `min_list` (it is what the page is for); the panel gets up to
+/// `want`, what is left after the list, and is dropped (height 0, no gap) when that is less than
+/// `min_detail`.
+pub fn stacked_heights(avail: f32, gap: f32, want: f32, min_list: f32, min_detail: f32) -> (f32, f32) {
+    let detail = want.min(avail - gap - min_list);
+    if detail < min_detail {
+        (avail.max(0.0), 0.0)
+    } else {
+        (avail - gap - detail, detail)
+    }
+}
+
 /// Interactive child UI in `rect` (left-to-right).
 pub fn row_ui<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
@@ -568,6 +584,17 @@ mod tests {
         let v = vsplit(r, &[20.0, -1.0, 30.0], 5.0);
         assert_eq!(v[1].height(), 40.0);
         assert_eq!(v[2].top(), 70.0);
+    }
+
+    #[test]
+    fn a_list_keeps_its_rows_beside_a_panel() {
+        // Plenty of room: the panel gets what it wants.
+        assert_eq!(stacked_heights(600.0, 14.0, 240.0, MIN_LIST_H, 80.0), (346.0, 240.0));
+        // Short window: the panel shrinks, the list keeps its minimum.
+        assert_eq!(stacked_heights(273.0, 14.0, 240.0, MIN_LIST_H, 80.0), (160.0, 99.0));
+        // No room for a useful panel: the list takes everything.
+        assert_eq!(stacked_heights(200.0, 14.0, 240.0, MIN_LIST_H, 80.0), (200.0, 0.0));
+        assert_eq!(stacked_heights(-5.0, 14.0, 240.0, MIN_LIST_H, 80.0), (0.0, 0.0));
     }
 
     fn frame(add: impl Fn(&egui::Context, &egui::Painter)) {
