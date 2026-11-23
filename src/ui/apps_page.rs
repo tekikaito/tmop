@@ -57,7 +57,7 @@ impl App {
         let user = apps.iter().filter(|a| a.scope == "User").count();
         let x86 = apps.iter().filter(|a| a.scope == "Machine (32-bit)").count();
         let publishers: HashSet<&str> = apps.iter().map(|a| a.publisher.as_str()).filter(|p| !p.is_empty()).collect();
-        let biggest = apps.iter().max_by_key(|a| a.size);
+        let biggest = apps.iter().max_by_key(|a| a.size).filter(|_| !sizing);
         let mut largest = StatTile::new("Largest", biggest.map(|b| format_bytes(b.size as f64)).unwrap_or_default(), biggest.map(|b| b.name.clone()).unwrap_or_default());
         if let Some(b) = biggest {
             largest = largest.bar(b.size as f32 / total.max(1) as f32, st.warn);
