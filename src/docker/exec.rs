@@ -52,8 +52,7 @@ const MARKER_LEN: usize = 32;
 /// SIGCHLD; a PID 1 such as busybox `sh -c "sleep 60"` ends on that signal (its sleep
 /// returns early and the shell exits with status 0), which stopped the container (#179).
 /// A member that survives SIGHUP (nohup) is left alone; its parent is still hung up.
-#[doc(hidden)]
-pub const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
+const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
 entry=$0 self=$$ sent=" "
 members() {
   for d in /proc/[0-9]*; do
