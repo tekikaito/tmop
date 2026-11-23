@@ -104,6 +104,14 @@ impl TerminalSessions {
         self.pending = None;
     }
 
+    /// Closes every session at app exit and waits up to `bound` for their shells to be hung
+    /// up; a hangup still running then is cut off when the process ends.
+    pub fn close_for_exit(&mut self, bound: std::time::Duration) {
+        let sessions = self.by_container.values_mut().flat_map(|cs| cs.sessions.iter_mut()).map(|s| &mut s.transport);
+        ExecSession::close_within(sessions, bound);
+        self.close_all();
+    }
+
     /// Drops sessions of containers that are no longer listed.
     pub fn retain(&mut self, alive: &HashSet<&str>) {
         self.by_container.retain(|id, _| alive.contains(id.as_str()));
