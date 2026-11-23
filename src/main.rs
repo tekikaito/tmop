@@ -124,7 +124,9 @@ fn dump(out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "GPU      {note}")?;
     }
     let cpu_temp = s.thermal.cpu.as_ref().map(|(label, c)| format!("{label} {c:.1} C"));
-    writeln!(out, "Thermal  {}  cpu {}  gpu {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), pairs(&s.thermal.gpu, " C"), s.thermal.sources)?;
+    let gpu_temps: Vec<(String, f32)> = s.thermal.gpu.iter().map(|g| (g.label.clone(), g.c)).collect();
+    let hottest = s.thermal.hottest().map(|h| format!("{} {:.1} C ({})", h.what, h.c, h.source));
+    writeln!(out, "Thermal  {}  cpu {}  gpu {}  hottest {}  [{}]", pairs(&s.thermal.zones, " C"), opt(cpu_temp), pairs(&gpu_temps, " C"), opt(hottest), s.thermal.sources)?;
     let handles = s.handle_count.map(|h| format!(", {h} {}", tmop::metrics::SOURCES.handles.to_lowercase())).unwrap_or_default();
     writeln!(out, "Procs    {} processes, {} threads{handles}", s.process_count, s.thread_count)?;
     let mut top: Vec<_> = procs.iter().collect();

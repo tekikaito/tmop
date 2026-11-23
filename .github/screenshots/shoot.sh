@@ -27,6 +27,9 @@ shot summary --page=summary
 shot performance-cpu --page=performance --device=cpu
 shot performance-memory --page=performance --device=memory
 shot performance-disk --page=performance --device=disk
+# GPU temperature (#165): CI runners report none, so these show the not-reported state.
+shot performance-gpu --page=performance --device=gpu
+shot performance-thermal --page=performance --device=thermal
 # The Processes page in tree view with the new/exited highlight (held 5 s). The settings live in a
 # private folder of their own; two harmless `sleep` processes are staged so a green row (a process
 # that started) and a red one (one that exited a moment ago) are really there at the shot.

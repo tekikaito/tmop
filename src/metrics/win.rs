@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, deci_celsius, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, gpu_sources, gpu_thermal, merge_sensors, offer_hwinfo_temps, parse_luid, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, deci_celsius, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, gpu_sources, gpu_thermal, merge_sensors, offer_hwinfo_temps, parse_luid, wddm_poll, group_disks, TempPoll, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -195,6 +195,8 @@ pub struct Collector {
     /// Only while [`gpu_detail`] is on; the inner `None` means it could not be opened.
     gpu_detail_pdh: Option<Option<Pdh>>,
     nvml: Option<Option<Nvml>>,
+    /// The last WDDM temperature of each GPU (adapter id -> when, °C), for while it is idle.
+    wddm_temps: HashMap<String, (Instant, f32)>,
     /// Opt-in PawnIO CPU temperature (closed while the Settings switch is off).
     pawnio: super::pawnio::Source,
     /// The disks read directly, until PDH's PhysicalDisk counters have shown traffic.
@@ -450,8 +452,9 @@ const DXGI_PERIOD: Duration = Duration::from_secs(30);
 
 /// The main temperature the driver of the GPU with LUID (`high`, `low`) reports to Windows:
 /// `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)`, WDDM 2.4 and later, what Task Manager shows
-/// as "GPU Temperature". Needs no elevation. None when the driver reports none (0, integrated
-/// GPUs) or the query fails (older drivers).
+/// as "GPU Temperature". Needs no elevation. None when the driver reports none (0) or the query
+/// fails (older drivers). Called only for a GPU at work ([`wddm_poll`]): the documentation does
+/// not say whether opening and asking an adapter wakes one that is powered down.
 fn wddm_temperature(high: i32, low: u32) -> Option<f32> {
     use windows::Wdk::Graphics::Direct3D::{
         D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
@@ -534,6 +537,7 @@ impl Collector {
             dxgi: None,
             gpu_detail_pdh: None,
             nvml: None,
+            wddm_temps: HashMap::new(),
             pawnio: super::pawnio::Source::default(),
             disk_ioctl: None,
             pdh_disk_proven: false,
@@ -586,10 +590,29 @@ impl Collector {
                 merge_sensors(&mut adapters, &n.read());
             }
         }
-        // Temperatures, best source first: NVML (above, while it is open), the driver's own report
-        // to Windows by LUID (what Task Manager shows), then HWiNFO by name.
+        // Temperatures, best source first: NVML (above, only while the GPU detail is shown, as
+        // before), the driver's own report to Windows by LUID (what Task Manager shows; asked
+        // only of a GPU at work, see `wddm_poll`), then HWiNFO by name.
+        let now = Instant::now();
+        self.wddm_temps.retain(|id, _| adapters.iter().any(|a| a.id == *id));
         for a in &mut adapters {
-            if let Some(c) = parse_luid(&a.id).and_then(|(high, low)| wddm_temperature(high, low)) {
+            let last = self.wddm_temps.get(&a.id).copied();
+            let reading = match wddm_poll(&a.engines, last.map(|l| now.saturating_duration_since(l.0))) {
+                TempPoll::Ask => {
+                    let c = parse_luid(&a.id).and_then(|(high, low)| wddm_temperature(high, low));
+                    match c {
+                        Some(c) => self.wddm_temps.insert(a.id.clone(), (now, c)),
+                        None => self.wddm_temps.remove(&a.id),
+                    };
+                    c
+                }
+                TempPoll::Keep => last.map(|l| l.1),
+                TempPoll::Drop => {
+                    self.wddm_temps.remove(&a.id);
+                    None
+                }
+            };
+            if let Some(c) = reading {
                 a.offer_temp(GpuTempKind::Gpu, c, "WDDM");
             }
         }
@@ -789,6 +812,7 @@ impl Collector {
             }
         }
         let (pawnio_cpu, pawnio) = self.pawnio.sample(super::pawnio::enabled());
+        snap.thermal.cpu_source = if pawnio_cpu.is_some() { Some("PawnIO".into()) } else { self.hwinfo.cpu.as_ref().map(|_| "HWiNFO".into()) };
         snap.thermal.cpu = pawnio_cpu.or_else(|| self.hwinfo.cpu.clone());
         let acpi = match snap.thermal.zones.len() {
             0 => "no zones".to_string(),

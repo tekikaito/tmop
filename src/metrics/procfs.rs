@@ -302,6 +302,7 @@ pub fn fold_thermal(chips: &[HwmonChip], zones: Vec<(String, f32)>) -> ThermalSa
         let temps: Vec<(&str, f32)> = chip.temps.iter().map(|(l, v)| (l.as_str(), *v)).collect();
         let (label, v) = pick_cpu_temp(&temps, &HWMON_CPU_LABELS).unwrap_or(temps[0]);
         t.cpu = Some((label.to_string(), v));
+        t.cpu_source = Some(format!("hwmon {name}"));
         cpu_chip = Some(i);
         break;
     }
@@ -737,6 +738,7 @@ HugePages_Total:       0
         ];
         let t = fold_thermal(&chips, vec![("acpitz".into(), 27.8)]);
         assert_eq!(t.cpu, Some(("Tctl".to_string(), 65.5)));
+        assert_eq!(t.cpu_source.as_deref(), Some("hwmon k10temp"));
         assert_eq!(t.zones, vec![("acpitz".to_string(), 27.8), ("nvme Composite".to_string(), 41.9), ("amdgpu edge".to_string(), 48.0)]);
         assert_eq!(t.sources, "hwmon: nvme, acpitz, k10temp, amdgpu \u{b7} thermal zones: 1");
         assert_eq!(t.max_c(), Some(65.5));

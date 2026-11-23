@@ -394,6 +394,34 @@ pub fn deci_celsius(v: u32) -> Option<f32> {
     (v > 0 && v <= 2000).then(|| v as f32 / 10.0)
 }
 
+/// How long a GPU's last WDDM temperature stands in while the GPU is idle and so not asked.
+pub const WDDM_TEMP_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What to do about a GPU's WDDM temperature this sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TempPoll {
+    /// Ask the driver.
+    Ask,
+    /// Show the last reading again without asking.
+    Keep,
+    /// Show none.
+    Drop,
+}
+
+/// Microsoft's documentation does not say whether asking an adapter for its performance data
+/// powers it up, so an adapter is asked only while this sample shows it at work (an engine above
+/// 0 %), when it is powered anyway. An idle one keeps its last reading for [`WDDM_TEMP_HOLD`],
+/// then shows none: a hybrid laptop's discrete GPU stays free to power down.
+pub fn wddm_poll(engines: &[(String, f32)], last_age: Option<std::time::Duration>) -> TempPoll {
+    if engines.iter().any(|e| e.1 > 0.0) {
+        TempPoll::Ask
+    } else if last_age.is_some_and(|a| a <= WDDM_TEMP_HOLD) {
+        TempPoll::Keep
+    } else {
+        TempPoll::Drop
+    }
+}
+
 /// The adapter id [`super::GpuAdapter::id`] Windows gives a GPU (`0x{high:08x}_0x{low:08x}`, the
 /// LUID as DXGI and the GPU performance counters write it) back as (HighPart, LowPart).
 pub fn parse_luid(id: &str) -> Option<(i32, u32)> {
@@ -442,13 +470,13 @@ pub fn gpu_sources(adapters: &[GpuAdapter]) -> String {
 
 /// The GPUs' temperatures for [`super::ThermalSample::gpu`]: "<name> · <reading> (<source>)". A
 /// name two GPUs share gets their position ("#2") so the rows stay apart.
-pub fn gpu_thermal(adapters: &[GpuAdapter]) -> Vec<(String, f32)> {
+pub fn gpu_thermal(adapters: &[GpuAdapter]) -> Vec<super::GpuThermal> {
     let mut out = Vec::new();
     for (i, a) in adapters.iter().enumerate() {
         let name = if a.name.is_empty() { "GPU" } else { a.name.as_str() };
         let twin = adapters.iter().filter(|b| b.name == a.name).count() > 1;
         let name = if twin { format!("{name} #{}", i + 1) } else { name.to_string() };
-        out.extend(a.temps.iter().map(|t| (format!("{name} \u{b7} {} ({})", t.kind.label(), t.source), t.c)));
+        out.extend(a.temps.iter().map(|t| super::GpuThermal { label: format!("{name} \u{b7} {} ({})", t.kind.label(), t.source), kind: t.kind, c: t.c, source: t.source }));
     }
     out
 }
@@ -708,6 +736,20 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_gpu_is_not_asked_for_its_temperature() {
+        let busy = [("3D".to_string(), 0.0), ("Copy".to_string(), 0.4)];
+        let idle = [("3D".to_string(), 0.0), ("Copy".to_string(), 0.0)];
+        let s = Duration::from_secs;
+        assert_eq!(wddm_poll(&busy, None), TempPoll::Ask);
+        assert_eq!(wddm_poll(&busy, Some(s(1))), TempPoll::Ask);
+        assert_eq!(wddm_poll(&idle, Some(s(1))), TempPoll::Keep);
+        assert_eq!(wddm_poll(&idle, Some(WDDM_TEMP_HOLD)), TempPoll::Keep);
+        assert_eq!(wddm_poll(&idle, Some(WDDM_TEMP_HOLD + s(1))), TempPoll::Drop);
+        assert_eq!(wddm_poll(&idle, None), TempPoll::Drop, "never asked: no reading, no handle opened");
+        assert_eq!(wddm_poll(&[], None), TempPoll::Drop);
+    }
+
+    #[test]
     fn adapter_ids_give_back_their_luid() {
         assert_eq!(parse_luid("0x00000000_0x0001a2b3"), Some((0, 0x0001_a2b3)));
         assert_eq!(parse_luid("0xffffffff_0x00000010"), Some((-1, 0x10)));
@@ -753,9 +795,9 @@ mod tests {
         let mut twin = GpuAdapter { name: "Twin".into(), ..Default::default() };
         twin.offer_temp(GpuTempKind::Gpu, 40.0, "NVML");
         let t = gpu_thermal(&[a, twin.clone(), twin, GpuAdapter::default()]);
-        let labels: Vec<&str> = t.iter().map(|r| r.0.as_str()).collect();
+        let labels: Vec<&str> = t.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["RTX 5070 \u{b7} GPU (WDDM)", "RTX 5070 \u{b7} Memory junction (HWiNFO)", "Twin #2 \u{b7} GPU (NVML)", "Twin #3 \u{b7} GPU (NVML)"]);
-        assert_eq!(t[1].1, 70.0);
+        assert_eq!((t[1].kind, t[1].c, t[1].source), (GpuTempKind::MemoryJunction, 70.0, "HWiNFO"));
     }
 
     #[test]

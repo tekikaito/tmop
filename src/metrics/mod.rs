@@ -19,7 +19,8 @@
 //! * Network: `GetIfTable2` octet deltas.
 //! * GPU: PDH `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage`.
 //!   GPU temperature: NVML while it is open, else the driver's report to Windows
-//!   (`D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` by LUID); hot spot and memory
+//!   (`D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` by LUID, asked only of a GPU whose
+//!   engines show work this sample, the last reading kept 30 s after); hot spot and memory
 //!   temperatures from HWiNFO's shared memory when it runs, matched to a GPU by name.
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin); CPU
 //!   temperature from the PawnIO driver when switched on in Settings ([`pawnio`]), else from
@@ -291,32 +292,59 @@ pub struct ThermalSample {
     pub zones: Vec<(String, f32)>,
     /// CPU temperature (PawnIO or HWiNFO shared memory on Windows, hwmon on Linux): (reading label, °C).
     pub cpu: Option<(String, f32)>,
-    /// The GPUs' temperatures ([`GpuAdapter::temps`]), as ("<GPU name> <reading>", °C).
-    pub gpu: Vec<(String, f32)>,
+    /// Where [`ThermalSample::cpu`] comes from: "PawnIO", "HWiNFO", "hwmon k10temp".
+    pub cpu_source: Option<String>,
+    /// The GPUs' temperatures ([`GpuAdapter::temps`]).
+    pub gpu: Vec<GpuThermal>,
     /// Which sources were checked, e.g. "ACPI: no zones · HWiNFO: not running".
     pub sources: String,
 }
 
+/// One GPU temperature in the thermal sample.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuThermal {
+    /// "<GPU name> · <reading> (<source>)", for a list of all readings.
+    pub label: String,
+    pub kind: GpuTempKind,
+    pub c: f32,
+    pub source: &'static str,
+}
+
+/// The reading behind [`ThermalSample::max_c`]: what it is ("CPU", "GPU" or the zone's name),
+/// °C and its source ("PawnIO", "WDDM", "ACPI zone" ...).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hottest {
+    pub what: String,
+    pub c: f32,
+    pub source: String,
+}
+
 impl ThermalSample {
-    /// The hottest reading of all, GPUs included: the Thermals figure, its history, the popout
-    /// tile and the temperature alert.
+    /// The hottest of the CPU, board and GPU-core readings: the Thermals headline, its history,
+    /// the popout tile, the recorder and the temperature alert. A GPU's hot spot and memory
+    /// readings are left out: they run well above the core in normal use (a GDDR6X memory
+    /// junction near 90-100 °C), so they would set off a limit meant for a part that is too hot.
     pub fn max_c(&self) -> Option<f32> {
-        hottest(self.board_readings().chain(self.gpu.iter().map(|g| g.1)))
+        self.hottest().map(|h| h.c)
+    }
+
+    /// What [`ThermalSample::max_c`] is, named.
+    pub fn hottest(&self) -> Option<Hottest> {
+        let cpu = self.cpu.iter().map(|c| ("CPU".to_string(), c.1, self.cpu_source.clone().unwrap_or_else(|| SOURCES.sensor.to_string())));
+        let gpu = self.gpu.iter().filter(|g| g.kind == GpuTempKind::Gpu).map(|g| ("GPU".to_string(), g.c, g.source.to_string()));
+        let zones = self.zones.iter().map(|z| (z.0.clone(), z.1, SOURCES.sensor.to_string()));
+        // The first of equals: CPU, then GPU, then the zones.
+        cpu.chain(gpu).chain(zones).fold(None::<Hottest>, |best, (what, c, source)| match best {
+            Some(b) if b.c >= c => Some(b),
+            _ => Some(Hottest { what, c, source }),
+        })
     }
 
     /// The hottest reading of the CPU and the board (thermal zones, other hwmon chips), GPUs left
     /// out: what a CPU readout falls back to when there is no CPU temperature.
     pub fn board_max_c(&self) -> Option<f32> {
-        hottest(self.board_readings())
+        self.zones.iter().map(|z| z.1).chain(self.cpu.as_ref().map(|c| c.1)).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
     }
-
-    fn board_readings(&self) -> impl Iterator<Item = f32> + '_ {
-        self.zones.iter().map(|z| z.1).chain(self.cpu.as_ref().map(|c| c.1))
-    }
-}
-
-fn hottest(v: impl Iterator<Item = f32>) -> Option<f32> {
-    v.fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
 }
 
 /// Windows' hint where no temperature source is available (see [`Sources::thermal_hint`]).
@@ -803,11 +831,19 @@ mod tests {
     }
 
     #[test]
-    fn gpu_readings_count_as_hottest_but_not_for_the_cpu() {
-        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], gpu: vec![("RTX GPU".into(), 80.0)], ..Default::default() };
+    fn only_the_gpu_core_counts_as_hottest_and_never_for_the_cpu() {
+        let g = |kind, c, source| GpuThermal { label: String::new(), kind, c, source };
+        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], gpu: vec![g(GpuTempKind::Gpu, 80.0, "WDDM"), g(GpuTempKind::MemoryJunction, 96.0, "HWiNFO"), g(GpuTempKind::HotSpot, 92.0, "HWiNFO")], ..Default::default() };
         assert_eq!((t.max_c(), t.board_max_c()), (Some(80.0), Some(45.0)));
-        let t = ThermalSample { gpu: vec![("RTX GPU".into(), 60.0)], ..Default::default() };
-        assert_eq!((t.max_c(), t.board_max_c()), (Some(60.0), None));
+        assert_eq!(t.hottest(), Some(Hottest { what: "GPU".into(), c: 80.0, source: "WDDM".into() }));
+        // Hot spot and memory alone: no hottest reading at all, rather than an alarming one.
+        let t = ThermalSample { gpu: vec![g(GpuTempKind::Memory, 90.0, "hwmon amdgpu")], ..Default::default() };
+        assert_eq!((t.max_c(), t.hottest()), (None, None));
+        // The CPU names its source and wins a tie; a zone is named by itself.
+        let t = ThermalSample { cpu: Some(("CPU Package".into(), 70.0)), cpu_source: Some("PawnIO".into()), gpu: vec![g(GpuTempKind::Gpu, 70.0, "NVML")], zones: vec![("TZ00".into(), 30.0)], ..Default::default() };
+        assert_eq!(t.hottest(), Some(Hottest { what: "CPU".into(), c: 70.0, source: "PawnIO".into() }));
+        let t = ThermalSample { zones: vec![("TZ00".into(), 30.0), ("TZ01".into(), 31.0)], ..Default::default() };
+        assert_eq!(t.hottest().map(|h| (h.what, h.source)), Some(("TZ01".to_string(), SOURCES.sensor.to_string())));
     }
 
     #[test]

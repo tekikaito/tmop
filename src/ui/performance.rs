@@ -726,7 +726,10 @@ impl App {
                     Some(t) => split_unit(&self.temp(t)),
                     None => ("\u{2014}".to_string(), String::new()),
                 };
-                let hd = Head { title: "Thermals", sub: src, value, side: String::new() };
+                // Which reading the headline is: "GPU · WDDM", "CPU · PawnIO", "TZ00 · ACPI zone".
+                let hottest = s.thermal.hottest();
+                let side = hottest.as_ref().map(|h| format!("{} \u{b7} {}", h.what, h.source)).unwrap_or_default();
+                let hd = Head { title: "Thermals", sub: src, value, side };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, 110.0))];
                 let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), self.temp(at(&fd.hist.thermal, age)));
@@ -736,7 +739,7 @@ impl App {
                     let th = &s.thermal;
                     let zones = th.zones.len();
                     let labels = [
-                        ("Hottest now", dash_or(th.max_c().map(|t| self.temp(t)))),
+                        ("Hottest now", dash_or(hottest.as_ref().map(|h| format!("{} {}", h.what, self.temp(h.c))))),
                         ("Peak since start", dash_or(self.perf.thermal_peak.as_ref().map(|(t, at)| format!("{} at {at}", self.temp(*t))))),
                         ("CPU", dash_or(th.cpu.as_ref().map(|(l, c)| format!("{l} {}", self.temp(*c))))),
                         ("Zones", dash_or((zones > 0).then(|| format!("{zones} thermal zone{}", if zones == 1 { "" } else { "s" })))),
@@ -746,12 +749,14 @@ impl App {
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Hottest sensor", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
-                if s.thermal.max_c().is_none() {
+                if s.thermal.max_c().is_none() && s.thermal.gpu.is_empty() {
                     p.text(pos2(ix, cy), Align2::LEFT_TOP, format!("No temperature source available. {}.", SOURCES.thermal_hint), theme::ui(12.0), theme::status(&pal).warn);
                     cy += 20.0;
                 } else {
                     let mut facts: Vec<(String, String)> = s.thermal.cpu.iter().map(|(l, c)| (l.clone(), self.temp(*c))).collect();
-                    facts.extend(s.thermal.gpu.iter().map(|(g, c)| (g.clone(), self.temp(*c))));
+                    // Every GPU reading is listed; only the GPU's own (not hot spot or memory)
+                    // counts toward the hottest figure above.
+                    facts.extend(s.thermal.gpu.iter().map(|g| (g.label.clone(), self.temp(g.c))));
                     facts.extend(s.thermal.zones.iter().map(|(z, c)| (z.clone(), self.temp(*c))));
                     cy += dl(&p, &pal, ix, cy, iw, &facts);
                 }
