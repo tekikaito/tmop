@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "tmop"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "ab_glyph",
  "alacritty_terminal",
