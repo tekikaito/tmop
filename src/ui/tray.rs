@@ -6,9 +6,15 @@
 //! While the window is hidden and no popout is open, TMOP draws nothing and asks for no
 //! repaints; sampling slows down to every 5 s unless the flight recorder is writing a
 //! recording ([`crate::tray::hidden_interval`]), so the flight recorder's ring and timeline go
-//! on; the per-process network counters and GPU detail stop. Container alerts go out as
-//! desktop notifications as they come, and the daily update check still runs. The tray icon,
-//! the shortcut and a second start wake it.
+//! on; the per-process network counters and GPU detail stop. The CPU, memory and temperature
+//! alerts ([`crate::alerts`]) run on the sampler thread and see every sample: their hold time
+//! is measured between sample times, so at 5 s they fire at most one interval late and never
+//! early. Container alerts go out as desktop notifications as they come, and the daily update
+//! check still runs. The tray icon, the shortcut and a second start wake it.
+//!
+//! Hiding cancels the close, so `App::on_exit` (Docker terminals, recording, settings) runs
+//! only on a real exit: Exit in the icon's menu, `TMOP --exit` and [`App::quit`] (see
+//! [`crate::tray::Action::ends_tmop`]).
 
 use super::settings_page::{note, row_hint, toggle_row_hint};
 use super::theme::Palette;
@@ -203,14 +209,16 @@ impl App {
         }
         self.retry_shortcut(ctx);
         let mut events = self.tray_ui.tray.as_ref().map(|t| t.events()).unwrap_or_default();
-        match self.replace.take_request().as_deref() {
-            None | Some(tray::ALREADY_RUNNING) => {}
-            Some(tray::EXIT_REQUEST) => events.push(Event::Exit),
-            Some(page) => {
-                if !page.is_empty() {
-                    self.page = Page::from_id_on(page, &self.caps);
+        if let Some(message) = self.replace.take_request() {
+            match tray::request_event(&message) {
+                Some(Event::SecondStart) => {
+                    if !message.is_empty() {
+                        self.page = Page::from_id_on(&message, &self.caps);
+                    }
+                    events.push(Event::SecondStart);
                 }
-                events.push(Event::SecondStart);
+                Some(e) => events.push(e),
+                None => {}
             }
         }
         if self.tray_ui.tray.is_some() {

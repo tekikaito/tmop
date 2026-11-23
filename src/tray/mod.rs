@@ -27,6 +27,16 @@ pub const FLAG_ALIAS: &str = "--hidden";
 /// Given by TMOP to a copy it starts in its own place (after an update, as administrator)
 /// just before it exits: that copy does not hand over to the one that is exiting.
 pub const REPLACING_FLAG: &str = "--replacing";
+/// The same as [`REPLACING_FLAG`] for the copy an update starts: that is the new version, and
+/// a version from before tray mode rejects an option it does not know (`cli::parse`, exit code
+/// 2), so the update passes this environment variable instead, which such a version ignores.
+pub const REPLACING_ENV: &str = "TMOP_REPLACING";
+
+/// Whether this start takes the place of an exiting TMOP: [`REPLACING_FLAG`] in `args`, or
+/// [`REPLACING_ENV`] set to `1`. `env` reads a variable (`std::env::var_os` in TMOP).
+pub fn is_replacing(args: &[String], env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    args.iter().any(|a| a == REPLACING_FLAG) || env(REPLACING_ENV).is_some_and(|v| v == "1")
+}
 
 /// What happened to the window, the icon or the shortcut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +73,27 @@ pub enum Action {
     Close,
     /// Close the window, which ends TMOP (the next close request is let through).
     Exit,
+}
+
+impl Action {
+    /// Whether TMOP ends: the close goes through, so eframe runs `App::on_exit`, which removes
+    /// the icon and the shortcut, stops a recording, hangs up the Docker terminals (bounded to
+    /// about a second) and saves the settings. A hide cancels the close (or was no close), so
+    /// none of that runs and everything goes on while the window is hidden.
+    pub fn ends_tmop(self) -> bool {
+        matches!(self, Action::Close | Action::Exit)
+    }
+}
+
+/// The event a message on the hand-off pipe stands for: [`EXIT_REQUEST`] (`TMOP --exit`) is
+/// Exit, [`ALREADY_RUNNING`] (a `--tray` start at sign-in) is nothing, and anything else (empty,
+/// or a page id) is a second start that brings the window to the front.
+pub fn request_event(message: &str) -> Option<Event> {
+    match message {
+        ALREADY_RUNNING => None,
+        EXIT_REQUEST => Some(Event::Exit),
+        _ => Some(Event::SecondStart),
+    }
 }
 
 /// Whether the main window is hidden in the tray, and what each event does to that.
@@ -317,6 +348,62 @@ mod tests {
         let mut v = Visibility::new(true);
         assert_eq!(v.on(Event::Exit, true), Action::Exit);
         assert_eq!(v.on(Event::CloseRequested, true), Action::Close);
+    }
+
+    /// Hiding to the tray never ends TMOP (no `on_exit`: Docker terminals stay open, the
+    /// recording goes on, alerts keep watching); each real exit does, from a shown or a hidden
+    /// window: Exit in the icon's menu, `TMOP --exit` over the pipe, and `App::quit` (File →
+    /// Exit, the update restart with `--replacing`, Restart as administrator), which all feed
+    /// [`Event::Exit`] and let the close that follows through.
+    #[test]
+    fn hiding_never_ends_tmop_and_every_exit_does() {
+        for hidden in [false, true] {
+            let mut v = Visibility::new(hidden);
+            let close = v.on(Event::CloseRequested, true);
+            assert_eq!(close, Action::HideInsteadOfClose);
+            assert!(!close.ends_tmop(), "the close button only hides");
+            let mut v = Visibility::new(false);
+            let min = v.on(Event::Minimized, true);
+            assert!(min == Action::Hide && !min.ends_tmop());
+            for e in [Event::IconClick, Event::IconDoubleClick, Event::Open, Event::Shortcut, Event::SecondStart] {
+                let mut v = Visibility::new(hidden);
+                assert!(!v.on(e, true).ends_tmop(), "{e:?}");
+            }
+        }
+        // The three exit routes, each from a window that is hidden or shown.
+        let routes = [Some(Event::Exit), request_event(EXIT_REQUEST)];
+        for hidden in [false, true] {
+            for route in routes {
+                let mut v = Visibility::new(hidden);
+                let first = v.on(route.expect("an exit event"), true);
+                assert!(first == Action::Exit && first.ends_tmop());
+                let then = v.on(Event::CloseRequested, true);
+                assert!(then == Action::Close && then.ends_tmop(), "the close Exit sends goes through");
+            }
+        }
+        // Without tray mode (or without an icon) a close ends TMOP as before.
+        let mut v = Visibility::new(false);
+        assert!(v.on(Event::CloseRequested, false).ends_tmop());
+    }
+
+    #[test]
+    fn replacing_comes_from_the_flag_or_the_update_variable() {
+        let none = |_: &str| None;
+        let set = |v: &'static str| move |n: &str| (n == REPLACING_ENV).then(|| std::ffi::OsString::from(v));
+        assert!(!is_replacing(&[], none));
+        assert!(is_replacing(&args(&["--replacing", "--page=disk-space"]), none), "Restart as administrator");
+        assert!(is_replacing(&[], set("1")), "the update restart");
+        assert!(!is_replacing(&[], set("0")));
+        assert!(!is_replacing(&[], set("")));
+        assert!(!is_replacing(&args(&["--page=replacing"]), none));
+    }
+
+    #[test]
+    fn pipe_messages_map_to_events() {
+        assert_eq!(request_event(EXIT_REQUEST), Some(Event::Exit));
+        assert_eq!(request_event(ALREADY_RUNNING), None, "a --tray start at sign-in changes nothing");
+        assert_eq!(request_event(""), Some(Event::SecondStart));
+        assert_eq!(request_event("processes"), Some(Event::SecondStart));
     }
 
     #[test]

@@ -415,8 +415,11 @@ fn main() -> eframe::Result<()> {
     // brings it to the front, and a `--tray` start at sign-in only tells it that it is there,
     // over the Task Manager pipe. A start with other arguments runs as a copy of its own
     // (`tray::hand_off_message`). An elevated start replaces a TMOP that is not elevated.
-    let mut replacing = args.iter().any(|a| a == tmop::tray::REPLACING_FLAG);
-    if settings.tray.keep_running && !popout_only && !replacing && tmop::platform::Caps::get().tray {
+    let mut replacing = tmop::tray::is_replacing(&args, |n| std::env::var_os(n));
+    // Not for the programs this TMOP starts (Run new task, a later update of its own).
+    std::env::remove_var(tmop::tray::REPLACING_ENV);
+    // A screenshot run is never handed over and has no part in tray mode (see `App::new`).
+    if settings.tray.keep_running && !popout_only && !replacing && launch.shot.is_none() && tmop::platform::Caps::get().tray {
         if let Some(message) = tmop::tray::hand_off_message(&args) {
             match tmop::taskmgr::hand_off_start(&message, message != tmop::tray::ALREADY_RUNNING) {
                 tmop::taskmgr::HandOff::Delivered => return Ok(()),

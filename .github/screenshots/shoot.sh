@@ -53,6 +53,9 @@ shot settings-alerts --page=settings --settings-section=alerts --wait=10
 if [ "$os" = windows ]; then
   shot services --page=services
   shot settings-graphs --page=settings --settings-section=graphs --wait=10
+  # The Notification area section (Windows only). A screenshot run has no icon or shortcut, so
+  # the section shows its main switch off.
+  shot settings-tray --page=settings --settings-section=notification-area --wait=10
 fi
 if [ "$os" = linux ]; then
   shot docker --page=docker --docker-tab=containers
@@ -114,6 +117,7 @@ shot_min min-perf-thermal --page=performance --device=thermal
 shot system-info --page=system-info
 shot installed-apps --page=installed-apps
 [ "$os" = windows ] && shot_min min-services --page=services
+[ "$os" = windows ] && shot_min min-settings-tray --page=settings --settings-section=notification-area
 [ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
 [ "$os" != macos ] && shot_min min-docker-engine --page=docker --docker-tab=engine
 ls -l "$out"

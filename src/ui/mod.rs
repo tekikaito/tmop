@@ -582,8 +582,12 @@ impl App {
         // The pipe first: only the copy that has it gets the tray icon and the shortcut.
         let claim_for = if launch.replacing { crate::tray::CLAIM_RETRY } else { Duration::ZERO };
         let replace = replace::ReplaceUi::new(&cc.egui_ctx, !popout_only && caps.taskmgr_replace, claim_for);
-        let owns_tray = crate::tray::owns_tray(caps.tray, popout_only, replace.listening());
-        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, tray::Role { owns_tray, other_copy: caps.tray && !popout_only && !owns_tray, replacing: launch.replacing }, launch.tray);
+        // A screenshot run has no icon or shortcut (its close must end it), and its Settings
+        // section shows the switches as they are, not the note for a second copy.
+        let shot = launch.shot.is_some();
+        let owns_tray = crate::tray::owns_tray(caps.tray, popout_only, replace.listening()) && !shot;
+        let role = tray::Role { owns_tray, other_copy: caps.tray && !popout_only && !owns_tray && !shot, replacing: launch.replacing };
+        let tray_ui = tray::TrayUi::new(&cc.egui_ctx, main_hwnd(cc), &settings.tray, role, launch.tray && !shot);
         let mut app = Self {
             caps,
             software_gl,

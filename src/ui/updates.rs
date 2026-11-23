@@ -183,7 +183,9 @@ impl App {
         let installed = if u.install.poll() { u.install.ok().cloned() } else { None };
         if let Some(exe) = installed {
             self.save_settings();
-            match std::process::Command::new(&exe).arg(crate::tray::REPLACING_FLAG).spawn() {
+            // The variable, not `--replacing`: a newer version from before tray mode would
+            // reject the option and not start (see `tray::REPLACING_ENV`).
+            match std::process::Command::new(&exe).env(crate::tray::REPLACING_ENV, "1").spawn() {
                 Ok(_) => self.quit(ctx),
                 Err(e) => {
                     self.updates.offer = None;
