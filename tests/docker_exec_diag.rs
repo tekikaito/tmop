@@ -172,8 +172,142 @@ async fn raw(docker: &Docker, name: &str, variant: &str) -> (Option<u128>, Strin
     (ms, after)
 }
 
+async fn exec_out(docker: &Docker, name: &str, cmd: &[&str]) -> String {
+    let o = CreateExecOptions::<String> {
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    let c = match docker.create_exec(name, o).await {
+        Ok(c) => c,
+        Err(e) => return format!("<create exec failed: {e}>"),
+    };
+    let mut s = String::new();
+    if let Ok(StartExecResults::Attached { mut output, .. }) = docker.start_exec(&c.id, None).await {
+        while let Some(Ok(item)) = output.next().await {
+            s.push_str(&item.to_string());
+        }
+    }
+    s
+}
+
+async fn state_line(docker: &Docker, name: &str) -> String {
+    match docker.inspect_container(name, None).await {
+        Ok(i) => {
+            let s = i.state.unwrap_or_default();
+            format!(
+                "running={:?} status={:?} exit={:?} oom={:?} error={:?} started={:?} finished={:?} pid={:?}",
+                s.running, s.status, s.exit_code, s.oom_killed, s.error, s.started_at, s.finished_at, s.pid
+            )
+        }
+        Err(e) => format!("<inspect failed: {e}>"),
+    }
+}
+
+/// Every process with its ids, state, and the TMOP_SESSION entry if it has one.
+const SNAPSHOT: &str = r#"for d in /proc/[0-9]*; do p=${d#/proc/}; [ "$p" = "$$" ] && continue; set -- $(cat $d/stat 2>/dev/null | sed 's/^.*) //'); printf '%s comm=%s state=%s ppid=%s pgid=%s sid=%s start=%s mark=%s args=%s\n' "$p" "$(cat $d/comm 2>/dev/null)" "$1" "$2" "$3" "$4" "${20}" "$(tr '\0' '\n' < $d/environ 2>/dev/null | grep TMOP_SESSION)" "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)"; done"#;
+
+/// The product's hangup script, printing what it signals instead of only signalling.
+const VERBOSE_HANGUP: &str = r#"for d in /proc/[0-9]*; do
+  p=${d#/proc/}
+  [ "$p" = 1 ] || [ "$p" = "$$" ] && continue
+  if grep -qF "$0" "$d/environ" 2>/dev/null; then echo "HUP $p $(cat $d/comm)"; kill -HUP "$p"; echo "kill rc=$?"; fi
+done
+echo "script done self=$$""#;
+
+/// The stubborn-program scenario of `closing_the_session_ends_a_program_that_ignores_ctrl_c`,
+/// with the container ("sh -c 'sleep 60'" as in the real test) observed around the close.
+/// DIAG_STUBBORN=manual runs the verbose hangup first, then waits, then closes.
+#[test]
+fn diag_stubborn() {
+    let Some((rt, docker)) = engine() else { return };
+    if std::env::var("DIAG_STUBBORN").is_err() {
+        return;
+    }
+    rt.block_on(ensure_image(&docker)).expect("pull test image");
+    let manual = env_or("DIAG_STUBBORN", "product") == "manual";
+    let iters: usize = env_or("DIAG_ITERS", "10").parse().unwrap();
+    let mut died = 0;
+    for i in 0..iters {
+        let name = format!("tmop-test-diag179-{}", suffix());
+        rt.block_on(async {
+            let opts = CreateContainerOptionsBuilder::default().name(&name).build();
+            let body = ContainerCreateBody {
+                image: Some(TEST_IMAGE.into()),
+                cmd: Some(vec!["sh".into(), "-c".into(), "sleep 60".into()]),
+                ..Default::default()
+            };
+            docker.create_container(Some(opts), body).await.expect("create");
+            docker.start_container(&name, None).await.expect("start");
+        });
+        let t_start = Instant::now();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let o = out.clone();
+        let sink = Sink::new(move |b| o.lock().unwrap().extend_from_slice(b), || {});
+        let engine = Engine { docker: docker.clone(), runtime: rt.handle().clone(), context: "diag".into(), read_only: false };
+        let opts = ExecOptions { command: None, user: None, cols: 80, rows: 24 };
+        let mut session = ExecSession::start(&engine, &name, opts, sink).expect("start");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while session.state() != TransportState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        session.write(b"sh -c \"trap '' INT; echo stub''born; sleep 600\"\r");
+        assert!(rt.block_on(wait_contains(&out, "stubborn", 0)), "no stubborn: {}", text(&out));
+        println!("DIAGS iter={i} t={:?} before close: {}", t_start.elapsed(), rt.block_on(state_line(&docker, &name)));
+        for line in rt.block_on(exec_out(&docker, &name, &["sh", "-c", SNAPSHOT])).lines() {
+            println!("DIAGS iter={i}   proc {line}");
+        }
+        if manual {
+            let marker = rt
+                .block_on(exec_out(&docker, &name, &["sh", "-c", SNAPSHOT]))
+                .lines()
+                .find_map(|l| l.split("mark=").nth(1).and_then(|m| m.split_whitespace().next()).map(str::to_string))
+                .unwrap_or_default();
+            println!("DIAGS iter={i} marker entry={marker}");
+            let v = rt.block_on(exec_out(&docker, &name, &["sh", "-c", VERBOSE_HANGUP, &marker]));
+            for line in v.lines() {
+                println!("DIAGS iter={i}   hangup {line}");
+            }
+        } else {
+            session.close();
+        }
+        let t0 = Instant::now();
+        let mut last = String::new();
+        let mut dead = false;
+        while t0.elapsed() < Duration::from_secs(4) {
+            let s = rt.block_on(state_line(&docker, &name));
+            if s != last {
+                println!("DIAGS iter={i} +{:?} {s}", t0.elapsed());
+                if s.contains("running=Some(false)") {
+                    dead = true;
+                }
+                last = s;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !dead {
+            for line in rt.block_on(exec_out(&docker, &name, &["sh", "-c", SNAPSHOT])).lines() {
+                println!("DIAGS iter={i}   after proc {line}");
+            }
+        }
+        if manual {
+            session.close();
+            std::thread::sleep(Duration::from_secs(1));
+            println!("DIAGS iter={i} after product close: {}", rt.block_on(state_line(&docker, &name)));
+        }
+        died += usize::from(dead);
+        drop(session);
+        rt.block_on(remove_container(&docker, &name));
+    }
+    println!("DIAG SUMMARY stubborn mode={} runs={iters} container_died={died}", if manual { "manual" } else { "product" });
+}
+
 #[test]
 fn diag_close_timing() {
+    if std::env::var("DIAG_STUBBORN").is_ok() {
+        return;
+    }
     let Some((rt, docker)) = engine() else { return };
     rt.block_on(ensure_image(&docker)).expect("pull test image");
     let variant = env_or("DIAG_VARIANT", "product");
