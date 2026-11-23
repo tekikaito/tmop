@@ -78,7 +78,10 @@ fn text(out: &Arc<Mutex<Vec<u8>>>) -> String {
 async fn wait_contains(out: &Arc<Mutex<Vec<u8>>>, needle: &str, from: usize) -> bool {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        let s = String::from_utf8_lossy(&out.lock().unwrap()[from.min(out.lock().unwrap().len())..]).into_owned();
+        let s = {
+            let buf = out.lock().unwrap();
+            String::from_utf8_lossy(&buf[from.min(buf.len())..]).into_owned()
+        };
         if s.contains(needle) {
             return true;
         }

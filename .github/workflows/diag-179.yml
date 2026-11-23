@@ -27,12 +27,12 @@ jobs:
           - name: loop-test-load
             mode: loop
             load: 'yes'
-          - name: diag-product
-            mode: diag
-            variants: 'product:300:1 product:300:4'
-          - name: diag-raw
-            mode: diag
-            variants: 'drop:20:1 ctrl_d:200:1 ctrl_c_d:300:1 ctrl_c_wait_d:300:1 ctrl_c_d:300:4'
+          - { name: diag-product-1, mode: diag, variants: 'product:300:1' }
+          - { name: diag-product-4, mode: diag, variants: 'product:300:4' }
+          - { name: diag-drop-ctrl-d, mode: diag, variants: 'drop:20:1 ctrl_d:100:1' }
+          - { name: diag-ctrl-c-d, mode: diag, variants: 'ctrl_c_d:300:1' }
+          - { name: diag-ctrl-c-d-4, mode: diag, variants: 'ctrl_c_d:300:4' }
+          - { name: diag-ctrl-c-wait-d, mode: diag, variants: 'ctrl_c_wait_d:300:1' }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -76,7 +76,7 @@ jobs:
             if [ "$t" != 1 ]; then
               for _ in $(seq $(nproc)); do (while :; do :; done) & done
             fi
-            DIAG_VARIANT=$v DIAG_ITERS=$n DIAG_THREADS=$t "$bin" --nocapture 2>&1 | grep '^DIAG' || true
+            DIAG_VARIANT=$v DIAG_ITERS=$n DIAG_THREADS=$t timeout 1500 "$bin" --nocapture 2>&1 | grep --line-buffered '^DIAG' || true
             jobs -p | xargs -r kill || true
           done
           docker ps -a --filter name=tmop-test- --format '{{.Names}}' | xargs -r docker rm -f
