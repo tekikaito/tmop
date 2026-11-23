@@ -1,5 +1,5 @@
 {
-    "version": "0.19.0",
+    "version": "0.19.1",
     "description": "Task Manager OverPowered: a skinnable task manager and system monitor",
     "homepage": "https://tekikaito.github.io/tmop/",
     "license": "GPL-3.0-only",
@@ -9,12 +9,12 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/tekikaito/tmop/releases/download/v0.19.0/TMOP-v0.19.0-windows-x64.zip",
-            "hash": "479cf488a1263a73730207cf185c3df29427da31e9b10a3360ed0eb13adc9bef"
+            "url": "https://github.com/tekikaito/tmop/releases/download/v0.19.1/TMOP-v0.19.1-windows-x64.zip",
+            "hash": "77fda3f03f296121231ab658023a7b8b518a88b89d7ca7c723f2be8f10d64708"
         },
         "arm64": {
-            "url": "https://github.com/tekikaito/tmop/releases/download/v0.19.0/TMOP-v0.19.0-windows-arm64.zip",
-            "hash": "dc13182b8345a2fdfa7a67dc05d2a3134a6e9a2af2a9f295b87838787685f3cd"
+            "url": "https://github.com/tekikaito/tmop/releases/download/v0.19.1/TMOP-v0.19.1-windows-arm64.zip",
+            "hash": "531b76804f09994e9874147cacca8532ee7759ff1089b57f0549556704f1ca4c"
         }
     },
     "bin": "TMOP.exe",
