@@ -23,6 +23,34 @@ shot() {  # name, then TMOP arguments (a later --wait= wins)
   echo "::endgroup::"
 }
 
+if [ -n "${QA_MIN:-}" ]; then
+  qa_min() {  # name, then TMOP arguments
+    local name="$1"; shift
+    echo "::group::$name"
+    if "$exe" --screenshot="$out/$name.png" --window-size=900x600 --wait="${SHOT_MIN_WAIT:-12}" "$@"; then echo "ok: $name"; else echo "::warning::shot $name failed"; fi
+    echo "::endgroup::"
+  }
+  for pg in summary performance processes docker system-info app-history startup-apps users services power-and-freq flight-recorder connections installed-apps drivers disk-space benchmarks settings; do
+    qa_min "min-page-$pg" --page=$pg
+  done
+  for d in cpu memory disk network gpu thermal docker; do qa_min "min-perf-$d" --page=performance --device=$d; done
+  for t in containers stacks images volumes networks engine; do qa_min "min-docker-$t" --page=docker --docker-tab=$t; done
+  for sct in appearance graphs general alerts "window management" "other options" "task manager" "skins and files" about; do
+    qa_min "min-settings-${sct// /-}" --page=settings --settings-section="$sct"
+  done
+  for pg in summary processes settings; do qa_min "min-light-$pg" --page=$pg --theme=light; done
+  shot def-perf-gpu --page=performance --device=gpu --wait=20
+  shot def-perf-thermal --page=performance --device=thermal --wait=20
+  shot def-power --page=power-and-freq --wait=20
+  shot def-system-info --page=system-info --wait=20
+  shot def-installed-apps --page=installed-apps --wait=20
+  shot def-services --page=services --wait=20
+  shot def-processes --page=processes --wait=25
+  TMOP_POPOUT_CORNERS="" "$exe" --popout --screenshot="$out/def-popout-classic.png" --wait=8 || echo "::warning::popout failed"
+  ls -l "$out"
+  exit 0
+fi
+
 shot summary --page=summary
 shot performance-cpu --page=performance --device=cpu
 shot performance-memory --page=performance --device=memory

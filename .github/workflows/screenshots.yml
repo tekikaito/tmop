@@ -12,6 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  QA_MIN: '1'
 
 jobs:
   windows:
