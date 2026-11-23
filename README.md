@@ -40,7 +40,7 @@ curl -fsSL https://tekikaito.github.io/tmop/install.sh | sh
   between them (see [Platforms](#platforms)). Where a system can't provide something, TMOP hides
   it instead of showing zeros.
 - **More than processes and graphs.** Per-core CPU, memory, disk (each disk on its own if you
-  like), network and graphics card, with engines where the system reports them; processes with
+  like), network and graphics card, with engines where the system reports them and its temperature (Windows and Linux; Intel, AMD and NVIDIA graphics on Linux); processes with
   end task, suspend and priority; services you can start and stop, startup apps you can turn on and off, installed apps, connections; table
   columns you can put in any order; a Disk Space scan with a treemap; benchmarks; a flight recorder; and a Docker page.
 - **Skinnable.** Skins, palettes and fonts change how it looks. Skins use the `.tmogskin`

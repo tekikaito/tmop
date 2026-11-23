@@ -375,6 +375,7 @@
           <ul>
             <li data-only="linux">Puts <code class="inline">tmop</code> in <i>~/.local/bin</i> and adds TMOP to your applications menu</li>
             <li data-only="linux">Prefer the AppImage? Add <code class="inline">-s -- --appimage</code> after <code class="inline">sh</code></li>
+            <li data-only="linux">On Debian, Ubuntu, Fedora or openSUSE you can take the <code class="inline">.deb</code> or <code class="inline">.rpm</code> from the <a href="https://github.com/tekikaito/tmop/releases/latest">release page</a> instead; those do not update themselves</li>
             <li data-only="macos">Puts TMOP.app in <i>Applications</i> in your home folder, with no "could not verify" prompt</li>
             <li>Checks the download's SHA-256, needs no root or admin password</li>
             <li>Run it again any time to update</li>
@@ -394,6 +395,20 @@
             <li><code class="inline">brew upgrade</code> keeps it up to date with every new release</li>
             <li>Remove it with <code class="inline">brew uninstall --cask tmop</code></li>
             <li>Use either Homebrew or the command above, not both: each installs its own copy</li>
+          </ul>
+        </div>
+        <div class="cmd-card" data-only="linux">
+          <div class="os-tag">Linux</div>
+          <h3 style="margin:0 0 4px; font-size:17px;">Or run it with Nix</h3>
+          <p style="margin:0; color:var(--muted); font-size:15px;">If you use <a href="https://nixos.org">Nix</a> (x86_64 and ARM64), paste this into a <b>Terminal</b>:</p>
+          <div class="cmd">
+            <code><span class="p">$ </span>nix run github:tekikaito/tmop</code>
+            <button class="copy" data-copy="nix run github:tekikaito/tmop">Copy</button>
+          </div>
+          <ul>
+            <li>Builds TMOP from source, so the first run compiles for a few minutes</li>
+            <li>Update with <code class="inline">nix flake update tmop</code> or <code class="inline">nix run github:tekikaito/tmop --refresh</code>, not from the app</li>
+            <li>Tested: the build on both architectures in CI, and that the built program runs. TMOP's window has not been seen on NixOS yet</li>
           </ul>
         </div>
         <div class="cmd-card" data-only="windows">
@@ -420,7 +435,10 @@
             <li>Most pages are there: performance, processes, services, startup apps, installed apps, connections, Disk Space and Docker.</li>
             <li>Windows-only parts are hidden, such as replacing Task Manager, TMOP's own Docker engine and the Windows Disk Cleanup handlers.</li>
             <li data-only="macos">Temperatures and per-engine graphics load aren't available on macOS; Apple Silicon Macs report no clock speeds.</li>
-            <li data-only="linux">On Wayland, "always on top" for the popout isn't available; on X11 it is.</li>
+            <li>On <i>Processes</i>, <i>Group by app</i> shows one row per service or program.</li>
+            <li data-only="linux">Graphics: usage for AMD and NVIDIA cards, and for Intel graphics (Linux 5.19 or newer with i915, 6.11 or newer with xe). The <i>GPU</i> column on <i>Processes</i> covers Intel and AMD, for the programs TMOP may read (without root, your own), not NVIDIA. The Intel support and the per-program figures have not been tested on real hardware yet, so numbers may be off or missing.</li>
+            <li data-only="linux">Graphics card temperatures are read per card; they have been tested only with made-up files so far.</li>
+            <li data-only="linux">On Wayland,"always on top" for the popout isn't available; on X11 it is.</li>
             <li>The <a href="https://github.com/tekikaito/tmop#platforms">README</a> lists exactly what works where.</li>
           </ul>
         </div>
@@ -468,6 +486,9 @@
           <div class="img"><img src="screenshots/services.png" loading="lazy" alt="Services page with Start, Stop and Restart buttons above the list"></div>
           <div class="t"><h3>Start, stop or restart a service</h3><p>Select a service and press <i>Start</i>, <i>Stop</i> or <i>Restart</i>. Only what the service's state allows is offered. Without administrator rights (root on Linux and macOS) the buttons are greyed out with the reason. TMOP never asks for more rights.</p></div>
         </div>
+        <div class="feature">
+          <div class="t"><h3>See how hot your graphics card is</h3><p>The temperature of your graphics card, next to its usage and in <i>Thermals</i>. On Windows for any card whose driver reports it to Windows (the figure Task Manager shows); hot spot and memory readings only while HWiNFO runs with <i>Shared Memory Support</i> on. On Linux for each graphics card. Not on macOS.</p></div>
+        </div>
       </div>
       <ul class="more">
         <li>Find what fills your disk</li>
@@ -502,6 +523,7 @@
           <p data-only="windows"><b>Windows:</b> if you used the PowerShell command, run it again. Otherwise download the newest version here and replace your old TMOP.exe with it.</p>
           <p data-only="linux macos"><b>Linux and macOS:</b> if you used the install command, run it again. Otherwise download the newest version here and replace the old <span data-only="linux">AppImage</span><span data-only="macos">TMOP in <i>Applications</i></span> with it.</p>
           <p data-only="windows"><b>Installed with Scoop:</b> run <code>scoop update tmop</code>.</p>
+          <p data-only="linux"><b>Installed with Nix, or from a .deb or .rpm:</b> TMOP does not replace its own files. For Nix use <code>nix flake update tmop</code>; for a package, download the new one from the release page.</p>
           <p data-only="macos"><b>Installed with Homebrew:</b> run <code>brew upgrade --cask tmop</code> (or just <code>brew upgrade</code>).</p>
           <p>Your settings are kept either way. TMOP can also tell you about new versions: turn on <i>Check for updates when TMOP starts</i> in <i>Settings → General</i>. On Windows it then updates itself with <i>Update now</i>.</p>
         </div>
