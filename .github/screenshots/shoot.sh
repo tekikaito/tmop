@@ -101,6 +101,9 @@ shot_min min-processes --page=processes
 shot_min min-users --page=users
 shot_min min-app-history --page=app-history
 shot_min min-benchmarks --page=benchmarks
+shot_min min-power --page=power-and-freq
+shot system-info --page=system-info
+shot installed-apps --page=installed-apps
 [ "$os" = windows ] && shot_min min-services --page=services
 [ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
 ls -l "$out"

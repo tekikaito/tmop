@@ -6,7 +6,6 @@ use super::kit::{STAT_GAP, STAT_TILE_H};
 use super::table::TableState;
 use super::theme::{self, with_alpha, Palette};
 use super::widgets::{self, Button, ButtonKind, ButtonSize};
-use crate::metrics::Series;
 use crate::pro::apps::App as InstalledApp;
 use crate::pro::connections::Conn;
 use crate::pro::diskspace::{DirFile, Scanner, Tree, Volume};
@@ -22,13 +21,15 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct ProState {
     pub power: Loader<PowerInfo>,
-    /// Fastest core clock per sampler generation, for the Power & Freq history.
-    pub power_fastest: ClockTrace,
     pub conns: Loader<Vec<Conn>>,
     pub conns_table: TableState,
     pub conns_view: usize,
     pub apps: Loader<Vec<InstalledApp>>,
     pub apps_table: TableState,
+    /// Sizes of the installed apps where the list comes without them (macOS), and whether they
+    /// were applied to the list that is shown.
+    pub apps_sizes: Loader<Vec<(String, u64)>>,
+    pub apps_sized: bool,
     pub drivers: Loader<Vec<Service>>,
     pub drivers_table: TableState,
     pub volumes: Loader<Vec<Volume>>,
@@ -90,36 +91,6 @@ pub enum FileCol {
 
 /// Recording length limits of the Flight Recorder page: label and seconds.
 pub(super) const LIMITS: [(&str, Option<u64>); 6] = [("Until stopped", None), ("1 minute", Some(60)), ("5 minutes", Some(300)), ("15 minutes", Some(900)), ("1 hour", Some(3600)), ("8 hours", Some(28800))];
-
-/// The fastest core's clock (MHz) once per sampler generation, lined up with `History::clock`.
-#[derive(Default)]
-pub struct ClockTrace {
-    series: Option<Series>,
-    seq: u64,
-}
-
-impl ClockTrace {
-    /// Records `mhz` for sampler generation `seq` (once per generation). A skipped generation (the
-    /// page was not shown) starts a new trace, so the line never drifts from the history behind it.
-    pub fn push(&mut self, seq: u64, mhz: f32, capacity: usize) {
-        if seq == 0 || (seq == self.seq && self.series.is_some()) {
-            return;
-        }
-        let series = match self.series.take() {
-            Some(mut s) if seq == self.seq + 1 => {
-                s.resize(capacity);
-                s
-            }
-            _ => Series::new(capacity),
-        };
-        self.series.insert(series).push(mhz);
-        self.seq = seq;
-    }
-
-    pub fn series(&self) -> Option<&Series> {
-        self.series.as_ref()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Page layout
@@ -369,19 +340,6 @@ mod tests {
                 }
             }).drop_without_applying_deltas();
         }
-    }
-
-    #[test]
-    fn clock_trace_follows_sampler_generations() {
-        let mut t = ClockTrace::default();
-        t.push(0, 1.0, 10);
-        assert!(t.series().is_none(), "generation 0 is the empty snapshot");
-        t.push(5, 4000.0, 10);
-        t.push(5, 9999.0, 10);
-        t.push(6, 4200.0, 10);
-        assert_eq!(t.series().unwrap().values.iter().copied().collect::<Vec<_>>(), vec![4000.0, 4200.0]);
-        t.push(9, 3000.0, 10);
-        assert_eq!(t.series().unwrap().values.len(), 1, "a skipped generation starts a new trace");
     }
 
     #[test]

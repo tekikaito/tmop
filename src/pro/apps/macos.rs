@@ -48,6 +48,13 @@ fn bundles(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Allocated bytes of each install location. Apart from [`read`], because walking every file of
+/// every bundle and Cellar version takes minutes on a loaded machine (a CI runner) and the list
+/// must not wait for it.
+pub fn sizes(locations: Vec<String>) -> Result<Vec<(String, u64)>, String> {
+    Ok(locations.into_iter().map(|l| (dir_size(Path::new(&l)), l)).map(|(s, l)| (l, s)).collect::<Vec<_>>())
+}
+
 pub fn read() -> Result<Vec<App>, String> {
     let mut out: Vec<App> = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute());
@@ -64,7 +71,7 @@ pub fn read() -> Result<Vec<App>, String> {
             };
             a.scope = scope;
             a.install_date = mdate(&b);
-            a.size = dir_size(&b);
+            // The size comes later (`sizes`): walking every bundle is the slow part.
             a.location = b.display().to_string();
             out.push(a);
         }
@@ -81,7 +88,7 @@ pub fn read() -> Result<Vec<App>, String> {
                 publisher: tap,
                 version: ver.file_name().to_string_lossy().into_owned(),
                 install_date: time.map(unix_date).unwrap_or_else(|| mdate(&ver.path())),
-                size: dir_size(&ver.path()),
+                size: 0,
                 location: ver.path().display().to_string(),
                 scope: "Homebrew",
                 key: name,
