@@ -33,6 +33,16 @@ const TREE_STEP: f32 = 16.0;
 const TREE_MAX_INDENT: usize = 8;
 /// Height of the system history strip.
 const STRIP_H: f32 = 108.0;
+
+/// Height of the history strip in a page area `area_h` high: dropped (0) when the table below it
+/// (with its tabs) would get less than [`kit::MIN_LIST_H`].
+fn strip_height(area_h: f32) -> f32 {
+    if area_h >= STRIP_H + 14.0 + 36.0 + 12.0 + kit::MIN_LIST_H {
+        STRIP_H
+    } else {
+        0.0
+    }
+}
 /// Network use (bytes/s, sent and received) that the Network column marks hot; its heat grows towards it.
 const NET_HOT: f32 = 10.0 * 1048576.0;
 /// Width of the "Columns" button at the right end of the filter tabs.
@@ -870,9 +880,12 @@ impl App {
         }
 
         // ---- layout: history strip, filter tabs, table
-        let strip = Rect::from_min_size(area.min, vec2(area.width(), STRIP_H));
-        history_strip(ui.painter(), strip, fd, &pal, iv);
-        let tabs_rect = Rect::from_min_size(pos2(area.left(), strip.bottom() + 14.0), vec2(area.width(), 36.0));
+        let strip_h = strip_height(area.height());
+        let strip = Rect::from_min_size(area.min, vec2(area.width(), strip_h));
+        if strip_h > 0.0 {
+            history_strip(ui.painter(), strip, fd, &pal, iv);
+        }
+        let tabs_rect = Rect::from_min_size(pos2(area.left(), strip.bottom() + if strip_h > 0.0 { 14.0 } else { 0.0 }), vec2(area.width(), 36.0));
         let tab_items: Vec<(&str, Option<usize>)> = VIEWS.iter().zip(counts).map(|(l, c)| (*l, c)).collect();
         // The tabs stop short of the Columns button; the hairline carries on under it.
         let tabs_only = Rect::from_min_max(tabs_rect.min, pos2(tabs_rect.right() - COLUMNS_W - 8.0, tabs_rect.bottom()));
@@ -2764,6 +2777,12 @@ mod tests {
         let ft = FILETIME_UNIX + (now.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - 600) * 10_000_000;
         let s = started_text(ft, now);
         assert!(s.ends_with("10 min ago"), "{s}");
+    }
+
+    #[test]
+    fn the_history_strip_yields_to_the_table() {
+        assert_eq!(strip_height(500.0), STRIP_H);
+        assert_eq!(strip_height(300.0), 0.0);
     }
 
     /// The history strip, every kind of cell and the context menu draw without panicking.

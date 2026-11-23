@@ -57,15 +57,27 @@ if [ "$os" = windows ] || [ "$os" = linux ]; then
   # Frames for the animation, two per second.
   shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
-# #168 checks: the first --window-size/--wait wins, so these run without the shot() defaults.
-shot_at() {  # name, size, wait, then TMOP arguments
-  local name="$1" size="$2" wait="$3"; shift 3
+# The minimum window size (900x600): lists keep their rows, the sidebar scrolls with arrows, the
+# Processes toolbar wraps. Calls the exe directly: shot() puts its own --window-size first and the
+# parser takes the first match.
+shot_min() {  # name, then TMOP arguments
+  local name="$1"; shift
   echo "::group::$name"
-  if "$exe" --screenshot="$out/$name.png" --window-size="$size" --wait="$wait" "$@"; then echo "ok: $name"; else echo "::warning::shot $name failed"; fi
+  if "$exe" --screenshot="$out/$name.png" --window-size=900x600 --wait="${SHOT_MIN_WAIT:-12}" "$@"; then
+    echo "ok: $name"
+  else
+    echo "::warning::shot $name failed"
+  fi
   echo "::endgroup::"
 }
-shot_at power-min 900x600 20 --page=power-and-freq
-shot_at system-info $SIZE 15 --page=system-info
-shot_at installed-apps $SIZE 30 --page=installed-apps
+shot_min min-processes --page=processes
+shot_min min-users --page=users
+shot_min min-app-history --page=app-history
+shot_min min-benchmarks --page=benchmarks
+shot_min min-power --page=power-and-freq
+shot system-info --page=system-info
+shot installed-apps --page=installed-apps
+[ "$os" = windows ] && shot_min min-services --page=services
+[ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
 ls -l "$out"
 exit 0

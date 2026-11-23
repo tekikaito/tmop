@@ -493,28 +493,32 @@ impl App {
 
         // Share of CPU time: the five busiest apps and the rest.
         let share_h = 18.0 + 22.0 + 12.0 + 14.0 + 18.0 + 18.0;
+        // A short window drops the card so the table keeps its rows.
+        let (_, share_h) = kit::stacked_heights(area.bottom() - area.top() - used - BLOCK_GAP, BLOCK_GAP, share_h, kit::MIN_LIST_H, share_h);
         let share = Rect::from_min_size(pos2(area.left(), area.top() + used + BLOCK_GAP), vec2(area.width(), share_h));
-        let content = section_card(&p, share, &pal, "Share of CPU time", &format!("{} total", format_cpu_time(total_cpu)));
-        let mut ranked: Vec<&HistoryEntry> = list.iter().filter(|e| e.cpu_time > 0).collect();
-        ranked.sort_by(|a, b| b.cpu_time.cmp(&a.cpu_time).then_with(|| cmp_str(&a.name, &b.name)));
-        let bar = Rect::from_min_size(content.min, vec2(content.width(), 12.0));
-        if ranked.is_empty() {
-            widgets::bar(&p, bar, 0.0, pal.accent);
-        } else {
-            let mut parts: Vec<(f32, Color32)> = ranked.iter().take(5).enumerate().map(|(i, e)| (e.cpu_time as f32, category_color(i))).collect();
-            let top5: u64 = ranked.iter().take(5).map(|e| e.cpu_time).sum();
-            parts.push((total_cpu.saturating_sub(top5) as f32, pal.raise(0.18)));
-            widgets::share_bar(&p, bar, &parts, 2.0);
-            let pct = |t: u64| t as f64 * 100.0 / total_cpu.max(1) as f64;
-            let mut labels: Vec<(String, Color32)> = ranked.iter().take(5).enumerate().map(|(i, e)| (format!("{} {:.0}%", clip_name(&e.name), pct(e.cpu_time)), category_color(i))).collect();
-            if total_cpu > top5 {
-                labels.push((format!("others {:.0}%", pct(total_cpu - top5)), pal.raise(0.18)));
+        if share_h > 0.0 {
+            let content = section_card(&p, share, &pal, "Share of CPU time", &format!("{} total", format_cpu_time(total_cpu)));
+            let mut ranked: Vec<&HistoryEntry> = list.iter().filter(|e| e.cpu_time > 0).collect();
+            ranked.sort_by(|a, b| b.cpu_time.cmp(&a.cpu_time).then_with(|| cmp_str(&a.name, &b.name)));
+            let bar = Rect::from_min_size(content.min, vec2(content.width(), 12.0));
+            if ranked.is_empty() {
+                widgets::bar(&p, bar, 0.0, pal.accent);
+            } else {
+                let mut parts: Vec<(f32, Color32)> = ranked.iter().take(5).enumerate().map(|(i, e)| (e.cpu_time as f32, category_color(i))).collect();
+                let top5: u64 = ranked.iter().take(5).map(|e| e.cpu_time).sum();
+                parts.push((total_cpu.saturating_sub(top5) as f32, pal.raise(0.18)));
+                widgets::share_bar(&p, bar, &parts, 2.0);
+                let pct = |t: u64| t as f64 * 100.0 / total_cpu.max(1) as f64;
+                let mut labels: Vec<(String, Color32)> = ranked.iter().take(5).enumerate().map(|(i, e)| (format!("{} {:.0}%", clip_name(&e.name), pct(e.cpu_time)), category_color(i))).collect();
+                if total_cpu > top5 {
+                    labels.push((format!("others {:.0}%", pct(total_cpu - top5)), pal.raise(0.18)));
+                }
+                let items: Vec<(&str, Color32)> = labels.iter().map(|(l, c)| (l.as_str(), *c)).collect();
+                widgets::legend(&p.with_clip_rect(content.expand2(vec2(4.0, 0.0))), pos2(content.left(), bar.bottom() + 18.0), &items, theme::ui(12.0));
             }
-            let items: Vec<(&str, Color32)> = labels.iter().map(|(l, c)| (l.as_str(), *c)).collect();
-            widgets::legend(&p.with_clip_rect(content.expand2(vec2(4.0, 0.0))), pos2(content.left(), bar.bottom() + 18.0), &items, theme::ui(12.0));
         }
 
-        let table_rect = Rect::from_min_max(pos2(area.left(), share.bottom() + BLOCK_GAP), area.max);
+        let table_rect = Rect::from_min_max(pos2(area.left(), share.bottom() + if share_h > 0.0 { BLOCK_GAP } else { 0.0 }), area.max);
         let st = &self.pro.inv.history_table;
         let mut order: Vec<usize> = (0..list.len()).filter(|i| table::matches(&st.filter, &[&list[*i].name, &list[*i].path])).collect();
         st.sort(&list, &mut order, |a, b, col| match col {
@@ -724,8 +728,10 @@ impl App {
         let apps = shown.map(|i| top_apps(fd.rows, full, &list[i].user, list[i].session)).unwrap_or_default();
         let card_cols = (((area.width() - 44.0 + 24.0) / (220.0 + 24.0)).floor() as usize).clamp(1, 3);
         let card_h = 18.0 + 22.0 + apps.len().max(1).div_ceil(card_cols) as f32 * 28.0 + 8.0;
-        let table_bottom = if shown.is_some() { area.bottom() - card_h - BLOCK_GAP } else { area.bottom() };
-        let table_rect = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), pos2(area.right(), table_bottom.max(area.top() + used + BLOCK_GAP + 120.0)));
+        // The table keeps its rows: the card shrinks (showing fewer apps) or goes when they do not fit.
+        let below_tiles = Rect::from_min_max(pos2(area.left(), area.top() + used + BLOCK_GAP), area.max);
+        let (table_h, card_h) = if shown.is_some() { kit::stacked_heights(below_tiles.height(), BLOCK_GAP, card_h, kit::MIN_LIST_H, 70.0) } else { (below_tiles.height(), 0.0) };
+        let table_rect = Rect::from_min_size(below_tiles.min, vec2(below_tiles.width(), table_h));
 
         // With full account names, a name that differs from its short form shows below it.
         let two_line = full && list.iter().any(|u| short_account(&u.user) != u.user);
@@ -759,11 +765,14 @@ impl App {
         let icons = &mut self.icons;
         table::show(ui, table_rect, "users-table", &pal, &cols, &order, &mut self.pro.inv.users_table, &key, &cell, icons);
 
-        if let Some(i) = shown {
+        if let Some(i) = shown.filter(|_| card_h > 0.0) {
             let u = &list[i];
             let card = Rect::from_min_max(pos2(area.left(), area.bottom() - card_h), area.max);
             let title = if sessions { format!("Session {} \u{b7} {} \u{b7} top apps", u.session, short_account(&u.user)) } else { format!("{} \u{b7} top apps", short_account(&u.user)) };
             let content = section_card(&p, card, &pal, &title, "");
+            // A card squeezed by a short window shows the apps that fit.
+            let p = p.with_clip_rect(card);
+            let fits = |y: f32| y + 14.0 <= card.bottom() - 4.0;
             if apps.is_empty() {
                 empty_state(&p, content, &pal, "No processes in this session.");
             } else {
@@ -771,6 +780,9 @@ impl App {
                 for (n, a) in apps.iter().enumerate() {
                     let x = content.left() + (n % card_cols) as f32 * (col_w + 24.0);
                     let y = content.top() + (n / card_cols) as f32 * 28.0 + 9.0;
+                    if !fits(y) {
+                        break;
+                    }
                     let right = format!("{:.1}% \u{b7} {}", a.cpu, format_bytes(a.mem as f64));
                     let right_w = widgets::text_width(&p, &right, theme::mono(12.0));
                     p.text(pos2(x + col_w, y), Align2::RIGHT_CENTER, &right, theme::mono(12.0), pal.text_table());
