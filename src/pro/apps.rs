@@ -13,7 +13,29 @@ pub mod parse;
 #[cfg(target_os = "linux")]
 pub use linux::read;
 #[cfg(target_os = "macos")]
-pub use macos::read;
+pub use macos::{read, sizes};
+
+/// Whether the list comes without sizes and [`sizes`] fills them in afterwards (macOS).
+pub const SIZES_LATER: bool = cfg!(target_os = "macos");
+
+/// Sizes of the install locations; nothing where `read` already has them.
+#[cfg(not(target_os = "macos"))]
+pub fn sizes(_locations: Vec<String>) -> Result<Vec<(String, u64)>, String> {
+    Ok(Vec::new())
+}
+
+/// Puts `sizes` (location, bytes) into `apps`; returns how many were set.
+pub fn apply_sizes(apps: &mut [App], sizes: &[(String, u64)]) -> usize {
+    let by_location: std::collections::HashMap<&str, u64> = sizes.iter().map(|(l, s)| (l.as_str(), *s)).collect();
+    let mut n = 0;
+    for a in apps.iter_mut() {
+        if let Some(s) = by_location.get(a.location.as_str()) {
+            a.size = *s;
+            n += 1;
+        }
+    }
+    n
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct App {
@@ -116,6 +138,14 @@ pub fn sources(apps: &[App]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_are_matched_by_location() {
+        let app = |loc: &str| App { location: loc.into(), ..Default::default() };
+        let mut apps = vec![app("/Applications/A.app"), app("/Applications/B.app"), app("")];
+        let n = apply_sizes(&mut apps, &[("/Applications/B.app".into(), 42), ("/x".into(), 7)]);
+        assert_eq!((n, apps[0].size, apps[1].size, apps[2].size), (1, 0, 42, 0));
+    }
 
     #[test]
     fn date_format() {

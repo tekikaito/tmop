@@ -57,6 +57,33 @@ if [ "$os" = windows ] || [ "$os" = linux ]; then
   # Frames for the animation, two per second.
   shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
+
+# The popout alone (--popout). These PNGs keep the framebuffer's alpha, and TMOP checks the
+# corner pixels against the corners it chose (#166): alpha 0 when rounded, the window colour
+# when square. It proves what the app renders, not what a compositor shows. TMOP_POPOUT_CORNERS
+# forces the rounded drawing where this runner gets square corners (llvmpipe on Windows, Xvfb
+# without a compositor), to check the transparent pixels there as well.
+popout_failed=0
+popout() {  # name, corners override (or ""), then TMOP arguments
+  local name="$1" corners="$2"; shift 2
+  echo "::group::$name"
+  local log="$out/$name.log"
+  TMOP_POPOUT_CORNERS="$corners" "$exe" --popout --screenshot="$out/$name.png" --wait=8 "$@" 2>&1 | tee "$log"
+  if grep -q "popout check ok" "$log"; then
+    echo "ok: $name"
+  else
+    echo "::error::popout corners check failed or missing: $name"
+    popout_failed=1
+  fi
+  echo "::endgroup::"
+}
+popout popout-classic ""
+popout popout-neon "" --popout-skin=com.tmop.neon
+if [ "$os" != macos ]; then
+  popout popout-classic-rounded rounded
+  popout popout-neon-rounded rounded --popout-skin=com.tmop.neon
+fi
+
 # The minimum window size (900x600): lists keep their rows, the sidebar scrolls with arrows, the
 # Processes toolbar wraps. Calls the exe directly: shot() puts its own --window-size first and the
 # parser takes the first match.
@@ -74,7 +101,10 @@ shot_min min-processes --page=processes
 shot_min min-users --page=users
 shot_min min-app-history --page=app-history
 shot_min min-benchmarks --page=benchmarks
+shot_min min-power --page=power-and-freq
+shot system-info --page=system-info
+shot installed-apps --page=installed-apps
 [ "$os" = windows ] && shot_min min-services --page=services
 [ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
 ls -l "$out"
-exit 0
+exit $popout_failed

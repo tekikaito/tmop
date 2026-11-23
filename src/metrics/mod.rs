@@ -488,6 +488,8 @@ pub struct History {
     pub thermal: Series,
     /// Average core clock in MHz.
     pub clock: Series,
+    /// Fastest core clock in MHz (0 where the OS reports no per-core clocks).
+    pub clock_max: Series,
     /// Used physical memory in bytes.
     pub memory_bytes: Series,
 }
@@ -511,6 +513,7 @@ impl History {
             gpu_adapters: Vec::new(),
             thermal: s(),
             clock: s(),
+            clock_max: s(),
             memory_bytes: s(),
         }
     }
@@ -565,6 +568,7 @@ impl History {
         }
         self.thermal.push(snap.thermal.max_c().unwrap_or(0.0));
         self.clock.push(snap.cpu.current_mhz.unwrap_or(0) as f32);
+        self.clock_max.push(snap.cpu.per_core_mhz.iter().copied().max().unwrap_or(0) as f32);
         self.memory_bytes.push(snap.memory.total.saturating_sub(snap.memory.available) as f32);
     }
 
@@ -581,6 +585,7 @@ impl History {
             &mut self.gpu,
             &mut self.thermal,
             &mut self.clock,
+            &mut self.clock_max,
             &mut self.memory_bytes,
         ] {
             s.resize(capacity);
@@ -706,6 +711,23 @@ mod tests {
         s.resize(2);
         assert_eq!(s.last(), 4.0);
         assert_eq!(s.values.len(), 2);
+    }
+
+    #[test]
+    fn fastest_core_history_runs_with_the_average_clock() {
+        // Both clock traces are collected with every sample, whatever page is shown, so a page
+        // switch cannot restart one of them.
+        let mut h = History::new(8);
+        let mut snap = Snapshot::default();
+        for per_core in [vec![3000, 4200], vec![3100, 3900], vec![]] {
+            snap.cpu.current_mhz = Some(3500);
+            snap.cpu.per_core_mhz = per_core;
+            h.push(&snap);
+        }
+        assert_eq!(h.clock.values.iter().copied().collect::<Vec<_>>(), vec![3500.0; 3]);
+        assert_eq!(h.clock_max.values.iter().copied().collect::<Vec<_>>(), vec![4200.0, 3900.0, 0.0]);
+        h.resize(2);
+        assert_eq!((h.clock.capacity, h.clock_max.capacity), (2, 2));
     }
 
     #[test]
