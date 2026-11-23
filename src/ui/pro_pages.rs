@@ -164,7 +164,7 @@ pub(super) fn toolbar_rows(width: f32, need: f32) -> usize {
 pub(super) fn toolbar<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     // A rect taller than one row wraps its controls (right to left, row by row).
     let wrap = rect.height() > TOOLBAR_H + 1.0;
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center).with_main_wrap(wrap)), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(if wrap { Align::Min } else { Align::Center }).with_main_wrap(wrap)), |ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, TOOLBAR_ROW_GAP);
         add(ui)
     })
@@ -402,6 +402,29 @@ mod tests {
         let narrow = Rect::from_min_size(pos2(100.0, 64.0), vec2(900.0, 600.0));
         let (tb, area) = page_layout(narrow, 800.0);
         assert!(tb.top() >= narrow.top() && area.top() > tb.bottom(), "on a row of its own");
+    }
+
+    #[test]
+    fn wrapped_toolbar_places_every_control_inside() {
+        let ctx = egui::Context::default();
+        theme::DARK.apply(&ctx);
+        let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(765.0, 2.0 * TOOLBAR_H + TOOLBAR_ROW_GAP));
+        let mut rects = Vec::new();
+        for _ in 0..2 {
+            rects.clear();
+            ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    toolbar(ui, rect, |ui| {
+                        for _ in 0..6 {
+                            rects.push(ui.add_sized(vec2(140.0, 36.0), egui::Button::new("x")).rect);
+                        }
+                    });
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        eprintln!("{rects:?}");
+        assert!(rects.iter().all(|r| rect.contains_rect(*r)), "{rects:?}");
     }
 
     #[test]
