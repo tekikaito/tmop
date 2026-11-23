@@ -400,7 +400,6 @@ fn main() -> eframe::Result<()> {
         .with_title(format!("{} \u{2013} {}", tmop::APP_NAME, tmop::APP_LONG_NAME))
         .with_app_id(tmop::APP_ID)
         .with_inner_size(size.unwrap_or([1320.0, 860.0]))
-        .with_min_inner_size([900.0, 600.0])
         // The main window opens as it was closed, unless a size is asked for; the pop-out alone
         // has its own fixed size.
         .with_maximized(args.iter().any(|a| a == "--maximized") || (!popout_only && size.is_none() && settings.window.maximized));
@@ -418,6 +417,11 @@ fn main() -> eframe::Result<()> {
     if !popout_only && tmop::platform::desktop::own_title_bar() {
         viewport = viewport.with_decorations(false);
     }
+    // The main window's minimum only: macOS enforces it on any window, and it made the `--popout`
+    // window 900x600 there.
+    if !popout_only {
+        viewport = viewport.with_min_inner_size([900.0, 600.0]);
+    }
     if popout_only {
         let skins = tmop::skin::scan(&tmop::skin::default_skin_dirs());
         let skin = skins.get(&settings.popout.skin).cloned().unwrap_or_else(tmop::skin::Skin::classic);
@@ -425,11 +429,13 @@ fn main() -> eframe::Result<()> {
             .with_title(format!("TMOP \u{2014} {}", skin.name))
             .with_inner_size(tmop::ui::popout::desired_size(&skin))
             .with_decorations(false)
-            .with_transparent(true)
             .with_resizable(false)
             .with_always_on_top();
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // eframe derives the one OpenGL config of all windows from the main viewport's `transparent`;
+    // the window's own flag is set in `window_builder`, which only shapes the window (#166).
+    viewport = viewport.with_transparent(tmop::platform::transparency::gl_config_transparency(tmop::platform::OS, popout_only));
+    let options = eframe::NativeOptions { viewport, window_builder: Some(Box::new(move |b| b.with_transparent(popout_only))), ..Default::default() };
     eframe::run_native(
         "TMOP",
         options,

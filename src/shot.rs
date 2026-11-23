@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::platform::transparency::Corners;
+
 /// What `--screenshot=` asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
@@ -88,12 +90,21 @@ pub struct Run {
     taken: u32,
     waiting: bool,
     inbox: Arc<Mutex<Option<Arc<eframe::egui::ColorImage>>>>,
+    /// A `--popout` run: the corners the popout drew with. The PNGs keep the framebuffer's alpha
+    /// and each frame's corners are checked against them ([`check_popout`]).
+    popout: Option<Corners>,
 }
 
 impl Run {
     pub fn new(plan: Plan) -> Self {
         let now = Instant::now();
-        Self { next_at: now + plan.wait, plan, started: now, taken: 0, waiting: false, inbox: Default::default() }
+        Self { next_at: now + plan.wait, plan, started: now, taken: 0, waiting: false, inbox: Default::default(), popout: None }
+    }
+
+    /// Makes this a run of the `--popout` window drawn with `corners`.
+    pub fn popout(mut self, corners: Corners) -> Self {
+        self.popout = Some(corners);
+        self
     }
 
     /// Called once per frame: collects an arrived screenshot, asks for the next one when due.
@@ -103,7 +114,13 @@ impl Run {
         if let Some(image) = arrived {
             self.waiting = false;
             let path = self.plan.frame_path(self.taken);
-            match write_png(&path, &image) {
+            if let Some(corners) = self.popout {
+                match check_popout(&image, corners) {
+                    Ok(what) => eprintln!("TMOP: popout check ok: {what}"),
+                    Err(what) => eprintln!("TMOP: popout check FAILED: {what}"),
+                }
+            }
+            match write_png(&path, &image, self.popout.is_some()) {
                 Ok(()) => eprintln!("TMOP: wrote {} ({}x{})", path.display(), image.size[0], image.size[1]),
                 Err(e) => {
                     eprintln!("TMOP: cannot write {}: {e}", path.display());
@@ -140,12 +157,42 @@ impl Run {
     }
 }
 
-/// Writes `image` as an RGBA PNG.
-pub fn write_png(path: &Path, image: &eframe::egui::ColorImage) -> Result<(), String> {
+/// Checks a frame of the `--popout` window against the `corners` it was drawn with (#166): the
+/// four outermost corner pixels are transparent (alpha 0) for [`Corners::Rounded`], opaque and
+/// not black for [`Corners::Square`]; the centre pixel is opaque either way. Returns the pixel
+/// values found (as `r,g,b,a`, alpha premultiplied as read from the framebuffer).
+pub fn check_popout(image: &eframe::egui::ColorImage, corners: Corners) -> Result<String, String> {
+    let [w, h] = image.size;
+    if w < 2 || h < 2 {
+        return Err(format!("{w}x{h} image"));
+    }
+    let px = |x: usize, y: usize| image.pixels[y * w + x];
+    let rgba = |c: eframe::egui::Color32| format!("{},{},{},{}", c.r(), c.g(), c.b(), c.a());
+    let edges = [px(0, 0), px(w - 1, 0), px(0, h - 1), px(w - 1, h - 1)];
+    let centre = px(w / 2, h / 2);
+    let what = format!("{corners:?}, {w}x{h}, corners {}, centre {}", edges.iter().map(|c| rgba(*c)).collect::<Vec<_>>().join(" "), rgba(centre));
+    let corners_ok = match corners {
+        Corners::Rounded => edges.iter().all(|c| c.a() == 0),
+        Corners::Square => edges.iter().all(|c| c.a() == 255 && (c.r(), c.g(), c.b()) != (0, 0, 0)),
+    };
+    if corners_ok && centre.a() == 255 {
+        Ok(what)
+    } else {
+        Err(what)
+    }
+}
+
+/// Writes `image` as an RGBA PNG: opaque, or with the framebuffer's alpha (`keep_alpha`,
+/// converted from premultiplied to the straight alpha PNG stores).
+pub fn write_png(path: &Path, image: &eframe::egui::ColorImage, keep_alpha: bool) -> Result<(), String> {
     let [w, h] = image.size;
     let mut data = Vec::with_capacity(w * h * 4);
     for p in &image.pixels {
-        data.extend_from_slice(&[p.r(), p.g(), p.b(), 255]);
+        if keep_alpha {
+            data.extend_from_slice(&p.to_srgba_unmultiplied());
+        } else {
+            data.extend_from_slice(&[p.r(), p.g(), p.b(), 255]);
+        }
     }
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -197,10 +244,56 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tmop-shot-test-{}", std::process::id()));
         let path = dir.join("x.png");
         let img = eframe::egui::ColorImage::filled([3, 2], eframe::egui::Color32::from_rgb(1, 2, 3));
-        write_png(&path, &img).unwrap();
+        write_png(&path, &img, false).unwrap();
         let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let reader = dec.read_info().unwrap();
         assert_eq!((reader.info().width, reader.info().height), (3, 2));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn first_pixel(img: &eframe::egui::ColorImage, keep_alpha: bool) -> Vec<u8> {
+        let dir = std::env::temp_dir().join(format!("tmop-shot-alpha-{}-{keep_alpha}", std::process::id()));
+        let path = dir.join("x.png");
+        write_png(&path, img, keep_alpha).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        buf[..4].to_vec()
+    }
+
+    #[test]
+    fn png_keeps_alpha_when_asked() {
+        use eframe::egui::Color32;
+        let clear = eframe::egui::ColorImage::filled([2, 2], Color32::TRANSPARENT);
+        assert_eq!(first_pixel(&clear, true), [0, 0, 0, 0]);
+        assert_eq!(first_pixel(&clear, false), [0, 0, 0, 255], "the README images stay opaque");
+        let half = eframe::egui::ColorImage::filled([2, 2], Color32::from_rgba_premultiplied(100, 50, 0, 128));
+        let p = first_pixel(&half, true);
+        assert_eq!(p[3], 128);
+        assert!((198..=200).contains(&p[0]), "unpremultiplied: {p:?}");
+    }
+
+    /// A 40x30 frame: `inside` everywhere but the four corner pixels, which are `corner`.
+    fn frame(inside: eframe::egui::Color32, corner: eframe::egui::Color32) -> eframe::egui::ColorImage {
+        let mut img = eframe::egui::ColorImage::filled([40, 30], inside);
+        for (x, y) in [(0, 0), (39, 0), (0, 29), (39, 29)] {
+            img.pixels[y * 40 + x] = corner;
+        }
+        img
+    }
+
+    #[test]
+    fn popout_corners_are_checked() {
+        use eframe::egui::Color32;
+        let body = Color32::from_rgb(14, 17, 30);
+        assert!(check_popout(&frame(body, Color32::TRANSPARENT), Corners::Rounded).is_ok());
+        let black = check_popout(&frame(body, Color32::BLACK), Corners::Rounded).unwrap_err();
+        assert!(black.contains("0,0,0,255"), "{black}");
+        assert!(check_popout(&frame(body, body), Corners::Square).is_ok());
+        assert!(check_popout(&frame(body, Color32::BLACK), Corners::Square).is_err(), "opaque black is the fault itself");
+        assert!(check_popout(&frame(body, Color32::TRANSPARENT), Corners::Square).is_err());
+        assert!(check_popout(&frame(Color32::TRANSPARENT, Color32::TRANSPARENT), Corners::Rounded).is_err(), "nothing drawn");
+        assert!(check_popout(&eframe::egui::ColorImage::filled([1, 1], body), Corners::Square).is_err());
     }
 }

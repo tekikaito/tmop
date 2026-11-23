@@ -451,6 +451,8 @@ pub struct App {
     pub device: Device,
     pub popout_open: bool,
     popout_only: bool,
+    /// Whether the popout's corners can be transparent here (#166), decided once at start-up.
+    popout_corners: crate::platform::transparency::Corners,
     pub filter: String,
     pub sort: (Column, bool),
     pub selected: Option<(u32, i64)>,
@@ -559,6 +561,10 @@ impl App {
             o.sync_window_theme = false;
         });
         let software_gl = gl_renderer(cc).is_some_and(|r| crate::startup::is_software_renderer(&r));
+        let (popout_corners, corner_facts) = crate::platform::transparency::current(popout_only, software_gl);
+        if launch.shot.is_some() && popout_only {
+            eprintln!("TMOP: popout corners {popout_corners:?} ({corner_facts:?})");
+        }
         let docker = docker::DockerState::new(&cc.egui_ctx, &settings);
         let mut app = Self {
             caps,
@@ -580,6 +586,7 @@ impl App {
             device,
             popout_open: popout_only || settings_popout_on,
             popout_only,
+            popout_corners,
             filter: String::new(),
             sort: (Column::Cpu, true),
             selected: None,
@@ -616,7 +623,14 @@ impl App {
             ip: (None, None),
             profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
             pending_section: launch.settings_section.as_deref().and_then(settings_page::section_index),
-            shot: launch.shot.map(crate::shot::Run::new),
+            shot: launch.shot.map(|plan| {
+                let run = crate::shot::Run::new(plan);
+                if popout_only {
+                    run.popout(popout_corners)
+                } else {
+                    run
+                }
+            }),
         };
         if !popout_only {
             crate::update::remove_leftover();
@@ -846,7 +860,7 @@ impl App {
             let op = if self.settings.popout.opaque_on_hover && hovered { 1.0 } else { opacity_setting };
             // Registered before the chrome so the close/chevron/drag areas stay on top of it.
             let menu = ui.interact(rect, ui.scope_id().with("popout-menu"), Sense::click());
-            let ev = popout::draw(ui, rect, skin, fd, op, fahrenheit, &mut self.popout_textures, &mut self.icons);
+            let ev = popout::draw(ui, rect, skin, fd, op, fahrenheit, self.popout_corners, &mut self.popout_textures, &mut self.icons);
             if ev.drag {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }
