@@ -387,6 +387,7 @@ command also expects the fork's GitHub Pages site with `install.sh`).
   A key with a passphrase works when it is loaded in `ssh-agent`. A different key file, user or
   port goes in `~/.ssh/config` under a `Host` entry, whose name you then enter as the host. The
   user on the server needs access to Docker (for example by being in the `docker` group).
+- **Container terminals:** a shell opened on a container's *Terminal* tab has `TMOP_SESSION` set to a random value; closing the tab (or TMOP) sends SIGHUP to the processes that carry it, like closing a terminal window, so nothing you leave running there outlives the tab unless it ignores SIGHUP (for example under `nohup`).
 - **CPU temperature on Windows:** Windows itself only reports the firmware's ACPI zones. For the
   CPU's own sensor (AMD Ryzen Tctl/Tdie or the Intel package), install the free
   [PawnIO](https://pawnio.eu) driver (x64 PCs only), switch on *Settings → General → CPU temperature through

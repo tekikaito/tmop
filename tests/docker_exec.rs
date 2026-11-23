@@ -238,12 +238,86 @@ fn closing_the_session_ends_the_shell() {
     assert!(wait_output(&out, "\nready"), "no output from the shell: {}", output_text(&out));
 
     session.close();
-    std::thread::sleep(Duration::from_millis(1500));
+    let (left, listing, waited) = wait_for_session_processes_gone(&rt, &docker, &name);
+    eprintln!("session processes gone after {waited:?}\n{listing}");
+    assert!(left.is_empty(), "the interactive shell is still running {waited:?} after close:\n{listing}");
+}
 
-    // `ps` runs without a shell so that the checker adds no `sh` process of its own. The
-    // remaining `sh` processes are PID 1 (`sh -c sleep 60`) and the interactive shell, if alive.
+/// A program in the foreground that ignores Ctrl+C keeps Ctrl+C and Ctrl+D from reaching the
+/// shell; closing the session must still end both (it hangs the session up).
+#[test]
+fn closing_the_session_ends_a_program_that_ignores_ctrl_c() {
+    let Some((rt, docker)) = engine() else { return };
+    rt.block_on(ensure_image(&docker)).expect("pull test image");
+
+    let name = format!("tmop-test-exec-{}", suffix());
+    let _cleanup = Cleanup { rt: &rt, docker: docker.clone(), names: vec![name.clone()] };
+    rt.block_on(create_and_start(&docker, &name)).expect("create and start container");
+
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let opts = ExecOptions { command: None, user: None, cols: 80, rows: 24 };
+    let mut session = ExecSession::start(&engine_for(&rt, &docker, false), &name, opts, collecting_sink(&out)).expect("start");
+    let state = wait_state(&session, |s| matches!(s, TransportState::Running) || is_ended(s));
+    assert_eq!(state, TransportState::Running, "session did not start: {}", output_text(&out));
+
+    session.write(b"sh -c \"trap '' INT; echo stub''born; sleep 600\"\r");
+    assert!(wait_output(&out, "stubborn"), "the program did not start: {}", output_text(&out));
+
+    session.close();
+    let (left, listing, waited) = wait_for_session_processes_gone(&rt, &docker, &name);
+    eprintln!("session processes gone after {waited:?}\n{listing}");
+    assert!(left.is_empty(), "session processes still running {waited:?} after close: {left:?}\n{listing}");
+}
+
+/// The app-exit path: `close_within` returns only once the shell is gone (or the bound passed).
+#[test]
+fn close_within_returns_after_the_shell_is_gone() {
+    let Some((rt, docker)) = engine() else { return };
+    rt.block_on(ensure_image(&docker)).expect("pull test image");
+
+    let name = format!("tmop-test-exec-{}", suffix());
+    let _cleanup = Cleanup { rt: &rt, docker: docker.clone(), names: vec![name.clone()] };
+    rt.block_on(create_and_start(&docker, &name)).expect("create and start container");
+
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let opts = ExecOptions { command: None, user: None, cols: 80, rows: 24 };
+    let mut session = ExecSession::start(&engine_for(&rt, &docker, false), &name, opts, collecting_sink(&out)).expect("start");
+    let state = wait_state(&session, |s| matches!(s, TransportState::Running) || is_ended(s));
+    assert_eq!(state, TransportState::Running, "session did not start: {}", output_text(&out));
+    session.write(b"echo ready\r");
+    assert!(wait_output(&out, "\nready"), "no output from the shell: {}", output_text(&out));
+
+    let start = Instant::now();
+    ExecSession::close_within([&mut session], Duration::from_secs(5));
+    let took = start.elapsed();
     let listing = rt.block_on(exec_stdout(&docker, &name, &["ps", "-o", "pid,comm"]));
-    let count = listing.lines().skip(1).filter(|line| line.split_whitespace().nth(1) == Some("sh")).count();
-    eprintln!("sh processes in the container after close: {count}\n{listing}");
-    assert_eq!(count, 1, "the interactive shell is still running:\n{listing}");
+    eprintln!("close_within took {took:?}\n{listing}");
+    let left: Vec<&str> = listing.lines().skip(1).filter(|l| !l.trim_start().starts_with("1 ") && !l.ends_with(" ps")).collect();
+    assert!(left.is_empty(), "still running right after close_within ({took:?}): {left:?}\n{listing}");
+}
+
+/// Waits up to 10 seconds until the container runs nothing but PID 1 (`sh -c sleep 60`).
+/// Returns the other processes (pid and name) of the last check, its `ps` listing and the
+/// time waited.
+fn wait_for_session_processes_gone(rt: &tokio::runtime::Runtime, docker: &Docker, name: &str) -> (Vec<String>, String, Duration) {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(10);
+    loop {
+        // `ps` runs without a shell so that the check adds no process but itself.
+        let listing = rt.block_on(exec_stdout(docker, name, &["ps", "-o", "pid,comm"]));
+        let left: Vec<String> = listing
+            .lines()
+            .skip(1)
+            .filter(|line| {
+                let mut cols = line.split_whitespace();
+                let (pid, comm) = (cols.next(), cols.next());
+                pid != Some("1") && comm != Some("ps")
+            })
+            .map(|line| line.trim().to_string())
+            .collect();
+        if left.is_empty() || Instant::now() >= deadline {
+            return (left, listing, start.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

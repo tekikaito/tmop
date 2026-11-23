@@ -5,6 +5,13 @@
 //! [`Sink`]; keystrokes and size changes go the other way through channels that the
 //! session task drains. The session ends when the process exits, when the engine closes
 //! the stream (for example because the container stopped), or when it is closed.
+//!
+//! Closing hangs the session up. The engine does not end a TTY exec when its client goes
+//! away: the daemon runs the exec with a context that is never cancelled and, with a TTY,
+//! does not close the process' input when the attach stream ends; the Engine API has no
+//! call to signal an exec either. So every session carries a marker variable
+//! ([`SESSION_ENV`]), and close runs a second exec that sends SIGHUP to the processes that
+//! carry it, which is what closing a real terminal does.
 
 use super::backend::{err_text, Engine};
 use crate::terminal::transport::{Sink, Transport, TransportState};
@@ -24,8 +31,25 @@ use tokio::task::JoinHandle;
 
 /// Longest time an engine request may take before the session gives up on it.
 const ENGINE_TIMEOUT: Duration = Duration::from_secs(20);
-/// Time the shell gets to exit after close before the tasks are aborted.
+/// Time the shell gets to exit after the keystroke fallback of close before the tasks are aborted.
 const CLOSE_GRACE: Duration = Duration::from_millis(300);
+/// Longest wait for the session's process to exit after the hangup.
+const HANGUP_WAIT: Duration = Duration::from_secs(3);
+const HANGUP_POLL: Duration = Duration::from_millis(20);
+/// Environment variable that marks the processes of one session (value: [`marker`]).
+pub const SESSION_ENV: &str = "TMOP_SESSION";
+/// Length of a marker in hex digits.
+const MARKER_LEN: usize = 32;
+/// Sends SIGHUP to every process except PID 1 and itself whose environment holds `$0`, the
+/// `TMOP_SESSION=<marker>` entry, passed as an argument and matched as a fixed string. All
+/// markers have the same length, so one session's entry never matches another's.
+const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
+for d in /proc/[0-9]*; do
+  p=${d#/proc/}
+  [ "$p" = 1 ] || [ "$p" = "$$" ] && continue
+  grep -qF "$0" "$d/environ" 2>/dev/null && kill -HUP "$p" 2>/dev/null
+done
+exit 0"#;
 const TIMED_OUT: &str = "The engine did not answer in time";
 const NO_SHELL: &str = "No shell found in the container (neither bash nor sh)";
 /// Ctrl+C: clears a partial line or interrupts the foreground program.
@@ -116,6 +140,51 @@ pub struct ExecSession {
     sink: Sink,
     runtime: Handle,
     closed: bool,
+    hangup: Hangup,
+}
+
+/// What close needs to hang the session up.
+#[derive(Clone)]
+struct Hangup {
+    docker: Docker,
+    container: String,
+    user: Option<String>,
+    /// The session's marker, the value of [`SESSION_ENV`].
+    marker: String,
+    /// Id of the session's exec once it is created.
+    exec_id: Arc<Mutex<Option<String>>>,
+}
+
+impl Hangup {
+    /// The `TMOP_SESSION=<marker>` entry of the session's environment.
+    fn entry(&self) -> String {
+        format!("{SESSION_ENV}={}", self.marker)
+    }
+}
+
+/// A random marker of [`MARKER_LEN`] hex digits, new for every session. The bits come from
+/// two hashers with fresh random keys (std seeds `RandomState` from the OS), fed with the
+/// clock, the process id and a counter so that two calls never hash the same input.
+fn marker() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let half = |salt: u8| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u8(salt);
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        h.write_u64(n);
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(0), half(1))
+}
+
+/// True for a marker as [`marker`] makes them: exactly [`MARKER_LEN`] lowercase hex digits.
+fn valid_marker(marker: &str) -> bool {
+    marker.len() == MARKER_LEN && marker.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 impl ExecSession {
@@ -129,18 +198,36 @@ impl ExecSession {
         let state = Arc::new(Mutex::new(TransportState::Starting));
         let (input, input_rx) = mpsc::unbounded_channel();
         let (resize, resize_rx) = mpsc::unbounded_channel();
+        let hangup = Hangup {
+            docker: engine.docker.clone(),
+            container: container_id.to_string(),
+            user: opts.user.clone(),
+            marker: marker(),
+            exec_id: Arc::new(Mutex::new(None)),
+        };
         let opts = ExecOptions { command, ..opts };
         let task = engine.runtime.spawn(run(
             engine.docker.clone(),
             container_id.to_string(),
             opts,
+            hangup.clone(),
             shell.clone(),
             state.clone(),
             sink.clone(),
             input_rx,
             resize_rx,
         ));
-        Ok(ExecSession { state, shell, input, resize, tasks: vec![task], sink, runtime: engine.runtime.clone(), closed: false })
+        Ok(ExecSession {
+            state,
+            shell,
+            input,
+            resize,
+            tasks: vec![task],
+            sink,
+            runtime: engine.runtime.clone(),
+            closed: false,
+            hangup,
+        })
     }
 
     /// The program that was started ("bash", "sh" or the first custom argument), once known.
@@ -163,22 +250,54 @@ impl Transport for ExecSession {
     }
 
     fn close(&mut self) {
+        self.begin_close();
+    }
+}
+
+impl ExecSession {
+    /// Closes every session in `sessions` and waits until their processes are hung up, for
+    /// at most `bound`. For app exit, where the runtime may be gone before a background
+    /// hangup ran. Must not be called from a runtime thread.
+    pub fn close_within<'a>(sessions: impl IntoIterator<Item = &'a mut ExecSession>, bound: Duration) {
+        let deadline = std::time::Instant::now() + bound;
+        let closing: Vec<_> = sessions.into_iter().filter_map(ExecSession::begin_close).collect();
+        for done in closing {
+            // Err: the hangup finished (its sender is gone), timed out, or never ran because
+            // the runtime has shut down.
+            let _ = done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+        }
+    }
+
+    /// Marks the session closed and starts ending its process in the background. Returns a
+    /// receiver that disconnects when that is done, if there is anything to do.
+    fn begin_close(&mut self) -> Option<std::sync::mpsc::Receiver<()>> {
         if self.closed {
-            return;
+            return None;
         }
         self.closed = true;
         if matches!(*lock(&self.state), TransportState::Ended(_)) {
-            return;
+            return None;
         }
         let tasks = std::mem::take(&mut self.tasks);
+        // Dropped by the closing task when it ends, which disconnects the receiver.
+        let (done, closed) = std::sync::mpsc::channel::<()>();
+        let mut closing = None;
         if matches!(*lock(&self.state), TransportState::Running) {
-            // Dropping the stream does not end the shell in the container. Ctrl+C clears a
-            // partial line or stops a program, Ctrl+D ends an empty shell. The tasks live on
-            // for a moment so that the writer can deliver both bytes first.
-            let _ = self.input.send(vec![ETX]);
-            let _ = self.input.send(vec![EOT]);
+            // Dropping the stream does not end the process in the container (see the module
+            // docs), so it is hung up first. The tasks live on until it has exited.
+            let hangup = self.hangup.clone();
+            let input = self.input.clone();
+            closing = Some(closed);
             self.runtime.spawn(async move {
-                tokio::time::sleep(CLOSE_GRACE).await;
+                let _done = done;
+                if !hang_up(&hangup).await {
+                    // The hangup could not run (no sh, grep or kill in the container) or the
+                    // process ignores SIGHUP. Ctrl+C clears a partial line or stops a
+                    // program, Ctrl+D ends an empty shell; this does not always work.
+                    let _ = input.send(vec![ETX]);
+                    let _ = input.send(vec![EOT]);
+                    tokio::time::sleep(CLOSE_GRACE).await;
+                }
                 for task in tasks {
                     task.abort();
                 }
@@ -187,9 +306,20 @@ impl Transport for ExecSession {
             for task in tasks {
                 task.abort();
             }
+            // Closed while starting: once the exec exists, the start request may already
+            // have reached the engine, so the process may run without anyone attached.
+            if lock(&self.hangup.exec_id).is_some() {
+                let hangup = self.hangup.clone();
+                closing = Some(closed);
+                self.runtime.spawn(async move {
+                    let _done = done;
+                    hang_up(&hangup).await
+                });
+            }
         }
         *lock(&self.state) = TransportState::Ended("Closed".to_string());
         self.sink.notify();
+        closing
     }
 }
 
@@ -216,13 +346,14 @@ async fn run(
     docker: Docker,
     container: String,
     opts: ExecOptions,
+    hangup: Hangup,
     shell: Arc<Mutex<Option<String>>>,
     state: Arc<Mutex<TransportState>>,
     sink: Sink,
     input_rx: UnboundedReceiver<Vec<u8>>,
     mut resize_rx: UnboundedReceiver<(u16, u16)>,
 ) {
-    let (id, started) = match attach(&docker, &container, &opts, &shell).await {
+    let (id, started) = match attach(&docker, &container, &opts, &hangup, &shell).await {
         Ok(attached) => attached,
         Err(message) => return fail(&state, &sink, message),
     };
@@ -284,6 +415,7 @@ async fn attach(
     docker: &Docker,
     container: &str,
     opts: &ExecOptions,
+    hangup: &Hangup,
     shell: &Mutex<Option<String>>,
 ) -> Result<(String, StartExecResults), String> {
     // The text shown when the program is missing from the container.
@@ -305,7 +437,7 @@ async fn attach(
         tty: Some(true),
         cmd: Some(cmd),
         user: opts.user.clone(),
-        env: Some(vec!["TERM=xterm-256color".to_string()]),
+        env: Some(vec!["TERM=xterm-256color".to_string(), hangup.entry()]),
         ..Default::default()
     };
     // The size goes in at create time: a resize after the start makes busybox ash redraw
@@ -313,6 +445,7 @@ async fn attach(
     let mut config = ExecConfig::from(options);
     config.console_size = Some(vec![usize::from(opts.rows.max(1)), usize::from(opts.cols.max(1))]);
     let created = request(docker.create_exec(container, config)).await.map_err(|e| missing_text(e, &missing))?;
+    *lock(&hangup.exec_id) = Some(created.id.clone());
     let start = StartExecOptions { detach: false, tty: true, output_capacity: None };
     let started = request(docker.start_exec(&created.id, Some(start))).await.map_err(|e| missing_text(e, &missing))?;
     Ok((created.id, started))
@@ -343,6 +476,45 @@ async fn probe_shell(docker: &Docker, container: &str, user: Option<&str>) -> Re
         Some(1) => Ok("sh"),
         // 126 and 127: sh itself could not be run; None: no exit code was reported.
         _ => Err(NO_SHELL.to_string()),
+    }
+}
+
+/// Sends SIGHUP to the session's processes through a second exec and waits until the
+/// session's exec has exited. Returns false when the hangup could not run or the process
+/// was still running after [`HANGUP_WAIT`].
+async fn hang_up(hangup: &Hangup) -> bool {
+    let Some(id) = lock(&hangup.exec_id).clone() else { return false };
+    // The marker goes into the command line of a shell; only the form `marker` makes is let through.
+    if !valid_marker(&hangup.marker) {
+        return false;
+    }
+    let docker = &hangup.docker;
+    let options = CreateExecOptions::<String> {
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        user: hangup.user.clone(),
+        // The entry is `$0` of the script, an argument, never part of the script text.
+        cmd: Some(vec!["sh".into(), "-c".into(), HANGUP_SCRIPT.into(), hangup.entry()]),
+        ..Default::default()
+    };
+    let Ok(created) = request(docker.create_exec(&hangup.container, options)).await else { return false };
+    let Ok(started) = request(docker.start_exec(&created.id, None)).await else { return false };
+    if let StartExecResults::Attached { mut output, .. } = started {
+        let drain = async { while output.next().await.is_some() {} };
+        if tokio::time::timeout(ENGINE_TIMEOUT, drain).await.is_err() {
+            return false;
+        }
+    }
+    if !matches!(request(docker.inspect_exec(&created.id)).await, Ok(ExecInspectResponse { exit_code: Some(0), .. })) {
+        return false;
+    }
+    let deadline = tokio::time::Instant::now() + HANGUP_WAIT;
+    loop {
+        match request(docker.inspect_exec(&id)).await {
+            Ok(ExecInspectResponse { running: Some(false), .. }) => return true,
+            Ok(_) if tokio::time::Instant::now() < deadline => tokio::time::sleep(HANGUP_POLL).await,
+            _ => return false,
+        }
     }
 }
 
@@ -381,6 +553,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_are_valid_and_differ() {
+        let a = marker();
+        let b = marker();
+        assert!(valid_marker(&a), "{a}");
+        assert!(valid_marker(&b), "{b}");
+        assert_ne!(a, b);
+        assert!(!valid_marker(""));
+        assert!(!valid_marker(&a[1..]));
+        assert!(!valid_marker(&format!("{a}0")));
+        assert!(!valid_marker(&format!("{}\"", &a[1..])));
+        assert!(!valid_marker(&a.to_uppercase().replace(|c: char| c.is_ascii_digit(), "A")));
+    }
 
     #[test]
     fn split_command_handles_quotes() {

@@ -1025,6 +1025,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.recorder.stop();
+        // Hangs up open container terminals; bounded so that exit waits at most a second.
+        self.docker.ui.detail.terminals.close_for_exit(std::time::Duration::from_secs(1));
         crate::process::netio::set_wanted(false);
         self.save_palette_edits(true);
         if self.settings_dirty {
