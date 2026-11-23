@@ -14,6 +14,7 @@ pub mod diskspace_page;
 pub mod docker;
 pub mod gpu_activity;
 pub mod drivers_page;
+pub mod elide;
 pub mod hardware;
 pub mod health;
 pub mod icons;

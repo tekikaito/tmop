@@ -619,43 +619,59 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         // update interval, so the visible end moves continuously from the previous value to the
         // new one instead of jumping when a sample arrives.
         let offset = if g.glide && n >= 2 { shift - 1.0 } else { shift };
-        let mut pts: Vec<Pos2> = Vec::with_capacity(n + 2);
+        // Samples without a reading (NaN) are gaps: the trace is drawn in runs of real samples.
+        let mut runs: Vec<Vec<Pos2>> = Vec::new();
+        let mut run: Vec<Pos2> = Vec::with_capacity(n + 2);
         for (age, v) in line.series.values.iter().rev().enumerate() {
             let x = axis.x_of(age as f32 + offset);
-            pts.push(pos2(x, y_of(*v)));
+            if v.is_nan() {
+                if !run.is_empty() {
+                    runs.push(std::mem::take(&mut run));
+                }
+            } else {
+                run.push(pos2(x, y_of(*v)));
+            }
             if x < rect.left() - p {
                 break;
             }
         }
-        pts.reverse();
-        let newest = *pts.last().expect("non-empty");
-        if newest.x < rect.right() - 0.5 {
-            // Hold the newest value to the right edge so the trace always meets the marker.
-            pts.push(pos2(rect.right(), newest.y));
+        if !run.is_empty() {
+            runs.push(run);
         }
-        let mut drawn = if g.smooth { smooth_points(&pts, y_clamp) } else { pts.clone() };
-        cut_at_x(&mut drawn, rect.right());
-        let head = *drawn.last().unwrap_or(&newest);
-        if g.fill > 0.0 && drawn.len() >= 2 {
-            let mut mesh = Mesh::default();
-            let c = with_alpha(line.color, g.fill);
-            let c0 = with_alpha(line.color, 0.0);
-            for (i, pt) in drawn.iter().enumerate() {
-                mesh.colored_vertex(*pt, c);
-                mesh.colored_vertex(pos2(pt.x, rect.bottom()), c0);
-                if i > 0 {
-                    let k = (i * 2) as u32;
-                    mesh.add_triangle(k - 2, k - 1, k);
-                    mesh.add_triangle(k - 1, k + 1, k);
-                }
+        let ends_at_newest = line.series.values.back().is_some_and(|v| !v.is_nan());
+        for (i, mut pts) in runs.into_iter().enumerate() {
+            pts.reverse();
+            let newest = *pts.last().expect("non-empty");
+            let current = i == 0 && ends_at_newest;
+            // Only the run that reaches the newest sample is held to the right edge.
+            if current && newest.x < rect.right() - 0.5 {
+                // Hold the newest value to the right edge so the trace always meets the marker.
+                pts.push(pos2(rect.right(), newest.y));
             }
-            painter.add(Shape::mesh(mesh));
-        }
-        glow_polyline(&painter, &drawn, line.color, g.line_width, g.bloom, g.dashed, additive);
-        if g.markers {
-            let y = head.y;
-            let m = theme::rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
-            painter.add(Shape::convex_polygon(vec![pos2(rect.right() - 6.0, y), pos2(rect.right(), y - 4.0), pos2(rect.right(), y + 4.0)], m, Stroke::NONE));
+            let mut drawn = if g.smooth { smooth_points(&pts, y_clamp) } else { pts.clone() };
+            cut_at_x(&mut drawn, rect.right());
+            let head = *drawn.last().unwrap_or(&newest);
+            if g.fill > 0.0 && drawn.len() >= 2 {
+                let mut mesh = Mesh::default();
+                let c = with_alpha(line.color, g.fill);
+                let c0 = with_alpha(line.color, 0.0);
+                for (i, pt) in drawn.iter().enumerate() {
+                    mesh.colored_vertex(*pt, c);
+                    mesh.colored_vertex(pos2(pt.x, rect.bottom()), c0);
+                    if i > 0 {
+                        let k = (i * 2) as u32;
+                        mesh.add_triangle(k - 2, k - 1, k);
+                        mesh.add_triangle(k - 1, k + 1, k);
+                    }
+                }
+                painter.add(Shape::mesh(mesh));
+            }
+            glow_polyline(&painter, &drawn, line.color, g.line_width, g.bloom, g.dashed, additive);
+            if g.markers && current {
+                let y = head.y;
+                let m = theme::rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
+                painter.add(Shape::convex_polygon(vec![pos2(rect.right() - 6.0, y), pos2(rect.right(), y - 4.0), pos2(rect.right(), y + 4.0)], m, Stroke::NONE));
+            }
         }
     }
     if let Some(b) = g.border {

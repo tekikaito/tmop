@@ -2,6 +2,7 @@
 //! Installed Apps, Drivers, Disk Space) and the small pieces those pages share; each page lives in
 //! its own module.
 
+use super::elide;
 use super::kit::{STAT_GAP, STAT_TILE_H};
 use super::table::TableState;
 use super::theme::{self, with_alpha, Palette};
@@ -118,7 +119,7 @@ pub(super) fn page_layout(body: Rect, need: f32) -> (Rect, Rect) {
     }
 }
 
-const TOOLBAR_ROW_GAP: f32 = 8.0;
+pub(super) const TOOLBAR_ROW_GAP: f32 = 8.0;
 
 /// Rows a toolbar of `need` px takes in `width` px (controls are wrapped, never cut).
 pub(super) fn toolbar_rows(width: f32, need: f32) -> usize {
@@ -168,7 +169,17 @@ pub(super) fn mono_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width
     frame
         .show(ui, |ui| {
             ui.allocate_ui_with_layout(vec2(inner_w, TOOLBAR_H - 2.0), Layout::left_to_right(Align::Center), |ui| {
-                ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w).font(theme::mono(12.0)), false))
+                let resp = ui.add(widgets::text_edit(egui::TextEdit::singleline(text).hint_text(egui::RichText::new(hint).color(pal.text_faint)).desired_width(inner_w).font(theme::mono(12.0)), false));
+                // A path wider than the field, not being edited: show it with its middle elided so
+                // the end stays visible (the edit underneath is untouched, a click still edits).
+                if !resp.has_focus() && !text.is_empty() {
+                    let p = ui.painter();
+                    if widgets::text_width(p, text, theme::mono(12.0)) > inner_w - 4.0 {
+                        p.rect_filled(resp.rect, 0.0, pal.control);
+                        elide::text_fit_path(p, pos2(resp.rect.left() + 2.0, resp.rect.center().y), Align2::LEFT_CENTER, text, theme::mono(12.0), pal.text, inner_w - 4.0);
+                    }
+                }
+                resp
             })
             .inner
         })

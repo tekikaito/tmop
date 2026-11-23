@@ -19,6 +19,10 @@ const EVENT_ROW_H: f32 = 18.0;
 const MIB: u64 = 1024 * 1024;
 /// Height of the recent events card; the TMOP engine card takes the rest of the right column.
 const EVENTS_H: f32 = 200.0;
+/// Least heights of the events card (heading and a row) and the TMOP engine card (heading and its
+/// set-up text with buttons) when the window is short.
+const EVENTS_MIN_H: f32 = 80.0;
+const ENGINE_CARD_H: f32 = 190.0;
 /// Indent of the help text under a switch, so it lines up after the toggle.
 const HELP_INDENT: f32 = 44.0;
 
@@ -86,8 +90,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         None => kit::empty_state(&p, left, &pal, engine_status_text(snap)),
     }
 
-    // Recent events on top, the TMOP engine card below.
-    let right = kit::vsplit(cols[1], &[EVENTS_H, -1.0], 14.0);
+    // Recent events on top, the TMOP engine card below; in a short window the events give way
+    // (down to a heading and a row) so the engine card keeps room for its controls.
+    let (events_h, _) = kit::card_pair_heights(cols[1].height(), 14.0, EVENTS_H, EVENTS_MIN_H, ENGINE_CARD_H);
+    let right = kit::vsplit(cols[1], &[events_h, -1.0], 14.0);
     let events = kit::section_card(&p, right[0], &pal, "Recent events", "");
     if snap.events.is_empty() {
         kit::empty_state(&p, events, &pal, "No events yet");

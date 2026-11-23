@@ -10,7 +10,8 @@ use crate::docker::model::{format_bytes, EngineStatus};
 use crate::platform::{Os, OS};
 use crate::ui::kit;
 use crate::ui::theme::{self, Palette};
-use crate::ui::widgets::text_fit;
+use crate::ui::elide;
+use crate::ui::widgets::{self, text_fit};
 use crate::ui::{App, FrameData};
 use eframe::egui::{self, pos2, Align2, Color32, Rect};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,10 @@ const RESCAN: Duration = Duration::from_secs(5);
 const ROW_H: f32 = 22.0;
 /// Height of the sockets card; the guidance card takes the rest of the right column.
 const SOCKETS_H: f32 = 230.0;
+/// Height of a card besides its content (heading and padding), and the least a sockets card gets.
+const HELP_CHROME_H: f32 = 58.0;
+const SOCKETS_CHROME_H: f32 = 58.0;
+const SOCKETS_MIN_H: f32 = 80.0;
 
 /// A socket that exists on this machine and what connecting to it found.
 pub type Found = (Candidate, Reach);
@@ -163,7 +168,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
         kit::empty_state(&p, rest, &pal, "Engine facts appear once it answers");
     }
 
-    let right = kit::vsplit(cols[1], &[SOCKETS_H, -1.0], 14.0);
+    // Sockets on top, the advice below. The advice needs the height of its text (and the command
+    // box); in a short window the sockets list gives way (down to a heading and a row).
+    let g = guidance(OS, context.as_ref().map(|c| &c.endpoint), snap.status, snap.error.as_deref(), found.as_deref().unwrap_or(&[]));
+    let help_w = (cols[1].width() - 44.0).max(40.0);
+    let galley = p.layout(g.text, theme::ui(13.0), pal.text, help_w);
+    let need_help = HELP_CHROME_H + galley.size().y + if g.command.is_some() { 14.0 + 64.0 } else { 0.0 };
+    let want_sockets = SOCKETS_CHROME_H + ROW_H * found.as_ref().map_or(1, |l| l.len().max(1)) as f32;
+    let (sockets_h, _) = kit::card_pair_heights(cols[1].height(), 14.0, want_sockets.min(SOCKETS_H), SOCKETS_MIN_H, need_help);
+    let right = kit::vsplit(cols[1], &[sockets_h, -1.0], 14.0);
     let sockets = kit::section_card(&p, right[0], &pal, "Sockets on this machine", "");
     match &found {
         None => kit::empty_state(&p, sockets, &pal, "Looking\u{2026}"),
@@ -172,8 +185,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, rect: Rect, fd: &FrameData<'_>) {
     }
 
     let help = kit::section_card(&p, right[1], &pal, "What to do", "");
-    let g = guidance(OS, context.as_ref().map(|c| &c.endpoint), snap.status, snap.error.as_deref(), found.as_deref().unwrap_or(&[]));
-    let galley = p.layout(g.text, theme::ui(13.0), pal.text, help.width());
     let text_h = galley.size().y;
     p.with_clip_rect(help).galley(help.min, galley, pal.text);
     if let Some(cmd) = g.command {
@@ -214,28 +225,33 @@ fn endpoint_rows(active: &str, context: Option<&Context>, snap: &Snap, pal: &Pal
     ]
 }
 
-/// One row per socket present: the install, its path and what connecting found.
+/// One row per socket present: the install, its path and what connecting found. The kind and the
+/// state take the room they need, so the path keeps the rest (and shows its end when cut).
 fn socket_rows(p: &egui::Painter, rect: Rect, pal: &Palette, list: &[Found]) {
     let st = theme::status(pal);
-    let kind_w = 150.0;
-    let state_w = 140.0;
-    let mut y = rect.top();
-    for (c, reach) in list {
-        if y + ROW_H > rect.bottom() + 1.0 {
-            break;
-        }
-        let mid = y + ROW_H / 2.0;
-        let (state, color) = match reach {
+    let states: Vec<(String, Color32)> = list
+        .iter()
+        .map(|(_, reach)| match reach {
             Reach::Open => ("answers".to_string(), st.ok),
             Reach::Denied => ("permission denied".to_string(), st.danger),
             Reach::Refused => ("not running".to_string(), st.warn),
             Reach::Absent => ("absent".to_string(), pal.text_faint),
             Reach::Failed(e) => (e.clone(), st.warn),
-        };
+        })
+        .collect();
+    let widest = |widths: &mut dyn Iterator<Item = f32>| widths.fold(0.0_f32, f32::max).ceil();
+    let kind_w = (widest(&mut list.iter().map(|(c, _)| widgets::text_width(p, c.kind.label(), theme::ui(13.0)))) + 16.0).clamp(60.0, 150.0);
+    let state_w = (widest(&mut states.iter().map(|(s, _)| widgets::text_width(p, s, theme::ui(12.0)))) + 8.0).clamp(60.0, 140.0);
+    let mut y = rect.top();
+    for ((c, _), (state, color)) in list.iter().zip(&states) {
+        if y + ROW_H > rect.bottom() + 1.0 {
+            break;
+        }
+        let mid = y + ROW_H / 2.0;
         text_fit(p, pos2(rect.left(), mid), Align2::LEFT_CENTER, c.kind.label(), theme::ui(13.0), pal.text, kind_w - 8.0);
-        let path_w = (rect.width() - kind_w - state_w).max(40.0);
-        text_fit(p, pos2(rect.left() + kind_w, mid), Align2::LEFT_CENTER, &c.path.to_string_lossy(), theme::mono(12.0), pal.text_table(), path_w - 8.0);
-        text_fit(p, pos2(rect.right(), mid), Align2::RIGHT_CENTER, &state, theme::ui(12.0), color, state_w);
+        let path_w = (rect.width() - kind_w - state_w - 8.0).max(40.0);
+        elide::text_fit_path(p, pos2(rect.left() + kind_w, mid), Align2::LEFT_CENTER, &c.path.to_string_lossy(), theme::mono(12.0), pal.text_table(), path_w);
+        text_fit(p, pos2(rect.right(), mid), Align2::RIGHT_CENTER, state, theme::ui(12.0), *color, state_w);
         y += ROW_H;
     }
 }

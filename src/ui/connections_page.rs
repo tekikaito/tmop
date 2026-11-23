@@ -15,8 +15,8 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Width the toolbar needs: filter, the five-way view switch and Refresh.
-const TOOLBAR_W: f32 = 780.0;
+/// Width the toolbar needs (measured, about 740): filter, the five-way view switch and Refresh.
+const TOOLBAR_W: f32 = 750.0;
 /// A process with at least this many established connections to at least this many different
 /// external endpoints is called out.
 const UNUSUAL_CONNS: usize = 12;
@@ -78,15 +78,20 @@ impl App {
         }
         // Throughput draws its own value, mono sub line and a trend of download plus upload.
         let r = rects[4];
-        let spark_w = (r.width() * 0.38).clamp(50.0, 110.0);
-        widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 31.0), Align2::LEFT_TOP, &format_rate(net.rx_bps + net.tx_bps), theme::light(24.0), pal.text, r.width() - 40.0 - spark_w);
-        widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 62.0), Align2::LEFT_TOP, &format!("\u{2193} {} \u{b7} \u{2191} {}", format_rate(net.rx_bps), format_rate(net.tx_bps)), theme::mono(11.0), pal.text_faint, r.width() - 32.0);
+        let rate = format_rate(net.rx_bps + net.tx_bps);
+        let rate_w = widgets::text_width(&p, &rate, theme::light(24.0));
+        // The trend takes what the value leaves (none when that is too little to read).
+        let spark_w = (r.width() - 40.0 - rate_w).clamp(0.0, 110.0);
+        widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 31.0), Align2::LEFT_TOP, &rate, theme::light(24.0), pal.text, r.width() - 32.0 - if spark_w >= 30.0 { spark_w + 8.0 } else { 0.0 });
+        widgets::text_fit(&p, pos2(r.left() + 16.0, r.top() + 62.0), Align2::LEFT_TOP, &format!("\u{2193}{} \u{2191}{}", format_rate(net.rx_bps), format_rate(net.tx_bps)), theme::mono(11.0), pal.text_faint, r.width() - 32.0);
         let mut trend = Series::new(fd.hist.net_rx.capacity.max(2));
         for (rx, tx) in fd.hist.net_rx.values.iter().zip(&fd.hist.net_tx.values) {
             trend.push(rx + tx);
         }
         let hi = trend.max().max(1.0);
-        widgets::sparkline(&p.with_clip_rect(r), Rect::from_min_size(pos2(r.right() - 16.0 - spark_w, r.top() + 34.0), vec2(spark_w, 20.0)), &[(&trend, pal.text, (0.0, hi))], 0.0, false);
+        if spark_w >= 30.0 {
+            widgets::sparkline(&p.with_clip_rect(r), Rect::from_min_size(pos2(r.right() - 16.0 - spark_w, r.top() + 34.0), vec2(spark_w, 20.0)), &[(&trend, pal.text, (0.0, hi))], 0.0, false);
+        }
 
         let mut y = area.top() + tiles_h + 14.0;
         let flagged = unusual(&conns);

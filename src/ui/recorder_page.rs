@@ -1,7 +1,7 @@
 //! Flight Recorder page: live graph, process events and recordings.
 
 use super::kit::{self, empty_state, hsplit, section_card, vsplit};
-use super::pro_pages::{clock_of, TOOLBAR_H, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
+use super::pro_pages::{clock_of, TOOLBAR_H, TOOLBAR_ROW_GAP, fmt_span, hm_of, list_row, mono_input, page_layout, stamp_secs, swatch_legend, swatch_legend_width, toolbar, RowLook, Swatch, LIMITS};
 use super::theme::{self, with_alpha};
 use super::widgets::{self, draw_graph, Button, ButtonKind, Graph, GraphLine, Icon, ScrollArea029 as _};
 use super::{fmt_hms, App, FrameData};
@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Width the toolbar needs: folder field, three buttons, the limit box and the two main buttons.
-const TOOLBAR_W: f32 = 1060.0;
+/// Width the toolbar needs in one row (measured, about 930 with the folder field at its least):
+/// folder field, three buttons, the limit box and the two main buttons.
+const TOOLBAR_W: f32 = 940.0;
 /// Space left of the graph for the mono percentage labels.
 const LABEL_W: f32 = 38.0;
 /// Gap between the cards of the page.
@@ -55,17 +56,13 @@ impl App {
         // The subtitle is drawn here (it needs a colour and the recording dot); the title block only
         // gets a blank one so it keeps its two-line layout.
         let body = self.page_title(ui, &pal, "Flight Recorder", " ");
-        let (tools, mut area) = page_layout(body, TOOLBAR_W);
+        let (tools, area) = page_layout(body, TOOLBAR_W);
         // On a row of its own that is narrower than the toolbar, the folder controls get a row above
-        // the recording controls, so nothing is pushed off the left edge.
+        // the recording controls, so nothing is pushed off the left edge. `page_layout` has already
+        // reserved the two rows, so they are laid out inside the rect it returned.
         let two_rows = tools.bottom() > body.top() && tools.width() < TOOLBAR_W;
-        let control_row = if two_rows {
-            let dy = TOOLBAR_H + 6.0;
-            area.min.y += dy;
-            tools.translate(vec2(0.0, dy))
-        } else {
-            tools
-        };
+        let row = |i: f32| Rect::from_min_size(pos2(tools.left(), tools.top() + i * (TOOLBAR_H + TOOLBAR_ROW_GAP)), vec2(tools.width(), TOOLBAR_H));
+        let control_row = if two_rows { row(1.0) } else { tools };
         let p = ui.painter().clone();
         {
             let (x, y) = (body.left() + 13.0, body.top() - super::HEADER_H + 44.0);
@@ -109,7 +106,7 @@ impl App {
             ui.label(label);
         };
         if two_rows {
-            toolbar(ui, tools, folder);
+            toolbar(ui, row(0.0), folder);
             toolbar(ui, control_row, controls);
         } else {
             toolbar(ui, tools, |ui| {

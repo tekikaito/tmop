@@ -414,7 +414,8 @@ impl App {
             p.text(pos2(x, full.top() + HEADER_H / 2.0), Align2::LEFT_CENTER, title, theme::light(30.0), pal.text);
         } else {
             p.text(pos2(x, full.top() + 1.0), Align2::LEFT_TOP, title, theme::light(30.0), pal.text);
-            widgets::text_fit(p, pos2(x + 1.0, full.top() + 44.0), Align2::LEFT_TOP, subtitle, theme::mono(12.0), pal.text_faint, (full.width() - 400.0).max(200.0));
+            // Too long for the row: the trailing parts go, not the end of a word.
+            super::elide::text_fit_parts(p, pos2(x + 1.0, full.top() + 44.0), Align2::LEFT_TOP, subtitle, theme::mono(12.0), pal.text_faint, (full.width() - 400.0).max(200.0));
         }
         Rect::from_min_max(pos2(full.left(), full.top() + HEADER_H), full.max)
     }

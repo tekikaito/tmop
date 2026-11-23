@@ -57,6 +57,15 @@ pub fn stacked_heights(avail: f32, gap: f32, want: f32, min_list: f32, min_detai
     }
 }
 
+/// Heights `(top, bottom)` of two cards stacked in `avail` px (`gap` between them) where both
+/// have content that needs room: the top card takes up to `want_top`, but leaves the bottom one
+/// `need_bottom` when it can; the top card never gets less than `min_top` (a heading and a row)
+/// and the bottom one gets the rest.
+pub fn card_pair_heights(avail: f32, gap: f32, want_top: f32, min_top: f32, need_bottom: f32) -> (f32, f32) {
+    let top = want_top.min(avail - gap - need_bottom).max(min_top).min((avail - gap).max(0.0));
+    (top, (avail - gap - top).max(0.0))
+}
+
 /// Interactive child UI in `rect` (left-to-right).
 pub fn row_ui<R>(ui: &mut egui::Ui, rect: Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), add).inner
@@ -584,6 +593,17 @@ mod tests {
         let v = vsplit(r, &[20.0, -1.0, 30.0], 5.0);
         assert_eq!(v[1].height(), 40.0);
         assert_eq!(v[2].top(), 70.0);
+    }
+
+    #[test]
+    fn two_stacked_cards_share_a_short_column() {
+        // Room for both: the top card gets what it wants.
+        assert_eq!(card_pair_heights(500.0, 14.0, 200.0, 80.0, 170.0), (200.0, 286.0));
+        // Short column: the top card gives way down to its minimum, the bottom one gets the rest.
+        assert_eq!(card_pair_heights(265.0, 14.0, 200.0, 80.0, 170.0), (81.0, 170.0));
+        assert_eq!(card_pair_heights(251.0, 14.0, 200.0, 80.0, 170.0), (80.0, 157.0));
+        // Nothing to share.
+        assert_eq!(card_pair_heights(50.0, 14.0, 200.0, 80.0, 170.0), (36.0, 0.0));
     }
 
     #[test]
