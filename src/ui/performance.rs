@@ -12,7 +12,7 @@ use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
 use super::{App, Device, FrameData};
 use crate::docker::model::{Container, EngineStatus};
-use crate::metrics::{DiskDrive, GpuAdapter, Series, SOURCES};
+use crate::metrics::{DiskDrive, GpuAdapter, GpuTempKind, Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
 use super::widgets::ScrollArea029 as _;
@@ -478,7 +478,7 @@ impl App {
                 let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.cpu, age), at(&fd.hist.kernel, age));
                 let (ph, hover) = plot(ui, &pc, "cpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
-                    let temp = s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string());
+                    let temp = s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.board_max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string());
                     let ghz = s.cpu.current_mhz.filter(|_| self.caps.clocks).map(|m| format!(" \u{b7} {:.2} GHz", m as f32 / 1000.0)).unwrap_or_default();
                     let l3 = if det.l3 > 0 { format!(" \u{b7} L3 {}", format_bytes(det.l3 as f64)) } else { String::new() };
                     let die = format!("{}C / {}T{ghz}{l3}", det.cores, threads);
@@ -562,7 +562,18 @@ impl App {
                 };
                 let value = if s.gpu.available { (format!("{shown_util:.0}"), "%".into()) } else { ("\u{2014}".to_string(), String::new()) };
                 let sub = if one.is_some() { "Busiest engine of this GPU" } else { SOURCES.gpu };
-                let hd = Head { title: &title, sub: sub.into(), value, side: String::new() };
+                // The GPUs this card speaks for: the one shown on its own, or all of them.
+                let shown: Vec<&GpuAdapter> = match one {
+                    Some((_, a)) => vec![a],
+                    None => s.gpu.adapters.iter().collect(),
+                };
+                // Beside the utilisation, when it is one GPU's: the one shown, or the only one reporting.
+                let mut reporting = shown.iter().filter_map(|a| a.temperature_c);
+                let gpu_temp = match (reporting.next(), reporting.next()) {
+                    (Some(t), None) => Some(self.temp(t)),
+                    _ => None,
+                };
+                let hd = Head { title: &title, sub: sub.into(), value, side: gpu_temp.clone().unwrap_or_default() };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(series, c, (0.0, 100.0))];
                 let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(series, age));
@@ -571,11 +582,16 @@ impl App {
                     let g = &s.gpu;
                     let on = |v: String| dash_or(g.available.then_some(v));
                     let top = engines.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(e, v)| format!("{e} \u{b7} {v:.0}%"));
+                    // The temperature where one GPU reports it, else the engine count as before.
+                    let last = match gpu_temp.clone() {
+                        Some(t) => ("Temperature", t),
+                        None => ("Engines", on(format!("{} reported", engines.len()))),
+                    };
                     let labels = [
                         ("Utilization", on(format!("{util:.0}%"))),
                         ("Busiest engine", dash_or(top.filter(|_| g.available))),
                         ("Dedicated memory", dash_or(gpu_memory(dedicated, ded_total).filter(|_| g.available))),
-                        ("Engines", on(format!("{} reported", engines.len()))),
+                        last,
                     ];
                     figure_at(&p, &pal, Exploded::Gpu, ix + gw, cy, 200.0, &labels);
                 }
@@ -603,10 +619,12 @@ impl App {
                 if self.caps.gpu_engines {
                     facts.push((if one.is_some() { "Engines" } else { "Engines reported" }.to_string(), engines.len().to_string()));
                 }
+                // Each temperature a source reports, named by what it measures and where it came
+                // from; with several GPUs grouped, by GPU too. None reported: no row.
+                facts.extend(gpu_temp_facts(&shown, one.is_none() && shown.len() > 1, |t| self.temp(t)));
                 cy += dl(&p, &pal, ix, cy + 4.0, iw, &facts) + 4.0;
                 if let Some((_, a)) = one {
                     let sensors = vec![
-                        ("Temperature".to_string(), dash_or(a.temperature_c.map(|t| self.temp(t)))),
                         ("Power".to_string(), dash_or(a.power_w.map(|w| format!("{w:.0} W")))),
                         ("Clock".to_string(), dash_or(a.clock_mhz.map(|m| format!("{m} MHz")))),
                     ];
@@ -733,6 +751,7 @@ impl App {
                     cy += 20.0;
                 } else {
                     let mut facts: Vec<(String, String)> = s.thermal.cpu.iter().map(|(l, c)| (l.clone(), self.temp(*c))).collect();
+                    facts.extend(s.thermal.gpu.iter().map(|(g, c)| (g.clone(), self.temp(*c))));
                     facts.extend(s.thermal.zones.iter().map(|(z, c)| (z.clone(), self.temp(*c))));
                     cy += dl(&p, &pal, ix, cy, iw, &facts);
                 }
@@ -852,7 +871,7 @@ impl App {
         // Facts under the cores.
         let facts: Vec<(String, String)> = [
             self.caps.clocks.then(|| ("Speed".to_string(), s.cpu.current_mhz.map(|m| format!("{:.2} GHz", m as f32 / 1000.0)).unwrap_or_else(|| "N/A".into()))),
-            self.caps.thermal.then(|| ("Temp".to_string(), s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".into()))),
+            self.caps.thermal.then(|| ("Temp".to_string(), s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.board_max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".into()))),
             Some(("Processes".to_string(), s.process_count.to_string())),
             Some(("Threads".to_string(), s.thread_count.to_string())),
             s.handle_count.map(|h| (SOURCES.handles.to_string(), h.to_string())),
@@ -1341,6 +1360,25 @@ fn gpu_memory(used: Option<u64>, total: Option<u64>) -> Option<String> {
     }
 }
 
+/// One row per temperature the GPUs report: "Temperature" / "Hot spot" / "Memory junction" ...
+/// with "52°C · WDDM"; with `named`, the GPU's name in front. Nothing for a GPU that reports none.
+fn gpu_temp_facts(adapters: &[&GpuAdapter], named: bool, fmt: impl Fn(f32) -> String) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for a in adapters {
+        for t in &a.temps {
+            let what = match t.kind {
+                GpuTempKind::Gpu => "Temperature",
+                GpuTempKind::HotSpot => "Hot spot",
+                GpuTempKind::Memory => "Memory temperature",
+                GpuTempKind::MemoryJunction => "Memory junction",
+            };
+            let label = if named { format!("{} \u{b7} {what}", a.name) } else { what.to_string() };
+            rows.push((label, format!("{} \u{b7} {}", fmt(t.c), t.source)));
+        }
+    }
+    rows
+}
+
 fn dash_or(s: Option<String>) -> String {
     s.unwrap_or_else(|| "\u{2014}".to_string())
 }
@@ -1467,6 +1505,19 @@ mod tests {
         assert_eq!(gpu_memory(Some(237 << 20), None).as_deref(), Some("237.0 MB in use"));
         assert_eq!(gpu_memory(None, Some(16 << 30)).as_deref(), Some("16.0 GB total"));
         assert_eq!(gpu_memory(None, None), None);
+    }
+
+    #[test]
+    fn gpu_temperatures_read_with_meaning_and_source() {
+        let mut nv = GpuAdapter { name: "RTX 5070".into(), ..Default::default() };
+        nv.offer_temp(GpuTempKind::Gpu, 52.0, "WDDM");
+        nv.offer_temp(GpuTempKind::HotSpot, 64.0, "HWiNFO");
+        let igpu = GpuAdapter { name: "Radeon".into(), ..Default::default() };
+        let fmt = |t: f32| format!("{t:.0}\u{b0}C");
+        let s = |rows: Vec<(String, String)>| rows.into_iter().map(|(l, v)| format!("{l}={v}")).collect::<Vec<_>>();
+        assert_eq!(s(gpu_temp_facts(&[&nv], false, fmt)), ["Temperature=52\u{b0}C \u{b7} WDDM", "Hot spot=64\u{b0}C \u{b7} HWiNFO"]);
+        assert_eq!(s(gpu_temp_facts(&[&igpu, &nv], true, fmt))[0], "RTX 5070 \u{b7} Temperature=52\u{b0}C \u{b7} WDDM");
+        assert!(gpu_temp_facts(&[&igpu], false, fmt).is_empty(), "no reading, no row");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! every host.
 
 use super::procfs::GpuDev;
-use super::{DiskDrive, GpuAdapter, GpuProcessUsage, GpuSample, NetworkSample};
+use super::{DiskDrive, GpuAdapter, GpuProcessUsage, GpuSample, GpuTempKind, NetworkSample};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -378,12 +378,79 @@ pub fn merge_sensors(adapters: &mut [GpuAdapter], devs: &[GpuDev]) {
         let mut matches = devs.iter().filter(|d| same(&d.name, &a.name));
         let (Some(d), None) = (matches.next(), matches.next()) else { continue };
         if names.iter().filter(|n| same(n, &a.name)).count() == 1 {
-            a.temperature_c = d.temperature_c;
+            if let Some(t) = d.temperature_c {
+                a.offer_temp(GpuTempKind::Gpu, t, "NVML");
+            }
             a.power_w = d.power_w;
             a.clock_mhz = d.clock_mhz;
             a.dedicated_total = a.dedicated_total.or(d.vram_total);
         }
     }
+}
+
+/// WDDM's `D3DKMT_ADAPTER_PERFDATA::Temperature` ("1 = 0.1C") as °C. 0 is what a driver that
+/// fills nothing leaves (integrated GPUs), so it is no reading; nor is anything above 200 °C.
+pub fn deci_celsius(v: u32) -> Option<f32> {
+    (v > 0 && v <= 2000).then(|| v as f32 / 10.0)
+}
+
+/// The adapter id [`super::GpuAdapter::id`] Windows gives a GPU (`0x{high:08x}_0x{low:08x}`, the
+/// LUID as DXGI and the GPU performance counters write it) back as (HighPart, LowPart).
+pub fn parse_luid(id: &str) -> Option<(i32, u32)> {
+    let (high, low) = id.split_once('_')?;
+    let hex = |s: &str| u32::from_str_radix(s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?, 16).ok();
+    Some((hex(high)? as i32, hex(low)?))
+}
+
+/// A GPU name for comparing sources: lowercase, without "(TM)" / "(R)", spaces collapsed.
+fn gpu_name_key(name: &str) -> String {
+    let lower = name.to_lowercase().replace("(tm)", " ").replace("(r)", " ");
+    lower.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Which of `adapters` (by name) a sensor named `sensor` belongs to: HWiNFO names a GPU's sensor
+/// "GPU [#0]: NVIDIA GeForce RTX 5070: " (the card's name between colons). The adapter whose whole
+/// name is one of those parts ("RTX 5070" is not "RTX 5070 Ti"); none when that name belongs to
+/// two adapters, as nothing tells which card the sensor is on.
+pub fn match_gpu_sensor(adapters: &[&str], sensor: &str) -> Option<usize> {
+    let parts: Vec<String> = sensor.split(':').map(gpu_name_key).filter(|p| !p.is_empty()).collect();
+    let keys: Vec<String> = adapters.iter().map(|a| gpu_name_key(a)).collect();
+    let i = keys.iter().position(|k| !k.is_empty() && parts.contains(k))?;
+    (keys.iter().filter(|k| **k == keys[i]).count() == 1).then_some(i)
+}
+
+/// Offers HWiNFO's GPU temperatures to the adapter each sensor names ([`match_gpu_sensor`]); a
+/// sensor no single adapter matches is left out.
+pub fn offer_hwinfo_temps(adapters: &mut [GpuAdapter], readings: &[super::hwinfo::GpuReading]) {
+    let names: Vec<String> = adapters.iter().map(|a| a.name.clone()).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    for r in readings {
+        if let Some(i) = match_gpu_sensor(&names, &r.sensor) {
+            adapters[i].offer_temp(r.kind, r.c, "HWiNFO");
+        }
+    }
+}
+
+/// The sources of the GPUs' temperatures for the Thermals subtitle: "GPU: HWiNFO, WDDM", or
+/// "GPU: not reported".
+pub fn gpu_sources(adapters: &[GpuAdapter]) -> String {
+    let mut by: Vec<&str> = adapters.iter().flat_map(|a| a.temps.iter().map(|t| t.source)).collect();
+    by.sort_unstable();
+    by.dedup();
+    format!("GPU: {}", if by.is_empty() { "not reported".to_string() } else { by.join(", ") })
+}
+
+/// The GPUs' temperatures for [`super::ThermalSample::gpu`]: "<name> · <reading> (<source>)". A
+/// name two GPUs share gets their position ("#2") so the rows stay apart.
+pub fn gpu_thermal(adapters: &[GpuAdapter]) -> Vec<(String, f32)> {
+    let mut out = Vec::new();
+    for (i, a) in adapters.iter().enumerate() {
+        let name = if a.name.is_empty() { "GPU" } else { a.name.as_str() };
+        let twin = adapters.iter().filter(|b| b.name == a.name).count() > 1;
+        let name = if twin { format!("{name} #{}", i + 1) } else { name.to_string() };
+        out.extend(a.temps.iter().map(|t| (format!("{name} \u{b7} {} ({})", t.kind.label(), t.source), t.c)));
+    }
+    out
 }
 
 /// HWiNFO's CPU temperature readings, best first.
@@ -623,6 +690,72 @@ mod tests {
         let mut adapters = [a("Twin"), a("Twin")];
         merge_sensors(&mut adapters, &[d("Twin", 70.0)]);
         assert!(adapters.iter().all(|a| a.temperature_c.is_none()));
+        // NVML's reading is labelled as NVML's.
+        let mut adapters = [a("RTX")];
+        merge_sensors(&mut adapters, &[d("RTX", 55.0)]);
+        assert_eq!(adapters[0].temp(GpuTempKind::Gpu).map(|t| (t.c, t.source)), Some((55.0, "NVML")));
+    }
+
+    #[test]
+    fn wddm_temperature_is_in_tenths_of_a_degree() {
+        assert_eq!(deci_celsius(452), Some(45.2));
+        assert_eq!(deci_celsius(1), Some(0.1));
+        assert_eq!(deci_celsius(2000), Some(200.0));
+        // 0: the driver filled nothing in; above 200 °C: no working sensor.
+        assert_eq!(deci_celsius(0), None);
+        assert_eq!(deci_celsius(2001), None);
+        assert_eq!(deci_celsius(u32::MAX), None);
+    }
+
+    #[test]
+    fn adapter_ids_give_back_their_luid() {
+        assert_eq!(parse_luid("0x00000000_0x0001a2b3"), Some((0, 0x0001_a2b3)));
+        assert_eq!(parse_luid("0xffffffff_0x00000010"), Some((-1, 0x10)));
+        assert_eq!(parse_luid("0x00000000"), None);
+        assert_eq!(parse_luid("card0"), None);
+        assert_eq!(parse_luid("nvidia0"), None);
+        assert_eq!(parse_luid("0x1_0xzz"), None);
+    }
+
+    #[test]
+    fn sensors_find_their_gpu_by_name() {
+        let names = ["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 5070", "NVIDIA GeForce RTX 5070 Ti"];
+        assert_eq!(match_gpu_sensor(&names, "GPU [#0]: NVIDIA GeForce RTX 5070: "), Some(1));
+        assert_eq!(match_gpu_sensor(&names, "GPU [#1]: NVIDIA GeForce RTX 5070 Ti: "), Some(2));
+        assert_eq!(match_gpu_sensor(&names, "GPU [#2]: AMD Radeon Graphics: "), Some(0), "(TM) and spacing ignored");
+        assert_eq!(match_gpu_sensor(&names, "GPU [#0]: Intel Arc A770: "), None);
+        assert_eq!(match_gpu_sensor(&["NVIDIA GeForce RTX 5070"], "GPU [#0]: NVIDIA GeForce RTX 5070 Ti: "), None, "a whole name only");
+        assert_eq!(match_gpu_sensor(&["RTX 4090", "RTX 4090"], "GPU [#0]: RTX 4090: "), None, "two cards of that name");
+        assert_eq!(match_gpu_sensor(&["", "RTX"], "GPU [#0]: RTX"), Some(1));
+        assert_eq!(match_gpu_sensor(&["NVIDIA GeForce RTX 5070"], "GPU [#0]: NVIDIA GeForce RTX 5070 (laptop): "), None, "not the same name");
+        assert_eq!(match_gpu_sensor(&[], "GPU"), None);
+    }
+
+    #[test]
+    fn hwinfo_readings_go_to_the_named_gpu_after_better_sources() {
+        use super::super::hwinfo::GpuReading;
+        let a = |n: &str| GpuAdapter { name: n.into(), ..Default::default() };
+        let mut adapters = [a("AMD Radeon(TM) Graphics"), a("NVIDIA GeForce RTX 5070")];
+        adapters[1].offer_temp(GpuTempKind::Gpu, 45.0, "WDDM");
+        let r = |s: &str, kind, c| GpuReading { sensor: s.into(), kind, c };
+        let nv = "GPU [#0]: NVIDIA GeForce RTX 5070: ";
+        offer_hwinfo_temps(&mut adapters, &[r(nv, GpuTempKind::Gpu, 46.0), r(nv, GpuTempKind::HotSpot, 58.0), r("GPU [#9]: Unknown", GpuTempKind::Gpu, 30.0)]);
+        let nvidia: Vec<(GpuTempKind, f32, &str)> = adapters[1].temps.iter().map(|t| (t.kind, t.c, t.source)).collect();
+        assert_eq!(nvidia, [(GpuTempKind::Gpu, 45.0, "WDDM"), (GpuTempKind::HotSpot, 58.0, "HWiNFO")]);
+        assert!(adapters[0].temps.is_empty());
+    }
+
+    #[test]
+    fn gpu_readings_are_named_by_gpu_kind_and_source() {
+        let mut a = GpuAdapter { name: "RTX 5070".into(), ..Default::default() };
+        a.offer_temp(GpuTempKind::Gpu, 50.0, "WDDM");
+        a.offer_temp(GpuTempKind::MemoryJunction, 70.0, "HWiNFO");
+        let mut twin = GpuAdapter { name: "Twin".into(), ..Default::default() };
+        twin.offer_temp(GpuTempKind::Gpu, 40.0, "NVML");
+        let t = gpu_thermal(&[a, twin.clone(), twin, GpuAdapter::default()]);
+        let labels: Vec<&str> = t.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels, ["RTX 5070 \u{b7} GPU (WDDM)", "RTX 5070 \u{b7} Memory junction (HWiNFO)", "Twin #2 \u{b7} GPU (NVML)", "Twin #3 \u{b7} GPU (NVML)"]);
+        assert_eq!(t[1].1, 70.0);
     }
 
     #[test]

@@ -18,6 +18,9 @@
 //!   (each disk); the disks' own counters while PDH's are missing or stay at zero.
 //! * Network: `GetIfTable2` octet deltas.
 //! * GPU: PDH `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage`.
+//!   GPU temperature: NVML while it is open, else the driver's report to Windows
+//!   (`D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)` by LUID); hot spot and memory
+//!   temperatures from HWiNFO's shared memory when it runs, matched to a GPU by name.
 //! * Thermal: PDH `\Thermal Zone Information(*)\Temperature` (ACPI firmware zones, Kelvin); CPU
 //!   temperature from the PawnIO driver when switched on in Settings ([`pawnio`]), else from
 //!   HWiNFO's shared memory ([`hwinfo`]).
@@ -192,11 +195,67 @@ pub struct GpuAdapter {
     pub shared_used: Option<u64>,
     /// System memory this GPU may use (Windows: DXGI's shared system memory, amdgpu: GTT).
     pub shared_total: Option<u64>,
+    /// The GPU temperature ([`GpuTempKind::Gpu`] of [`GpuAdapter::temps`]), kept for readers that
+    /// want the one figure.
     pub temperature_c: Option<f32>,
+    /// Each temperature a source reports for this GPU, one per kind; none is a 0 °C placeholder.
+    pub temps: Vec<GpuTemp>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,
     /// Its figures cover only the processes TMOP could read ([`GpuSample::note`] says so).
     pub partial: bool,
+}
+
+impl GpuAdapter {
+    /// The reading of `kind`, when a source reports one.
+    pub fn temp(&self, kind: GpuTempKind) -> Option<&GpuTemp> {
+        self.temps.iter().find(|t| t.kind == kind)
+    }
+
+    /// Sets the reading of `kind` unless one is already there: sources are offered best first.
+    pub fn offer_temp(&mut self, kind: GpuTempKind, c: f32, source: &'static str) {
+        if self.temp(kind).is_none() && c.is_finite() {
+            self.temps.push(GpuTemp { kind, c, source });
+            self.temps.sort_by_key(|t| t.kind);
+            if kind == GpuTempKind::Gpu {
+                self.temperature_c = Some(c);
+            }
+        }
+    }
+}
+
+/// What a GPU temperature reading measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GpuTempKind {
+    /// The GPU's main sensor: what the driver reports as the GPU temperature (amdgpu "edge",
+    /// NVML's GPU die sensor, WDDM's main sensor).
+    Gpu,
+    /// The hottest point of the die (AMD "junction", HWiNFO "GPU Hot Spot Temperature").
+    HotSpot,
+    /// The graphics memory (amdgpu "mem", Intel xe "vram", HWiNFO "GPU Memory Temperature").
+    Memory,
+    /// The graphics memory's junction (HWiNFO "GPU Memory Junction Temperature", GDDR6X).
+    MemoryJunction,
+}
+
+impl GpuTempKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            GpuTempKind::Gpu => "GPU",
+            GpuTempKind::HotSpot => "Hot spot",
+            GpuTempKind::Memory => "Memory",
+            GpuTempKind::MemoryJunction => "Memory junction",
+        }
+    }
+}
+
+/// One temperature of one GPU: what it measures, °C, and where it came from ("WDDM", "NVML",
+/// "HWiNFO", "hwmon amdgpu").
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuTemp {
+    pub kind: GpuTempKind,
+    pub c: f32,
+    pub source: &'static str,
 }
 
 /// One process on one GPU.
@@ -232,14 +291,32 @@ pub struct ThermalSample {
     pub zones: Vec<(String, f32)>,
     /// CPU temperature (PawnIO or HWiNFO shared memory on Windows, hwmon on Linux): (reading label, °C).
     pub cpu: Option<(String, f32)>,
+    /// The GPUs' temperatures ([`GpuAdapter::temps`]), as ("<GPU name> <reading>", °C).
+    pub gpu: Vec<(String, f32)>,
     /// Which sources were checked, e.g. "ACPI: no zones · HWiNFO: not running".
     pub sources: String,
 }
 
 impl ThermalSample {
+    /// The hottest reading of all, GPUs included: the Thermals figure, its history, the popout
+    /// tile and the temperature alert.
     pub fn max_c(&self) -> Option<f32> {
-        self.zones.iter().map(|z| z.1).chain(self.cpu.as_ref().map(|c| c.1)).fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
+        hottest(self.board_readings().chain(self.gpu.iter().map(|g| g.1)))
     }
+
+    /// The hottest reading of the CPU and the board (thermal zones, other hwmon chips), GPUs left
+    /// out: what a CPU readout falls back to when there is no CPU temperature.
+    pub fn board_max_c(&self) -> Option<f32> {
+        hottest(self.board_readings())
+    }
+
+    fn board_readings(&self) -> impl Iterator<Item = f32> + '_ {
+        self.zones.iter().map(|z| z.1).chain(self.cpu.as_ref().map(|c| c.1))
+    }
+}
+
+fn hottest(v: impl Iterator<Item = f32>) -> Option<f32> {
+    v.fold(None, |m, v| Some(m.map_or(v, |m: f32| m.max(v))))
 }
 
 /// Windows' hint where no temperature source is available (see [`Sources::thermal_hint`]).
@@ -698,9 +775,29 @@ mod tests {
 
     #[test]
     fn thermal_max_includes_hwinfo() {
-        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], cpu: Some(("CPU Package".into(), 70.0)), sources: String::new() };
+        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], cpu: Some(("CPU Package".into(), 70.0)), ..Default::default() };
         assert_eq!(t.max_c(), Some(70.0));
         assert_eq!(ThermalSample::default().max_c(), None);
+    }
+
+    #[test]
+    fn gpu_readings_count_as_hottest_but_not_for_the_cpu() {
+        let t = ThermalSample { zones: vec![("TZ00".into(), 45.0)], gpu: vec![("RTX GPU".into(), 80.0)], ..Default::default() };
+        assert_eq!((t.max_c(), t.board_max_c()), (Some(80.0), Some(45.0)));
+        let t = ThermalSample { gpu: vec![("RTX GPU".into(), 60.0)], ..Default::default() };
+        assert_eq!((t.max_c(), t.board_max_c()), (Some(60.0), None));
+    }
+
+    #[test]
+    fn a_gpu_keeps_the_first_reading_of_each_kind() {
+        let mut a = GpuAdapter::default();
+        a.offer_temp(GpuTempKind::HotSpot, 75.0, "HWiNFO");
+        a.offer_temp(GpuTempKind::Gpu, 61.0, "NVML");
+        a.offer_temp(GpuTempKind::Gpu, 60.0, "WDDM");
+        a.offer_temp(GpuTempKind::Memory, f32::NAN, "HWiNFO");
+        assert_eq!(a.temperature_c, Some(61.0));
+        assert_eq!(a.temps.iter().map(|t| (t.kind, t.source)).collect::<Vec<_>>(), [(GpuTempKind::Gpu, "NVML"), (GpuTempKind::HotSpot, "HWiNFO")]);
+        assert_eq!(a.temp(GpuTempKind::HotSpot).map(|t| t.c), Some(75.0));
     }
 
     #[test]

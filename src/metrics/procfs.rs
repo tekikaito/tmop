@@ -3,7 +3,7 @@
 //! every host.
 
 use super::common::{pick_cpu_temp, Ticks, HWMON_CPU_LABELS};
-use super::{DiskDrive, DiskSample, GpuAdapter, GpuSample, MemorySample, ThermalSample};
+use super::{DiskDrive, DiskSample, GpuAdapter, GpuSample, GpuTempKind, MemorySample, ThermalSample};
 use crate::pro::mounts::Mount;
 use std::time::Duration;
 
@@ -319,6 +319,51 @@ pub fn fold_thermal(chips: &[HwmonChip], zones: Vec<(String, f32)>) -> ThermalSa
     t
 }
 
+/// What each reading of a GPU driver's hwmon chip measures, from the kernel's labels:
+/// amdgpu `edge` / `junction` / `mem` (`amdgpu_pm.c`), xe `pkg` / `vram`
+/// (`sysfs-driver-intel-xe-hwmon`) and i915's one unlabelled package temperature (`temp1`).
+/// Anything else is not a known GPU reading and stays with the other sensors.
+pub fn gpu_hwmon_kind(chip: &str, label: &str) -> Option<GpuTempKind> {
+    Some(match (chip, label) {
+        ("amdgpu", "edge") | ("xe", "pkg") | ("i915", "temp1") => GpuTempKind::Gpu,
+        ("amdgpu", "junction") => GpuTempKind::HotSpot,
+        ("amdgpu", "mem") | ("xe", "vram") => GpuTempKind::Memory,
+        _ => return None,
+    })
+}
+
+/// How a GPU driver's hwmon chip is named as a source.
+fn hwmon_source(chip: &str) -> Option<&'static str> {
+    Some(match chip {
+        "amdgpu" => "hwmon amdgpu",
+        "xe" => "hwmon xe",
+        "i915" => "hwmon i915",
+        _ => return None,
+    })
+}
+
+/// Gives each GPU the readings of its driver's hwmon chip and returns the other chips. A chip
+/// goes to the adapter on the same device: `chips` carry the (resolved) device directory of their
+/// hwmon (`/sys/class/hwmon/hwmonN/device`), `adapter_devs` that of each adapter's card
+/// (`/sys/class/drm/cardN/device`), both the PCI function, so two cards of one model stay apart.
+/// A chip with no such adapter, or with no reading [`gpu_hwmon_kind`] knows, stays with the rest.
+pub fn attach_gpu_hwmon(adapters: &mut [GpuAdapter], adapter_devs: &[Option<std::path::PathBuf>], chips: Vec<(HwmonChip, Option<std::path::PathBuf>)>) -> Vec<HwmonChip> {
+    let mut rest = Vec::new();
+    for (chip, dev) in chips {
+        let at = dev.as_ref().and_then(|d| adapter_devs.iter().position(|a| a.as_ref() == Some(d)));
+        let known: Vec<(GpuTempKind, f32)> = chip.temps.iter().filter_map(|(l, c)| Some((gpu_hwmon_kind(&chip.name, l)?, *c))).collect();
+        match (at.and_then(|i| adapters.get_mut(i)), hwmon_source(&chip.name)) {
+            (Some(a), Some(source)) if !known.is_empty() => {
+                for (kind, c) in known {
+                    a.offer_temp(kind, c, source);
+                }
+            }
+            _ => rest.push(chip),
+        }
+    }
+    rest
+}
+
 /// One GPU's reading: amdgpu sysfs, Intel DRM fdinfo or NVML.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuDev {
@@ -362,12 +407,19 @@ pub fn fold_gpus(devs: &[GpuDev]) -> GpuSample {
             dedicated_total: d.vram_total,
             shared_used: d.shared_used,
             shared_total: d.shared_total,
-            temperature_c: d.temperature_c,
             power_w: d.power_w,
             clock_mhz: d.clock_mhz,
             partial: d.partial,
+            ..Default::default()
         })
         .collect();
+    // Only NVML fills a GpuDev's temperature; amdgpu and Intel's come from hwmon
+    // ([`attach_gpu_hwmon`]).
+    for (a, d) in g.adapters.iter_mut().zip(devs) {
+        if let Some(t) = d.temperature_c {
+            a.offer_temp(GpuTempKind::Gpu, t, "NVML");
+        }
+    }
     super::common::group_memory(&mut g);
     g
 }
@@ -695,6 +747,36 @@ HugePages_Total:       0
         let t = fold_thermal(&[], vec![]);
         assert_eq!((t.max_c(), t.cpu), (None, None));
         assert_eq!(t.sources, "hwmon: no sensors \u{b7} thermal zones: none");
+    }
+
+    #[test]
+    fn gpu_hwmon_labels_and_their_meaning() {
+        assert_eq!(gpu_hwmon_kind("amdgpu", "edge"), Some(GpuTempKind::Gpu));
+        assert_eq!(gpu_hwmon_kind("amdgpu", "junction"), Some(GpuTempKind::HotSpot));
+        assert_eq!(gpu_hwmon_kind("amdgpu", "mem"), Some(GpuTempKind::Memory));
+        assert_eq!(gpu_hwmon_kind("xe", "pkg"), Some(GpuTempKind::Gpu));
+        assert_eq!(gpu_hwmon_kind("xe", "vram"), Some(GpuTempKind::Memory));
+        assert_eq!(gpu_hwmon_kind("i915", "temp1"), Some(GpuTempKind::Gpu));
+        assert_eq!(gpu_hwmon_kind("xe", "mctrl"), None);
+        assert_eq!(gpu_hwmon_kind("nouveau", "temp1"), None);
+        assert_eq!(gpu_hwmon_kind("nvme", "Composite"), None);
+        // A GPU chip with no matching card, or with no known reading, stays with the other sensors.
+        let chip = |name: &str, label: &str| HwmonChip { name: name.into(), temps: vec![(label.into(), 50.0)] };
+        let dev = |s: &str| Some(std::path::PathBuf::from(s));
+        let mut adapters = [GpuAdapter { id: "card0".into(), ..Default::default() }];
+        let rest = attach_gpu_hwmon(&mut adapters, &[dev("/pci/a")], vec![(chip("amdgpu", "edge"), dev("/pci/b")), (chip("nouveau", "temp1"), dev("/pci/a")), (chip("amdgpu", "edge"), None)]);
+        assert_eq!(rest.len(), 3);
+        assert!(adapters[0].temps.is_empty());
+        let rest = attach_gpu_hwmon(&mut adapters, &[None, dev("/pci/a")], vec![(chip("amdgpu", "edge"), dev("/pci/a"))]);
+        assert_eq!(rest.len(), 1, "the matching position has no adapter");
+    }
+
+    #[test]
+    fn nvml_temperature_is_labelled_as_nvml() {
+        let nv = GpuDev { temperature_c: Some(57.0), name: "RTX".into(), ..Default::default() };
+        let g = fold_gpus(&[GpuDev::default(), nv]);
+        assert!(g.adapters[0].temps.is_empty() && g.adapters[0].temperature_c.is_none());
+        assert_eq!(g.adapters[1].temp(GpuTempKind::Gpu).map(|t| (t.c, t.source)), Some((57.0, "NVML")));
     }
 
     #[test]

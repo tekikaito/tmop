@@ -8,13 +8,15 @@
 //! * GPU: amdgpu sysfs (`gpu_busy_percent`, `mem_info_vram_used`), Intel i915 / xe DRM client
 //!   stats in `/proc/<pid>/fdinfo` ([`super::drm_clients`], which also gives the Processes
 //!   column for Intel and amdgpu) and NVIDIA NVML (`dlopen`).
-//! * Thermal: hwmon (`k10temp`, `zenpower`, `coretemp` for the CPU) and `thermal_zone*`.
+//! * Thermal: hwmon (`k10temp`, `zenpower`, `coretemp` for the CPU) and `thermal_zone*`. A GPU
+//!   driver's hwmon chip (amdgpu edge / junction / mem, xe pkg / vram, i915 package) gives that
+//!   GPU its temperatures, matched by PCI device; NVML gives NVIDIA's.
 //! * Uptime `/proc/uptime`, open files `/proc/sys/fs/file-nr`, threads `/proc/loadavg`.
 //!
 //! Process rows come from the Linux process enumerator ([`crate::process::Enumerator`]); the
 //! system-wide counts above stay the snapshot's process, thread and open-file totals.
 
-use super::common::{cpu_brand, disk_firmware, disk_model, net_delta, split_storage, tick_delta_pct, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, disk_firmware, disk_model, gpu_sources, gpu_thermal, net_delta, split_storage, tick_delta_pct, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::procfs::{self, DiskStat, DiskTotals, GpuDev, HwmonChip, NetIf};
 use super::{Probe, Snapshot, Sources};
@@ -209,7 +211,12 @@ impl Collector {
         gpus.extend(drm.devs);
         snap.gpu = procfs::fold_gpus(&gpus);
         snap.gpu.note = super::drm_clients::note(&gpus).map(str::to_string);
-        snap.thermal = self.thermal();
+        // A GPU driver's hwmon readings go to that GPU, matched by PCI device; the rest are zones.
+        let card_devs: Vec<Option<PathBuf>> = snap.gpu.adapters.iter().map(|a| fs::canonicalize(Path::new("/sys/class/drm").join(&a.id).join("device")).ok()).collect();
+        let chips = procfs::attach_gpu_hwmon(&mut snap.gpu.adapters, &card_devs, self.hwmon_chips());
+        snap.thermal = thermal_fold(&chips);
+        snap.thermal.gpu = gpu_thermal(&snap.gpu.adapters);
+        snap.thermal.sources.push_str(&format!(" \u{b7} {}", gpu_sources(&snap.gpu.adapters)));
         snap.handle_count = read("/proc/sys/fs/file-nr").and_then(|f| procfs::parse_file_nr(&f));
         snap.thread_count = read("/proc/loadavg").and_then(|l| procfs::parse_loadavg_threads(&l)).unwrap_or(0);
         snap.process_count = fs::read_dir("/proc").map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())).count()).unwrap_or(0);
@@ -396,9 +403,10 @@ impl Collector {
         devs
     }
 
-    /// hwmon chips and thermal zones, folded by [`procfs::fold_thermal`]. A chip of a powered-down
-    /// device is not read (that would wake it); one of a GPU that may sleep is read seldom.
-    fn thermal(&mut self) -> super::ThermalSample {
+    /// hwmon chips, each with its (resolved) device directory when it is a GPU's. A chip of a
+    /// powered-down device is not read (that would wake it); one of a GPU that may sleep is read
+    /// seldom.
+    fn hwmon_chips(&mut self) -> Vec<(HwmonChip, Option<PathBuf>)> {
         let now = Instant::now();
         let mut chips = Vec::new();
         for h in entries("/sys/class/hwmon", "hwmon") {
@@ -420,9 +428,10 @@ impl Collector {
                     temps
                 }
             };
-            chips.push(HwmonChip { name, temps });
+            let gpu_dev = if gpu { fs::canonicalize(&dev).ok() } else { None };
+            chips.push((HwmonChip { name, temps }, gpu_dev));
         }
-        thermal_fold(&chips)
+        chips
     }
 }
 
@@ -489,6 +498,46 @@ mod tests {
         assert_eq!(firmware_rev(&dev("blank", &[("rev", " \n")])), "");
         assert_eq!(firmware_rev(&dev("none", &[])), "");
         assert_eq!(firmware_rev(&root.join("missing")), "");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A sysfs tree like the kernel's: two amdgpu cards and an NVMe drive, each with its hwmon
+    /// chip; the cards' readings go to the card on the same PCI device, labelled, the drive's stay.
+    #[test]
+    fn gpu_hwmon_readings_go_to_their_card() {
+        use super::super::{GpuAdapter, GpuTempKind};
+        let root = std::env::temp_dir().join(format!("tmop-gpu-hwmon-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let pci = |slot: &str| root.join("devices/pci0000:00").join(slot);
+        let hwmon = |dev: &Path, n: u32, name: &str, files: &[(&str, &str)]| {
+            let h = dev.join(format!("hwmon/hwmon{n}"));
+            fs::create_dir_all(&h).unwrap();
+            fs::write(h.join("name"), format!("{name}\n")).unwrap();
+            for (f, text) in files {
+                fs::write(h.join(f), text).unwrap();
+            }
+            std::os::unix::fs::symlink(dev, h.join("device")).unwrap();
+            h
+        };
+        let (gpu_a, gpu_b, nvme) = (pci("0000:03:00.0"), pci("0000:0a:00.0"), pci("0000:01:00.0"));
+        let amd_files = [("temp1_input", "48000\n"), ("temp1_label", "edge\n"), ("temp2_input", "61000\n"), ("temp2_label", "junction\n"), ("temp3_input", "70000\n"), ("temp3_label", "mem\n")];
+        let ha = hwmon(&gpu_a, 1, "amdgpu", &amd_files);
+        let hb = hwmon(&gpu_b, 2, "amdgpu", &[("temp1_input", "39000\n"), ("temp1_label", "edge\n")]);
+        let hn = hwmon(&nvme, 0, "nvme", &[("temp1_input", "41850\n"), ("temp1_label", "Composite\n")]);
+        // hwmon_temps reads the tree in channel order with the kernel's labels.
+        assert_eq!(hwmon_temps(&ha), [("edge".to_string(), 48.0), ("junction".to_string(), 61.0), ("mem".to_string(), 70.0)]);
+        let chip = |h: &Path, gpu: bool| (HwmonChip { name: read(h.join("name")).unwrap().trim().to_string(), temps: hwmon_temps(h) }, gpu.then(|| fs::canonicalize(h.join("device")).unwrap()));
+        let chips = vec![chip(&hn, false), chip(&ha, true), chip(&hb, true)];
+        // Two cards of one model, listed in the other order: matched by device, not by position.
+        let card = |id: &str| GpuAdapter { id: id.into(), name: "AMD Radeon RX 7900 XTX".into(), ..Default::default() };
+        let mut adapters = [card("card1"), card("card0")];
+        let devs = [Some(fs::canonicalize(&gpu_b).unwrap()), Some(fs::canonicalize(&gpu_a).unwrap())];
+        let rest = procfs::attach_gpu_hwmon(&mut adapters, &devs, chips);
+        assert_eq!(rest.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["nvme"]);
+        let temps = |a: &GpuAdapter| a.temps.iter().map(|t| (t.kind, t.c, t.source)).collect::<Vec<_>>();
+        assert_eq!(temps(&adapters[0]), [(GpuTempKind::Gpu, 39.0, "hwmon amdgpu")]);
+        assert_eq!(temps(&adapters[1]), [(GpuTempKind::Gpu, 48.0, "hwmon amdgpu"), (GpuTempKind::HotSpot, 61.0, "hwmon amdgpu"), (GpuTempKind::Memory, 70.0, "hwmon amdgpu")]);
+        assert_eq!(adapters[1].temperature_c, Some(48.0));
         let _ = fs::remove_dir_all(&root);
     }
 

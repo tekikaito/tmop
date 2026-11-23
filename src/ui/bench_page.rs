@@ -231,7 +231,8 @@ impl App {
             let current_left = t.budget().mul_f32((1.0 - prog.fraction).clamp(0.0, 1.0));
             let remaining = prog.queue.iter().fold(current_left, |acc, q| acc + q.budget());
             let mut items = vec![("Elapsed", clock(elapsed)), ("Remaining", format!("~{}", clock(remaining)))];
-            if let Some(c) = fd.snap.thermal.max_c() {
+            // The board's readings only: a GPU's would not be the CPU's.
+            if let Some(c) = fd.snap.thermal.board_max_c() {
                 items.push(("CPU temp", self.temp(c)));
             }
             let mut y = inner.top() + 6.0;

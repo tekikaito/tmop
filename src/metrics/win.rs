@@ -1,7 +1,7 @@
 //! Windows metric collection.
 
 use super::clock::{clock_base, clock_mhz, perf_mhz};
-use super::common::{cpu_brand, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, merge_sensors, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
+use super::common::{cpu_brand, deci_celsius, descriptor_text, disk_deltas, disk_firmware, disk_model, fold_adapters, fold_gpu, gpu_sources, gpu_thermal, merge_sensors, offer_hwinfo_temps, parse_luid, group_disks, net_delta, pdh_disks, tick_delta_pct, volumes_storage, windows_drive, DiskCounters, DiskUse, EngineUse, GpuMemory, KnownAdapter, NetMark, Storage, Ticks};
 use super::nvml::Nvml;
 use super::*;
 use crate::process::{Enumerator, ProcessRow};
@@ -448,10 +448,42 @@ impl DiskSpaces {
 /// How often the GPU list is taken again.
 const DXGI_PERIOD: Duration = Duration::from_secs(30);
 
+/// The main temperature the driver of the GPU with LUID (`high`, `low`) reports to Windows:
+/// `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA)`, WDDM 2.4 and later, what Task Manager shows
+/// as "GPU Temperature". Needs no elevation. None when the driver reports none (0, integrated
+/// GPUs) or the query fails (older drivers).
+fn wddm_temperature(high: i32, low: u32) -> Option<f32> {
+    use windows::Wdk::Graphics::Direct3D::{
+        D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
+    };
+    use windows::Win32::Foundation::LUID;
+    let mut open = D3DKMT_OPENADAPTERFROMLUID { AdapterLuid: LUID { LowPart: low, HighPart: high }, hAdapter: 0 };
+    // SAFETY: the structures are the windows crate's (Microsoft's metadata of d3dkmthk.h), the
+    // out-pointers are valid locals for the call, and the size passed is the buffer's.
+    unsafe {
+        if D3DKMTOpenAdapterFromLuid(&mut open).is_err() {
+            return None;
+        }
+        // Physical adapter 0: a linked adapter's first GPU.
+        let mut perf = D3DKMT_ADAPTER_PERFDATA { PhysicalAdapterIndex: 0, ..Default::default() };
+        let mut q = D3DKMT_QUERYADAPTERINFO {
+            hAdapter: open.hAdapter,
+            Type: KMTQAITYPE_ADAPTERPERFDATA,
+            pPrivateDriverData: (&mut perf as *mut D3DKMT_ADAPTER_PERFDATA).cast(),
+            PrivateDriverDataSize: std::mem::size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
+        };
+        let ok = D3DKMTQueryAdapterInfo(&mut q).is_ok();
+        let _ = D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER { hAdapter: open.hAdapter });
+        ok.then(|| deci_celsius(perf.Temperature)).flatten()
+    }
+}
+
 /// Last HWiNFO read; the mapping is polled at most every 2 s (30 s while not running).
 struct HwinfoCache {
     at: Option<Instant>,
     cpu: Option<(String, f32)>,
+    /// Its GPU temperatures, matched to the GPUs by name in [`Collector::gpu_adapters`].
+    gpu: Vec<super::hwinfo::GpuReading>,
     status: String,
     running: bool,
 }
@@ -498,7 +530,7 @@ impl Collector {
             pdh,
             procs: Enumerator::new(),
             reg_mhz: registry_base_mhz(),
-            hwinfo: HwinfoCache { at: None, cpu: None, status: "not running".into(), running: false },
+            hwinfo: HwinfoCache { at: None, cpu: None, gpu: Vec::new(), status: "not running".into(), running: false },
             dxgi: None,
             gpu_detail_pdh: None,
             nvml: None,
@@ -554,6 +586,16 @@ impl Collector {
                 merge_sensors(&mut adapters, &n.read());
             }
         }
+        // Temperatures, best source first: NVML (above, while it is open), the driver's own report
+        // to Windows by LUID (what Task Manager shows), then HWiNFO by name.
+        for a in &mut adapters {
+            if let Some(c) = parse_luid(&a.id).and_then(|(high, low)| wddm_temperature(high, low)) {
+                a.offer_temp(GpuTempKind::Gpu, c, "WDDM");
+            }
+        }
+        offer_hwinfo_temps(&mut adapters, &self.hwinfo.gpu);
+        snap.thermal.gpu = gpu_thermal(&adapters);
+        snap.thermal.sources.push_str(&format!(" \u{b7} {}", gpu_sources(&adapters)));
         snap.gpu.adapters = adapters;
         snap.gpu.processes = processes;
         super::common::group_memory(&mut snap.gpu);
@@ -727,14 +769,18 @@ impl Collector {
             self.hwinfo.at = Some(Instant::now());
             self.hwinfo.running = true;
             self.hwinfo.cpu = None;
+            self.hwinfo.gpu.clear();
             match super::hwinfo::read() {
-                Ok(r) => match super::hwinfo::cpu_temp(&r) {
-                    Some(t) => {
-                        self.hwinfo.status = t.0.clone();
-                        self.hwinfo.cpu = Some(t);
+                Ok(r) => {
+                    self.hwinfo.gpu = super::hwinfo::gpu_temps(&r);
+                    match super::hwinfo::cpu_temp(&r) {
+                        Some(t) => {
+                            self.hwinfo.status = t.0.clone();
+                            self.hwinfo.cpu = Some(t);
+                        }
+                        None => self.hwinfo.status = "no CPU temperature reading".into(),
                     }
-                    None => self.hwinfo.status = "no CPU temperature reading".into(),
-                },
+                }
                 Err(super::hwinfo::Error::NotRunning) => {
                     self.hwinfo.status = "not running".into();
                     self.hwinfo.running = false;
@@ -948,6 +994,19 @@ mod tests {
         assert!((g.utilization_pct - 55.0).abs() < 0.01);
         assert_eq!(per[&1], 40.0);
         assert_eq!(per[&1234], 30.0);
+    }
+
+    /// Every GPU DXGI lists can be asked, by the LUID its id carries; a reading is a plausible
+    /// temperature or none. Prints what this machine reports (`--nocapture`).
+    #[test]
+    fn wddm_temperature_of_each_listed_gpu() {
+        for (id, name, _, _) in dxgi_adapters() {
+            let (high, low) = parse_luid(&id).expect("DXGI ids carry the LUID");
+            let t = wddm_temperature(high, low);
+            println!("{id} {name}: {t:?}");
+            assert!(t.is_none_or(|c| c > 0.0 && c <= 200.0), "{t:?}");
+        }
+        assert_eq!(wddm_temperature(-1, 0xffff_fff0), None, "no such adapter");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Alerts: a desktop notification when CPU usage, memory usage or the temperature stays above a
-//! limit (Settings → Alerts).
+//! limit (Settings → Alerts). The temperature is the hottest reading TMOP has
+//! ([`crate::metrics::ThermalSample::max_c`]): CPU, board sensors and the GPUs' readings (GPU, hot
+//! spot, memory) where a source reports them.
 //!
 //! The decision is a pure state machine, [`Tracker`]: samples and the time they arrived in,
 //! [`Event`]s out. [`Monitor`] runs one tracker per [`Metric`] over a [`Snapshot`] and words the
