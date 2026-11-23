@@ -10,6 +10,7 @@ use super::theme::{self, dim, lighten, mix, with_alpha, MetricColors, Palette};
 use super::widgets::{self, draw_graph, draw_icon, ellipse_points, fill_vertical_gradient, polygon_points, rounded_rect_points, GraphLine, Icon, LedStyle};
 use super::FrameData;
 use crate::metrics::Series;
+use crate::platform::transparency::Corners;
 use crate::process::format_rate;
 use crate::skin::{Channel, Color, Fill, FontDesign, FontSpec, FontWeight, Ink, MeterStyle, Quadrant, Skin, SkinSource, Surfaces};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
@@ -444,12 +445,22 @@ pub struct PopoutEvents {
     pub chevron: Option<egui::Response>,
 }
 
-/// Draws the whole popout into `rect`.
+/// The radius of the window's corners: the skin's (`fallback` without one), none where the
+/// corners cannot be transparent ([`Corners::Square`], #166).
+fn window_radius(corners: Corners, skin_radius: Option<f32>, fallback: f32) -> f32 {
+    match corners {
+        Corners::Rounded => skin_radius.unwrap_or(fallback),
+        Corners::Square => 0.0,
+    }
+}
+
+/// Draws the whole popout into `rect`. With [`Corners::Square`] every pixel of `rect` is
+/// painted, whatever the skin's shape.
 #[allow(clippy::too_many_arguments)]
-pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool, tex: &mut Textures, icons: &mut IconCache) -> PopoutEvents {
+pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool, corners: Corners, tex: &mut Textures, icons: &mut IconCache) -> PopoutEvents {
     tex.ensure(ui.ctx(), skin);
     if is_classic(skin) {
-        return draw_classic(ui, rect, skin, fd, opacity, fahrenheit);
+        return draw_classic(ui, rect, skin, fd, opacity, fahrenheit, corners);
     }
     let mut ev = PopoutEvents::default();
     let painter = ui.painter_at(rect);
@@ -457,7 +468,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
     let m = skin.metrics.clone().unwrap_or_default();
     let typo = skin.typography.clone().unwrap_or_default();
     let l = layout(skin);
-    let radius = m.corner_radius.unwrap_or(8.0);
+    let radius = window_radius(corners, m.corner_radius, 8.0);
     let border = m.border_width.unwrap_or(1.0);
     let pad = l.pad;
     let bloom = fd.bloom;
@@ -472,6 +483,10 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
         "polygon" => polygon_points(rect, sides as usize, rot),
         _ => rounded_rect_points(rect, CornerRadiusF32::same(radius)),
     };
+    if corners == Corners::Square && kind != "rectangle" {
+        // Circles, ellipses, polygons and capsules sit on the window colour instead of black.
+        fill_vertical_gradient(&painter, &rounded_rect_points(rect, CornerRadiusF32::ZERO), p.window.0, p.window.1);
+    }
     fill_vertical_gradient(&painter, &win_pts, p.window.0, p.window.1);
     if let (Some(img), Some(spec)) = (&tex.window, image_spec(surf.window_image.as_ref())) {
         draw_image(&painter, img, rect, &spec.mode, spec.opacity * opacity);
@@ -691,13 +706,13 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
 
 /// Classic: header with the orbit mark, a grid of history tiles, the per-core strip, the health
 /// line and the busiest processes, all in the application's palette (see [`classic_skin`]).
-fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool) -> PopoutEvents {
+fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opacity: f32, fahrenheit: bool, corners: Corners) -> PopoutEvents {
     let mut ev = PopoutEvents::default();
     let painter = ui.painter_at(rect);
     let p = paint(skin, opacity);
     let typo = skin.typography.clone().unwrap_or_default();
     let l = layout(skin);
-    let radius = skin.metrics.as_ref().and_then(|m| m.corner_radius).unwrap_or(10.0);
+    let radius = window_radius(corners, skin.metrics.as_ref().and_then(|m| m.corner_radius), 10.0);
     let pal = &fd.pal;
     let st = theme::status(pal);
     let fade = |c: Color32| with_alpha(c, opacity);
@@ -996,6 +1011,14 @@ mod tests {
     use super::*;
     use crate::skin::contrast;
 
+    #[test]
+    fn square_corners_have_no_radius() {
+        assert_eq!(window_radius(Corners::Rounded, Some(12.0), 8.0), 12.0);
+        assert_eq!(window_radius(Corners::Rounded, None, 10.0), 10.0);
+        assert_eq!(window_radius(Corners::Square, Some(12.0), 8.0), 0.0);
+        assert_eq!(window_radius(Corners::Square, None, 10.0), 0.0);
+    }
+
     /// Process rows stay readable on their heat band in every built-in skin, Classic included.
     #[test]
     fn process_rows_are_readable() {
@@ -1064,11 +1087,11 @@ mod tests {
         }
         let rows = vec![crate::process::ProcessRow { pid: 4, name: "chrome.exe".into(), cpu_pct: 18.4, ..Default::default() }];
         let mut icons = IconCache::new(&ctx);
-        for _ in 0..2 {
+        for corners in [Corners::Rounded, Corners::Square] {
             ctx.run_ui(egui::RawInput::default(), |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     let fd = FrameData { snap: &snap, hist: &hist, rows: &rows, smooth: &smooth, pal, metric_colors: MetricColors::default(), bloom: 0.0, phase: 0.0, glide: false, time: 0.0, show_self: false, lasting: Default::default(), gpus_separated: false, disks_separated: false };
-                    let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, &mut Textures::default(), &mut icons);
+                    let ev = draw(ui, Rect::from_min_size(pos2(0.0, 0.0), size), &skin, &fd, 0.85, false, corners, &mut Textures::default(), &mut icons);
                     assert!(!ev.close && !ev.menu);
                 });
             }).drop_without_applying_deltas();
