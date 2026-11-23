@@ -143,8 +143,10 @@ pub fn driver_like_page(
         let w = (rest.width() * 0.27).clamp(320.0, 440.0);
         (Rect::from_min_max(rest.min, pos2(rest.right() - w - 14.0, rest.bottom())), Rect::from_min_max(pos2(rest.right() - w, rest.top()), rest.max))
     } else {
-        let h = (rest.height() * 0.45).clamp(170.0, 280.0).min(rest.height());
-        (Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - h - 14.0)), Rect::from_min_max(pos2(rest.left(), rest.bottom() - h), rest.max))
+        let want = (rest.height() * 0.45).clamp(170.0, 280.0);
+        let (_, h) = kit::stacked_heights(rest.height(), 14.0, want, kit::MIN_LIST_H, 80.0);
+        let gap = if h > 0.0 { 14.0 } else { 0.0 };
+        (Rect::from_min_max(rest.min, pos2(rest.right(), rest.bottom() - h - gap)), Rect::from_min_max(pos2(rest.left(), rest.bottom() - h), rest.max))
     };
 
     let mut order: Vec<usize> = (0..list.len()).filter(|i| only_pid.is_none_or(|p| list[*i].pid == p) && table::matches(&state.filter, &[&list[*i].name, &list[*i].display, &list[*i].company, &list[*i].path])).collect();
@@ -211,6 +213,8 @@ pub fn driver_like_page(
     let selected = state.selected.as_ref().and_then(|k| list.iter().find(|s| &s.name == k));
     if drivers {
         driver_bar(ui, side_rect, pal, selected);
+        None
+    } else if side_rect.height() < 1.0 {
         None
     } else {
         service_panel(ui, side_rect, fd, selected, info)

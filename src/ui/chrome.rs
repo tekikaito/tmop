@@ -12,6 +12,13 @@ const READOUTS_MIN_W: f32 = 1100.0;
 const RAIL_ITEM: (f32, f32) = (60.0, 46.0);
 const RAIL_GAP: f32 = 2.0;
 const RAIL_MIN_STEP: f32 = 38.0;
+/// Height of the arrow strips at the ends of a rail list that scrolls.
+const RAIL_ARROW_H: f32 = 16.0;
+
+/// Whether a rail entry spanning `top..bottom` lies whole inside the list area `view_top..view_bottom`.
+fn rail_entry_visible(top: f32, bottom: f32, view_top: f32, view_bottom: f32) -> bool {
+    top >= view_top - 0.5 && bottom <= view_bottom + 0.5
+}
 
 /// "HOST · user": [`crate::platform::hostname`] and the user from the environment (Windows:
 /// `USERNAME`; elsewhere `USER`); empty parts are skipped.
@@ -234,13 +241,33 @@ impl App {
             let step = fit.clamp(RAIL_MIN_STEP, RAIL_ITEM.1 + RAIL_GAP);
             let item_h = step - RAIL_GAP;
             let bottom_top = full.bottom() - 16.0 - 2.0 * step + RAIL_GAP;
-            let nav_rect = Rect::from_min_max(pos2(full.left(), full.top() + 12.0), pos2(full.right(), (bottom_top - 8.0).max(full.top() + 12.0)));
+            let strip = Rect::from_min_max(pos2(full.left(), full.top() + 12.0), pos2(full.right(), (bottom_top - 8.0).max(full.top() + 12.0)));
             let nav_h = pages.len() as f32 * step;
+            // A list that does not fit scrolls, with an arrow strip at each end that says so.
+            let scrolls = nav_h > strip.height();
+            let nav_rect = if scrolls { strip.shrink2(vec2(0.0, RAIL_ARROW_H)) } else { strip };
             let scroll_id = ui.scope_id().with("nav-scroll");
             let max_scroll = (nav_h - nav_rect.height()).max(0.0);
             let mut scroll = ui.data(|d| d.get_temp::<f32>(scroll_id)).unwrap_or(0.0);
-            if max_scroll > 0.0 && ui.rect_contains_pointer(nav_rect) {
+            if max_scroll > 0.0 && ui.rect_contains_pointer(strip) {
                 scroll -= ui.input(|i| i.smooth_scroll_delta.y);
+            }
+            if scrolls {
+                for (up, arrow) in [(true, Rect::from_min_size(strip.min, vec2(strip.width(), RAIL_ARROW_H))), (false, Rect::from_min_max(pos2(strip.left(), strip.bottom() - RAIL_ARROW_H), strip.max))] {
+                    let more = if up { scroll > 0.5 } else { scroll < max_scroll - 0.5 };
+                    let resp = ui.interact(arrow, ui.scope_id().with(if up { "nav-up" } else { "nav-down" }), Sense::click());
+                    if more && resp.clicked() {
+                        scroll += if up { -2.0 } else { 2.0 } * step;
+                    }
+                    let (c, d) = (pos2(arrow.center().x, arrow.center().y), if up { -1.0 } else { 1.0 });
+                    let color = if !more { pal.text_faint.gamma_multiply(0.35) } else if resp.hovered() { pal.accent } else { pal.text_rail() };
+                    let s = Stroke::new(1.6_f32, color);
+                    p.line_segment([pos2(c.x - 6.0, c.y - 2.0 * d), pos2(c.x, c.y + 2.0 * d)], s);
+                    p.line_segment([pos2(c.x, c.y + 2.0 * d), pos2(c.x + 6.0, c.y - 2.0 * d)], s);
+                    if more {
+                        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    }
+                }
             }
             // A page picked elsewhere (shortcut, link) is scrolled into view.
             let seen_id = ui.scope_id().with("nav-seen");
@@ -258,11 +285,11 @@ impl App {
             for page in pages {
                 let rect = Rect::from_min_size(pos2(x, y), vec2(RAIL_ITEM.0, item_h));
                 y += step;
-                let hit = rect.intersect(nav_rect);
-                if !hit.is_positive() {
+                // Only whole entries are drawn: a half one would show an icon without its label.
+                if !rail_entry_visible(rect.top(), rect.bottom(), nav_rect.top(), nav_rect.bottom()) {
                     continue;
                 }
-                let resp = Self::rail_item(ui, &clip, rect, hit, page.id(), page.icon(), page.rail_label(), self.page == page, pal);
+                let resp = Self::rail_item(ui, &clip, rect, rect, page.id(), page.icon(), page.rail_label(), self.page == page, pal);
                 let tip = if page.shortcut().is_empty() { page.title().to_string() } else { format!("{}  {}", page.title(), page.shortcut()) };
                 if resp.on_hover_text(tip).clicked() {
                     self.page = page;
@@ -401,6 +428,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rail_shows_whole_entries_only() {
+        assert!(rail_entry_visible(100.0, 136.0, 100.0, 400.0));
+        assert!(rail_entry_visible(364.0, 400.0, 100.0, 400.0));
+        // Cut by the bottom or the top edge: left out, so no icon shows without its label.
+        assert!(!rail_entry_visible(380.0, 416.0, 100.0, 400.0));
+        assert!(!rail_entry_visible(90.0, 126.0, 100.0, 400.0));
+    }
 
     #[test]
     fn machine_line_skips_empty_parts() {

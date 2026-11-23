@@ -57,5 +57,24 @@ if [ "$os" = windows ] || [ "$os" = linux ]; then
   # Frames for the animation, two per second.
   shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
+# The minimum window size (900x600): lists keep their rows, the sidebar scrolls with arrows, the
+# Processes toolbar wraps. Calls the exe directly: shot() puts its own --window-size first and the
+# parser takes the first match.
+shot_min() {  # name, then TMOP arguments
+  local name="$1"; shift
+  echo "::group::$name"
+  if "$exe" --screenshot="$out/$name.png" --window-size=900x600 --wait="${SHOT_MIN_WAIT:-12}" "$@"; then
+    echo "ok: $name"
+  else
+    echo "::warning::shot $name failed"
+  fi
+  echo "::endgroup::"
+}
+shot_min min-processes --page=processes
+shot_min min-users --page=users
+shot_min min-app-history --page=app-history
+shot_min min-benchmarks --page=benchmarks
+[ "$os" = windows ] && shot_min min-services --page=services
+[ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
 ls -l "$out"
 exit 0
