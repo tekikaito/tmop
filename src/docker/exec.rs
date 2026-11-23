@@ -43,7 +43,8 @@ const MARKER_LEN: usize = 32;
 /// Sends SIGHUP to every process except PID 1 and itself whose environment holds `$0`, the
 /// `TMOP_SESSION=<marker>` entry, passed as an argument and matched as a fixed string. All
 /// markers have the same length, so one session's entry never matches another's.
-const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
+#[doc(hidden)]
+pub const HANGUP_SCRIPT: &str = r#"command -v grep >/dev/null || exit 127
 for d in /proc/[0-9]*; do
   p=${d#/proc/}
   [ "$p" = 1 ] || [ "$p" = "$$" ] && continue

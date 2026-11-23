@@ -31,8 +31,10 @@ jobs:
         if: matrix.mode == 'old'
         run: |
           git fetch --depth 1 origin main
-          for f in src/docker/exec.rs src/ui/docker/terminal_tab.rs src/ui/mod.rs; do git show FETCH_HEAD:$f > $f; done
-          awk '/^\/\/\/ The app-exit path/{skip=1} /^\/\/\/ Waits up to 10 seconds/{skip=0} !skip' tests/docker_exec.rs > t && mv t tests/docker_exec.rs
+          awk '/^\/\/\/ The app-exit path/{skip=1} /^\/\/\/ Waits up to 10 seconds/{skip=0} !skip' tests/docker_exec.rs > "$RUNNER_TEMP/docker_exec.rs"
+          git checkout FETCH_HEAD -- .
+          rm -f tests/docker_exec_diag.rs
+          cp "$RUNNER_TEMP/docker_exec.rs" tests/docker_exec.rs
           git diff --stat
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -41,7 +43,7 @@ jobs:
           save-if: false
       - name: Build tests
         run: |
-          cargo test --locked --test docker_exec --test docker_exec_diag --test docker_files --no-run --message-format=json > build.json || { jq -r 'select(.reason == "compiler-message") | .message.rendered' build.json; exit 1; }
+          cargo test --locked --test docker_exec $( [ -f tests/docker_exec_diag.rs ] && echo --test docker_exec_diag ) --test docker_files --no-run --message-format=json > build.json || { jq -r 'select(.reason == "compiler-message") | .message.rendered' build.json; exit 1; }
           for t in docker_exec docker_exec_diag docker_files; do
             echo "BIN_$t=$(jq -r --arg t $t 'select(.profile.test == true and .target.name == $t) | .executable' build.json)" >> "$GITHUB_ENV"
           done
@@ -53,6 +55,7 @@ jobs:
         if: matrix.mode == 'stubborn'
         run: |
           docker version --format 'server {{.Server.Version}}'
-          DIAG_STUBBORN=product DIAG_ITERS=20 "$BIN_docker_exec_diag" diag_stubborn --nocapture 2>&1 | grep --line-buffered '^DIAG' || true
-          DIAG_STUBBORN=manual DIAG_ITERS=10 "$BIN_docker_exec_diag" diag_stubborn --nocapture 2>&1 | grep --line-buffered '^DIAG' || true
+          for m in product traced init leaf orphan; do
+            DIAG_STUBBORN=$m DIAG_ITERS=10 "$BIN_docker_exec_diag" diag_stubborn --nocapture 2>&1 | grep --line-buffered -E '^DIAG|panicked' || true
+          done
           docker ps -a --filter name=tmop-test- --format '{{.Names}}' | xargs -r docker rm -f
