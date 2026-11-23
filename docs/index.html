@@ -435,10 +435,10 @@
             <li>Most pages are there: performance, processes, services, startup apps, installed apps, connections, Disk Space and Docker.</li>
             <li>Windows-only parts are hidden, such as replacing Task Manager, TMOP's own Docker engine and the Windows Disk Cleanup handlers.</li>
             <li data-only="macos">Temperatures and per-engine graphics load aren't available on macOS; Apple Silicon Macs report no clock speeds.</li>
-            <li>On <i>Processes</i>, <i>Group by app</i> shows one row per service or program.</li>
+            <li data-only="linux macos">On <i>Processes</i>, <i>Group by app</i> shows one row per service or program.</li>
             <li data-only="linux">Graphics: usage for AMD and NVIDIA cards, and for Intel graphics (Linux 5.19 or newer with i915, 6.11 or newer with xe). The <i>GPU</i> column on <i>Processes</i> covers Intel and AMD, for the programs TMOP may read (without root, your own), not NVIDIA. The Intel support and the per-program figures have not been tested on real hardware yet, so numbers may be off or missing.</li>
             <li data-only="linux">Graphics card temperatures are read per card; they have been tested only with made-up files so far.</li>
-            <li data-only="linux">On Wayland,"always on top" for the popout isn't available; on X11 it is.</li>
+            <li data-only="linux">On Wayland, "always on top" for the popout isn't available; on X11 it is.</li>
             <li>The <a href="https://github.com/tekikaito/tmop#platforms">README</a> lists exactly what works where.</li>
           </ul>
         </div>
@@ -486,9 +486,6 @@
           <div class="img"><img src="screenshots/services.png" loading="lazy" alt="Services page with Start, Stop and Restart buttons above the list"></div>
           <div class="t"><h3>Start, stop or restart a service</h3><p>Select a service and press <i>Start</i>, <i>Stop</i> or <i>Restart</i>. Only what the service's state allows is offered. Without administrator rights (root on Linux and macOS) the buttons are greyed out with the reason. TMOP never asks for more rights.</p></div>
         </div>
-        <div class="feature">
-          <div class="t"><h3>See how hot your graphics card is</h3><p>The temperature of your graphics card, next to its usage and in <i>Thermals</i>. On Windows for any card whose driver reports it to Windows (the figure Task Manager shows); hot spot and memory readings only while HWiNFO runs with <i>Shared Memory Support</i> on. On Linux for each graphics card. Not on macOS.</p></div>
-        </div>
       </div>
       <ul class="more">
         <li>Find what fills your disk</li>
@@ -499,6 +496,7 @@
         <li>Battery health</li>
         <li>Find what is using a file</li>
         <li>Save any table as CSV</li>
+        <li>Graphics card temperature on Windows and Linux</li>
       </ul>
     </div>
   </section>
