@@ -41,13 +41,20 @@ jobs:
           key: linux-x86_64
           save-if: false
       - name: Build tests
-        run: cargo test --locked --test docker_exec --test docker_exec_diag --test docker_containers --test docker_files --no-run
+        run: |
+          cargo test --locked --test docker_exec --test docker_exec_diag --test docker_files --test docker_logs --no-run --message-format=json > build.json
+          for t in docker_exec docker_exec_diag docker_files; do
+            echo "BIN_$t=$(jq -r --arg t $t 'select(.profile.test == true and .target.name == $t) | .executable' build.json)" >> "$GITHUB_ENV"
+          done
+          cat "$GITHUB_ENV"
       - name: Loop the real test
         if: matrix.mode == 'loop'
         run: |
-          bin=$(ls -t target/debug/deps/docker_exec-* | grep -v '\.d$' | head -1)
+          bin=$BIN_docker_exec
           if [ "${{ matrix.load }}" = yes ]; then
             for _ in $(seq $(nproc)); do (while :; do :; done) & done
+            other=$BIN_docker_files
+            (while :; do "$other" >/dev/null 2>&1; done) &
           fi
           fail=0
           for i in $(seq 300); do
@@ -63,7 +70,7 @@ jobs:
       - name: Diagnostics
         if: matrix.mode == 'diag'
         run: |
-          bin=$(ls -t target/debug/deps/docker_exec_diag-* | grep -v '\.d$' | head -1)
+          bin=$BIN_docker_exec_diag
           for spec in ${{ matrix.variants }}; do
             IFS=: read -r v n t <<< "$spec"
             if [ "$t" != 1 ]; then
