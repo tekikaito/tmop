@@ -594,7 +594,8 @@ impl History {
         for (id, s) in &mut self.gpu_adapters {
             s.push(snap.gpu.adapters.iter().find(|a| a.id == *id).map_or(0.0, |a| a.utilization_pct));
         }
-        self.thermal.push(snap.thermal.max_c().unwrap_or(0.0));
+        // No reading is a gap (NaN), not 0 °C: graphs leave it out and the readout says so.
+        self.thermal.push(snap.thermal.max_c().unwrap_or(f32::NAN));
         self.clock.push(snap.cpu.current_mhz.unwrap_or(0) as f32);
         self.clock_max.push(snap.cpu.per_core_mhz.iter().copied().max().unwrap_or(0) as f32);
         self.memory_bytes.push(snap.memory.total.saturating_sub(snap.memory.available) as f32);

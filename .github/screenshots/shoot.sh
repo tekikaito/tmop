@@ -107,9 +107,14 @@ shot_min min-users --page=users
 shot_min min-app-history --page=app-history
 shot_min min-benchmarks --page=benchmarks
 shot_min min-power --page=power-and-freq
+shot_min min-connections --page=connections
+shot_min min-flight-recorder --page=flight-recorder
+shot_min min-perf-gpu --page=performance --device=gpu
+shot_min min-perf-thermal --page=performance --device=thermal
 shot system-info --page=system-info
 shot installed-apps --page=installed-apps
 [ "$os" = windows ] && shot_min min-services --page=services
 [ "$os" = linux ] && shot_min min-docker-containers --page=docker --docker-tab=containers
+[ "$os" != macos ] && shot_min min-docker-engine --page=docker --docker-tab=engine
 ls -l "$out"
 exit $popout_failed

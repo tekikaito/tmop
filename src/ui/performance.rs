@@ -22,6 +22,10 @@ use std::time::Duration;
 const LIST_W: f32 = 236.0;
 const GAP: f32 = 16.0;
 const DEVICE_CARD_H: f32 = 76.0;
+/// Height of the cards when the list is squeezed so every device stays in view; and the room the
+/// "previews" line with the Refresh button below the cards takes.
+const DEVICE_CARD_MIN_H: f32 = 50.0;
+const DEVICE_FOOTER_H: f32 = 48.0;
 /// Seconds the top-consumer sparklines cover.
 const TOP_SPAN_SECS: f32 = 60.0;
 /// Width kept free at the right of the CPU graph for the exploded CPU and its labels.
@@ -29,6 +33,8 @@ const FIGURE_W: f32 = 410.0;
 /// Narrowest tile of the strip of other devices in which a value ("13.7 / 31.1 GB", both network
 /// rates) still fits beside its label; in narrower tiles it goes below it.
 const STRIP_INLINE_MIN_W: f32 = 240.0;
+/// Narrowest tile of the stacked strip: the longest value ("down 9.6 up 1.7 KB/s") still fits.
+const STRIP_STACKED_MIN_W: f32 = 140.0;
 
 /// How the per-core block of the CPU page shows the logical processors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -210,9 +216,20 @@ impl App {
         let list = Rect::from_min_size(area.min, vec2(LIST_W, area.height()));
         let detail = Rect::from_min_max(pos2(list.right() + GAP, area.top()), area.max);
         let mut act = None;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
-            egui::ScrollArea::vertical().id_salt("perf-list").auto_shrink([false, false]).show_029(ui, [false, true], |ui| self.device_list(ui, list, fd, &mut act));
+        let scrolled = ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
+            egui::ScrollArea::vertical().id_salt("perf-list").auto_shrink([false, false]).show_029(ui, [false, true], |ui| self.device_list(ui, list, fd, &mut act))
         });
+        // More cards below the edge: a small arrow says the list scrolls.
+        let out = scrolled.inner;
+        if out.state.clamped_offset().y + out.inner_rect.height() < out.content_size.y - 1.0 {
+            let pal = fd.pal;
+            let pill = Rect::from_center_size(pos2(list.center().x, list.bottom() - 12.0), vec2(34.0, 18.0));
+            let p = ui.painter();
+            p.rect_filled(pill, 9.0, pal.panel);
+            p.rect_stroke(pill, 9.0, Stroke::new(1.0_f32, pal.accent), egui::StrokeKind::Outside);
+            let c = pill.center();
+            p.add(Shape::line(vec![pos2(c.x - 5.0, c.y - 2.5), pos2(c.x, c.y + 2.5), pos2(c.x + 5.0, c.y - 2.5)], Stroke::new(1.5_f32, pal.accent)));
+        }
         ui.scope_builder(egui::UiBuilder::new().max_rect(detail), |ui| {
             egui::ScrollArea::vertical().id_salt("perf-detail").auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
                 let top = ui.cursor().min;
@@ -371,6 +388,8 @@ impl App {
                 entries.push((d, None));
             }
         }
+        let card_h = device_card_h(list.height(), entries.len());
+        let title_y = if card_h < DEVICE_CARD_H { 15.0 } else { 19.0 };
         let selected_gpu = self.selected_adapter(fd).map(|(i, _)| i);
         let selected_disk = self.selected_drive(fd).map(|(i, _)| i);
         for (d, one) in entries {
@@ -378,7 +397,7 @@ impl App {
             let adapter = gpu.map(|i| &fd.snap.gpu.adapters[i]);
             let drive = one.filter(|_| d == Device::Disk).map(|i| &fd.snap.disk.drives[i]);
             let selected = if d == Device::Disk { selected_disk } else { selected_gpu };
-            let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), DEVICE_CARD_H));
+            let r = Rect::from_min_size(pos2(list.left(), y), vec2(list.width(), card_h));
             let resp = ui.interact(r, ui.scope_id().with(("dev", d.key(), one)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if d == Device::Gpu {
                 kit::context_menu(&resp, |ui| {
@@ -420,9 +439,9 @@ impl App {
             };
             let value_w = widgets::text_width(&p, &view.value, theme::mono(12.0));
             let name_w = r.width() - 24.0 - value_w - 8.0;
-            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + 19.0), Align2::LEFT_CENTER, title, theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
-            widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + 19.0), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
-            let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 34.0), vec2(r.width() - 24.0, 32.0));
+            widgets::text_fit(&p, pos2(r.left() + 12.0, r.top() + title_y), Align2::LEFT_CENTER, title, theme::semibold(13.0), if active { pal.text } else { pal.text_table() }, name_w);
+            widgets::text_fit(&p, pos2(r.right() - 12.0, r.top() + title_y), Align2::RIGHT_CENTER, &view.value, theme::mono(12.0), if active { pal.text } else { pal.text_dim }, r.width() - 24.0);
+            let spark = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + title_y + 15.0), vec2(r.width() - 24.0, (card_h - title_y - 23.0).min(32.0)));
             if d == Device::Docker {
                 widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
             } else {
@@ -435,15 +454,15 @@ impl App {
                     _ => Act::Device(d),
                 });
             }
-            y += DEVICE_CARD_H + 6.0;
+            y += card_h + 6.0;
         }
         let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.settings.update_speed().interval());
-        p.text(pos2(list.left() + 2.0, y + 4.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
-        let button = Rect::from_min_size(pos2(list.left(), y + 26.0), vec2(120.0, 28.0));
+        p.text(pos2(list.left() + 2.0, y + 2.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
+        let button = Rect::from_min_size(pos2(list.left(), y + 18.0), vec2(120.0, 28.0));
         if kit::row_ui(ui, button, |ui| Button::ghost("Refresh").size(ButtonSize::Compact).icon(Icon::Refresh).show(ui, &pal).clicked()) {
             *act = Some(Act::Refresh);
         }
-        ui.allocate_rect(Rect::from_min_size(top, vec2(list.width(), y + 58.0 - top.y)), Sense::hover());
+        ui.allocate_rect(Rect::from_min_size(top, vec2(list.width(), y + DEVICE_FOOTER_H - top.y)), Sense::hover());
     }
 
     // ------------------------------------------------------------------ detail card
@@ -704,8 +723,8 @@ impl App {
                 let (ph, hover) = plot(ui, &pc, "network", ix, cy, gw, 200.0, 64.0, &rate_labels(m), &lines, &readout);
                 if figure {
                     let n = &s.network;
-                    let link = dash_or((n.link_bps > 0.0).then(|| format!("{:.1} Gb/s", n.link_bps / 1e9)));
-                    let labels = [("Receive", format!("\u{2193} {}", format_rate(n.rx_bps))), ("Send", format!("\u{2191} {}", format_rate(n.tx_bps))), ("Utilization", format!("{:.2}% of link", n.utilization_pct)), ("Link speed", link)];
+                    let link = link_speed_text(n.link_bps);
+                    let labels = [("Receive", format!("\u{2193} {}", format_rate(n.rx_bps))), ("Send", format!("\u{2191} {}", format_rate(n.tx_bps))), ("Utilization", link_use_text(n.link_bps, n.utilization_pct)), ("Link speed", link)];
                     figure_at(&p, &pal, Exploded::Network, ix + gw, cy, 200.0, &labels);
                 }
                 cy += ph + 10.0;
@@ -714,8 +733,8 @@ impl App {
                 let facts = vec![
                     ("Receive".to_string(), format_rate(s.network.rx_bps)),
                     ("Send".to_string(), format_rate(s.network.tx_bps)),
-                    ("Link speed".to_string(), format!("{:.1} Gb/s", s.network.link_bps / 1e9)),
-                    ("Utilization".to_string(), format!("{:.2}%", s.network.utilization_pct)),
+                    ("Link speed".to_string(), link_speed_text(s.network.link_bps)),
+                    ("Utilization".to_string(), link_use_text(s.network.link_bps, s.network.utilization_pct)),
                 ];
                 cy += dl(&p, &pal, ix, cy, iw, &facts);
             }
@@ -732,7 +751,7 @@ impl App {
                 let hd = Head { title: "Thermals", sub: src, value, side };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, 110.0))];
-                let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), self.temp(at(&fd.hist.thermal, age)));
+                let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), temp_or_none(at(&fd.hist.thermal, age), |t| self.temp(t)));
                 let labels = ["110\u{b0}".to_string(), "82\u{b0}".to_string(), "55\u{b0}".to_string(), "27\u{b0}".to_string(), "0\u{b0}".to_string()];
                 let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, gw, 200.0, 36.0, &labels, &lines, &readout);
                 if figure {
@@ -750,8 +769,9 @@ impl App {
                 legend_row(&p, &pal, ix + 36.0, cy + 12.0, &[("Hottest sensor", c, false)], hover.as_deref(), ix + gw);
                 cy += 30.0;
                 if s.thermal.max_c().is_none() && s.thermal.gpu.is_empty() {
-                    p.text(pos2(ix, cy), Align2::LEFT_TOP, format!("No temperature source available. {}.", SOURCES.thermal_hint), theme::ui(12.0), theme::status(&pal).warn);
-                    cy += 20.0;
+                    // Wraps inside the card (the hint is long); more than three lines end in an ellipsis.
+                    let hint = format!("No temperature source available. {}.", SOURCES.thermal_hint);
+                    cy += widgets::text_wrapped(&p, pos2(ix, cy), &hint, theme::ui(12.0), theme::status(&pal).warn, iw, 3).height() + 8.0;
                 } else {
                     let mut facts: Vec<(String, String)> = s.thermal.cpu.iter().map(|(l, c)| (l.clone(), self.temp(*c))).collect();
                     // Every GPU reading is listed; only the GPU's own (not hot spot or memory)
@@ -833,8 +853,15 @@ impl App {
         // into the label. The width decides for the whole strip, so the tiles stay alike and the
         // layout does not flip when a value grows by a digit.
         let stacked = strip_stacked(w, others.len());
-        let strip = Rect::from_min_size(pos2(x, y), vec2(w, if stacked { 90.0 } else { 80.0 }));
-        let tiles = kit::tile_strip(&p, strip, &pal, others.len());
+        let tile_h = if stacked { 90.0 } else { 80.0 };
+        // Tiles that would be too narrow for their values go on further rows (balanced).
+        let mut tiles = Vec::new();
+        let mut row_y = y;
+        for n in strip_rows(w, others.len(), stacked) {
+            tiles.extend(kit::tile_strip(&p, Rect::from_min_size(pos2(x, row_y), vec2(w, tile_h)), &pal, n));
+            row_y += tile_h + 8.0;
+        }
+        let strip_h = row_y - 8.0 - y;
         for (d, t) in others.iter().zip(tiles) {
             let resp = ui.interact(t, ui.scope_id().with(("other", d.key())), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.hovered() {
@@ -858,7 +885,7 @@ impl App {
                 *act = Some(Act::Device(*d));
             }
         }
-        strip.height()
+        strip_h
     }
 
     // ------------------------------------------------------------------ CPU: processors and consumers
@@ -1219,7 +1246,8 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
             let cx = axis.x_of(age as f32 + offset).min(gr.right());
             p.line_segment([pos2(cx, gr.top()), pos2(cx, gr.bottom())], Stroke::new(1.0_f32, pal.raise(0.3)));
             for l in lines {
-                if let Some(v) = l.series.values.len().checked_sub(1 + age).and_then(|i| l.series.values.get(i)) {
+                // A sample without a reading (NaN) has no point on the trace.
+                if let Some(v) = l.series.values.len().checked_sub(1 + age).and_then(|i| l.series.values.get(i)).filter(|v| !v.is_nan()) {
                     let (lo, hi) = l.range;
                     let ty = gr.bottom() - ((v - lo) / if hi > lo { hi - lo } else { 1.0 }).clamp(0.0, 1.0) * gr.height();
                     p.circle_filled(pos2(cx, ty), 3.5, l.color);
@@ -1262,16 +1290,25 @@ fn legend_row(p: &egui::Painter, pal: &Palette, x: f32, cy: f32, items: &[(&str,
     }
 }
 
+/// Columns of a [`dl`] `w` px wide: as many as keep every column at least 100 px and as wide as
+/// the widest label (`label_ws`), so one heading never runs into the next.
+fn dl_columns(w: f32, label_ws: &[f32]) -> usize {
+    let min_col = label_ws.iter().copied().fold(100.0_f32, f32::max).ceil();
+    (((w + 12.0) / (min_col + 12.0)).floor() as usize).clamp(1, label_ws.len().max(1))
+}
+
 /// Label / value facts in auto-fitting columns under a hairline. Returns the height used.
 fn dl(p: &egui::Painter, pal: &Palette, x: f32, y: f32, w: f32, items: &[(String, String)]) -> f32 {
     p.line_segment([pos2(x, y + 0.5), pos2(x + w, y + 0.5)], Stroke::new(1.0_f32, pal.row_rule()));
-    let cols = (((w + 12.0) / (100.0 + 12.0)).floor() as usize).clamp(1, items.len().max(1));
+    let labels: Vec<String> = items.iter().map(|(k, _)| k.to_uppercase()).collect();
+    let label_ws: Vec<f32> = labels.iter().map(|l| widgets::tracked_width(p, l, theme::ui(11.0), 0.12)).collect();
+    let cols = dl_columns(w, &label_ws);
     let cw = (w - 12.0 * (cols - 1) as f32) / cols as f32;
-    for (i, (k, v)) in items.iter().enumerate() {
+    for (i, (label, (_, v))) in labels.iter().zip(items).enumerate() {
         let (c, r) = (i % cols, i / cols);
         let ix = x + c as f32 * (cw + 12.0);
         let iy = y + 14.0 + r as f32 * 48.0;
-        widgets::tracked_text(p, pos2(ix, iy), Align2::LEFT_TOP, &k.to_uppercase(), theme::ui(11.0), pal.text_faint, 0.12);
+        widgets::tracked_text(p, pos2(ix, iy), Align2::LEFT_TOP, label, theme::ui(11.0), pal.text_faint, 0.12);
         widgets::text_fit(p, pos2(ix, iy + 15.0), Align2::LEFT_TOP, v, theme::light(17.0), pal.text, cw);
     }
     let rows = items.len().div_ceil(cols).max(1);
@@ -1384,6 +1421,33 @@ fn gpu_temp_facts(adapters: &[&GpuAdapter], named: bool, fmt: impl Fn(f32) -> St
     rows
 }
 
+/// A temperature of the history for the hover readout; a sample without a reading (NaN) says so.
+fn temp_or_none(c: f32, fmt: impl Fn(f32) -> String) -> String {
+    if c.is_nan() {
+        "no reading".to_string()
+    } else {
+        fmt(c)
+    }
+}
+
+/// "1.0 Gb/s" for a link speed in bit/s; 0 is how a system that does not report it shows up.
+fn link_speed_text(bps: f64) -> String {
+    if bps > 0.0 {
+        format!("{:.1} Gb/s", bps / 1e9)
+    } else {
+        "Not reported".to_string()
+    }
+}
+
+/// Utilization of the link; unknown (as the link speed is) when the speed is.
+fn link_use_text(bps: f64, pct: f32) -> String {
+    if bps > 0.0 {
+        format!("{pct:.2}%")
+    } else {
+        "Not reported".to_string()
+    }
+}
+
 fn dash_or(s: Option<String>) -> String {
     s.unwrap_or_else(|| "\u{2014}".to_string())
 }
@@ -1399,9 +1463,29 @@ pub(super) fn bytes_pair(used: u64, total: u64) -> String {
     format!("{:.1} / {t:.1} {}", used as f64 / 1024f64.powi(i as i32), U[i])
 }
 
+/// Height of the device cards in a list `avail` px high with `n` cards: the usual height, less when
+/// that would push the last card (and the Refresh button) out of view, but never below the least
+/// that still shows a title and a trace (the list then scrolls).
+fn device_card_h(avail: f32, n: usize) -> f32 {
+    let n = n.max(1) as f32;
+    ((avail - DEVICE_FOOTER_H) / n - 6.0).floor().clamp(DEVICE_CARD_MIN_H, DEVICE_CARD_H)
+}
+
 /// Whether a strip `w` wide with `tiles` tiles puts each value below its label.
 fn strip_stacked(w: f32, tiles: usize) -> bool {
     w / (tiles.max(1) as f32) < STRIP_INLINE_MIN_W
+}
+
+/// Tiles per row of the strip of other devices: one row while the tiles stay at least
+/// `STRIP_STACKED_MIN_W` wide (or sit inline), else as few rows as the width allows, filled evenly.
+fn strip_rows(w: f32, tiles: usize, stacked: bool) -> Vec<usize> {
+    if tiles == 0 {
+        return Vec::new();
+    }
+    let cols = if stacked { (((w + 1.0) / (STRIP_STACKED_MIN_W + 1.0)).floor() as usize).clamp(1, tiles) } else { tiles };
+    let rows = tiles.div_ceil(cols);
+    let per = tiles.div_ceil(rows);
+    (0..rows).map(|i| per.min(tiles - i * per)).collect()
 }
 
 /// "\u{2193}1.2 \u{2191}0.2 MB/s": both rates in the unit of the larger.
@@ -1477,6 +1561,31 @@ mod tests {
     }
 
     #[test]
+    fn samples_without_a_reading_are_gaps_that_draw_and_read_out_as_such() {
+        let pal = theme::DARK;
+        // Never a sensor, a sensor that appears late, and one that drops out and returns.
+        let mut never = Series::new(60);
+        let mut late = Series::new(60);
+        let mut gappy = Series::new(60);
+        for i in 0..40 {
+            never.push(f32::NAN);
+            late.push(if i < 30 { f32::NAN } else { 40.0 + i as f32 });
+            gappy.push(if (10..20).contains(&i) { f32::NAN } else { 50.0 });
+        }
+        assert_eq!(never.max(), 0.0, "an absent reading does not count as a value");
+        let mut texts = Vec::new();
+        frames(|ui| {
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.5, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false };
+            for s in [&never, &late, &gappy] {
+                let lines = [PlotLine::new(s, pal.accent, (0.0, 110.0))];
+                let (_, text) = plot(ui, &cx, "gap", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| temp_or_none(at(s, age), |t| format!("{t:.0}")));
+                texts.extend(text);
+            }
+        });
+        assert!(texts.iter().any(|t| t == "no reading"), "{texts:?}");
+    }
+
+    #[test]
     fn an_empty_history_draws_too() {
         let pal = theme::LIGHT;
         let empty = Series::new(4);
@@ -1502,6 +1611,47 @@ mod tests {
         assert!(!strip_stacked(1500.0, 5));
         assert!(!strip_stacked(945.0, 3));
         assert!(!strip_stacked(300.0, 0), "no tiles, nothing to stack");
+    }
+
+    #[test]
+    fn a_narrow_strip_wraps_onto_rows_of_usable_tiles() {
+        // 6 other devices in 520 px: 3 per row, not 6 tiles of 86 px.
+        assert_eq!(strip_rows(520.0, 6, true), vec![3, 3]);
+        assert_eq!(strip_rows(520.0, 5, true), vec![3, 2]);
+        assert_eq!(strip_rows(945.0, 5, true), vec![5], "the default window keeps one row");
+        assert_eq!(strip_rows(1500.0, 5, false), vec![5]);
+        assert_eq!(strip_rows(100.0, 3, true), vec![1, 1, 1]);
+        assert!(strip_rows(500.0, 0, true).is_empty());
+    }
+
+    #[test]
+    fn device_cards_shrink_to_keep_every_device_in_view() {
+        assert_eq!(device_card_h(900.0, 7), DEVICE_CARD_H);
+        // 462 px, 7 devices at the 900x600 window: smaller cards, all in view.
+        let h = device_card_h(462.0, 7);
+        assert!((DEVICE_CARD_MIN_H..DEVICE_CARD_H).contains(&h));
+        assert!(7.0 * (h + 6.0) + DEVICE_FOOTER_H <= 462.0);
+        // Far too little room: the minimum, and the list scrolls.
+        assert_eq!(device_card_h(200.0, 7), DEVICE_CARD_MIN_H);
+    }
+
+    #[test]
+    fn facts_columns_leave_room_for_the_widest_heading() {
+        // 480 px with a 135 px heading: 3 columns, not the 4 a 100 px minimum allows.
+        assert_eq!(dl_columns(480.0, &[135.0, 90.0, 120.0, 130.0]), 3);
+        assert_eq!(dl_columns(480.0, &[80.0, 90.0, 60.0, 70.0]), 4);
+        assert_eq!(dl_columns(100.0, &[135.0, 90.0]), 1);
+        assert_eq!(dl_columns(500.0, &[]), 1);
+    }
+
+    #[test]
+    fn unknown_values_read_as_not_reported() {
+        assert_eq!(link_speed_text(0.0), "Not reported");
+        assert_eq!(link_speed_text(1e9), "1.0 Gb/s");
+        assert_eq!(link_use_text(0.0, 0.0), "Not reported");
+        assert_eq!(link_use_text(1e9, 2.5), "2.50%");
+        assert_eq!(temp_or_none(f32::NAN, |t| format!("{t}")), "no reading");
+        assert_eq!(temp_or_none(41.0, |t| format!("{t:.0} C")), "41 C");
     }
 
     #[test]
