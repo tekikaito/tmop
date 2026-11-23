@@ -301,7 +301,7 @@ pub fn is_scoop_exe(exe: &str, env_roots: &[String], is_dir: impl Fn(&str) -> bo
 
 /// True when the running exe lives in a Scoop app folder (checked once). The path is tried as
 /// given and with junctions resolved (`apps\tmop\current` points at the version folder).
-fn is_scoop_install() -> bool {
+pub fn is_scoop_install() -> bool {
     static SCOOP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SCOOP.get_or_init(|| {
         let Ok(exe) = std::env::current_exe() else { return false };

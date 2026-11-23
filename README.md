@@ -288,6 +288,7 @@ showing zeros.
 | Popout always on top, header pin | ✔ | X11 only (not on Wayland) | ✔ |
 | Skins, palettes, fonts, system light/dark theme | ✔ | ✔ | ✔ |
 | Open TMOP instead of Task Manager | ✔ | — | — |
+| Keep running in the notification area, shortcut, start with Windows | ✔ | — | — |
 | Screensaver | ✔ (only in a build you make yourself, with `--features screensaver`) | — | — |
 
 ### Where TMOP keeps its files
@@ -333,6 +334,30 @@ the PC.
 - `tmop --page=<id>`, `--screenshot=<file.png>` and the other options are in `tmop --help`.
 - On Linux, TMOP without an X11 or Wayland session (no `DISPLAY` or `WAYLAND_DISPLAY`, for
   example over plain SSH) says so in one line and exits with code 1.
+
+## Keep TMOP in the notification area
+
+*Windows only.* This needs no administrator rights and no registry change outside your own user.
+In *Settings*, under *Notification area*:
+
+- **Keep TMOP running in the notification area**: closing or minimizing the window hides it
+  next to the clock instead of ending TMOP. Click the icon to show or hide the window; its
+  right-click menu has *Open TMOP* and *Exit*. Starting TMOP again (on its own, or with only
+  `--page=`) brings the running one to the front; a start with other options (`--record`,
+  `--bench=`, `--disk-root=`, ...) opens a separate window that ends when you close it. An
+  elevated start (*Run as administrator*) takes the place of a TMOP that is not elevated.
+  While the window is hidden, TMOP samples every 5 seconds (at your speed while the flight
+  recorder writes a recording), so the flight recorder keeps a record of that time, and Docker
+  container alerts still arrive as notifications.
+- **Shortcut to open TMOP**: click the field and press a combination with Ctrl, Alt or the
+  Windows key, such as Ctrl + Alt + T. TMOP registers it with Windows (`RegisterHotKey`; there
+  is no keyboard hook). If another program or Windows already uses it, TMOP says so and the
+  shortcut stays off.
+- **Start with Windows**: starts TMOP hidden in the notification area when you sign in (a
+  `TMOP` entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). If you move
+  TMOP.exe, Settings shows that the entry points at the old place.
+- `TMOP.exe --exit` ends a TMOP that runs in the notification area. `TMOP.exe --tray` (or
+  `--hidden`) starts it hidden there.
 
 ## Update or remove
 

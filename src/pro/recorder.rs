@@ -244,6 +244,18 @@ impl Recorder {
         self.known = now;
     }
 
+    /// Starts the process timeline over: the next sample is the new baseline and lists no
+    /// starts or exits. For a gap without samples, whose changes would all carry the time of
+    /// the first sample after it; `note` says so in the timeline.
+    pub fn resync_processes(&mut self, note: &str) {
+        if self.known.is_empty() {
+            return;
+        }
+        self.known.clear();
+        let time = self.ring.back().map(|r| r.time.clone()).unwrap_or_default();
+        self.push_event(Event { time, kind: EventKind::Note, text: note.to_string() });
+    }
+
     pub fn push_event(&mut self, e: Event) {
         if let Some(f) = self.file.as_mut().and_then(|f| f.events.as_mut()) {
             let tag = match e.kind {
@@ -438,6 +450,23 @@ mod tests {
         assert_eq!(load(&flight).unwrap().len(), 3);
         assert!(list(&dir).len() >= 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a gap without samples the timeline starts over with a note, instead of listing
+    /// every change in the gap at the time of the first sample after it.
+    #[test]
+    fn a_resync_lists_no_catch_up_burst() {
+        let mut rec = Recorder::default();
+        rec.resync_processes("gap");
+        assert!(rec.events.is_empty(), "nothing to start over before the first sample");
+        rec.on_sample(&snap(1, 5.0), &[row(10, "a.exe", 1.0), row(11, "b.exe", 1.0)]);
+        rec.resync_processes("gap");
+        rec.on_sample(&snap(2, 5.0), &[row(12, "c.exe", 1.0), row(13, "d.exe", 1.0)]);
+        let kinds: Vec<_> = rec.events.iter().map(|e| (e.kind.clone(), e.text.as_str())).collect();
+        assert_eq!(kinds, [(EventKind::Note, "gap")]);
+        // Afterwards changes are listed again.
+        rec.on_sample(&snap(3, 5.0), &[row(12, "c.exe", 1.0)]);
+        assert!(rec.events.iter().any(|e| e.kind == EventKind::Exited && e.text.starts_with("d.exe")));
     }
 
     #[test]

@@ -288,10 +288,46 @@ pub fn current_user_sddl_dacl() -> Result<String, String> {
     Ok(format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", current_user_sid()?))
 }
 
-fn current_user_sid() -> Result<String, String> {
+/// The current user's SID as a string (`S-1-5-21-...`).
+pub fn current_user_sid() -> Result<String, String> {
+    // SAFETY: the pseudo handle from GetCurrentProcess needs no closing.
+    process_token_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The user SID and the elevation of process `pid` (elevation `None` when Windows doesn't
+/// say). Needs `PROCESS_QUERY_LIMITED_INFORMATION` on the process and `TOKEN_QUERY` on its token.
+pub fn process_user(pid: u32) -> Result<(String, Option<bool>), String> {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: the handle is owned by `Kernel` and closed on drop.
+    let process = Kernel(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(|e| format!("OpenProcess failed: {e}"))?);
+    let sid = process_token_user_sid(process.raw())?;
+    Ok((sid, process_elevated(process.raw())))
+}
+
+/// Whether the current process runs elevated (its token says so).
+pub fn current_process_elevated() -> Option<bool> {
+    // SAFETY: the pseudo handle from GetCurrentProcess needs no closing.
+    process_elevated(unsafe { GetCurrentProcess() })
+}
+
+fn process_elevated(process: HANDLE) -> Option<bool> {
+    use windows::Win32::Security::{TokenElevation, TOKEN_ELEVATION};
     let mut token = HANDLE::default();
-    // SAFETY: the pseudo handle from GetCurrentProcess needs no closing; `token` receives a real handle.
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.map_err(|e| format!("OpenProcessToken failed: {e}"))?;
+    // SAFETY: `process` is a valid process handle; `token` receives a real handle.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+    let token = Kernel(token);
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut needed = 0u32;
+    let size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+    // SAFETY: `elevation` is a TOKEN_ELEVATION of `size` bytes.
+    unsafe { GetTokenInformation(token.0, TokenElevation, Some((&raw mut elevation).cast()), size, &mut needed) }.ok()?;
+    Some(elevation.TokenIsElevated != 0)
+}
+
+fn process_token_user_sid(process: HANDLE) -> Result<String, String> {
+    let mut token = HANDLE::default();
+    // SAFETY: `process` is a valid process handle; `token` receives a real handle.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(|e| format!("OpenProcessToken failed: {e}"))?;
     let token = Kernel(token);
 
     let mut needed = 0u32;
@@ -304,16 +340,23 @@ fn current_user_sid() -> Result<String, String> {
         .map_err(|e| format!("GetTokenInformation failed: {e}"))?;
     // SAFETY: the buffer now holds a TOKEN_USER; the SID it points to lives in `buf`.
     let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    // SAFETY: `user.User.Sid` is valid while `buf` lives.
+    unsafe { sid_string(user.User.Sid) }
+}
 
+/// A SID as a string.
+///
+/// # Safety
+/// `sid` must point at a valid SID.
+pub unsafe fn sid_string(sid: windows::Win32::Security::PSID) -> Result<String, String> {
     let mut out = windows::core::PWSTR::null();
-    // SAFETY: `user.User.Sid` is valid while `buf` lives; the output string is freed below.
-    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut out) }.map_err(|e| format!("ConvertSidToStringSidW failed: {e}"))?;
-    let text = take_local_wide(out);
-    Ok(text)
+    // SAFETY: the caller guarantees `sid`; the output string is freed by `take_local_wide`.
+    unsafe { ConvertSidToStringSidW(sid, &mut out) }.map_err(|e| format!("ConvertSidToStringSidW failed: {e}"))?;
+    Ok(take_local_wide(out))
 }
 
 /// Copies a NUL-terminated string allocated by LocalAlloc and frees it.
-fn take_local_wide(p: windows::core::PWSTR) -> String {
+pub(crate) fn take_local_wide(p: windows::core::PWSTR) -> String {
     // SAFETY: the API returned a NUL-terminated buffer; it is read up to the terminator and freed once.
     unsafe {
         let mut len = 0usize;

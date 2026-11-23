@@ -1,7 +1,8 @@
 //! Settings (`settings.json`): TMOP's own schema, grouped by section.
 //!
 //! * the file is a JSON object `{ "version": 1, "general": {..}, "window": {..},
-//!   "appearance": {..}, "graphs": {..}, "popout": {..}, "docker": {..}, "alerts": {..} }` with camelCase keys;
+//!   "appearance": {..}, "graphs": {..}, "popout": {..}, "docker": {..}, "alerts": {..},
+//!   "tray": {..} }` with camelCase keys;
 //! * an older `version` is upgraded step by step (1→2→…) by [`MIGRATIONS`];
 //! * a file without `version` is TMOG's format (`schemaVersion` 12, also what TMOP 0.1 wrote) and
 //!   is converted by [`migrate_v12`]; TMOG keys TMOP doesn't implement are dropped;
@@ -41,6 +42,7 @@ pub struct Settings {
     pub popout: Popout,
     pub docker: Docker,
     pub alerts: Alerts,
+    pub tray: Tray,
     /// Set when the file is from a newer TMOP, or is an old one that couldn't be backed up:
     /// [`Settings::save`] refuses to overwrite it.
     #[serde(skip)]
@@ -188,6 +190,22 @@ impl Default for Docker {
     }
 }
 
+/// Keeping TMOP in the notification area (Windows; see [`crate::tray`]). Added after 0.11.1 without a
+/// migration: older files load with everything off, and 0.11 drops the section as unknown (and
+/// leaves it out when it saves).
+/// "Start with Windows" is not here: the Run entry in the registry is its only record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Tray {
+    /// Closing or minimizing the main window hides it in the notification area.
+    pub keep_running: bool,
+    /// Register [`Tray::shortcut`] (only with `keep_running`).
+    pub shortcut_enabled: bool,
+    /// The combination that brings TMOP to the front, as `Ctrl+Alt+T`
+    /// (see [`crate::tray::Shortcut`]); empty until one is chosen.
+    pub shortcut: String,
+}
+
 /// Per-context Docker options.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -260,6 +278,7 @@ impl Default for Settings {
             popout: Popout::default(),
             docker: Docker::default(),
             alerts: Alerts::default(),
+            tray: Tray::default(),
             read_only: false,
         }
     }
@@ -672,6 +691,13 @@ pub fn import_tmog() -> Result<Load, String> {
     std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Settings::from_json(&t))
 }
 
+/// The settings after "Import TMOG settings" replaced `current` with `imported`. What TMOG has
+/// no say over is kept: a read-only file stays protected, and the `tray` section stays, since
+/// the tray icon, the shortcut and the Run entry of this TMOP stay in place too.
+pub fn after_import(current: &Settings, imported: Settings) -> Settings {
+    Settings { read_only: current.read_only, tray: current.tray.clone(), ..imported }
+}
+
 /// Loads TMOP's settings; on first run imports TMOG's file if present.
 pub fn load_or_import() -> (Settings, String) {
     let own = default_path();
@@ -721,7 +747,7 @@ mod tests {
         // Unimplemented TMOG keys are gone from the written file.
         let out: Map<String, Value> = serde_json::from_str(&s.to_json()).unwrap();
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout", "docker", "alerts"]);
+        assert_eq!(keys, ["version", "general", "window", "appearance", "graphs", "popout", "docker", "alerts", "tray"]);
         assert!(!s.to_json().contains("diskLights"));
     }
 
@@ -900,6 +926,44 @@ mod tests {
         assert_eq!(back.settings, s);
         assert!(Settings::from_json(r#"{"version":1,"general":{"highlightSeconds":"2"}}"#).is_err());
         assert!(Settings::from_json(r#"{"version":1,"general":{"highlightProcesses":1}}"#).is_err());
+    }
+
+    /// The `tray` section is new: files without it (0.11 and TMOG's) load with tray mode off and
+    /// no shortcut, its keys are known once written, and they round-trip.
+    /// An import of TMOG's settings replaces everything TMOG knows, but keeps tray mode (whose
+    /// icon, shortcut and Run entry stay in place) and the read-only protection.
+    #[test]
+    fn import_keeps_tray_and_read_only() {
+        let tray = Tray { keep_running: true, shortcut_enabled: true, shortcut: "Ctrl+Alt+T".into() };
+        let current = Settings { tray: tray.clone(), read_only: true, ..Default::default() };
+        let imported = parse(SAMPLE).settings;
+        assert_eq!(imported.tray, Tray::default());
+        let after = after_import(&current, imported.clone());
+        assert_eq!(after.tray, tray);
+        assert!(after.read_only);
+        assert_eq!(Settings { tray: Tray::default(), read_only: false, ..after }, imported);
+    }
+
+    #[test]
+    fn tray_is_off_until_set() {
+        for old in [r#"{"version":1,"window":{"alwaysOnTop":true}}"#, SAMPLE] {
+            let load = parse(old);
+            assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+            assert_eq!(load.settings.tray, Tray::default());
+            assert!(!load.settings.tray.keep_running && !load.settings.tray.shortcut_enabled && load.settings.tray.shortcut.is_empty());
+        }
+        let load = parse(r#"{"version":1,"tray":{"keepRunning":true}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded));
+        assert!(load.settings.tray.keep_running && !load.settings.tray.shortcut_enabled);
+        let s = Settings { tray: Tray { keep_running: true, shortcut_enabled: true, shortcut: "Ctrl+Alt+T".into() }, ..Default::default() };
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(out["tray"], serde_json::json!({"keepRunning": true, "shortcutEnabled": true, "shortcut": "Ctrl+Alt+T"}));
+        let load = parse(&s.to_json());
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings, s);
+        assert!(Settings::from_json(r#"{"version":1,"tray":{"keepRunning":"yes"}}"#).is_err());
+        // An unknown key inside the section is dropped like any other.
+        assert_eq!(parse(r#"{"version":1,"tray":{"startHidden":true}}"#).unknown_keys, ["tray.startHidden"]);
     }
 
     #[test]

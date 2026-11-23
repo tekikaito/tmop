@@ -15,6 +15,8 @@
 //!        [--settings-section=<name>] [--wait=<s>] [--frames=<n> --every=<ms>] [--shot-home=<dir>]
 //!                         render the window's own frames to PNG files and exit (see src/shot.rs)
 //!   TMOP --popout         only the skinned popout window
+//!   TMOP --tray           start hidden in the notification area when tray mode is on (alias --hidden; Windows)
+//!   TMOP --exit           ask the running TMOP (in the notification area or not) to exit (Windows)
 //!   TMOP --dump           print two samples to stdout and exit (no UI)
 //!   TMOP --restore-taskmgr  stop opening TMOP in place of Windows Task Manager
 //!   TMOP /s | /p <hwnd> | /c   screensaver conventions (Windows, built with `--features screensaver`; a no-op elsewhere)
@@ -331,6 +333,13 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    if args.iter().any(|a| a == "--exit") {
+        if tmop::taskmgr::hand_off(tmop::tray::EXIT_REQUEST) {
+            std::process::exit(0);
+        }
+        eprintln!("no TMOP window is running");
+        std::process::exit(1);
+    }
     if args.iter().any(|a| a == "--engine-relay") {
         std::process::exit(engine_relay());
     }
@@ -391,6 +400,8 @@ fn main() -> eframe::Result<()> {
         engine_test: value(&["--engine-test="]),
         settings_section: value(&["--settings-section="]),
         shot,
+        tray: args.iter().any(|a| a == tmop::tray::FLAG || a == tmop::tray::FLAG_ALIAS),
+        replacing: false,
     };
     let size = value(&["--window-size="]).and_then(|s| {
         let (w, h) = s.split_once(['x', 'X', ','])?;
@@ -400,6 +411,21 @@ fn main() -> eframe::Result<()> {
     tmop::platform::raise_open_files_limit();
     settings::migrate_legacy_dir();
     let (mut settings, status) = settings::load_or_import();
+    // In tray mode one TMOP sits in the tray: a plain second start (or one with only `--page=`)
+    // brings it to the front, and a `--tray` start at sign-in only tells it that it is there,
+    // over the Task Manager pipe. A start with other arguments runs as a copy of its own
+    // (`tray::hand_off_message`). An elevated start replaces a TMOP that is not elevated.
+    let mut replacing = args.iter().any(|a| a == tmop::tray::REPLACING_FLAG);
+    if settings.tray.keep_running && !popout_only && !replacing && tmop::platform::Caps::get().tray {
+        if let Some(message) = tmop::tray::hand_off_message(&args) {
+            match tmop::taskmgr::hand_off_start(&message, message != tmop::tray::ALREADY_RUNNING) {
+                tmop::taskmgr::HandOff::Delivered => return Ok(()),
+                tmop::taskmgr::HandOff::Replacing => replacing = true,
+                tmop::taskmgr::HandOff::NoServer => {}
+            }
+        }
+    }
+    let launch = Launch { replacing, ..launch };
     if let Some(skin) = value(&["--popout-skin="]) {
         settings.popout.skin = skin;
     }
