@@ -10,6 +10,11 @@ bash "$here/load.sh" "$scratch" >/dev/null 2>&1 &
 load_pid=$!
 trap 'kill $load_pid 2>/dev/null' EXIT
 
+if [ "$os" = macos ]; then
+  # TEMPORARY (#168): where does the installed-apps scan spend its time on the runner?
+  cargo test --release --locked pro::apps::macos::tests::scan_timing -- --ignored --nocapture 2>&1 | grep -E "PROBE|test result|error" || true
+fi
+
 WAIT="${SHOT_WAIT:-45}"
 SIZE=1584x877
 shot() {  # name, then TMOP arguments (a later --wait= wins)
@@ -57,5 +62,16 @@ if [ "$os" = windows ] || [ "$os" = linux ]; then
   # Frames for the animation, two per second.
   shot anim --page=performance --device=cpu --frames=25 --every=500
 fi
+# #168 checks: the first --window-size/--wait wins, so these run without the shot() defaults.
+shot_at() {  # name, size, wait, then TMOP arguments
+  local name="$1" size="$2" wait="$3"; shift 3
+  echo "::group::$name"
+  if "$exe" --screenshot="$out/$name.png" --window-size="$size" --wait="$wait" "$@"; then echo "ok: $name"; else echo "::warning::shot $name failed"; fi
+  echo "::endgroup::"
+}
+shot_at power-full $SIZE 20 --page=power-and-freq
+shot_at power-min 900x600 20 --page=power-and-freq
+shot_at system-info $SIZE 15 --page=system-info
+shot_at installed-apps $SIZE 90 --page=installed-apps
 ls -l "$out"
 exit 0

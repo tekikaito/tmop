@@ -97,6 +97,40 @@ pub fn read() -> Result<Vec<App>, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Timing probe for CI (run with `--ignored --nocapture`): where the scan spends its time.
+    #[test]
+    #[ignore]
+    fn scan_timing() {
+        let t = Instant::now();
+        let b = bundles(Path::new("/Applications"));
+        println!("PROBE bundles in /Applications: {} in {:?}", b.len(), t.elapsed());
+        let t = Instant::now();
+        let mut sizes: Vec<(u64, String, std::time::Duration)> = b
+            .iter()
+            .map(|p| {
+                let s = Instant::now();
+                (dir_size(p), p.display().to_string(), s.elapsed())
+            })
+            .collect();
+        println!("PROBE dir_size of all bundles: {:?}", t.elapsed());
+        sizes.sort_by_key(|s| std::cmp::Reverse(s.2));
+        for s in sizes.iter().take(5) {
+            println!("PROBE slowest {} {} bytes {:?}", s.1, s.0, s.2);
+        }
+        for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
+            let t = Instant::now();
+            let n = std::fs::read_dir(cellar).map(|r| r.flatten().count()).unwrap_or(0);
+            let total = dir_size(Path::new(cellar));
+            println!("PROBE {cellar}: {n} formulae, {total} bytes, {:?}", t.elapsed());
+        }
+        let t = Instant::now();
+        let r = read();
+        println!("PROBE full read(): {:?} in {:?}", r.as_ref().map(|v| v.len()), t.elapsed());
+    }
+
     #[test]
     fn lists_some_apps() {
         let apps = super::read().unwrap();

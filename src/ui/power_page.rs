@@ -4,11 +4,11 @@ use super::hardware::Iso;
 use super::kit::{empty_state, hsplit, section_card, stat_tile, vsplit, StatTile};
 use super::pro_pages::{fmt_span, list_row, page_layout, swatch_legend, tile_rects, toolbar, RowLook, Swatch};
 use super::theme::{self, with_alpha};
-use super::widgets::{self, draw_graph, tracked_text, Graph, GraphLine, Icon};
+use super::widgets::{self, draw_graph, tracked_text, Graph, GraphLine, Icon, ScrollArea029 as _};
 use super::{App, FrameData};
 use crate::metrics::Series;
 use crate::platform::Os;
-use crate::pro::power::Battery;
+use crate::pro::power::{Battery, PowerInfo};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense};
 use std::time::Duration;
 
@@ -32,7 +32,6 @@ impl App {
         if let Some((_, mhz)) = fastest {
             self.pro.power_fastest.push(s.seq, mhz as f32, fd.hist.clock.capacity);
         }
-        let p = ui.painter().clone();
         let max = s.cpu.max_mhz.unwrap_or(0) as f32;
         let base = s.cpu.base_mhz.or(s.cpu.max_mhz).unwrap_or(0) as f32;
         let cur = fd.smooth.clock;
@@ -53,7 +52,7 @@ impl App {
                 clock = clock.bar((cur / max).min(1.0), pal.accent);
             }
             tiles.push(clock);
-            let mut core = StatTile::new("Fastest core", ghz(fastest_mhz), format!("Base {}{}", ghz(base), fastest.map(|f| format!(" \u{b7} core {}", f.0)).unwrap_or_default()));
+            let mut core = StatTile::new("Fastest core", if fastest.is_some() { ghz(fastest_mhz) } else { "N/A".into() }, fastest_sub(fastest.map(|f| f.0), base as u32));
             if max > 0.0 && fastest_mhz > 0.0 {
                 core = core.bar((fastest_mhz / max).min(1.0), st.warn);
             }
@@ -65,10 +64,28 @@ impl App {
             info.as_ref().map(|i| i.scheme_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "\u{2014}".into()),
             info.as_ref().map(|i| if i.schemes.is_empty() { format!("No {schemes} offered") } else { format!("{} {schemes} installed", i.schemes.len()) }).unwrap_or_else(|| "Reading power policy\u{2026}".into()),
         ));
+        let (_, tiles_h) = tile_rects(area, tiles.len(), TILE_W);
+        // A window too low for the cards scrolls instead of squeezing them to nothing.
+        let content_h = area.height().max(min_content_height(tiles_h, clocks));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area).id_salt("power-scroll"), |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_029(ui, [false, true], |ui| {
+                let (area, _) = ui.allocate_exact_size(vec2(area.width(), content_h), Sense::hover());
+                self.power_body(ui, fd, area, &tiles, battery.as_ref(), &info, base, max);
+            });
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn power_body(&mut self, ui: &mut egui::Ui, fd: &FrameData<'_>, area: Rect, tiles: &[StatTile], battery: Option<&Battery>, info: &Option<PowerInfo>, base: f32, max: f32) {
+        let pal = fd.pal;
+        let st = theme::status(&pal);
+        let p = ui.painter().clone();
+        let clocks = self.caps.clocks;
+        let (scheme, schemes) = crate::pro::power::scheme_words();
         let (rects, tiles_h) = tile_rects(area, tiles.len(), TILE_W);
-        for (i, (r, t)) in rects.iter().zip(&tiles).enumerate() {
+        for (i, (r, t)) in rects.iter().zip(tiles).enumerate() {
             stat_tile(&p, *r, &pal, &t.label, &t.value, &t.sub, t.bar, None);
-            if let (0, Some(b)) = (i, &battery) {
+            if let (0, Some(b)) = (i, battery) {
                 battery_icon(&p, Rect::from_min_size(pos2(r.right() - 16.0 - 54.0, r.top() + 14.0), vec2(54.0, 36.0)), pal.text_rail(), st.ok, b.percent as f32 / 100.0);
                 let sub = if b.charging && b.rate_mw <= 0 {
                     "Charging".to_string()
@@ -85,18 +102,23 @@ impl App {
 
         // Clock history and per-core clocks, then policy and plans.
         let rest = Rect::from_min_max(pos2(area.left(), area.top() + tiles_h + 14.0), area.max);
-        let low_h = (rest.height() * 0.45).clamp(190.0, 270.0);
+        let low_h = (rest.height() * 0.45).clamp(LOW_MIN_H, 300.0);
         let low_row = if clocks {
             let rows = vsplit(rest, &[-1.0, low_h], 14.0);
             let mid = hsplit(rows[0], &[3.0, 2.0], 14.0);
             self.clock_history(ui, mid[0], fd, base);
             let n = fd.smooth.per_core_mhz.len();
-            let right = if n > 0 && max > 0.0 { format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0) } else { format!("{n} cores") };
+            // Without a reported maximum the bars scale to the fastest core seen.
+            let scale = bar_scale(max, &fd.smooth.per_core_mhz);
+            let right = match (n, scale) {
+                (0, _) => String::new(),
+                (_, Some(_)) if max > 0.0 => format!("{n} cores \u{b7} max {:.1} GHz", max / 1000.0),
+                _ => format!("{n} cores"),
+            };
             let content = section_card(&p, mid[1], &pal, "Per-core clock", &right);
-            if n == 0 || max <= 0.0 {
-                empty_state(&p, content, &pal, "Per-core clocks are not reported");
-            } else {
-                self.core_bars(ui, content, fd, max);
+            match scale {
+                Some(scale) if n > 0 => self.core_bars(ui, content, fd, scale),
+                _ => empty_state(&p, content, &pal, "This system does not report per-core clocks"),
             }
             rows[1]
         } else {
@@ -115,7 +137,14 @@ impl App {
                 // One value column when the OS does not split by power source.
                 let split = i.policy.iter().any(|r| !r.dc.is_empty());
                 let x_dc = content.right();
-                let x_ac = if split { content.left() + content.width() * 0.72 } else { x_dc };
+                // The value columns are as wide as their widest text; the setting names get
+                // what is left and are cut with an ellipsis, never drawn into a value.
+                let text_w = |text: &str, font: egui::FontId| p.layout_no_wrap(text.to_string(), font, pal.text_table()).size().x;
+                let col_w = |f: &dyn Fn(&crate::pro::power::PolicyRow) -> &str, head: &str| i.policy.iter().map(|r| text_w(f(r), theme::mono(12.0))).fold(head.len() as f32 * 8.0, f32::max);
+                let dc_w = if split { col_w(&|r| r.dc.as_str(), "On battery") } else { 0.0 };
+                let ac_w = col_w(&|r| r.ac.as_str(), if split { "Plugged in" } else { "Current" });
+                let x_ac = if split { x_dc - dc_w - 24.0 } else { x_dc };
+                let name_w = (x_ac - ac_w - 16.0 - content.left()).max(40.0);
                 let head = |x: f32, anchor: Align2, text: &str| {
                     tracked_text(&p, pos2(x, content.top() + 10.0), anchor, &text.to_uppercase(), theme::semibold(11.0), pal.text_faint, 0.08);
                 };
@@ -133,14 +162,16 @@ impl App {
                     }
                     p.hline(content.x_range(), top, egui::Stroke::new(1.0_f32, pal.row_rule()));
                     let y = top + 15.0;
-                    p.text(pos2(content.left(), y), Align2::LEFT_CENTER, row.name, theme::ui(13.0), pal.text_table());
+                    widgets::text_fit(&p, pos2(content.left(), y), Align2::LEFT_CENTER, row.name, theme::ui(13.0), pal.text_table(), name_w);
                     p.text(pos2(x_ac, y), Align2::RIGHT_CENTER, &row.ac, theme::mono(12.0), pal.text_table());
                     if split {
                         p.text(pos2(x_dc, y), Align2::RIGHT_CENTER, &row.dc, theme::mono(12.0), pal.text_table());
                     }
                 }
             }
-            _ => empty_state(&p, content, &pal, self.pro.power.error().unwrap_or("Reading power policy\u{2026}")),
+            // The read finished with no policy rows: say so instead of loading for ever.
+            Some(_) => empty_state(&p, content, &pal, policy_empty_text()),
+            None => empty_state(&p, content, &pal, self.pro.power.error().unwrap_or("Reading power policy\u{2026}")),
         }
 
         let content = section_card(&p, low[1], &pal, &format!("{scheme}s"), "");
@@ -262,6 +293,51 @@ impl App {
     }
 }
 
+/// Least height of the clock history / per-core row and of the policy / plans row (the policy
+/// table's header and six rows); below that the page scrolls.
+const MID_MIN_H: f32 = 170.0;
+const LOW_MIN_H: f32 = 262.0;
+
+/// The page height that fits all cards: the tiles, then the clock row (where the OS has clocks)
+/// and the policy row, with the 14 px gaps.
+fn min_content_height(tiles_h: f32, clocks: bool) -> f32 {
+    tiles_h + 14.0 + if clocks { MID_MIN_H + 14.0 } else { 0.0 } + LOW_MIN_H
+}
+
+/// The "Fastest core" tile's sub line. A base clock of 0 is "not reported", never "0.00 GHz".
+fn fastest_sub(core: Option<usize>, base_mhz: u32) -> String {
+    let mut parts = Vec::new();
+    if base_mhz > 0 {
+        parts.push(format!("Base {:.2} GHz", base_mhz as f32 / 1000.0));
+    }
+    if let Some(c) = core {
+        parts.push(format!("core {c}"));
+    }
+    if parts.is_empty() {
+        "Base clock not reported".into()
+    } else {
+        parts.join(" \u{b7} ")
+    }
+}
+
+/// The MHz the per-core bars are scaled to: the reported maximum, else the fastest core seen;
+/// `None` when no core has a clock.
+fn bar_scale(max_mhz: f32, clocks: &[f32]) -> Option<f32> {
+    if max_mhz > 0.0 {
+        return Some(max_mhz);
+    }
+    let seen = clocks.iter().copied().fold(0.0, f32::max);
+    (seen > 0.0).then_some(seen)
+}
+
+/// What the policy card says when the read finished without any policy rows.
+fn policy_empty_text() -> &'static str {
+    match crate::platform::OS {
+        Os::Linux => "Not reported by this system (no cpufreq driver)",
+        _ => "Not reported by this system",
+    }
+}
+
 /// The logical processor with the highest clock (the first of equals) and its MHz.
 fn fastest_core(clocks: &[u32]) -> Option<(usize, u32)> {
     clocks.iter().enumerate().fold(None, |best, (i, &m)| match best {
@@ -347,6 +423,17 @@ mod tests {
                 }
             });
         }).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn unreported_values_are_not_zero() {
+        assert_eq!(fastest_sub(Some(3), 0), "core 3");
+        assert_eq!(fastest_sub(Some(2), 2600), "Base 2.60 GHz \u{b7} core 2");
+        assert_eq!(fastest_sub(None, 0), "Base clock not reported");
+        assert_eq!(bar_scale(0.0, &[0.0, 0.0]), None);
+        assert_eq!(bar_scale(0.0, &[2100.0, 2400.0]), Some(2400.0));
+        assert_eq!(bar_scale(3000.0, &[2100.0]), Some(3000.0));
+        assert!(min_content_height(205.0, true) > min_content_height(205.0, false));
     }
 
     #[test]
