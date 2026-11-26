@@ -74,6 +74,20 @@ fn run_store() -> Option<Box<dyn RunStore>> {
     None
 }
 
+/// Shown while the switch is on: Windows 11 often puts a new icon behind the "^" chevron.
+const ICON_HINT: &str = "Windows may place the icon in the hidden icons (^) next to the clock. Drag it onto the taskbar to keep it visible.";
+
+/// What the Settings section says when another process holds the hand-off pipe. That process
+/// may be an older TMOP (also the one Task Manager replacement starts), which has no tray
+/// settings, so the text claims nothing about what it can do.
+fn other_copy_note(keep_running: bool) -> &'static str {
+    if keep_running {
+        "Another TMOP is already running in this Windows session, possibly an older version. The notification area icon and the shortcut are not set up in this window. Close the other TMOP and start this one again to use these settings here."
+    } else {
+        "Another TMOP is already running in this Windows session, possibly an older version. Close it and start this TMOP again to use these settings here."
+    }
+}
+
 fn exe() -> std::path::PathBuf {
     crate::taskmgr::this_exe()
 }
@@ -332,12 +346,7 @@ impl App {
     /// The Settings section.
     pub fn tray_section(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         if self.tray_ui.other_copy {
-            let text = if self.settings.tray.keep_running {
-                "Another TMOP is running in the notification area; the icon and the shortcut are its. This window is a copy of its own and ends when you close it. Change these settings in that TMOP."
-            } else {
-                "Another TMOP window is open; these settings are changed there."
-            };
-            note(ui, pal, text);
+            note(ui, pal, other_copy_note(self.settings.tray.keep_running));
             ui.add_space(8.0);
             return;
         }
@@ -354,6 +363,10 @@ impl App {
         if let Some(e) = &self.tray_ui.icon_error {
             ui.add_space(4.0);
             note(ui, pal, e);
+        }
+        if on && self.tray_ui.icon_error.is_none() {
+            ui.add_space(4.0);
+            note(ui, pal, ICON_HINT);
         }
         if on {
             self.shortcut_row(ui, pal);
@@ -483,5 +496,25 @@ impl App {
             Ok(_) => "TMOP no longer starts with Windows".into(),
             Err(e) => format!("Start with Windows not changed: {e}"),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_other_copy_note_does_not_claim_settings_live_elsewhere() {
+        for keep in [false, true] {
+            let t = other_copy_note(keep);
+            assert!(t.contains("possibly an older version"), "{t}");
+            assert!(t.contains("start this") && t.contains("again"), "{t}");
+            assert!(!t.contains("changed there") && !t.contains("Change these settings in that"), "{t}");
+        }
+    }
+
+    #[test]
+    fn the_icon_hint_names_the_chevron() {
+        assert!(ICON_HINT.contains("hidden icons (^)") && ICON_HINT.contains("Drag it"));
     }
 }

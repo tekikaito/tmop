@@ -415,6 +415,9 @@ fn main() -> eframe::Result<()> {
     // brings it to the front, and a `--tray` start at sign-in only tells it that it is there,
     // over the Task Manager pipe. A start with other arguments runs as a copy of its own
     // (`tray::hand_off_message`). An elevated start replaces a TMOP that is not elevated.
+    // An older TMOP (0.20.x) holds the same pipe and cannot be told apart from this one: it
+    // treats any message as "come to the front" and an unknown page id as Summary, so it is
+    // brought forward and a `--tray` start or `--exit` does not do what it does here.
     let mut replacing = tmop::tray::is_replacing(&args, |n| std::env::var_os(n));
     // Not for the programs this TMOP starts (Run new task, a later update of its own).
     std::env::remove_var(tmop::tray::REPLACING_ENV);

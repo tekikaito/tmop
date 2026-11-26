@@ -84,6 +84,11 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()
             .map_err(|e| e.to_string())?;
+        // `build` returns Ok even when Shell_NotifyIconW(NIM_ADD) failed (tray-icon discards its
+        // result). `TrayIcon::rect()` (Shell_NotifyIconGetRect) is not used to check: its
+        // documentation does not say whether it succeeds for an icon in the hidden-icons
+        // flyout, so a failed check could reject a good icon. The Settings section tells
+        // the user where to look instead (`ICON_HINT` in `ui/tray.rs`).
         self.icon = Some(icon);
         Ok(())
     }
