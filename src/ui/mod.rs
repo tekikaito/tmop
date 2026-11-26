@@ -1067,6 +1067,13 @@ impl eframe::App for App {
         // then): new samples are taken in here, so recording and App history go on meanwhile.
         let (snap, _, rows) = self.snapshot();
         self.take_sample(&snap, &rows, Instant::now());
+        // The sample rate follows low-power mode, the battery and a recording also while the
+        // window is minimized (#194). Hidden in the notification area, `window_logic` sets its
+        // own, slower rate (`tray::hidden_interval`, from this same interval).
+        self.battery.set_wanted(self.settings.general.low_power_on_battery);
+        if !(self.tray_ui.vis.hidden && !self.popout_open) {
+            self.set_sample_interval(self.interval());
+        }
         if !self.popout_only {
             self.window_logic(ctx);
             // Here rather than in `ui`, which does not run while the window is hidden in the

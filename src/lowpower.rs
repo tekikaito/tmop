@@ -10,7 +10,7 @@
 
 use crate::pro::power::Source;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// The slowest the mode samples on its own: once a second. A slower setting of the user stays.
@@ -103,11 +103,31 @@ fn secs(d: Duration) -> String {
 }
 
 /// Reads the power source on a thread of its own: once at the start (to know whether there is a
-/// battery at all), then every [`BATTERY_EVERY`] while [`BatteryWatch::set_wanted`] asks for it.
-/// A machine without a battery ends the thread after the first look.
+/// battery at all), then every [`BATTERY_EVERY`] while [`BatteryWatch::set_wanted`] asks for it,
+/// and at once when it starts asking. Only a first look that finds no battery ends the thread; a
+/// later "no battery" (an unreadable status, a battery missing for a moment after resume, a
+/// `pmset` that timed out) keeps the last state and the watch goes on.
 pub struct BatteryWatch {
-    state: Arc<AtomicU8>,
-    wanted: Arc<AtomicBool>,
+    shared: Arc<Watch>,
+}
+
+#[derive(Default)]
+struct Watch {
+    state: AtomicU8,
+    wanted: AtomicBool,
+    /// Read now: the battery option was just switched on.
+    poke: AtomicBool,
+    stop: AtomicBool,
+    lock: Mutex<()>,
+    cv: Condvar,
+}
+
+impl Watch {
+    /// Call after setting a flag the thread checks; the lock makes sure it is not lost.
+    fn wake(&self) {
+        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
+    }
 }
 
 const UNREAD: u8 = 0;
@@ -120,44 +140,86 @@ fn code(s: Source) -> u8 {
     }
 }
 
+/// The state after a reading `now` when the last one was `last`: a later "no battery" keeps it.
+fn next_state(last: u8, now: Source) -> u8 {
+    if now == Source::NoBattery && last != UNREAD {
+        last
+    } else {
+        code(now)
+    }
+}
+
 impl BatteryWatch {
     /// Starts the watch; `changed` runs on its thread when the source changes (a repaint).
-    pub fn start(read: fn() -> Source, changed: impl Fn() + Send + 'static) -> Self {
-        let state = Arc::new(AtomicU8::new(UNREAD));
-        let wanted = Arc::new(AtomicBool::new(false));
-        let (st, w) = (state.clone(), wanted.clone());
-        let spawned = std::thread::Builder::new().name("tmop-battery".into()).spawn(move || loop {
-            let now = code(read());
-            if st.swap(now, Ordering::Relaxed) != now {
-                changed();
-            }
-            if now == code(Source::NoBattery) {
+    pub fn start(read: impl Fn() -> Source + Send + 'static, changed: impl Fn() + Send + 'static) -> Self {
+        Self::start_every(read, BATTERY_EVERY, changed)
+    }
+
+    /// [`BatteryWatch::start`] with its own period (tests).
+    fn start_every(read: impl Fn() -> Source + Send + 'static, every: Duration, changed: impl Fn() + Send + 'static) -> Self {
+        let shared = Arc::new(Watch::default());
+        let w = shared.clone();
+        let spawned = std::thread::Builder::new().name("tmop-battery".into()).spawn(move || {
+            let first = read();
+            w.state.store(code(first), Ordering::Relaxed);
+            changed();
+            if first == Source::NoBattery {
                 return;
             }
-            std::thread::sleep(BATTERY_EVERY);
-            while !w.load(Ordering::Relaxed) {
-                std::thread::sleep(BATTERY_EVERY);
+            loop {
+                {
+                    let held = w.lock.lock().unwrap_or_else(|e| e.into_inner());
+                    if !w.stop.load(Ordering::Relaxed) && !w.poke.load(Ordering::Relaxed) {
+                        // Not wanted: sleep until asked (the hour is only a safety net).
+                        let wait = if w.wanted.load(Ordering::Relaxed) { every } else { Duration::from_secs(3600) };
+                        let _ = w.cv.wait_timeout(held, wait);
+                    }
+                }
+                if w.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let poked = w.poke.swap(false, Ordering::Relaxed);
+                if !poked && !w.wanted.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let last = w.state.load(Ordering::Relaxed);
+                let now = next_state(last, read());
+                if now != last {
+                    w.state.store(now, Ordering::Relaxed);
+                    changed();
+                }
             }
         });
         if spawned.is_err() {
-            state.store(code(Source::NoBattery), Ordering::Relaxed);
+            shared.state.store(code(Source::NoBattery), Ordering::Relaxed);
         }
-        Self { state, wanted }
+        Self { shared }
     }
 
-    /// Whether the power source is looked at again (the battery option is on).
+    /// Whether the power source is looked at again (the battery option is on). Switching it on
+    /// reads the source at once.
     pub fn set_wanted(&self, on: bool) {
-        self.wanted.store(on, Ordering::Relaxed);
+        if self.shared.wanted.swap(on, Ordering::Relaxed) != on && on {
+            self.shared.poke.store(true, Ordering::Relaxed);
+            self.shared.wake();
+        }
     }
 
     /// Whether a battery was found (the option is offered then); false until the first look.
     pub fn has_battery(&self) -> bool {
-        matches!(self.state.load(Ordering::Relaxed), 2 | 3)
+        matches!(self.shared.state.load(Ordering::Relaxed), 2 | 3)
     }
 
     /// Whether the machine runs on its battery now.
     pub fn on_battery(&self) -> bool {
-        self.state.load(Ordering::Relaxed) == code(Source::Battery)
+        self.shared.state.load(Ordering::Relaxed) == code(Source::Battery)
+    }
+}
+
+impl Drop for BatteryWatch {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.wake();
     }
 }
 
@@ -258,6 +320,108 @@ mod tests {
         let w = BatteryWatch::start(|| Source::NoBattery, || {});
         std::thread::sleep(Duration::from_millis(50));
         assert!(!w.has_battery() && !w.on_battery());
+    }
+
+    /// A source the test sets, and how often it was read.
+    fn scripted(first: Source) -> (Arc<AtomicU8>, Arc<std::sync::atomic::AtomicUsize>, impl Fn() -> Source + Send + 'static) {
+        let now = Arc::new(AtomicU8::new(code(first)));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (n, r) = (now.clone(), reads.clone());
+        let read = move || {
+            r.fetch_add(1, Ordering::Relaxed);
+            match n.load(Ordering::Relaxed) {
+                1 => Source::NoBattery,
+                2 => Source::Mains,
+                _ => Source::Battery,
+            }
+        };
+        (now, reads, read)
+    }
+
+    fn until(f: impl Fn() -> bool) -> bool {
+        (0..300).any(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            f()
+        })
+    }
+
+    /// The source changes over time: mains, battery, a moment of "no battery" (kept as it was),
+    /// mains again. Only the first look ends the watch when it finds no battery.
+    #[test]
+    fn the_watch_follows_the_source_and_rides_out_a_missing_battery() {
+        let (now, reads, read) = scripted(Source::Mains);
+        let w = BatteryWatch::start_every(read, Duration::from_millis(20), || {});
+        w.set_wanted(true);
+        assert!(until(|| w.has_battery() && !w.on_battery()), "mains");
+        now.store(code(Source::Battery), Ordering::Relaxed);
+        assert!(until(|| w.on_battery()), "unplugged");
+        now.store(code(Source::NoBattery), Ordering::Relaxed);
+        let seen = reads.load(Ordering::Relaxed);
+        assert!(until(|| reads.load(Ordering::Relaxed) >= seen + 3), "still reading");
+        assert!(w.on_battery() && w.has_battery(), "a later 'no battery' keeps the last state");
+        now.store(code(Source::Mains), Ordering::Relaxed);
+        assert!(until(|| !w.on_battery()), "plugged in again after the gap");
+        assert!(w.has_battery());
+
+        let (_, reads, read) = scripted(Source::NoBattery);
+        let w = BatteryWatch::start_every(read, Duration::from_millis(20), || {});
+        w.set_wanted(true);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "no battery at the first look: the watch ends");
+        assert!(!w.has_battery());
+    }
+
+    /// Switching the battery option on reads the source at once, not a period later; off, the
+    /// watch does not read at all.
+    #[test]
+    fn switching_the_option_on_reads_at_once() {
+        let (now, reads, read) = scripted(Source::Mains);
+        let w = BatteryWatch::start_every(read, Duration::from_secs(3600), || {});
+        assert!(until(|| reads.load(Ordering::Relaxed) == 1), "the first look");
+        now.store(code(Source::Battery), Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "not wanted: no reads");
+        assert!(!w.on_battery());
+        w.set_wanted(true);
+        assert!(until(|| w.on_battery()), "read at once when switched on");
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        w.set_wanted(true);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(reads.load(Ordering::Relaxed), 2, "only a switch from off to on reads at once");
+    }
+
+    /// A settings save while the mode is on writes what the user set, not the effective values:
+    /// fast sampling, glide and bloom on, as chosen.
+    #[test]
+    fn a_save_while_on_writes_the_configured_values() {
+        let mut s = crate::settings::Settings::default();
+        s.general.low_power = true;
+        s.general.update_speed = "fast".into();
+        s.appearance.high_frequency_visuals = true;
+        s.appearance.bloom = true;
+        let on = active(s.general.low_power, s.general.low_power_on_battery, false).is_some();
+        assert!(on);
+        // What the app works out from the settings while the mode is on.
+        assert_eq!(interval(s.update_speed().interval(), on, false), Some(MIN_INTERVAL));
+        assert!(!glide(s.appearance.high_frequency_visuals, on) && bloom(0.7, on) == 0.0);
+        let dir = std::env::temp_dir().join(format!("tmop-lowpower-save-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("settings.json");
+        s.save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let _ = std::fs::remove_dir_all(&dir);
+        let back = crate::settings::Settings::from_json(&text).expect("parse").settings;
+        assert_eq!(back, s, "the file holds exactly the configured settings");
+        assert_eq!(back.update_speed(), crate::settings::UpdateSpeed::Fast);
+        assert!(back.appearance.high_frequency_visuals && back.appearance.bloom && back.general.low_power);
+    }
+
+    #[test]
+    fn a_later_no_battery_keeps_the_last_state() {
+        assert_eq!(next_state(UNREAD, Source::NoBattery), code(Source::NoBattery));
+        assert_eq!(next_state(code(Source::Battery), Source::NoBattery), code(Source::Battery));
+        assert_eq!(next_state(code(Source::Mains), Source::NoBattery), code(Source::Mains));
+        assert_eq!(next_state(code(Source::Mains), Source::Battery), code(Source::Battery));
     }
 
     #[test]
