@@ -755,7 +755,7 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, THERMAL_MAX_C))];
                 let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), temp_or_none(at(&fd.hist.thermal, age), |t| self.temp(t)));
-                let labels: [String; 5] = std::array::from_fn(|i| format!("{:.0}\u{b0}", THERMAL_MAX_C * (4 - i) as f32 / 4.0));
+                let labels = thermal_axis_labels(self.settings.fahrenheit());
                 let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, gw, 200.0, 36.0, &labels, &lines, &readout);
                 if figure {
                     let th = &s.thermal;
@@ -1503,9 +1503,24 @@ fn rate_pair(rx: f64, tx: f64) -> String {
     format!("\u{2193}{:.1} \u{2191}{:.1} {}/s", rx / scale, tx / scale, U[i])
 }
 
+/// The Thermals chart's vertical axis, top to bottom: the gridlines (quarters of the °C range) in
+/// the temperature unit, "120°" ... "0°" or "248°" ... "32°".
+fn thermal_axis_labels(fahrenheit: bool) -> [String; 5] {
+    std::array::from_fn(|i| {
+        let c = THERMAL_MAX_C * (4 - i) as f32 / 4.0;
+        format!("{:.0}\u{b0}", if fahrenheit { super::to_fahrenheit(c) } else { c })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_axis_labels_follow_the_unit() {
+        assert_eq!(thermal_axis_labels(false), ["120\u{b0}", "90\u{b0}", "60\u{b0}", "30\u{b0}", "0\u{b0}"]);
+        assert_eq!(thermal_axis_labels(true), ["248\u{b0}", "194\u{b0}", "140\u{b0}", "86\u{b0}", "32\u{b0}"]);
+    }
 
     #[test]
     fn thermal_peak_keeps_the_highest_reading() {

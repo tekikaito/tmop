@@ -784,7 +784,7 @@ impl App {
 
     pub fn temp(&self, c: f32) -> String {
         if self.settings.fahrenheit() {
-            format!("{:.0} \u{b0}F", c * 9.0 / 5.0 + 32.0)
+            format!("{:.0} \u{b0}F", to_fahrenheit(c))
         } else {
             format!("{c:.0} \u{b0}C")
         }
@@ -1244,6 +1244,11 @@ impl App {
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }
+}
+
+/// °C as °F.
+pub(crate) fn to_fahrenheit(c: f32) -> f32 {
+    c * 9.0 / 5.0 + 32.0
 }
 
 #[cfg(test)]
