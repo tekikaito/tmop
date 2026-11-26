@@ -12,7 +12,7 @@ opens without taking the focus. After -WarmUp seconds it samples once a second f
   * working set, private bytes, handles and threads;
   * the machine's own load (GetSystemTimes, the sum of all 3D engines) for context.
 
-Then it ends exactly the process it started (Stop-Process -Id), removes the temporary folder
+Then it ends exactly the process it started (through its own handle), removes the temporary folder
 (unless -Keep) and prints one result object; -Csv appends it to a CSV file.
 
   .\scripts\measure.ps1 -Page performance
@@ -59,6 +59,10 @@ $env:TMOP_PROFILE = $profile_file
 $env:TMOP_PROFILE_WINDOW = $Window
 try {
     $proc = Start-Process -FilePath $Exe -ArgumentList $tmop_args -PassThru
+} catch {
+    # Nothing started: leave no temporary folder behind.
+    Remove-Item -Recurse -Force $home_dir -ErrorAction SilentlyContinue
+    throw
 } finally {
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
 }
@@ -82,12 +86,16 @@ try {
         "\GPU Process Memory(pid_$($id)_*)\Shared Usage",
         '\GPU Engine(*engtype_3D)\Utilization Percentage'
     )
-    $p = Get-Process -Id $id
+    # The process object from Start-Process, never a lookup by PID number: once TMOP has exited
+    # its PID may belong to an unrelated process.
+    $p = $proc
+    if ($p.HasExited) { throw "TMOP pid $id exited during the warm-up" }
+    $p.Refresh()
     $cpu0 = $p.TotalProcessorTime; $t0 = [DateTime]::UtcNow; $sys0 = Busy
     for ($i = 0; $i -lt $Seconds; $i++) {
         $set = Get-Counter -Counter $counters -SampleInterval 1 -MaxSamples 1 -ErrorAction SilentlyContinue
-        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if (-not $p) { $ended = 'exited by itself during the run'; break }
+        if ($p.HasExited) { $ended = 'exited by itself during the run'; break }
+        $p.Refresh()
         $cpu1 = $p.TotalProcessorTime; $t1 = [DateTime]::UtcNow; $sys1 = Busy
         # Kernel time includes idle time; busy = (kernel + user - idle) / (kernel + user).
         $total = $sys1[1] - $sys0[1]
@@ -110,10 +118,11 @@ try {
         $samples += [pscustomobject]$s
     }
 } finally {
-    if (Get-Process -Id $id -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $id -Force
+    # Ends the process this script started, through its own handle (never by PID number).
+    if (-not $proc.HasExited) {
+        $proc.Kill()
         $proc.WaitForExit(5000) | Out-Null
-        $ended = 'stopped by the script (Stop-Process -Id)'
+        $ended = 'stopped by the script (Process.Kill on its own handle)'
     } elseif ($ended -eq 'still running') { $ended = 'exited by itself' }
     Write-Host "TMOP pid $id $ended"
 }
@@ -166,5 +175,8 @@ $r = [pscustomobject][ordered]@{
     ended           = $ended
 }
 if ($Csv) { $r | Export-Csv -Path $Csv -Append -NoTypeInformation }
-if ($Keep) { Write-Host "kept $home_dir" } else { Remove-Item -Recurse -Force $home_dir }
+if ($Keep) { Write-Host "kept $home_dir" } else {
+    # A folder that cannot be removed (a file still open) must not cost the result.
+    try { Remove-Item -Recurse -Force $home_dir -ErrorAction Stop } catch { Write-Warning "could not remove ${home_dir}: $($_.Exception.Message)" }
+}
 $r
