@@ -305,52 +305,53 @@ pub struct Smooth {
 }
 
 impl Smooth {
-    /// Eases the values towards `s` over `dt`. Returns whether a value that pages without a
-    /// gliding graph show still moves (#194): CPU, RAM, disk and GPU, read out in the header of
-    /// every page and on the System information tiles. One within [`SETTLED`] of its target
-    /// takes it, so the frames can stop. The other values (kernel, temperature, clock, network,
-    /// per core) are shown only on Summary, Performance, Power and frequency and the popout,
-    /// whose graphs glide and keep the frames going anyway; they ease the same way.
+    /// Eases every value towards `s` over `dt` and returns whether any of them still moves
+    /// (#194). Any of them can be on screen without a gliding graph to keep the frames going:
+    /// the header and System information tiles show CPU, RAM, disk and GPU; the popout's meter
+    /// styles show network, temperature and the cores; with sampling paused nothing glides at all
+    /// (Summary's network ring, the Power page's clocks). A value within [`SETTLED`] (percent
+    /// points or °C) or [`SETTLED_MHZ`] of its target takes it, so the frames can stop.
     fn step(&mut self, s: &Snapshot, dt: f32, eased: bool) -> bool {
         let k = if eased { 1.0 - (-dt * 9.0).exp() } else { 1.0 };
         let mut moving = false;
-        let mut settle = |cur: &mut f32, target: f32| {
+        let mut settle = |cur: &mut f32, target: f32, near: f32| {
             *cur += (target - *cur) * k;
             // Not a number on either side counts as settled, so it cannot keep the frames going.
-            if (target - *cur).abs().partial_cmp(&SETTLED) == Some(std::cmp::Ordering::Greater) {
+            if (target - *cur).abs().partial_cmp(&near) == Some(std::cmp::Ordering::Greater) {
                 moving = true;
             } else {
                 *cur = target;
             }
         };
-        settle(&mut self.cpu, s.cpu.total_pct);
-        settle(&mut self.memory, s.memory.used_pct);
-        settle(&mut self.disk, s.disk.active_pct);
-        settle(&mut self.gpu, s.gpu.utilization_pct);
-        let ease = |cur: &mut f32, target: f32| *cur += (target - *cur) * k;
-        ease(&mut self.kernel, s.cpu.kernel_pct);
-        ease(&mut self.thermal, s.thermal.max_c().unwrap_or(0.0));
-        ease(&mut self.clock, s.cpu.current_mhz.unwrap_or(0) as f32);
-        ease(&mut self.net, s.network.utilization_pct);
+        settle(&mut self.cpu, s.cpu.total_pct, SETTLED);
+        settle(&mut self.memory, s.memory.used_pct, SETTLED);
+        settle(&mut self.disk, s.disk.active_pct, SETTLED);
+        settle(&mut self.gpu, s.gpu.utilization_pct, SETTLED);
+        settle(&mut self.kernel, s.cpu.kernel_pct, SETTLED);
+        settle(&mut self.thermal, s.thermal.max_c().unwrap_or(0.0), SETTLED);
+        settle(&mut self.clock, s.cpu.current_mhz.unwrap_or(0) as f32, SETTLED_MHZ);
+        settle(&mut self.net, s.network.utilization_pct, SETTLED);
         if self.per_core.len() != s.cpu.per_core_pct.len() {
             self.per_core = s.cpu.per_core_pct.clone();
         }
         for (c, t) in self.per_core.iter_mut().zip(&s.cpu.per_core_pct) {
-            ease(c, *t);
+            settle(c, *t, SETTLED);
         }
         if self.per_core_mhz.len() != s.cpu.per_core_mhz.len() {
             self.per_core_mhz = s.cpu.per_core_mhz.iter().map(|m| *m as f32).collect();
         }
         for (c, t) in self.per_core_mhz.iter_mut().zip(&s.cpu.per_core_mhz) {
-            ease(c, *t as f32);
+            settle(c, *t as f32, SETTLED_MHZ);
         }
         moving
     }
 }
 
-/// How close (in percent points) an eased readout must come to its target to take it: half of
-/// the smallest step a whole-percent readout shows, under a pixel on a 200 px bar.
+/// How close (in percent points or °C) an eased value must come to its target to take it: half
+/// of the smallest step a whole-percent readout shows, under a pixel on a 200 px bar.
 const SETTLED: f32 = 0.25;
+/// The same for clocks, in MHz: half of the 10 MHz a clock in hundredths of a GHz shows.
+const SETTLED_MHZ: f32 = 5.0;
 
 /// The longest wait for a frame while nothing moves: as with high-frequency visuals off.
 const HEARTBEAT: Duration = Duration::from_millis(500);
@@ -1520,8 +1521,7 @@ mod tests {
             assert!(frames < 120, "never settles");
         }
         assert!(frames > 10, "eases over several frames, not {frames}");
-        assert_eq!((sm.cpu, sm.memory), (40.0, 55.5), "the readouts end on the sample exactly");
-        assert!(sm.clock > 4100.0 && sm.clock < 4200.0, "the clock eases on without holding frames: {}", sm.clock);
+        assert_eq!((sm.cpu, sm.memory, sm.clock), (40.0, 55.5, 4200.0), "the values end on the sample exactly");
         assert!(!sm.step(&s, dt, true), "a settled value stays still");
         // Off: values follow at once and never ask for frames.
         let mut off = Smooth::default();
@@ -1531,6 +1531,51 @@ mod tests {
         s.gpu.utilization_pct = f32::NAN;
         assert!(!sm.step(&s, dt, true));
         assert!(!sm.step(&s, dt, true), "nor later");
+    }
+
+    /// Every eased value holds the frames while it moves, alone: the popout's meters show
+    /// network, temperature and the cores without a gliding graph, and with sampling paused
+    /// nothing glides at all.
+    #[test]
+    fn each_eased_value_alone_keeps_the_frames_going() {
+        let base = || {
+            let mut s = Snapshot::default();
+            s.cpu.per_core_pct = vec![0.0; 4];
+            s.cpu.per_core_mhz = vec![1000; 4];
+            s.cpu.current_mhz = Some(1000);
+            s
+        };
+        type Change = (&'static str, fn(&mut Snapshot));
+        let changes: [Change; 10] = [
+            ("cpu", |s| s.cpu.total_pct = 30.0),
+            ("kernel", |s| s.cpu.kernel_pct = 30.0),
+            ("memory", |s| s.memory.used_pct = 30.0),
+            ("disk", |s| s.disk.active_pct = 30.0),
+            ("gpu", |s| s.gpu.utilization_pct = 30.0),
+            ("temperature", |s| s.thermal.zones = vec![("zone".into(), 70.0)]),
+            ("clock", |s| s.cpu.current_mhz = Some(4000)),
+            ("network", |s| s.network.utilization_pct = 30.0),
+            ("a core", |s| s.cpu.per_core_pct[2] = 30.0),
+            ("a core's clock", |s| s.cpu.per_core_mhz[1] = 4000),
+        ];
+        let dt = 1.0 / 60.0;
+        for (what, change) in changes {
+            let mut sm = Smooth::default();
+            let before = base();
+            for _ in 0..200 {
+                sm.step(&before, dt, true);
+            }
+            assert!(!sm.step(&before, dt, true), "{what}: settled at the start");
+            let mut after = base();
+            change(&mut after);
+            assert!(sm.step(&after, dt, true), "{what}: moving alone holds the frames");
+            let frames = (0..200).take_while(|_| sm.step(&after, dt, true)).count();
+            assert!(frames > 5 && frames < 200, "{what}: eases, then settles ({frames} frames)");
+            let mut exact = Smooth::default();
+            exact.step(&after, dt, false);
+            let pair = |m: &Smooth| (m.cpu, m.kernel, m.memory, m.disk, m.gpu, m.thermal, m.clock, m.net, m.per_core.clone(), m.per_core_mhz.clone());
+            assert_eq!(pair(&sm), pair(&exact), "{what}: ends on the sample exactly");
+        }
     }
 
     /// TMOP_PROFILE_WINDOW sends its one command after 3 s, and only once.
