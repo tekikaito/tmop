@@ -86,7 +86,7 @@ pub fn reading(q: Quadrant, fd: &FrameData<'_>, fahrenheit: bool) -> Reading {
             Some(h) => Reading {
                 quadrant: q,
                 fraction: Some((sm.thermal / 100.0).clamp(0.0, 1.0)),
-                text: if fahrenheit { format!("{:.0}\u{b0}F", h.c * 9.0 / 5.0 + 32.0) } else { format!("{:.0}\u{b0}C", h.c) },
+                text: if fahrenheit { format!("{:.0}\u{b0}F", super::to_fahrenheit(h.c)) } else { format!("{:.0}\u{b0}C", h.c) },
                 aux: thermal_caption(&h),
             },
             None => Reading { quadrant: q, fraction: None, text: "N/A".into(), aux: "no sensor".into() },
