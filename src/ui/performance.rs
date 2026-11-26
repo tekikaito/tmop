@@ -19,6 +19,9 @@ use super::widgets::ScrollArea029 as _;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+/// Top of the Thermals chart range in degrees C. A multiple of 4, so the quarter-step axis labels
+/// are whole numbers (0, 30, 60, 90, 120), and above any plausible reading.
+const THERMAL_MAX_C: f32 = 120.0;
 const LIST_W: f32 = 236.0;
 const GAP: f32 = 16.0;
 const DEVICE_CARD_H: f32 = 76.0;
@@ -341,7 +344,7 @@ impl App {
             }
             Device::Thermal => DevView {
                 value: s.thermal.max_c().map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string()),
-                lines: vec![(&fd.hist.thermal, c, (0.0, 110.0))],
+                lines: vec![(&fd.hist.thermal, c, (0.0, THERMAL_MAX_C))],
                 dashed_second: false,
             },
             Device::Docker => DevView { value: format!("{} running", self.docker.ui.snap.totals.running), lines: vec![(&self.perf_docker.totals_cpu, c, (0.0, 100.0))], dashed_second: false },
@@ -750,9 +753,9 @@ impl App {
                 let side = hottest.as_ref().map(|h| format!("{} \u{b7} {}", h.what, h.source)).unwrap_or_default();
                 let hd = Head { title: "Thermals", sub: src, value, side };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
-                let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, 110.0))];
+                let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, THERMAL_MAX_C))];
                 let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), temp_or_none(at(&fd.hist.thermal, age), |t| self.temp(t)));
-                let labels = ["110\u{b0}".to_string(), "82\u{b0}".to_string(), "55\u{b0}".to_string(), "27\u{b0}".to_string(), "0\u{b0}".to_string()];
+                let labels: [String; 5] = std::array::from_fn(|i| format!("{:.0}\u{b0}", THERMAL_MAX_C * (4 - i) as f32 / 4.0));
                 let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, gw, 200.0, 36.0, &labels, &lines, &readout);
                 if figure {
                     let th = &s.thermal;
