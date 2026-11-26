@@ -120,8 +120,11 @@ pub struct ProcState {
     filter_seen: String,
     /// New and exited processes ("Highlight new and exited processes").
     pub highlights: Highlights,
+    /// The table model of the last frame and what it was built from ([`cached_model`]).
+    model: Option<(ModelKey, std::sync::Arc<Model>)>,
 }
 
+#[derive(Debug, PartialEq)]
 enum Entry {
     Group(&'static str, usize),
     Row { idx: usize, depth: usize, kids: usize, open: bool },
@@ -395,6 +398,134 @@ fn tree_tab(view: usize, r: &ProcessRow) -> bool {
 /// no arrows (`kids` 0), so a click on that spot selects the row like anywhere else.
 fn tree_entries(tree: &[TreeRow], filtering: bool) -> Vec<Entry> {
     tree.iter().map(|t| Entry::Row { idx: t.index, depth: t.depth, kids: usize::from(t.has_children && !filtering), open: t.expanded }).collect()
+}
+
+/// Everything the rows of the Processes table are built from, apart from the rows themselves
+/// (#194). The table model is rebuilt only when this changes: a new sample (`seq`), an exited
+/// process that appears or goes, the search, the sort, the view and tab, or a group or tree node
+/// opened or closed.
+#[derive(Clone, Debug, PartialEq)]
+struct ModelKey {
+    seq: u64,
+    /// Rows below this index are live; the ones after are exited processes still listed.
+    live_n: usize,
+    exited: Vec<(u32, i64)>,
+    /// The search text, lowercased.
+    filter: String,
+    show_self: bool,
+    sort: (Column, bool),
+    tree_on: bool,
+    tree_view: bool,
+    view: usize,
+    expanded: HashSet<(u32, i64)>,
+    show_all: HashSet<(u32, i64)>,
+    collapsed: HashSet<(u32, i64)>,
+}
+
+/// The table model of one [`ModelKey`]: indices into the rows it was built from.
+struct Model {
+    visible: Vec<usize>,
+    all: Groups,
+    /// The grouping of a tab beyond the first three, which lists only its own processes.
+    subset: Option<Groups>,
+    live_apps: usize,
+    live_bg: usize,
+    counts: [Option<usize>; 6],
+    tree_rows: Vec<TreeRow>,
+    built: Built,
+    filtering: bool,
+}
+
+impl Model {
+    fn groups(&self) -> &Groups {
+        self.subset.as_ref().unwrap_or(&self.all)
+    }
+}
+
+/// The model of `key`, from `cache` while the key is the same, else built anew and kept.
+fn cached_model(cache: &mut Option<(ModelKey, std::sync::Arc<Model>)>, key: ModelKey, build: impl FnOnce(&ModelKey) -> Model) -> std::sync::Arc<Model> {
+    if let Some((k, m)) = cache.as_ref() {
+        if *k == key {
+            return m.clone();
+        }
+    }
+    let m = std::sync::Arc::new(build(&key));
+    *cache = Some((key, m.clone()));
+    m
+}
+
+/// Filters, groups and sorts `rows` (live ones first, `k.live_n` of them) into the table model.
+fn build_model(rows: &[ProcessRow], k: &ModelKey) -> Model {
+    let f = k.filter.as_str();
+    let (col, desc) = k.sort;
+    let (live_n, view, tree_view) = (k.live_n, k.view, k.tree_view);
+    let listed = |r: &ProcessRow| k.show_self || r.pid != std::process::id();
+    let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], f)).collect();
+    let tree = k.tree_on && !tree_view && f.is_empty();
+    let all = group_rows(OS, rows, &visible, tree, col, desc, live_n);
+    // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
+    // Exited processes still listed are not counted.
+    let live = |i: &&usize| **i < live_n;
+    let (live_apps, live_bg) = all.live_procs(&visible, live_n);
+    let counts: [Option<usize>; 6] = [
+        Some(live_apps + live_bg),
+        Some(live_apps),
+        Some(live_bg),
+        Some(visible.iter().filter(live).filter(|i| in_view(3, &rows[**i])).count()),
+        Some(visible.iter().filter(live).filter(|i| in_view(4, &rows[**i])).count()),
+        Some(visible.iter().filter(live).filter(|i| in_view(5, &rows[**i])).count()),
+    ];
+    // Tree view: every listed process takes part; the filter text and the tab pick the matches,
+    // shown with their ancestors.
+    let filtering = !f.is_empty() || view != 0;
+    let tree_rows: Vec<TreeRow> = if tree_view {
+        let members: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i])).collect();
+        let pick = |r: &ProcessRow| tree_tab(view, r) && text_match(r, f);
+        ptree::build(rows, &members, filtering.then_some(&pick as &dyn Fn(&ProcessRow) -> bool), (col, desc), &k.collapsed)
+    } else {
+        Vec::new()
+    };
+    let (subset, sub_roots) = if view >= 3 && !tree_view {
+        let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
+        let subset = group_rows(OS, rows, &ids, tree, col, desc, live_n);
+        let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
+        sort_entries(&mut roots, rows, &subset.aggs, col, desc);
+        (Some(subset), roots)
+    } else {
+        (None, Vec::new())
+    };
+    let groups = subset.as_ref().unwrap_or(&all);
+    let mut built = Built::default();
+    let tctx = TreeCtx { rows, children: &groups.children, expanded: &k.expanded, show_all: &k.show_all, live: live_n };
+    match view {
+        _ if tree_view => built.entries = tree_entries(&tree_rows, filtering),
+        0 => {
+            built.entries.push(Entry::Group("Apps", live_apps));
+            for i in &groups.apps {
+                push_root(*i, &tctx, &mut built);
+            }
+            built.entries.push(Entry::Group("Background processes", live_bg));
+            for i in &groups.bg {
+                push_root(*i, &tctx, &mut built);
+            }
+        }
+        1 => {
+            for i in &groups.apps {
+                push_root(*i, &tctx, &mut built);
+            }
+        }
+        2 => {
+            for i in &groups.bg {
+                push_root(*i, &tctx, &mut built);
+            }
+        }
+        _ => {
+            for i in &sub_roots {
+                push_root(*i, &tctx, &mut built);
+            }
+        }
+    }
+    Model { visible, all, subset, live_apps, live_bg, counts, tree_rows, built, filtering }
 }
 
 /// Whether the row of process `k` is among the lines `entries` the table lists now. The keyboard
@@ -739,78 +870,31 @@ impl App {
         let tree_on = self.tree_enabled();
         let tree_view = self.tree_view();
 
-        // ---- model
+        // ---- model: rebuilt only when a new sample or the view state asks for it (#194)
         let f = self.filter.to_lowercase();
         let rows: &[ProcessRow] = &shown_rows;
-        let show_self = self.settings.general.show_self_in_reports;
-        let listed = |r: &ProcessRow| show_self || r.pid != std::process::id();
-        let visible: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i]) && text_match(&rows[*i], &f)).collect();
         let (col, desc) = self.sort;
-        let tree = tree_on && !tree_view && f.is_empty();
-        let all = group_rows(OS, rows, &visible, tree, col, desc, live_n);
         let view = self.proc.view.min(VIEWS.len() - 1);
-        // Processes one by one, not the entries the tree folds them into: All = Apps + Background.
-        // Exited processes still listed are not counted.
+        let key = ModelKey {
+            seq: fd.snap.seq,
+            live_n,
+            exited: rows[live_n..].iter().map(|r| (r.pid, r.create_time)).collect(),
+            filter: f.clone(),
+            show_self: self.settings.general.show_self_in_reports,
+            sort: self.sort,
+            tree_on,
+            tree_view,
+            view,
+            expanded: self.proc.expanded.clone(),
+            show_all: self.proc.show_all.clone(),
+            collapsed: self.proc.collapsed.clone(),
+        };
+        let model = cached_model(&mut self.proc.model, key, |k| build_model(rows, k));
+        let Model { visible, live_apps, live_bg, counts, tree_rows, built, filtering, .. } = &*model;
+        let (live_apps, live_bg, counts, filtering) = (*live_apps, *live_bg, *counts, *filtering);
+        let groups = model.groups();
+        let all = &model.all;
         let live = |i: &&usize| **i < live_n;
-        let (live_apps, live_bg) = all.live_procs(&visible, live_n);
-        let counts: [Option<usize>; 6] = [
-            Some(live_apps + live_bg),
-            Some(live_apps),
-            Some(live_bg),
-            Some(visible.iter().filter(live).filter(|i| in_view(3, &rows[**i])).count()),
-            Some(visible.iter().filter(live).filter(|i| in_view(4, &rows[**i])).count()),
-            Some(visible.iter().filter(live).filter(|i| in_view(5, &rows[**i])).count()),
-        ];
-        let subset;
-        // Tree view: every listed process takes part; the filter text and the tab pick the matches,
-        // shown with their ancestors.
-        let filtering = !f.is_empty() || view != 0;
-        let tree_rows: Vec<TreeRow> = if tree_view {
-            let members: Vec<usize> = (0..rows.len()).filter(|i| listed(&rows[*i])).collect();
-            let pick = |r: &ProcessRow| tree_tab(view, r) && text_match(r, &f);
-            ptree::build(rows, &members, filtering.then_some(&pick as &dyn Fn(&ProcessRow) -> bool), (col, desc), &self.proc.collapsed)
-        } else {
-            Vec::new()
-        };
-        let (groups, sub_roots): (&Groups, Vec<usize>) = if view >= 3 && !tree_view {
-            let ids: Vec<usize> = visible.iter().copied().filter(|i| in_view(view, &rows[*i])).collect();
-            subset = group_rows(OS, rows, &ids, tree, col, desc, live_n);
-            let mut roots = [subset.apps.as_slice(), subset.bg.as_slice()].concat();
-            sort_entries(&mut roots, rows, &subset.aggs, col, desc);
-            (&subset, roots)
-        } else {
-            (&all, Vec::new())
-        };
-        let mut built = Built::default();
-        let tctx = TreeCtx { rows, children: &groups.children, expanded: &self.proc.expanded, show_all: &self.proc.show_all, live: live_n };
-        match view {
-            _ if tree_view => built.entries = tree_entries(&tree_rows, filtering),
-            0 => {
-                built.entries.push(Entry::Group("Apps", live_apps));
-                for i in &groups.apps {
-                    push_root(*i, &tctx, &mut built);
-                }
-                built.entries.push(Entry::Group("Background processes", live_bg));
-                for i in &groups.bg {
-                    push_root(*i, &tctx, &mut built);
-                }
-            }
-            1 => {
-                for i in &groups.apps {
-                    push_root(*i, &tctx, &mut built);
-                }
-            }
-            2 => {
-                for i in &groups.bg {
-                    push_root(*i, &tctx, &mut built);
-                }
-            }
-            _ => {
-                for i in &sub_roots {
-                    push_root(*i, &tctx, &mut built);
-                }
-            }
-        }
         let sel_info = sel_row.as_ref().and_then(|r| rows.iter().position(|x| (x.pid, x.create_time) == (r.pid, r.create_time))).map(|i| {
             let mut members = Vec::new();
             members_of(i, &groups.children, &mut members, 0);
@@ -1007,7 +1091,7 @@ impl App {
                     scroll_to = Some(shown[n]);
                 }
             } else if tree_view {
-                match tree_key(ui.ctx(), &tree_rows, at, filtering) {
+                match tree_key(ui.ctx(), tree_rows, at, filtering) {
                     Some(ptree::Step::Toggle(n)) => toggle = row_key(&built.entries[n]),
                     Some(ptree::Step::Select(n)) => {
                         self.selected = row_key(&built.entries[n]);
@@ -1218,7 +1302,7 @@ impl App {
         }
         if let Some(k) = toggle {
             if tree_view {
-                tree_toggle(&mut self.proc.collapsed, &tree_rows, rows, k, &mut self.selected, filtering);
+                tree_toggle(&mut self.proc.collapsed, tree_rows, rows, k, &mut self.selected, filtering);
             } else if !self.proc.expanded.remove(&k) {
                 self.proc.expanded.insert(k);
             } else {
@@ -2239,6 +2323,96 @@ mod tests {
         rows[2].cpu_pct = 2.5;
         rows[3].cpu_pct = 40.0;
         rows
+    }
+
+    /// The table model's key for [`tree_sample`]: grouped by app, by CPU, nothing open.
+    fn model_key() -> ModelKey {
+        ModelKey { seq: 7, live_n: 6, exited: Vec::new(), filter: String::new(), show_self: false, sort: (Column::Cpu, true), tree_on: true, tree_view: false, view: 0, expanded: HashSet::new(), show_all: HashSet::new(), collapsed: HashSet::new() }
+    }
+
+    type KeyChange = (&'static str, fn(&mut ModelKey));
+
+    /// One change of each input of the table model (#194).
+    const KEY_CHANGES: [KeyChange; 13] = [
+        ("new sample", |k| k.seq += 1),
+        ("a live row less", |k| k.live_n -= 1),
+        ("an exited process still listed", |k| k.exited.push((4, 4))),
+        ("search text", |k| k.filter = "vim".into()),
+        ("show TMOP itself", |k| k.show_self = true),
+        ("sort column", |k| k.sort.0 = Column::Name),
+        ("sort direction", |k| k.sort.1 = false),
+        ("group by app off", |k| k.tree_on = false),
+        ("tree view", |k| k.tree_view = true),
+        ("tab", |k| k.view = 2),
+        ("a group opened", |k| {
+            k.expanded.insert((2, 2));
+        }),
+        ("all members of a group shown", |k| {
+            k.show_all.insert((2, 2));
+        }),
+        ("a tree node closed", |k| {
+            k.collapsed.insert((3, 3));
+        }),
+    ];
+
+    /// Every input of the table model is part of its key, so a change of any of them rebuilds it.
+    #[test]
+    fn the_model_key_changes_with_each_input() {
+        let base = model_key();
+        assert_eq!(base.clone(), base);
+        for (what, change) in KEY_CHANGES {
+            let mut k = base.clone();
+            change(&mut k);
+            assert_ne!(k, base, "{what}");
+        }
+    }
+
+    /// The model is built once per key: the same key returns the kept one, any change of the key
+    /// builds a new one, and that equals a model built from scratch.
+    #[test]
+    fn the_model_is_rebuilt_exactly_when_its_key_changes() {
+        let rows = tree_sample();
+        let builds = std::cell::Cell::new(0);
+        let get = |cache: &mut Option<(ModelKey, std::sync::Arc<Model>)>, k: ModelKey| {
+            cached_model(cache, k, |k| {
+                builds.set(builds.get() + 1);
+                build_model(&rows, k)
+            })
+        };
+        let mut cache = None;
+        let first = get(&mut cache, model_key());
+        let again = get(&mut cache, model_key());
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        assert_eq!(builds.get(), 1);
+        for (n, (what, change)) in KEY_CHANGES.into_iter().enumerate() {
+            let mut k = model_key();
+            change(&mut k);
+            let m = get(&mut cache, k.clone());
+            assert_eq!(builds.get(), n + 2, "{what}");
+            assert_eq!(m.built.entries, build_model(&rows, &k).built.entries, "{what}");
+            assert_eq!(m.counts, build_model(&rows, &k).counts, "{what}");
+        }
+    }
+
+    /// What the key's inputs do to the rows: the search keeps only the matches, the sort
+    /// direction reverses the order, and an exited row is listed but not counted.
+    #[test]
+    fn the_model_follows_search_sort_and_exited_rows() {
+        let mut rows = tree_sample();
+        let k = ModelKey { tree_on: false, ..model_key() };
+        let names = |m: &Model, rows: &[ProcessRow]| -> Vec<String> {
+            m.built.entries.iter().filter_map(|e| if let Entry::Row { idx, .. } = e { Some(rows[*idx].name.clone()) } else { None }).collect()
+        };
+        let m = build_model(&rows, &ModelKey { filter: "vim".into(), ..k.clone() });
+        assert_eq!(names(&m, &rows), ["vim"]);
+        let down = names(&build_model(&rows, &k), &rows);
+        let up = names(&build_model(&rows, &ModelKey { sort: (Column::Cpu, false), ..k.clone() }), &rows);
+        assert_eq!(down.first().map(String::as_str), Some("rustc"));
+        assert_eq!(up.last().map(String::as_str), Some("rustc"));
+        rows.push(row(42, 0, 42, "gone"));
+        let with_ghost = build_model(&rows, &ModelKey { exited: vec![(42, 42)], ..k.clone() });
+        assert!(names(&with_ghost, &rows).contains(&"gone".to_string()));
+        assert_eq!(with_ghost.counts[0], build_model(&rows[..6], &k).counts[0]);
     }
 
     fn tree_of_sample(rows: &[ProcessRow], collapsed: &HashSet<(u32, i64)>) -> Vec<TreeRow> {

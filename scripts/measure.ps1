@@ -128,7 +128,7 @@ function Field($line, $key) { if ($line -match "(^| )$key=([^ ]+)") { $matches[2
 
 # TMOP's own lines (see Profile in src/ui/mod.rs), after the warm-up.
 $lines = @(if (Test-Path $profile_file) { Get-Content $profile_file | Where-Object { [double](Field $_ 't') -ge $WarmUp } })
-$num = { param($key) Stat ($lines | ForEach-Object { $x = Field $_ $key; if ($x -and $x -ne 'n/a') { [double]$x } }) }
+$num = { param($key) Stat ($lines | ForEach-Object { $x = Field $_ $key; if ($x -and $x -ne 'n/a') { [double]$x.TrimEnd('%') } }) }
 $part = { param($key) Stat ($lines | ForEach-Object { $x = Field $_ $key; if ($x -match '^(\d+)x([\d.]+)$' -and [int]$matches[1] -gt 0) { [double]$matches[2] } }) }
 
 $mb = 1MB
@@ -152,6 +152,7 @@ $r = [pscustomobject][ordered]@{
     handles         = [math]::Round((Stat $samples.handles).avg, 0)
     threads         = [math]::Round((Stat $samples.threads).avg, 0)
     fps             = [math]::Round((& $num 'fps').avg, 1)
+    paced_pct       = [math]::Round((& $num 'paced').avg, 0)
     frame_ms        = [math]::Round((& $num 'frame_ms').avg, 2)
     ui_ms           = [math]::Round((& $num 'ui_ms').avg, 2)
     ui_thread_pct   = [math]::Round((& $num 'ui_cpu').avg, 1)

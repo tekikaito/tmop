@@ -52,7 +52,7 @@ pub use imp::query_processor_performance;
 use crate::process::ProcessRow;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
@@ -662,6 +662,44 @@ pub struct Sampler {
     interval_ms: Arc<AtomicU64>,
     refresh_now: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    wake: Arc<Wake>,
+}
+
+/// Wakes the sampler thread before its next sample is due: a refresh, a new interval, the end
+/// (#194). The thread sleeps until then instead of looking every 25 ms.
+#[derive(Default)]
+struct Wake {
+    lock: Mutex<()>,
+    cv: Condvar,
+}
+
+impl Wake {
+    /// Call after changing what the sleeper checks: taking the lock first means a sleeper that
+    /// checked before the change is already waiting, so the notification cannot be lost.
+    fn notify(&self) {
+        let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
+    }
+
+    /// Sleeps up to `wait`, or until [`Wake::notify`]; returns at once when `ready()` already
+    /// holds (checked under the lock).
+    fn sleep(&self, wait: Duration, ready: impl Fn() -> bool) {
+        let held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if ready() {
+            return;
+        }
+        let _ = self.cv.wait_timeout(held, wait);
+    }
+}
+
+/// How long the sampler sleeps before its next look: until the next sample is due, or (paused,
+/// `interval_ms` 0) until woken. `since_last` is the time since the last sample.
+fn sampler_wait(interval_ms: u64, since_last: Duration) -> Duration {
+    if interval_ms == 0 {
+        Duration::from_secs(3600)
+    } else {
+        Duration::from_millis(interval_ms).saturating_sub(since_last)
+    }
 }
 
 impl Sampler {
@@ -676,11 +714,13 @@ impl Sampler {
         let interval_ms = Arc::new(AtomicU64::new(interval.map(|d| d.as_millis() as u64).unwrap_or(0)));
         let refresh_now = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(Wake::default());
         {
             let shared = shared.clone();
             let interval_ms = interval_ms.clone();
             let refresh_now = refresh_now.clone();
             let stop = stop.clone();
+            let wake = wake.clone();
             std::thread::Builder::new()
                 .name("tmop-sampler".into())
                 .spawn(move || {
@@ -689,7 +729,13 @@ impl Sampler {
                     while !stop.load(Ordering::Relaxed) {
                         let ms = interval_ms.load(Ordering::Relaxed);
                         let due = (ms > 0 && last.elapsed() >= Duration::from_millis(ms)) || refresh_now.swap(false, Ordering::Relaxed);
-                        if due {
+                        if !due {
+                            // Until the next sample is due, or a refresh, a new interval or the end.
+                            let ready = || stop.load(Ordering::Relaxed) || refresh_now.load(Ordering::Relaxed) || interval_ms.load(Ordering::Relaxed) != ms;
+                            wake.sleep(sampler_wait(ms, last.elapsed()), ready);
+                            continue;
+                        }
+                        {
                             last = Instant::now();
                             let (mut snap, procs) = cost::time(cost::Part::Collect, || collector.collect());
                             // Invariant: CPU% normalisers divide by it.
@@ -704,32 +750,64 @@ impl Sampler {
                             on_sample(&snap, &procs);
                             cost::note_sampler_cpu();
                         }
-                        std::thread::sleep(Duration::from_millis(25));
                     }
                 })
                 .expect("spawn sampler");
         }
-        Self { shared, interval_ms, refresh_now, stop }
+        Self { shared, interval_ms, refresh_now, stop, wake }
     }
 
+    /// Called every frame; wakes the sampler only when the interval changes.
     pub fn set_interval(&self, interval: Option<Duration>) {
-        self.interval_ms.store(interval.map(|d| d.as_millis() as u64).unwrap_or(0), Ordering::Relaxed);
+        let ms = interval.map(|d| d.as_millis() as u64).unwrap_or(0);
+        if self.interval_ms.swap(ms, Ordering::Relaxed) != ms {
+            self.wake.notify();
+        }
     }
 
     pub fn refresh(&self) {
         self.refresh_now.store(true, Ordering::Relaxed);
+        self.wake.notify();
     }
 }
 
 impl Drop for Sampler {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.wake.notify();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sampler_sleeps_until_the_next_sample_is_due() {
+        assert_eq!(sampler_wait(500, Duration::from_millis(120)), Duration::from_millis(380));
+        assert_eq!(sampler_wait(500, Duration::from_millis(900)), Duration::ZERO, "overdue");
+        assert!(sampler_wait(0, Duration::ZERO) >= Duration::from_secs(3600), "paused: until woken");
+    }
+
+    /// A paused sampler takes its first sample and then sleeps; a refresh and a new interval wake
+    /// it at once instead of after its long wait (#194).
+    #[test]
+    fn a_sleeping_sampler_wakes_for_a_refresh_and_a_new_interval() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        let s = Sampler::start(None, 8, move |snap, _| {
+            let _ = tx.lock().map(|t| t.send(snap.seq));
+        });
+        let wait = Duration::from_secs(20);
+        assert_eq!(rx.recv_timeout(wait), Ok(1), "the first sample");
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "paused: no more");
+        s.refresh();
+        assert_eq!(rx.recv_timeout(wait), Ok(2), "woken by a refresh");
+        s.set_interval(Some(Duration::from_millis(50)));
+        assert_eq!(rx.recv_timeout(wait), Ok(3), "woken by the new interval");
+        assert_eq!(rx.recv_timeout(wait), Ok(4), "and sampling at it");
+        drop(s);
+    }
 
     #[test]
     fn series_ring() {

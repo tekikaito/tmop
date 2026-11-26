@@ -71,6 +71,7 @@ impl App {
             let mut text_x = x;
             if recording {
                 let c = pos2(x + 4.0, y + 8.0);
+                widgets::note_motion();
                 let pulse = 0.5 + 0.5 * (fd.time * 3.0).sin() as f32;
                 p.circle_filled(c, 8.0, with_alpha(st.danger, 0.10 + 0.14 * pulse * fd.bloom.max(0.4)));
                 p.circle_filled(c, 4.0, st.danger);

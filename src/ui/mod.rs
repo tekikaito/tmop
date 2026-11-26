@@ -305,14 +305,30 @@ pub struct Smooth {
 }
 
 impl Smooth {
-    fn step(&mut self, s: &Snapshot, dt: f32, eased: bool) {
+    /// Eases the values towards `s` over `dt`. Returns whether a value that pages without a
+    /// gliding graph show still moves (#194): CPU, RAM, disk and GPU, read out in the header of
+    /// every page and on the System information tiles. One within [`SETTLED`] of its target
+    /// takes it, so the frames can stop. The other values (kernel, temperature, clock, network,
+    /// per core) are shown only on Summary, Performance, Power and frequency and the popout,
+    /// whose graphs glide and keep the frames going anyway; they ease the same way.
+    fn step(&mut self, s: &Snapshot, dt: f32, eased: bool) -> bool {
         let k = if eased { 1.0 - (-dt * 9.0).exp() } else { 1.0 };
+        let mut moving = false;
+        let mut settle = |cur: &mut f32, target: f32| {
+            *cur += (target - *cur) * k;
+            // Not a number on either side counts as settled, so it cannot keep the frames going.
+            if (target - *cur).abs().partial_cmp(&SETTLED) == Some(std::cmp::Ordering::Greater) {
+                moving = true;
+            } else {
+                *cur = target;
+            }
+        };
+        settle(&mut self.cpu, s.cpu.total_pct);
+        settle(&mut self.memory, s.memory.used_pct);
+        settle(&mut self.disk, s.disk.active_pct);
+        settle(&mut self.gpu, s.gpu.utilization_pct);
         let ease = |cur: &mut f32, target: f32| *cur += (target - *cur) * k;
-        ease(&mut self.cpu, s.cpu.total_pct);
         ease(&mut self.kernel, s.cpu.kernel_pct);
-        ease(&mut self.memory, s.memory.used_pct);
-        ease(&mut self.disk, s.disk.active_pct);
-        ease(&mut self.gpu, s.gpu.utilization_pct);
         ease(&mut self.thermal, s.thermal.max_c().unwrap_or(0.0));
         ease(&mut self.clock, s.cpu.current_mhz.unwrap_or(0) as f32);
         ease(&mut self.net, s.network.utilization_pct);
@@ -328,8 +344,16 @@ impl Smooth {
         for (c, t) in self.per_core_mhz.iter_mut().zip(&s.cpu.per_core_mhz) {
             ease(c, *t as f32);
         }
+        moving
     }
 }
+
+/// How close (in percent points) an eased readout must come to its target to take it: half of
+/// the smallest step a whole-percent readout shows, under a pixel on a 200 px bar.
+const SETTLED: f32 = 0.25;
+
+/// The longest wait for a frame while nothing moves: as with high-frequency visuals off.
+const HEARTBEAT: Duration = Duration::from_millis(500);
 
 /// Everything a page needs for one frame.
 pub struct FrameData<'a> {
@@ -499,6 +523,8 @@ pub struct App {
     /// [`App::set_sample_interval`]); App history counts each sample as that long.
     sample_interval: Option<Duration>,
     last_frame_at: Instant,
+    /// The last frame asked for the next one at the frame rate (something moved, #194).
+    paced: bool,
     pub smooth: Smooth,
     pub popout_textures: popout::Textures,
     pub recorder: Recorder,
@@ -632,6 +658,7 @@ impl App {
             last_sample_at: Instant::now(),
             sample_interval: None,
             last_frame_at: Instant::now(),
+            paced: true,
             smooth: Smooth::default(),
             popout_textures: popout::Textures::default(),
             recorder: Recorder::default(),
@@ -1046,6 +1073,7 @@ impl eframe::App for App {
             p.frames += 1;
             p.busy += t_update.elapsed();
             p.frame_cpu += frame.info().cpu_usage.unwrap_or(0.0) as f64;
+            p.paced += u64::from(self.paced);
             for c in ui.ctx().repaint_causes() {
                 *p.causes.entry(format!("{c:?}")).or_default() += 1;
             }
@@ -1092,7 +1120,8 @@ fn high_frequency(setting: bool, software_gl: bool) -> bool {
 /// Frame and sampling statistics, one line every 2 s, while `TMOP_PROFILE` is set (#194). Its
 /// value is the file to append to when it names one (contains a path separator or a dot), else
 /// `%TEMP%\tmop-profile.txt`. `scripts/measure.ps1` reads these lines. Fields (`key=value`):
-/// `t` seconds since start, `page`, `fps`, `ui_ms` the app's own update per frame, `frame_ms`
+/// `t` seconds since start, `page`, `fps`, `paced` the share of frames that asked for the next at
+/// the frame rate (something moved), `ui_ms` the app's own update per frame, `frame_ms`
 /// eframe's CPU time per frame (update plus tessellation and painting), `ui_cpu` and
 /// `sampler_cpu` the UI and sampler threads' CPU time in % of one core (Windows only), then the
 /// sampler's parts as `<part>=<runs>x<avg ms>` and the repaint causes.
@@ -1104,6 +1133,8 @@ pub struct Profile {
     frames: u64,
     busy: Duration,
     frame_cpu: f64,
+    /// Frames that asked for the next one at the frame rate.
+    paced: u64,
     saves: u64,
     since: Instant,
     causes: std::collections::BTreeMap<String, u64>,
@@ -1125,6 +1156,7 @@ impl Profile {
             frames: 0,
             busy: Duration::ZERO,
             frame_cpu: 0.0,
+            paced: 0,
             saves: 0,
             since: now,
             causes: Default::default(),
@@ -1159,10 +1191,11 @@ impl Profile {
         };
         let causes: Vec<String> = self.causes.iter().map(|(k, n)| format!("{n}:{}", short(k))).collect();
         format!(
-            "t={:.1} page={page} window={} fps={:.1} ui_ms={:.2} frame_ms={:.2} ui_cpu={ui_cpu} sampler_cpu={sampler_cpu} {} saves={} causes={}\n",
+            "t={:.1} page={page} window={} fps={:.1} paced={:.0}% ui_ms={:.2} frame_ms={:.2} ui_cpu={ui_cpu} sampler_cpu={sampler_cpu} {} saves={} causes={}\n",
             self.started.elapsed().as_secs_f64(),
             self.window.state(),
             self.frames as f64 / secs,
+            self.paced as f64 * 100.0 / self.frames.max(1) as f64,
             per_frame(self.busy.as_secs_f64()),
             per_frame(self.frame_cpu),
             parts.join(" "),
@@ -1176,6 +1209,7 @@ impl Profile {
         self.frames = 0;
         self.busy = Duration::ZERO;
         self.frame_cpu = 0.0;
+        self.paced = 0;
         self.saves = 0;
         self.since = Instant::now();
         self.causes.clear();
@@ -1288,8 +1322,13 @@ impl App {
         }
         // Animation clock.
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame_at).as_secs_f32().min(0.25);
+        // After a pause in the frames (nothing moved) an ease starts with one frame's step, not
+        // with the whole pause, so it glides in as it would at the frame rate.
+        let frame_dt = 1.0 / self.settings.appearance.frame_rate.clamp(10, 240) as f32;
+        let dt = if self.paced { now.duration_since(self.last_frame_at).as_secs_f32().min(0.25) } else { frame_dt };
         self.last_frame_at = now;
+        // Cleared here: what this frame draws says whether the next one comes at the frame rate.
+        let _ = widgets::take_motion();
         self.take_sample(&snap, &rows, now);
         let interval = self.settings.update_speed().interval();
         let hf = high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl);
@@ -1297,7 +1336,7 @@ impl App {
             Some(iv) if hf => (now.duration_since(self.last_sample_at).as_secs_f32() / iv.as_secs_f32()).clamp(0.0, 1.0),
             _ => 0.0,
         };
-        self.smooth.step(&snap, dt, hf);
+        let smooth_moving = self.smooth.step(&snap, dt, hf);
         widgets::set_spark_glide(phase, hf && interval.is_some());
         if self.caps.window_levels && self.applied_top != Some(self.settings.window.always_on_top) {
             let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
@@ -1416,8 +1455,18 @@ impl App {
         // Frame pacing. egui shortens every delay by its predicted frame time, which would
         // double the rate (or pin it to the monitor's refresh), so add that back to get the
         // configured appearance.frameRate.
+        // At that rate only while something moves on its own (#194): a gliding graph, an eased
+        // readout still on its way, a pulse or a running clock (`widgets::note_motion`). Else the
+        // next frame comes with the next sample (the sampler asks for it), with input, with an
+        // animation of egui's own, or with this heartbeat at the latest (status messages that
+        // time out, clocks while sampling is paused).
+        if self.recorder.is_recording() {
+            widgets::note_motion();
+        }
         let fps = self.settings.appearance.frame_rate.clamp(10, 240) as f32;
-        let wait = if hf && interval.is_some() { Duration::from_secs_f32(1.0 / fps) } else { Duration::from_millis(500) };
+        let drawn_motion = widgets::take_motion();
+        self.paced = hf && (drawn_motion || smooth_moving);
+        let wait = if self.paced { Duration::from_secs_f32(1.0 / fps) } else { HEARTBEAT };
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }
@@ -1451,6 +1500,37 @@ mod tests {
         let mut m = MaximizedMemory::new(false);
         assert_eq!(m.observe(Some(false), 0.0), Some(false));
         assert_eq!(m.observe(Some(true), 0.1), Some(true));
+    }
+
+    /// Eased readouts move towards a new sample over several frames, then take the exact value
+    /// and report that nothing moves any more, so the frames can stop (#194).
+    #[test]
+    fn eased_values_settle_on_the_sample_and_then_stop_moving() {
+        let mut s = Snapshot::default();
+        s.cpu.total_pct = 40.0;
+        s.memory.used_pct = 55.5;
+        s.cpu.current_mhz = Some(4200);
+        let mut sm = Smooth::default();
+        let dt = 1.0 / 60.0;
+        assert!(sm.step(&s, dt, true), "a jump of 40 points eases");
+        assert!(sm.cpu > 0.0 && sm.cpu < 40.0, "{}", sm.cpu);
+        let mut frames = 1;
+        while sm.step(&s, dt, true) {
+            frames += 1;
+            assert!(frames < 120, "never settles");
+        }
+        assert!(frames > 10, "eases over several frames, not {frames}");
+        assert_eq!((sm.cpu, sm.memory), (40.0, 55.5), "the readouts end on the sample exactly");
+        assert!(sm.clock > 4100.0 && sm.clock < 4200.0, "the clock eases on without holding frames: {}", sm.clock);
+        assert!(!sm.step(&s, dt, true), "a settled value stays still");
+        // Off: values follow at once and never ask for frames.
+        let mut off = Smooth::default();
+        assert!(!off.step(&s, dt, false));
+        assert_eq!(off.cpu, 40.0);
+        // A reading that is not a number cannot keep the frames going.
+        s.gpu.utilization_pct = f32::NAN;
+        assert!(!sm.step(&s, dt, true));
+        assert!(!sm.step(&s, dt, true), "nor later");
     }
 
     /// TMOP_PROFILE_WINDOW sends its one command after 3 s, and only once.
