@@ -645,7 +645,7 @@ impl App {
             updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
-            profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
+            profile: Profile::from_env(),
             pending_section: launch.settings_section.as_deref().and_then(|name| settings_page::section_index(name, &caps)),
             shot: launch.shot.map(|plan| {
                 let run = crate::shot::Run::new(plan);
@@ -1031,7 +1031,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Hidden in the notification area: eframe still calls this for a window that is hidden
         // but not minimized, so draw nothing and ask for no repaint (see `ui::tray`).
         if self.tray_ui.vis.hidden && !self.popout_open {
@@ -1045,22 +1045,19 @@ impl eframe::App for App {
         if let Some(p) = &mut self.profile {
             p.frames += 1;
             p.busy += t_update.elapsed();
+            p.frame_cpu += frame.info().cpu_usage.unwrap_or(0.0) as f64;
             for c in ui.ctx().repaint_causes() {
                 *p.causes.entry(format!("{c:?}")).or_default() += 1;
             }
+            // A measurement-only window state (TMOP_PROFILE_WINDOW), once, after the first seconds.
+            if let Some(cmd) = p.window.take_due(p.started.elapsed()) {
+                ui.ctx().send_viewport_cmd(cmd);
+            }
             if p.since.elapsed() >= Duration::from_secs(2) {
-                let secs = p.since.elapsed().as_secs_f64();
-                let line = format!(
-                    "{:.1} fps, update {:.2} ms avg, saves {}, page {:?}, causes {:?}\n",
-                    p.frames as f64 / secs,
-                    p.busy.as_secs_f64() * 1000.0 / p.frames.max(1) as f64,
-                    p.saves,
-                    self.page,
-                    p.causes
-                );
-                let path = std::env::temp_dir().join("tmop-profile.txt");
-                let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-                *p = Profile::default();
+                let page = if self.popout_only { "popout" } else { self.page.id() };
+                let line = p.line(page);
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p.path).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                p.reset();
             }
         }
     }
@@ -1092,18 +1089,143 @@ fn high_frequency(setting: bool, software_gl: bool) -> bool {
     setting && !software_gl
 }
 
-/// Frame statistics written to `%TEMP%\tmop-profile.txt` when `TMOP_PROFILE` is set.
+/// Frame and sampling statistics, one line every 2 s, while `TMOP_PROFILE` is set (#194). Its
+/// value is the file to append to when it names one (contains a path separator or a dot), else
+/// `%TEMP%\tmop-profile.txt`. `scripts/measure.ps1` reads these lines. Fields (`key=value`):
+/// `t` seconds since start, `page`, `fps`, `ui_ms` the app's own update per frame, `frame_ms`
+/// eframe's CPU time per frame (update plus tessellation and painting), `ui_cpu` and
+/// `sampler_cpu` the UI and sampler threads' CPU time in % of one core (Windows only), then the
+/// sampler's parts as `<part>=<runs>x<avg ms>` and the repaint causes.
+///
+/// `TMOP_PROFILE_WINDOW=minimized|hidden` minimizes or hides the window 3 s after the start, to
+/// measure those states without touching the window. `hidden` hides the bare window; it is not
+/// tray mode's hiding (`ui::tray`), which also stops drawing.
 pub struct Profile {
     frames: u64,
     busy: Duration,
+    frame_cpu: f64,
     saves: u64,
     since: Instant,
     causes: std::collections::BTreeMap<String, u64>,
+    started: Instant,
+    path: std::path::PathBuf,
+    ui_cpu: Option<Duration>,
+    sampler_cpu: Duration,
+    window: ProfileWindow,
 }
 
-impl Default for Profile {
-    fn default() -> Self {
-        Self { frames: 0, busy: Duration::ZERO, saves: 0, since: Instant::now(), causes: Default::default() }
+impl Profile {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var_os("TMOP_PROFILE")?;
+        let named = value.to_string_lossy().contains(['/', '\\', '.']);
+        let path = if named { std::path::PathBuf::from(value) } else { std::env::temp_dir().join("tmop-profile.txt") };
+        let window = ProfileWindow::parse(&std::env::var("TMOP_PROFILE_WINDOW").unwrap_or_default());
+        let now = Instant::now();
+        Some(Self {
+            frames: 0,
+            busy: Duration::ZERO,
+            frame_cpu: 0.0,
+            saves: 0,
+            since: now,
+            causes: Default::default(),
+            started: now,
+            path,
+            ui_cpu: crate::metrics::cost::thread_cpu(),
+            sampler_cpu: crate::metrics::cost::sampler_cpu(),
+            window,
+        })
+    }
+
+    /// The line for the period since the last reset.
+    fn line(&self, page: &str) -> String {
+        let secs = self.since.elapsed().as_secs_f64().max(1e-3);
+        let per_frame = |d: f64| d * 1000.0 / self.frames.max(1) as f64;
+        let share = |d: Duration| d.as_secs_f64() / secs * 100.0;
+        let ui_cpu = match (self.ui_cpu, crate::metrics::cost::thread_cpu()) {
+            (Some(a), Some(b)) => format!("{:.1}", share(b.saturating_sub(a))),
+            _ => "n/a".into(),
+        };
+        let sampler = crate::metrics::cost::sampler_cpu();
+        let sampler_cpu = if sampler.is_zero() { "n/a".into() } else { format!("{:.1}", share(sampler.saturating_sub(self.sampler_cpu))) };
+        let parts: Vec<String> = crate::metrics::cost::take()
+            .iter()
+            .zip(crate::metrics::cost::Part::ALL)
+            .map(|((runs, total), part)| format!("{}={}x{:.2}", part.name(), runs, total.as_secs_f64() * 1000.0 / (*runs).max(1) as f64))
+            .collect();
+        // A cause is `<file>:<line>`; the last two path parts are enough (and name no home folder).
+        let short = |k: &str| {
+            let parts: Vec<&str> = k.split(['/', '\\']).collect();
+            parts[parts.len().saturating_sub(2)..].join("/").replace(' ', "")
+        };
+        let causes: Vec<String> = self.causes.iter().map(|(k, n)| format!("{n}:{}", short(k))).collect();
+        format!(
+            "t={:.1} page={page} window={} fps={:.1} ui_ms={:.2} frame_ms={:.2} ui_cpu={ui_cpu} sampler_cpu={sampler_cpu} {} saves={} causes={}\n",
+            self.started.elapsed().as_secs_f64(),
+            self.window.state(),
+            self.frames as f64 / secs,
+            per_frame(self.busy.as_secs_f64()),
+            per_frame(self.frame_cpu),
+            parts.join(" "),
+            self.saves,
+            causes.join(",")
+        )
+    }
+
+    /// Starts the next period.
+    fn reset(&mut self) {
+        self.frames = 0;
+        self.busy = Duration::ZERO;
+        self.frame_cpu = 0.0;
+        self.saves = 0;
+        self.since = Instant::now();
+        self.causes.clear();
+        self.ui_cpu = crate::metrics::cost::thread_cpu();
+        self.sampler_cpu = crate::metrics::cost::sampler_cpu();
+    }
+}
+
+/// The window state `TMOP_PROFILE_WINDOW` asks for, and whether it was applied.
+#[derive(Debug, PartialEq)]
+enum ProfileWindow {
+    Normal,
+    Minimized { done: bool },
+    Hidden { done: bool },
+}
+
+impl ProfileWindow {
+    fn parse(v: &str) -> Self {
+        match v.trim() {
+            "minimized" => ProfileWindow::Minimized { done: false },
+            "hidden" => ProfileWindow::Hidden { done: false },
+            _ => ProfileWindow::Normal,
+        }
+    }
+
+    fn state(&self) -> &'static str {
+        match self {
+            ProfileWindow::Normal => "normal",
+            ProfileWindow::Minimized { done: true } => "minimized",
+            ProfileWindow::Hidden { done: true } => "hidden",
+            _ => "pending",
+        }
+    }
+
+    /// The command to send now, once, `running` after the start.
+    fn take_due(&mut self, running: Duration) -> Option<ViewportCommand> {
+        if running < Duration::from_secs(3) {
+            return None;
+        }
+        match self {
+            ProfileWindow::Minimized { done } if !*done => {
+                *done = true;
+                Some(ViewportCommand::Minimized(true))
+            }
+            ProfileWindow::Hidden { done } if !*done => {
+                *done = true;
+                Some(ViewportCommand::Visible(false))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1329,6 +1451,20 @@ mod tests {
         let mut m = MaximizedMemory::new(false);
         assert_eq!(m.observe(Some(false), 0.0), Some(false));
         assert_eq!(m.observe(Some(true), 0.1), Some(true));
+    }
+
+    /// TMOP_PROFILE_WINDOW sends its one command after 3 s, and only once.
+    #[test]
+    fn profile_window_state_is_sent_once_after_the_start() {
+        let mut w = ProfileWindow::parse("minimized");
+        assert_eq!(w.take_due(Duration::from_secs(1)), None);
+        assert_eq!(w.state(), "pending");
+        assert_eq!(w.take_due(Duration::from_secs(3)), Some(ViewportCommand::Minimized(true)));
+        assert_eq!(w.take_due(Duration::from_secs(9)), None);
+        assert_eq!(w.state(), "minimized");
+        assert_eq!(ProfileWindow::parse("hidden").take_due(Duration::from_secs(5)), Some(ViewportCommand::Visible(false)));
+        let mut n = ProfileWindow::parse("");
+        assert_eq!((n.take_due(Duration::from_secs(5)), n.state()), (None, "normal"));
     }
 
     #[test]

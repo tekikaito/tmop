@@ -644,7 +644,7 @@ impl Collector {
         let mut pdh_disk = None;
         let mut pdh_disks_each = Vec::new();
         if let Some(pdh) = &self.pdh {
-            pdh.collect();
+            super::cost::time(super::cost::Part::Pdh, || pdh.collect());
             // Disk
             if let (Some(idle), Some(read), Some(write)) = (pdh.value("disk_idle"), pdh.value("disk_read"), pdh.value("disk_write")) {
                 pdh_disk = Some(((100.0 - idle).clamp(0.0, 100.0) as f32, read, write));
@@ -704,9 +704,9 @@ impl Collector {
         }
         self.thermal(&mut snap);
         if let Some((engines, gpu_mem, gpu_shared)) = gpu_counters {
-            self.gpu_adapters(&mut snap, &engines, &gpu_mem, gpu_shared);
+            super::cost::time(super::cost::Part::Gpu, || self.gpu_adapters(&mut snap, &engines, &gpu_mem, gpu_shared));
         }
-        let rows = match self.procs.collect(self.logical, &gpu_by_pid) {
+        let rows = match super::cost::time(super::cost::Part::Processes, || self.procs.collect(self.logical, &gpu_by_pid)) {
             Ok((rows, t)) => {
                 snap.process_count = t.processes;
                 snap.thread_count = t.threads;

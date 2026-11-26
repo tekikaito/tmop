@@ -28,6 +28,7 @@
 //! * Processes: `NtQuerySystemInformation(SystemProcessInformation)`.
 
 pub mod common;
+pub mod cost;
 pub mod drm_fdinfo;
 pub mod hwinfo;
 #[cfg(target_os = "linux")]
@@ -690,7 +691,7 @@ impl Sampler {
                         let due = (ms > 0 && last.elapsed() >= Duration::from_millis(ms)) || refresh_now.swap(false, Ordering::Relaxed);
                         if due {
                             last = Instant::now();
-                            let (mut snap, procs) = collector.collect();
+                            let (mut snap, procs) = cost::time(cost::Part::Collect, || collector.collect());
                             // Invariant: CPU% normalisers divide by it.
                             snap.cpu.logical_count = snap.cpu.logical_count.max(1);
                             let (snap, procs) = (Arc::new(snap), Arc::new(procs));
@@ -701,6 +702,7 @@ impl Sampler {
                                 g.processes = procs.clone();
                             }
                             on_sample(&snap, &procs);
+                            cost::note_sampler_cpu();
                         }
                         std::thread::sleep(Duration::from_millis(25));
                     }
