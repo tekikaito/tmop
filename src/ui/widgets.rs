@@ -561,6 +561,12 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         painter.rect_filled(rect, 0.0, bg);
     }
     let p = g.px_per_update.max(MIN_PX_PER_UPDATE);
+    // Low-power mode draws the traces plain: no gradient fill, no glow (#194, [`set_plain`]).
+    let (fill, bloom) = if plain() { (0.0, 0.0) } else { (g.fill, g.bloom) };
+    // A graph that glides or scrolls by the update clock moves every frame (#194).
+    if g.glide || g.phase > 0.0 {
+        note_motion();
+    }
     let axis = TimeAxis::new(rect.right(), rect.width(), p, g.regions);
     // Sub-pixel motion between updates: anti-aliased traces glide instead of stepping.
     let shift = g.phase.clamp(0.0, 1.0);
@@ -651,9 +657,9 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
             let mut drawn = if g.smooth { smooth_points(&pts, y_clamp) } else { pts.clone() };
             cut_at_x(&mut drawn, rect.right());
             let head = *drawn.last().unwrap_or(&newest);
-            if g.fill > 0.0 && drawn.len() >= 2 {
+            if fill > 0.0 && drawn.len() >= 2 {
                 let mut mesh = Mesh::default();
-                let c = with_alpha(line.color, g.fill);
+                let c = with_alpha(line.color, fill);
                 let c0 = with_alpha(line.color, 0.0);
                 for (i, pt) in drawn.iter().enumerate() {
                     mesh.colored_vertex(*pt, c);
@@ -666,7 +672,7 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
                 }
                 painter.add(Shape::mesh(mesh));
             }
-            glow_polyline(&painter, &drawn, line.color, g.line_width, g.bloom, g.dashed, additive);
+            glow_polyline(&painter, &drawn, line.color, g.line_width, bloom, g.dashed, additive);
             if g.markers && current {
                 let y = head.y;
                 let m = theme::rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
@@ -675,8 +681,8 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         }
     }
     if let Some(b) = g.border {
-        if g.bloom > 0.0 {
-            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * g.bloom)), egui::StrokeKind::Outside);
+        if bloom > 0.0 {
+            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * bloom)), egui::StrokeKind::Outside);
         }
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, b), egui::StrokeKind::Outside);
     }
@@ -1244,6 +1250,37 @@ pub fn set_spark_glide(phase: f32, glide: bool) {
 /// The frame's glide for a graph of live samples: (phase, glide).
 pub fn spark_glide() -> (f32, bool) {
     (f32::from_bits(SPARK_PHASE.load(std::sync::atomic::Ordering::Relaxed)), SPARK_GLIDE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+thread_local! {
+    /// Something drawn this frame moves with time alone (#194), see [`note_motion`].
+    static MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Says that this frame drew something that changes from one frame to the next without a new
+/// sample or input: a gliding graph, an easing value, a pulse, a running clock. The app then
+/// keeps drawing at the frame rate; a frame without motion waits for a sample, input or the
+/// heartbeat. Animations of egui itself (`animate_bool`, `animate_value_with_time`, tooltips,
+/// the text cursor) ask for their own repaints and need not call this.
+pub fn note_motion() {
+    MOTION.with(|m| m.set(true));
+}
+
+/// Graphs without gradient fill and glow (low-power mode, #194); set once per frame. The
+/// graphs' own settings are left as they are.
+static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_plain(on: bool) {
+    PLAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn plain() -> bool {
+    PLAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether [`note_motion`] was called since the last call, and starts over.
+pub fn take_motion() -> bool {
+    MOTION.with(|m| m.replace(false))
 }
 
 /// A progress ring: `track` full circle, `color` arc from 12 o'clock over `frac` (0..1) of it.
@@ -2149,6 +2186,32 @@ mod tests {
                 });
             }).drop_without_applying_deltas();
         }
+    }
+
+    /// A graph that glides or is shifted by the update clock asks for the next frame at the frame
+    /// rate; a still one does not (#194).
+    #[test]
+    fn only_moving_graphs_note_motion() {
+        let mut s = Series::new(16);
+        for v in [10.0, 30.0, 20.0] {
+            s.push(v);
+        }
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 60.0));
+        let p = egui::Painter::new(egui::Context::default(), egui::LayerId::background(), rect);
+        let graph = |glide: bool, phase: f32| {
+            let mut g = Graph::new(vec![GraphLine { series: &s, color: Color32::WHITE, range: (0.0, 100.0) }]);
+            (g.glide, g.phase) = (glide, phase);
+            g.bloom = 0.0;
+            let _ = take_motion();
+            draw_graph(&p, rect, &g);
+            take_motion()
+        };
+        assert!(!graph(false, 0.0), "a still graph");
+        assert!(graph(true, 0.0), "gliding");
+        assert!(graph(false, 0.4), "shifted by the update clock");
+        assert!(!take_motion(), "taking clears it");
+        note_motion();
+        assert!(take_motion());
     }
 
     #[test]

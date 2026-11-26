@@ -135,6 +135,7 @@ impl App {
                         widgets::text_fit(&p, c + vec2(0.0, 24.0), Align2::CENTER_CENTER, &progress.current, theme::mono(11.0), pal.text_faint, content.width() * 0.8);
                         let track = Rect::from_center_size(c, vec2((content.width() * 0.5).min(360.0), 4.0));
                         p.rect_filled(track, 2.0, pal.raise(0.08));
+                        widgets::note_motion();
                         let t = (fd.time as f32 * 0.6).fract();
                         let seg = Rect::from_min_max(pos2(track.left() + track.width() * t * 0.8, track.top()), pos2(track.left() + track.width() * (t * 0.8 + 0.2), track.bottom()));
                         p.rect_filled(seg, 2.0, st.info);

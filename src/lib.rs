@@ -7,6 +7,7 @@ pub mod engine;
 pub mod fonts;
 pub mod icon;
 pub mod launch;
+pub mod lowpower;
 pub mod metrics;
 pub mod palette;
 pub mod platform;

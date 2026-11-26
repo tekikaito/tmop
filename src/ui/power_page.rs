@@ -205,7 +205,7 @@ impl App {
         let st = theme::status(&pal);
         let p = ui.painter().clone();
         let n = fd.hist.clock.values.len();
-        let span = self.settings.update_speed().interval().map(|d| fmt_span((d.as_secs_f32() * n as f32).round() as u64)).filter(|_| n > 1);
+        let span = self.interval().map(|d| fmt_span((d.as_secs_f32() * n as f32).round() as u64)).filter(|_| n > 1);
         let title = match span {
             Some(s) => format!("Clock history \u{b7} {s}"),
             None => "Clock history".into(),

@@ -305,31 +305,54 @@ pub struct Smooth {
 }
 
 impl Smooth {
-    fn step(&mut self, s: &Snapshot, dt: f32, eased: bool) {
+    /// Eases every value towards `s` over `dt` and returns whether any of them still moves
+    /// (#194). Any of them can be on screen without a gliding graph to keep the frames going:
+    /// the header and System information tiles show CPU, RAM, disk and GPU; the popout's meter
+    /// styles show network, temperature and the cores; with sampling paused nothing glides at all
+    /// (Summary's network ring, the Power page's clocks). A value within [`SETTLED`] (percent
+    /// points or °C) or [`SETTLED_MHZ`] of its target takes it, so the frames can stop.
+    fn step(&mut self, s: &Snapshot, dt: f32, eased: bool) -> bool {
         let k = if eased { 1.0 - (-dt * 9.0).exp() } else { 1.0 };
-        let ease = |cur: &mut f32, target: f32| *cur += (target - *cur) * k;
-        ease(&mut self.cpu, s.cpu.total_pct);
-        ease(&mut self.kernel, s.cpu.kernel_pct);
-        ease(&mut self.memory, s.memory.used_pct);
-        ease(&mut self.disk, s.disk.active_pct);
-        ease(&mut self.gpu, s.gpu.utilization_pct);
-        ease(&mut self.thermal, s.thermal.max_c().unwrap_or(0.0));
-        ease(&mut self.clock, s.cpu.current_mhz.unwrap_or(0) as f32);
-        ease(&mut self.net, s.network.utilization_pct);
+        let mut moving = false;
+        let mut settle = |cur: &mut f32, target: f32, near: f32| {
+            *cur += (target - *cur) * k;
+            // Not a number on either side counts as settled, so it cannot keep the frames going.
+            if (target - *cur).abs().partial_cmp(&near) == Some(std::cmp::Ordering::Greater) {
+                moving = true;
+            } else {
+                *cur = target;
+            }
+        };
+        settle(&mut self.cpu, s.cpu.total_pct, SETTLED);
+        settle(&mut self.memory, s.memory.used_pct, SETTLED);
+        settle(&mut self.disk, s.disk.active_pct, SETTLED);
+        settle(&mut self.gpu, s.gpu.utilization_pct, SETTLED);
+        settle(&mut self.kernel, s.cpu.kernel_pct, SETTLED);
+        settle(&mut self.thermal, s.thermal.max_c().unwrap_or(0.0), SETTLED);
+        settle(&mut self.clock, s.cpu.current_mhz.unwrap_or(0) as f32, SETTLED_MHZ);
+        settle(&mut self.net, s.network.utilization_pct, SETTLED);
         if self.per_core.len() != s.cpu.per_core_pct.len() {
             self.per_core = s.cpu.per_core_pct.clone();
         }
         for (c, t) in self.per_core.iter_mut().zip(&s.cpu.per_core_pct) {
-            ease(c, *t);
+            settle(c, *t, SETTLED);
         }
         if self.per_core_mhz.len() != s.cpu.per_core_mhz.len() {
             self.per_core_mhz = s.cpu.per_core_mhz.iter().map(|m| *m as f32).collect();
         }
         for (c, t) in self.per_core_mhz.iter_mut().zip(&s.cpu.per_core_mhz) {
-            ease(c, *t as f32);
+            settle(c, *t as f32, SETTLED_MHZ);
         }
+        moving
     }
 }
+
+/// How close (in percent points or °C) an eased value must come to its target to take it: half
+/// of the smallest step a whole-percent readout shows, under a pixel on a 200 px bar.
+const SETTLED: f32 = 0.25;
+/// The same for clocks, in MHz: half of the 10 MHz a clock in hundredths of a GHz shows.
+const SETTLED_MHZ: f32 = 5.0;
+
 
 /// Everything a page needs for one frame.
 pub struct FrameData<'a> {
@@ -498,7 +521,11 @@ pub struct App {
     /// The interval the sampler was last given (slower while hidden in the tray; see
     /// [`App::set_sample_interval`]); App history counts each sample as that long.
     sample_interval: Option<Duration>,
+    /// The power source, for "Turn on automatically on battery" (#194).
+    battery: crate::lowpower::BatteryWatch,
     last_frame_at: Instant,
+    /// The last frame asked for the next one at the frame rate (something moved, #194).
+    paced: bool,
     pub smooth: Smooth,
     pub popout_textures: popout::Textures,
     pub recorder: Recorder,
@@ -547,7 +574,10 @@ impl App {
         csv::set_owner(&ctx, main_hwnd(cc));
         let alert_cfg = std::sync::Arc::new(std::sync::Mutex::new(crate::alerts::Config::from_settings(&settings.alerts, settings.fahrenheit())));
         let alerts_hook = crate::alerts::hook(alert_cfg.clone());
-        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
+        let start_interval = crate::lowpower::interval(settings.update_speed().interval(), settings.general.low_power, false);
+        let battery_ctx = cc.egui_ctx.clone();
+        let battery = crate::lowpower::BatteryWatch::start(crate::pro::power::source, move || battery_ctx.request_repaint());
+        let sampler = Sampler::start(start_interval, history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
             alerts_hook(snap, rows);
             ctx.request_repaint();
         });
@@ -631,7 +661,9 @@ impl App {
             last_seq: 0,
             last_sample_at: Instant::now(),
             sample_interval: None,
+            battery,
             last_frame_at: Instant::now(),
+            paced: true,
             smooth: Smooth::default(),
             popout_textures: popout::Textures::default(),
             recorder: Recorder::default(),
@@ -645,7 +677,7 @@ impl App {
             updates: updates::UpdateUi::default(),
             status_seen: (String::new(), Instant::now()),
             ip: (None, None),
-            profile: std::env::var_os("TMOP_PROFILE").map(|_| Profile::default()),
+            profile: Profile::from_env(),
             pending_section: launch.settings_section.as_deref().and_then(|name| settings_page::section_index(name, &caps)),
             shot: launch.shot.map(|plan| {
                 let run = crate::shot::Run::new(plan);
@@ -744,11 +776,26 @@ impl App {
     }
 
     pub fn bloom(&self) -> f32 {
-        if self.settings.appearance.bloom {
-            (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1)
-        } else {
-            0.0
-        }
+        let set = if self.settings.appearance.bloom { (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1) } else { 0.0 };
+        crate::lowpower::bloom(set, self.low_power().is_some())
+    }
+
+    /// Whether low-power mode is on, and why (#194).
+    pub fn low_power(&self) -> Option<crate::lowpower::Why> {
+        let g = &self.settings.general;
+        crate::lowpower::active(g.low_power, g.low_power_on_battery, self.battery.on_battery())
+    }
+
+    /// Whether Settings offers "Turn on automatically on battery": a battery was read, or the
+    /// option is on already (so it can always be switched off again).
+    pub fn battery_known(&self) -> bool {
+        self.battery.has_battery() || self.settings.general.low_power_on_battery
+    }
+
+    /// The sample interval in use while the window is shown: the configured one, slower in
+    /// low-power mode unless a recording runs. Pages that name the rate or a history span use it.
+    pub fn interval(&self) -> Option<Duration> {
+        crate::lowpower::interval(self.settings.update_speed().interval(), self.low_power().is_some(), self.recorder.is_recording())
     }
 
     /// A graph configured from the settings (history compression, smoothing, bloom).
@@ -1020,6 +1067,13 @@ impl eframe::App for App {
         // then): new samples are taken in here, so recording and App history go on meanwhile.
         let (snap, _, rows) = self.snapshot();
         self.take_sample(&snap, &rows, Instant::now());
+        // The sample rate follows low-power mode, the battery and a recording also while the
+        // window is minimized (#194). Hidden in the notification area, `window_logic` sets its
+        // own, slower rate (`tray::hidden_interval`, from this same interval).
+        self.battery.set_wanted(self.settings.general.low_power_on_battery);
+        if !(self.tray_ui.vis.hidden && !self.popout_open) {
+            self.set_sample_interval(self.interval());
+        }
         if !self.popout_only {
             self.window_logic(ctx);
             // Here rather than in `ui`, which does not run while the window is hidden in the
@@ -1031,7 +1085,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Hidden in the notification area: eframe still calls this for a window that is hidden
         // but not minimized, so draw nothing and ask for no repaint (see `ui::tray`).
         if self.tray_ui.vis.hidden && !self.popout_open {
@@ -1045,22 +1099,20 @@ impl eframe::App for App {
         if let Some(p) = &mut self.profile {
             p.frames += 1;
             p.busy += t_update.elapsed();
+            p.frame_cpu += frame.info().cpu_usage.unwrap_or(0.0) as f64;
+            p.paced += u64::from(self.paced);
             for c in ui.ctx().repaint_causes() {
                 *p.causes.entry(format!("{c:?}")).or_default() += 1;
             }
+            // A measurement-only window state (TMOP_PROFILE_WINDOW), once, after the first seconds.
+            if let Some(cmd) = p.window.take_due(p.started.elapsed()) {
+                ui.ctx().send_viewport_cmd(cmd);
+            }
             if p.since.elapsed() >= Duration::from_secs(2) {
-                let secs = p.since.elapsed().as_secs_f64();
-                let line = format!(
-                    "{:.1} fps, update {:.2} ms avg, saves {}, page {:?}, causes {:?}\n",
-                    p.frames as f64 / secs,
-                    p.busy.as_secs_f64() * 1000.0 / p.frames.max(1) as f64,
-                    p.saves,
-                    self.page,
-                    p.causes
-                );
-                let path = std::env::temp_dir().join("tmop-profile.txt");
-                let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-                *p = Profile::default();
+                let page = if self.popout_only { "popout" } else { self.page.id() };
+                let line = p.line(page);
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p.path).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                p.reset();
             }
         }
     }
@@ -1092,18 +1144,149 @@ fn high_frequency(setting: bool, software_gl: bool) -> bool {
     setting && !software_gl
 }
 
-/// Frame statistics written to `%TEMP%\tmop-profile.txt` when `TMOP_PROFILE` is set.
+/// Frame and sampling statistics, one line every 2 s, while `TMOP_PROFILE` is set (#194). Its
+/// value is the file to append to when it names one (contains a path separator or a dot), else
+/// `%TEMP%\tmop-profile.txt`. `scripts/measure.ps1` reads these lines. Fields (`key=value`):
+/// `t` seconds since start, `page`, `fps`, `paced` the share of frames that asked for the next at
+/// the frame rate (something moved), `ui_ms` the app's own update per frame, `frame_ms`
+/// eframe's CPU time per frame (update plus tessellation and painting), `ui_cpu` and
+/// `sampler_cpu` the UI and sampler threads' CPU time in % of one core (Windows only), then the
+/// sampler's parts as `<part>=<runs>x<avg ms>` and the repaint causes.
+///
+/// `TMOP_PROFILE_WINDOW=minimized|hidden` minimizes or hides the window 3 s after the start, to
+/// measure those states without touching the window. `hidden` hides the bare window; it is not
+/// tray mode's hiding (`ui::tray`), which also stops drawing.
 pub struct Profile {
     frames: u64,
     busy: Duration,
+    frame_cpu: f64,
+    /// Frames that asked for the next one at the frame rate.
+    paced: u64,
     saves: u64,
     since: Instant,
     causes: std::collections::BTreeMap<String, u64>,
+    started: Instant,
+    path: std::path::PathBuf,
+    ui_cpu: Option<Duration>,
+    sampler_cpu: Duration,
+    window: ProfileWindow,
 }
 
-impl Default for Profile {
-    fn default() -> Self {
-        Self { frames: 0, busy: Duration::ZERO, saves: 0, since: Instant::now(), causes: Default::default() }
+impl Profile {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var_os("TMOP_PROFILE")?;
+        let named = value.to_string_lossy().contains(['/', '\\', '.']);
+        let path = if named { std::path::PathBuf::from(value) } else { std::env::temp_dir().join("tmop-profile.txt") };
+        let window = ProfileWindow::parse(&std::env::var("TMOP_PROFILE_WINDOW").unwrap_or_default());
+        let now = Instant::now();
+        Some(Self {
+            frames: 0,
+            busy: Duration::ZERO,
+            frame_cpu: 0.0,
+            paced: 0,
+            saves: 0,
+            since: now,
+            causes: Default::default(),
+            started: now,
+            path,
+            ui_cpu: crate::metrics::cost::thread_cpu(),
+            sampler_cpu: crate::metrics::cost::sampler_cpu(),
+            window,
+        })
+    }
+
+    /// The line for the period since the last reset.
+    fn line(&self, page: &str) -> String {
+        let secs = self.since.elapsed().as_secs_f64().max(1e-3);
+        let per_frame = |d: f64| d * 1000.0 / self.frames.max(1) as f64;
+        let share = |d: Duration| d.as_secs_f64() / secs * 100.0;
+        let ui_cpu = match (self.ui_cpu, crate::metrics::cost::thread_cpu()) {
+            (Some(a), Some(b)) => format!("{:.1}", share(b.saturating_sub(a))),
+            _ => "n/a".into(),
+        };
+        let sampler = crate::metrics::cost::sampler_cpu();
+        let sampler_cpu = if sampler.is_zero() { "n/a".into() } else { format!("{:.1}", share(sampler.saturating_sub(self.sampler_cpu))) };
+        let parts: Vec<String> = crate::metrics::cost::take()
+            .iter()
+            .zip(crate::metrics::cost::Part::ALL)
+            .map(|((runs, total), part)| format!("{}={}x{:.2}", part.name(), runs, total.as_secs_f64() * 1000.0 / (*runs).max(1) as f64))
+            .collect();
+        // A cause is `<file>:<line>`; the last two path parts are enough (and name no home folder).
+        let short = |k: &str| {
+            let parts: Vec<&str> = k.split(['/', '\\']).collect();
+            parts[parts.len().saturating_sub(2)..].join("/").replace(' ', "")
+        };
+        let causes: Vec<String> = self.causes.iter().map(|(k, n)| format!("{n}:{}", short(k))).collect();
+        format!(
+            "t={:.1} page={page} window={} fps={:.1} paced={:.0}% ui_ms={:.2} frame_ms={:.2} ui_cpu={ui_cpu} sampler_cpu={sampler_cpu} {} saves={} causes={}\n",
+            self.started.elapsed().as_secs_f64(),
+            self.window.state(),
+            self.frames as f64 / secs,
+            self.paced as f64 * 100.0 / self.frames.max(1) as f64,
+            per_frame(self.busy.as_secs_f64()),
+            per_frame(self.frame_cpu),
+            parts.join(" "),
+            self.saves,
+            causes.join(",")
+        )
+    }
+
+    /// Starts the next period.
+    fn reset(&mut self) {
+        self.frames = 0;
+        self.busy = Duration::ZERO;
+        self.frame_cpu = 0.0;
+        self.paced = 0;
+        self.saves = 0;
+        self.since = Instant::now();
+        self.causes.clear();
+        self.ui_cpu = crate::metrics::cost::thread_cpu();
+        self.sampler_cpu = crate::metrics::cost::sampler_cpu();
+    }
+}
+
+/// The window state `TMOP_PROFILE_WINDOW` asks for, and whether it was applied.
+#[derive(Debug, PartialEq)]
+enum ProfileWindow {
+    Normal,
+    Minimized { done: bool },
+    Hidden { done: bool },
+}
+
+impl ProfileWindow {
+    fn parse(v: &str) -> Self {
+        match v.trim() {
+            "minimized" => ProfileWindow::Minimized { done: false },
+            "hidden" => ProfileWindow::Hidden { done: false },
+            _ => ProfileWindow::Normal,
+        }
+    }
+
+    fn state(&self) -> &'static str {
+        match self {
+            ProfileWindow::Normal => "normal",
+            ProfileWindow::Minimized { done: true } => "minimized",
+            ProfileWindow::Hidden { done: true } => "hidden",
+            _ => "pending",
+        }
+    }
+
+    /// The command to send now, once, `running` after the start.
+    fn take_due(&mut self, running: Duration) -> Option<ViewportCommand> {
+        if running < Duration::from_secs(3) {
+            return None;
+        }
+        match self {
+            ProfileWindow::Minimized { done } if !*done => {
+                *done = true;
+                Some(ViewportCommand::Minimized(true))
+            }
+            ProfileWindow::Hidden { done } if !*done => {
+                *done = true;
+                Some(ViewportCommand::Visible(false))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1122,7 +1305,7 @@ impl App {
             self.last_sample_at = now;
             self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(snap, rows);
-            let dt = self.sample_interval.or_else(|| self.settings.update_speed().interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            let dt = self.sample_interval.or_else(|| self.interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(rows, dt);
             self.perf.note_temperature(snap.thermal.max_c());
         }
@@ -1166,16 +1349,25 @@ impl App {
         }
         // Animation clock.
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame_at).as_secs_f32().min(0.25);
+        // After a pause in the frames (nothing moved) an ease starts with one frame's step, not
+        // with the whole pause, so it glides in as it would at the frame rate.
+        let frame_dt = 1.0 / self.settings.appearance.frame_rate.clamp(10, 240) as f32;
+        let dt = if self.paced { now.duration_since(self.last_frame_at).as_secs_f32().min(0.25) } else { frame_dt };
         self.last_frame_at = now;
+        // Cleared here: what this frame draws says whether the next one comes at the frame rate.
+        let _ = widgets::take_motion();
         self.take_sample(&snap, &rows, now);
-        let interval = self.settings.update_speed().interval();
-        let hf = high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl);
+        let interval = self.interval();
+        // Low-power mode (#194): no glide, no glow or fill on graphs; the settings stay as they are.
+        let low = self.low_power().is_some();
+        self.battery.set_wanted(self.settings.general.low_power_on_battery);
+        widgets::set_plain(!crate::lowpower::fills(low));
+        let hf = crate::lowpower::glide(high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl), low);
         let phase = match interval {
             Some(iv) if hf => (now.duration_since(self.last_sample_at).as_secs_f32() / iv.as_secs_f32()).clamp(0.0, 1.0),
             _ => 0.0,
         };
-        self.smooth.step(&snap, dt, hf);
+        let smooth_moving = self.smooth.step(&snap, dt, hf);
         widgets::set_spark_glide(phase, hf && interval.is_some());
         if self.caps.window_levels && self.applied_top != Some(self.settings.window.always_on_top) {
             let level = if self.settings.window.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
@@ -1263,7 +1455,7 @@ impl App {
         }
 
         // Apply cadence changes and persist.
-        self.set_sample_interval(self.settings.update_speed().interval());
+        self.set_sample_interval(self.interval());
         {
             let cfg = crate::alerts::Config::from_settings(&self.settings.alerts, self.settings.fahrenheit());
             let mut shared = self.alert_cfg.lock().unwrap_or_else(|e| e.into_inner());
@@ -1294,8 +1486,19 @@ impl App {
         // Frame pacing. egui shortens every delay by its predicted frame time, which would
         // double the rate (or pin it to the monitor's refresh), so add that back to get the
         // configured appearance.frameRate.
+        // At that rate only while something moves on its own (#194): a gliding graph, an eased
+        // readout still on its way, a pulse or a running clock (`widgets::note_motion`). Else the
+        // next frame comes with the next sample (the sampler asks for it), with input, with an
+        // animation of egui's own, or with this heartbeat at the latest (status messages that
+        // time out, clocks while sampling is paused).
+        if self.recorder.is_recording() {
+            widgets::note_motion();
+        }
         let fps = self.settings.appearance.frame_rate.clamp(10, 240) as f32;
-        let wait = if hf && interval.is_some() { Duration::from_secs_f32(1.0 / fps) } else { Duration::from_millis(500) };
+        let drawn_motion = widgets::take_motion();
+        self.paced = hf && (drawn_motion || smooth_moving);
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        let wait = if self.paced { Duration::from_secs_f32(1.0 / fps) } else { crate::lowpower::heartbeat(low, focused) };
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }
@@ -1329,6 +1532,95 @@ mod tests {
         let mut m = MaximizedMemory::new(false);
         assert_eq!(m.observe(Some(false), 0.0), Some(false));
         assert_eq!(m.observe(Some(true), 0.1), Some(true));
+    }
+
+    /// Eased readouts move towards a new sample over several frames, then take the exact value
+    /// and report that nothing moves any more, so the frames can stop (#194).
+    #[test]
+    fn eased_values_settle_on_the_sample_and_then_stop_moving() {
+        let mut s = Snapshot::default();
+        s.cpu.total_pct = 40.0;
+        s.memory.used_pct = 55.5;
+        s.cpu.current_mhz = Some(4200);
+        let mut sm = Smooth::default();
+        let dt = 1.0 / 60.0;
+        assert!(sm.step(&s, dt, true), "a jump of 40 points eases");
+        assert!(sm.cpu > 0.0 && sm.cpu < 40.0, "{}", sm.cpu);
+        let mut frames = 1;
+        while sm.step(&s, dt, true) {
+            frames += 1;
+            assert!(frames < 120, "never settles");
+        }
+        assert!(frames > 10, "eases over several frames, not {frames}");
+        assert_eq!((sm.cpu, sm.memory, sm.clock), (40.0, 55.5, 4200.0), "the values end on the sample exactly");
+        assert!(!sm.step(&s, dt, true), "a settled value stays still");
+        // Off: values follow at once and never ask for frames.
+        let mut off = Smooth::default();
+        assert!(!off.step(&s, dt, false));
+        assert_eq!(off.cpu, 40.0);
+        // A reading that is not a number cannot keep the frames going.
+        s.gpu.utilization_pct = f32::NAN;
+        assert!(!sm.step(&s, dt, true));
+        assert!(!sm.step(&s, dt, true), "nor later");
+    }
+
+    /// Every eased value holds the frames while it moves, alone: the popout's meters show
+    /// network, temperature and the cores without a gliding graph, and with sampling paused
+    /// nothing glides at all.
+    #[test]
+    fn each_eased_value_alone_keeps_the_frames_going() {
+        let base = || {
+            let mut s = Snapshot::default();
+            s.cpu.per_core_pct = vec![0.0; 4];
+            s.cpu.per_core_mhz = vec![1000; 4];
+            s.cpu.current_mhz = Some(1000);
+            s
+        };
+        type Change = (&'static str, fn(&mut Snapshot));
+        let changes: [Change; 10] = [
+            ("cpu", |s| s.cpu.total_pct = 30.0),
+            ("kernel", |s| s.cpu.kernel_pct = 30.0),
+            ("memory", |s| s.memory.used_pct = 30.0),
+            ("disk", |s| s.disk.active_pct = 30.0),
+            ("gpu", |s| s.gpu.utilization_pct = 30.0),
+            ("temperature", |s| s.thermal.zones = vec![("zone".into(), 70.0)]),
+            ("clock", |s| s.cpu.current_mhz = Some(4000)),
+            ("network", |s| s.network.utilization_pct = 30.0),
+            ("a core", |s| s.cpu.per_core_pct[2] = 30.0),
+            ("a core's clock", |s| s.cpu.per_core_mhz[1] = 4000),
+        ];
+        let dt = 1.0 / 60.0;
+        for (what, change) in changes {
+            let mut sm = Smooth::default();
+            let before = base();
+            for _ in 0..200 {
+                sm.step(&before, dt, true);
+            }
+            assert!(!sm.step(&before, dt, true), "{what}: settled at the start");
+            let mut after = base();
+            change(&mut after);
+            assert!(sm.step(&after, dt, true), "{what}: moving alone holds the frames");
+            let frames = (0..200).take_while(|_| sm.step(&after, dt, true)).count();
+            assert!(frames > 5 && frames < 200, "{what}: eases, then settles ({frames} frames)");
+            let mut exact = Smooth::default();
+            exact.step(&after, dt, false);
+            let pair = |m: &Smooth| (m.cpu, m.kernel, m.memory, m.disk, m.gpu, m.thermal, m.clock, m.net, m.per_core.clone(), m.per_core_mhz.clone());
+            assert_eq!(pair(&sm), pair(&exact), "{what}: ends on the sample exactly");
+        }
+    }
+
+    /// TMOP_PROFILE_WINDOW sends its one command after 3 s, and only once.
+    #[test]
+    fn profile_window_state_is_sent_once_after_the_start() {
+        let mut w = ProfileWindow::parse("minimized");
+        assert_eq!(w.take_due(Duration::from_secs(1)), None);
+        assert_eq!(w.state(), "pending");
+        assert_eq!(w.take_due(Duration::from_secs(3)), Some(ViewportCommand::Minimized(true)));
+        assert_eq!(w.take_due(Duration::from_secs(9)), None);
+        assert_eq!(w.state(), "minimized");
+        assert_eq!(ProfileWindow::parse("hidden").take_due(Duration::from_secs(5)), Some(ViewportCommand::Visible(false)));
+        let mut n = ProfileWindow::parse("");
+        assert_eq!((n.take_due(Duration::from_secs(5)), n.state()), (None, "normal"));
     }
 
     #[test]

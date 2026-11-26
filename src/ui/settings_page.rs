@@ -582,6 +582,12 @@ pub(super) fn toggle_row_hint(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, l
     changed
 }
 
+/// The low-power rows of General (#194). The battery one shows only where a battery is read.
+const LOW_POWER: &str = "Low-power mode";
+const LOW_POWER_HINT: &str = "Uses less CPU and GPU: graphs without glide, glow or fill, updates at most once a second, fewer redraws in the background. Your other settings stay as they are.";
+const LOW_POWER_BATTERY: &str = "Turn on automatically on battery";
+const LOW_POWER_BATTERY_HINT: &str = "Low-power mode also comes on by itself while this computer runs on its battery, and goes off again on mains power.";
+
 /// The project's pages, opened only when a link is clicked.
 const REPO_URL: &str = "https://github.com/tekikaito/tmop";
 const ISSUES_URL: &str = "https://github.com/tekikaito/tmop/issues/new/choose";
@@ -650,6 +656,7 @@ impl App {
         let base_accent = self.palettes.get(&current_palette).map(|p| p.palette.accent).unwrap_or(pal.accent);
         let font_missing = self.display_font.1;
         let docker_found = self.docker.found();
+        let has_battery = self.battery_known();
         let font_families: Option<Vec<String>> = self.font_list.get(ui.ctx()).map(<[String]>::to_vec);
         let nav_id = egui::Id::unique("settings-nav");
         let mut sections = Sections { target: ui.data_mut(|d| d.get_temp(nav_id.with("target"))).or(self.pending_section.take()), ..Default::default() };
@@ -770,6 +777,10 @@ impl App {
                                     }
                                 });
                             });
+                            changed |= toggle_row_hint(ui, &pal, &mut s.general.low_power, LOW_POWER, LOW_POWER_HINT);
+                            if has_battery {
+                                changed |= toggle_row_hint(ui, &pal, &mut s.general.low_power_on_battery, LOW_POWER_BATTERY, LOW_POWER_BATTERY_HINT);
+                            }
                             row(ui, &pal, "Default start page", |ui| {
                                 let cur = Page::from_id_on(&s.general.default_page, &caps).title();
                                 egui::ComboBox::from_id_salt("page").width(200.0).selected_text(theme::button_text(cur)).show_ui(ui, |ui| {

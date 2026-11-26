@@ -259,7 +259,7 @@ impl App {
             self.apply_window_action(ctx, action);
         }
         if self.tray_ui.vis.hidden && !self.popout_open {
-            let interval = tray::hidden_interval(self.settings.update_speed().interval(), self.recorder.is_recording());
+            let interval = tray::hidden_interval(self.interval(), self.recorder.is_recording());
             self.tray_ui.unsampled |= interval.is_none();
             self.set_sample_interval(interval);
             // Container alerts go out as they come, not as a burst of toasts at the next Show.
@@ -324,7 +324,7 @@ impl App {
                     // would list every process start and exit in between at the time of this Show.
                     self.recorder.resync_processes("TMOP was hidden and paused; process starts and exits in that time are not listed");
                 }
-                self.set_sample_interval(self.settings.update_speed().interval());
+                self.set_sample_interval(self.interval());
                 self.sampler.refresh();
                 ctx.request_repaint();
             }

@@ -448,6 +448,10 @@ fn main() -> eframe::Result<()> {
         // The window renders its own frames; it need not take the focus from what the user is doing.
         viewport = viewport.with_active(false);
     }
+    // A measured run (TMOP_PROFILE, scripts/measure.ps1) does not take the focus either.
+    if std::env::var_os("TMOP_PROFILE").is_some() {
+        viewport = viewport.with_active(false);
+    }
     if let Some(icon) = tmop::icon::window_icon() {
         viewport = viewport.with_icon(icon);
     }
