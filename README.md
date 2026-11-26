@@ -289,6 +289,8 @@ showing zeros.
 | Skins, palettes, fonts, system light/dark theme | ✔ | ✔ | ✔ |
 | Open TMOP instead of Task Manager | ✔ | — | — |
 | Keep running in the notification area, shortcut, start with Windows | ✔ | — | — |
+| Low-power mode (switch in *Settings → General*) | ✔ | ✔ | ✔ |
+| Low-power mode on battery | ✔ (where a battery is readable) | ✔ (where a battery is readable) | ✔ (where a battery is readable) |
 | Screensaver | ✔ (only in a build you make yourself, with `--features screensaver`) | — | — |
 
 ### Where TMOP keeps its files
@@ -359,6 +361,37 @@ In *Settings*, under *Notification area*:
   TMOP.exe, Settings shows that the entry points at the old place.
 - `TMOP.exe --exit` ends a TMOP that runs in the notification area. `TMOP.exe --tray` (or
   `--hidden`) starts it hidden there.
+
+## Low-power mode
+
+Low-power mode makes TMOP use less CPU and GPU. It is on Windows, Linux and macOS. In *Settings →
+General*, turn on **Low-power mode** (off by default). While it is on:
+
+- Graphs have no glide, no glow and no gradient fill under the line. They step with each sample.
+- TMOP samples at most once a second. If you chose a slower speed, that stays.
+- While the window is in the background, TMOP redraws less often. Each new sample still brings a
+  redraw.
+- A **Low power** chip appears at the left of the status bar. Hover it to see why the mode is on;
+  click it to open *Settings → General*.
+
+**Turn on automatically on battery** (off by default) switches the mode on while the computer
+runs on its battery, and off again on mains power. The row appears only on a computer where TMOP
+can read a battery.
+
+What stays the same: your own settings are not changed, so turning the mode off gives back
+exactly what you had. Readings are as exact as before, and the alerts keep working. A running
+flight recorder recording keeps its full rate. A paused TMOP stays paused. While TMOP is hidden
+in the notification area, it samples every 5 seconds, as before.
+
+On one Windows desktop (no battery), TMOP's own CPU use fell from roughly 5-9 % of one core to
+about 1 %. These are rough figures from two 30-second runs per page, not a promise for your
+computer. The battery option has been tested by unit tests only, not on a real laptop.
+
+Known limit: right after the mode switches on or off, the "last N s" labels on the graphs can be
+off for a while (by up to a factor of two).
+
+Separately, and without a setting, pages that show no moving graph redraw only when something
+changes.
 
 ## Update or remove
 
