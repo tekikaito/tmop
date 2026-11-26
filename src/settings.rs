@@ -70,6 +70,11 @@ pub struct General {
     /// Windows: read the CPU temperature through the PawnIO driver (opt-in; needs PawnIO
     /// installed and TMOP running as administrator).
     pub pawnio_cpu_temperature: bool,
+    /// Low-power mode (#194, see [`crate::lowpower`]): plainer graphs, slower sampling. Overrides
+    /// the settings it touches at use and changes none of them.
+    pub low_power: bool,
+    /// Low-power mode also comes on by itself while the computer runs on its battery.
+    pub low_power_on_battery: bool,
     /// Empty means the default recordings folder.
     pub recording_folder: String,
     /// Empty means the temporary folder.
@@ -298,6 +303,8 @@ impl Default for General {
             highlight_processes: true,
             highlight_seconds: 2,
             pawnio_cpu_temperature: false,
+            low_power: false,
+            low_power_on_battery: false,
             recording_folder: String::new(),
             benchmark_folder: String::new(),
             check_for_updates: false,
@@ -942,6 +949,27 @@ mod tests {
         assert_eq!(after.tray, tray);
         assert!(after.read_only);
         assert_eq!(Settings { tray: Tray::default(), read_only: false, ..after }, imported);
+    }
+
+    /// The low-power keys (#194) are new in `general`: older files load with both off, the keys
+    /// are known once written, and they round-trip.
+    #[test]
+    fn low_power_is_off_until_set() {
+        for old in [r#"{"version":1,"general":{"updateSpeed":"fast"}}"#, SAMPLE] {
+            let load = parse(old);
+            assert!(load.unknown_keys.is_empty(), "{:?}", load.unknown_keys);
+            assert!(!load.settings.general.low_power && !load.settings.general.low_power_on_battery);
+        }
+        let load = parse(r#"{"version":1,"general":{"lowPower":true}}"#);
+        assert!(matches!(load.outcome, LoadOutcome::Loaded) && load.unknown_keys.is_empty());
+        assert!(load.settings.general.low_power && !load.settings.general.low_power_on_battery);
+        let s = Settings { general: General { low_power: true, low_power_on_battery: true, ..General::default() }, ..Default::default() };
+        let out: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!((&out["general"]["lowPower"], &out["general"]["lowPowerOnBattery"]), (&Value::Bool(true), &Value::Bool(true)));
+        let load = parse(&s.to_json());
+        assert!(load.unknown_keys.is_empty());
+        assert_eq!(load.settings, s);
+        assert!(Settings::from_json(r#"{"version":1,"general":{"lowPower":"yes"}}"#).is_err());
     }
 
     #[test]

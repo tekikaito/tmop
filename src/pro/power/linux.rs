@@ -16,6 +16,13 @@ fn subdirs(dir: &str, prefix: &str) -> Vec<PathBuf> {
     v
 }
 
+/// The power source from `/sys/class/power_supply` alone (see [`super::source`]).
+pub fn source() -> super::Source {
+    let supplies: Vec<parse::Supply> = subdirs("/sys/class/power_supply", "").iter().map(|d| parse::supply(&|k| attr(d, k))).collect();
+    let (ac, battery) = parse::combine(&supplies);
+    super::source_of(ac, battery.is_some())
+}
+
 pub fn read() -> Result<PowerInfo, String> {
     let mut info = PowerInfo::default();
     let supplies: Vec<parse::Supply> = subdirs("/sys/class/power_supply", "").iter().map(|d| parse::supply(&|k| attr(d, k))).collect();

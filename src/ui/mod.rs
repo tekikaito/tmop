@@ -352,8 +352,6 @@ impl Smooth {
 /// the smallest step a whole-percent readout shows, under a pixel on a 200 px bar.
 const SETTLED: f32 = 0.25;
 
-/// The longest wait for a frame while nothing moves: as with high-frequency visuals off.
-const HEARTBEAT: Duration = Duration::from_millis(500);
 
 /// Everything a page needs for one frame.
 pub struct FrameData<'a> {
@@ -522,6 +520,8 @@ pub struct App {
     /// The interval the sampler was last given (slower while hidden in the tray; see
     /// [`App::set_sample_interval`]); App history counts each sample as that long.
     sample_interval: Option<Duration>,
+    /// The power source, for "Turn on automatically on battery" (#194).
+    battery: crate::lowpower::BatteryWatch,
     last_frame_at: Instant,
     /// The last frame asked for the next one at the frame rate (something moved, #194).
     paced: bool,
@@ -573,7 +573,10 @@ impl App {
         csv::set_owner(&ctx, main_hwnd(cc));
         let alert_cfg = std::sync::Arc::new(std::sync::Mutex::new(crate::alerts::Config::from_settings(&settings.alerts, settings.fahrenheit())));
         let alerts_hook = crate::alerts::hook(alert_cfg.clone());
-        let sampler = Sampler::start(settings.update_speed().interval(), history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
+        let start_interval = crate::lowpower::interval(settings.update_speed().interval(), settings.general.low_power, false);
+        let battery_ctx = cc.egui_ctx.clone();
+        let battery = crate::lowpower::BatteryWatch::start(crate::pro::power::source, move || battery_ctx.request_repaint());
+        let sampler = Sampler::start(start_interval, history_capacity(settings.graphs.history_multiplier), move |snap, rows| {
             alerts_hook(snap, rows);
             ctx.request_repaint();
         });
@@ -657,6 +660,7 @@ impl App {
             last_seq: 0,
             last_sample_at: Instant::now(),
             sample_interval: None,
+            battery,
             last_frame_at: Instant::now(),
             paced: true,
             smooth: Smooth::default(),
@@ -771,11 +775,26 @@ impl App {
     }
 
     pub fn bloom(&self) -> f32 {
-        if self.settings.appearance.bloom {
-            (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1)
-        } else {
-            0.0
-        }
+        let set = if self.settings.appearance.bloom { (self.settings.appearance.bloom_level.min(10) as f32 / 10.0).max(0.1) } else { 0.0 };
+        crate::lowpower::bloom(set, self.low_power().is_some())
+    }
+
+    /// Whether low-power mode is on, and why (#194).
+    pub fn low_power(&self) -> Option<crate::lowpower::Why> {
+        let g = &self.settings.general;
+        crate::lowpower::active(g.low_power, g.low_power_on_battery, self.battery.on_battery())
+    }
+
+    /// Whether Settings offers "Turn on automatically on battery": a battery was read, or the
+    /// option is on already (so it can always be switched off again).
+    pub fn battery_known(&self) -> bool {
+        self.battery.has_battery() || self.settings.general.low_power_on_battery
+    }
+
+    /// The sample interval in use while the window is shown: the configured one, slower in
+    /// low-power mode unless a recording runs. Pages that name the rate or a history span use it.
+    pub fn interval(&self) -> Option<Duration> {
+        crate::lowpower::interval(self.settings.update_speed().interval(), self.low_power().is_some(), self.recorder.is_recording())
     }
 
     /// A graph configured from the settings (history compression, smoothing, bloom).
@@ -1278,7 +1297,7 @@ impl App {
             self.last_sample_at = now;
             self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(snap, rows);
-            let dt = self.sample_interval.or_else(|| self.settings.update_speed().interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            let dt = self.sample_interval.or_else(|| self.interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
             self.pro.inv.history.update(rows, dt);
             self.perf.note_temperature(snap.thermal.max_c());
         }
@@ -1330,8 +1349,12 @@ impl App {
         // Cleared here: what this frame draws says whether the next one comes at the frame rate.
         let _ = widgets::take_motion();
         self.take_sample(&snap, &rows, now);
-        let interval = self.settings.update_speed().interval();
-        let hf = high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl);
+        let interval = self.interval();
+        // Low-power mode (#194): no glide, no glow or fill on graphs; the settings stay as they are.
+        let low = self.low_power().is_some();
+        self.battery.set_wanted(self.settings.general.low_power_on_battery);
+        widgets::set_plain(!crate::lowpower::fills(low));
+        let hf = crate::lowpower::glide(high_frequency(self.settings.appearance.high_frequency_visuals, self.software_gl), low);
         let phase = match interval {
             Some(iv) if hf => (now.duration_since(self.last_sample_at).as_secs_f32() / iv.as_secs_f32()).clamp(0.0, 1.0),
             _ => 0.0,
@@ -1424,7 +1447,7 @@ impl App {
         }
 
         // Apply cadence changes and persist.
-        self.set_sample_interval(self.settings.update_speed().interval());
+        self.set_sample_interval(self.interval());
         {
             let cfg = crate::alerts::Config::from_settings(&self.settings.alerts, self.settings.fahrenheit());
             let mut shared = self.alert_cfg.lock().unwrap_or_else(|e| e.into_inner());
@@ -1466,7 +1489,8 @@ impl App {
         let fps = self.settings.appearance.frame_rate.clamp(10, 240) as f32;
         let drawn_motion = widgets::take_motion();
         self.paced = hf && (drawn_motion || smooth_moving);
-        let wait = if self.paced { Duration::from_secs_f32(1.0 / fps) } else { HEARTBEAT };
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        let wait = if self.paced { Duration::from_secs_f32(1.0 / fps) } else { crate::lowpower::heartbeat(low, focused) };
         let predicted = ctx.input(|i| i.predicted_dt).clamp(0.0, 0.1);
         ctx.request_repaint_after(wait + Duration::from_secs_f32(predicted));
     }

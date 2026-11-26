@@ -803,7 +803,7 @@ impl App {
             self.proc.highlights.clear();
             return None;
         };
-        if self.settings.update_speed().interval().is_none() {
+        if self.interval().is_none() {
             self.proc.highlights.rebase();
         }
         self.proc.highlights.observe(fd.snap.seq, fd.rows, now, hold);
@@ -866,7 +866,7 @@ impl App {
             }
         }
 
-        let iv = self.settings.update_speed().interval();
+        let iv = self.interval();
         let tree_on = self.tree_enabled();
         let tree_view = self.tree_view();
 
@@ -1483,7 +1483,7 @@ impl App {
         }
 
         // Summary: resources and connections at the left, facts at the right.
-        let interval = self.settings.update_speed().interval();
+        let interval = self.interval();
         let logical = fd.snap.cpu.logical_count;
         let mut go_parent: Option<(u32, i64)> = None;
         let mut go_network = false;

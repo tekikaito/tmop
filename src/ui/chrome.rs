@@ -328,6 +328,18 @@ impl App {
             let mut x = r.left() + 16.0;
             p.circle_filled(pos2(x, r.center().y), 3.0, dot);
             x += 10.0;
+            // Low-power mode says so (#194): what it reduces, and whether the battery turned it on.
+            if let Some(why) = self.low_power() {
+                let chip = widgets::chip(p, pos2(x, r.center().y), "Low power", pal.accent, None);
+                let tip = crate::lowpower::tooltip(why, self.settings.update_speed().interval(), self.recorder.is_recording());
+                let resp = ui.interact(chip, ui.scope_id().with("status-low-power"), Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    self.page = Page::Settings;
+                    self.pending_section = super::settings_page::section_index("General", &self.caps);
+                }
+                x = chip.right() + 10.0;
+            }
+            let p = ui.painter();
             let mut parts: Vec<(String, Color32)> = vec![
                 (if healthy { "Native providers healthy".to_string() } else { snap.errors[0].clone() }, pal.text_faint),
                 (format!("{} processes", snap.process_count), pal.text_faint),

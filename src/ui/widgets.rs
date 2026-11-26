@@ -561,6 +561,8 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         painter.rect_filled(rect, 0.0, bg);
     }
     let p = g.px_per_update.max(MIN_PX_PER_UPDATE);
+    // Low-power mode draws the traces plain: no gradient fill, no glow (#194, [`set_plain`]).
+    let (fill, bloom) = if plain() { (0.0, 0.0) } else { (g.fill, g.bloom) };
     // A graph that glides or scrolls by the update clock moves every frame (#194).
     if g.glide || g.phase > 0.0 {
         note_motion();
@@ -655,9 +657,9 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
             let mut drawn = if g.smooth { smooth_points(&pts, y_clamp) } else { pts.clone() };
             cut_at_x(&mut drawn, rect.right());
             let head = *drawn.last().unwrap_or(&newest);
-            if g.fill > 0.0 && drawn.len() >= 2 {
+            if fill > 0.0 && drawn.len() >= 2 {
                 let mut mesh = Mesh::default();
-                let c = with_alpha(line.color, g.fill);
+                let c = with_alpha(line.color, fill);
                 let c0 = with_alpha(line.color, 0.0);
                 for (i, pt) in drawn.iter().enumerate() {
                     mesh.colored_vertex(*pt, c);
@@ -670,7 +672,7 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
                 }
                 painter.add(Shape::mesh(mesh));
             }
-            glow_polyline(&painter, &drawn, line.color, g.line_width, g.bloom, g.dashed, additive);
+            glow_polyline(&painter, &drawn, line.color, g.line_width, bloom, g.dashed, additive);
             if g.markers && current {
                 let y = head.y;
                 let m = theme::rgba_unmultiplied(0xF0, 0xF0, 0xF0, 230);
@@ -679,8 +681,8 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         }
     }
     if let Some(b) = g.border {
-        if g.bloom > 0.0 {
-            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * g.bloom)), egui::StrokeKind::Outside);
+        if bloom > 0.0 {
+            painter.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0_f32, with_alpha(b, 0.10 * bloom)), egui::StrokeKind::Outside);
         }
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, b), egui::StrokeKind::Outside);
     }
@@ -1262,6 +1264,18 @@ thread_local! {
 /// the text cursor) ask for their own repaints and need not call this.
 pub fn note_motion() {
     MOTION.with(|m| m.set(true));
+}
+
+/// Graphs without gradient fill and glow (low-power mode, #194); set once per frame. The
+/// graphs' own settings are left as they are.
+static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_plain(on: bool) {
+    PLAIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn plain() -> bool {
+    PLAIN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether [`note_motion`] was called since the last call, and starts over.

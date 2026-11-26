@@ -270,7 +270,7 @@ impl App {
         let interval = if playing {
             span_secs.filter(|_| n > 1).map(|s| fmt_interval(Duration::from_secs_f32(s as f32 / (n - 1) as f32)))
         } else {
-            self.settings.update_speed().interval().map(fmt_interval)
+            self.interval().map(fmt_interval)
         };
         // The heading, from the fullest wording to the barest.
         let titles: Vec<String> = match (&self.pro.playback, span_secs) {

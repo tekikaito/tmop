@@ -311,7 +311,7 @@ impl App {
 
     /// Samples in the top-consumer sparklines: [`TOP_SPAN_SECS`] at the update interval.
     fn spark_cap(&self) -> usize {
-        let secs = self.settings.update_speed().interval().map_or(1.0, |d| d.as_secs_f32());
+        let secs = self.interval().map_or(1.0, |d| d.as_secs_f32());
         (TOP_SPAN_SECS / secs).ceil().clamp(8.0, 240.0) as usize
     }
 
@@ -459,7 +459,7 @@ impl App {
             }
             y += card_h + 6.0;
         }
-        let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.settings.update_speed().interval());
+        let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.interval());
         p.text(pos2(list.left() + 2.0, y + 2.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
         let button = Rect::from_min_size(pos2(list.left(), y + 18.0), vec2(120.0, 28.0));
         if kit::row_ui(ui, button, |ui| Button::ghost("Refresh").size(ButtonSize::Compact).icon(Icon::Refresh).show(ui, &pal).clicked()) {
@@ -479,7 +479,7 @@ impl App {
         let (ix, iw) = (x + 24.0, w - 48.0);
         let gw = if figure { iw - FIGURE_W } else { iw };
         let mut cy = y + 20.0;
-        let iv = self.settings.update_speed().interval();
+        let iv = self.interval();
         let gs = &self.settings.graphs;
         let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv, phase: fd.phase, glide: fd.glide };
         let s = fd.snap;
@@ -899,7 +899,7 @@ impl App {
         let pal = fd.pal;
         let p = ui.painter().clone();
         let s = fd.snap;
-        let iv = self.settings.update_speed().interval();
+        let iv = self.interval();
         let wide = w >= 760.0;
         let (lw, rw) = if wide { ((w - GAP) * 0.6, (w - GAP) * 0.4) } else { (w, w) };
 

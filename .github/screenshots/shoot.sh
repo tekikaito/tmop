@@ -47,6 +47,19 @@ echo '{"version":1,"general":{"highlightProcesses":true,"highlightSeconds":5},"w
 stage_pid=$!
 shot processes --page=processes --shot-home="$home" --wait=30
 kill $stage_pid 2>/dev/null
+# Low-power mode (#194), switched on in a private settings folder: plain graphs, no glide, the
+# "Low power" marker in the status bar, and the General section with its switch.
+lphome="${RUNNER_TEMP:-/tmp}/tmop-shot-lowpower"
+case "$os" in
+  windows) lpcfg="$lphome/TMOP" ;;
+  macos) lpcfg="$lphome/Library/Application Support/TMOP" ;;
+  *) lpcfg="$lphome/config/tmop" ;;
+esac
+mkdir -p "$lpcfg"
+echo '{"version":1,"general":{"lowPower":true}}' >"$lpcfg/settings.json"
+shot summary-low-power --page=summary --shot-home="$lphome"
+shot performance-cpu-low-power --page=performance --device=cpu --shot-home="$lphome"
+shot settings-general-low-power --page=settings --settings-section=general --shot-home="$lphome" --wait=10
 shot startup --page=startup
 shot power --page=power
 shot settings-alerts --page=settings --settings-section=alerts --wait=10

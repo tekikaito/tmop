@@ -243,6 +243,69 @@ pub fn read() -> Result<PowerInfo, String> {
     Err(format!("power information is not implemented on {}", crate::platform::os_name()))
 }
 
+/// What powers the machine now, for the low-power mode's "on battery" (#194).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// No system battery, or none that can be read: the battery option is not offered.
+    NoBattery,
+    /// A battery, and the machine runs on mains power (or that cannot be told).
+    Mains,
+    /// Running on the battery.
+    Battery,
+}
+
+/// The power source from what [`read`]'s parsers give: whether mains power is on, and whether
+/// a battery was found. A battery with unknown mains counts as on mains, so an unreadable state
+/// never turns the mode on.
+pub fn source_of(ac_online: Option<bool>, battery: bool) -> Source {
+    match (battery, ac_online) {
+        (false, _) => Source::NoBattery,
+        (true, Some(false)) => Source::Battery,
+        (true, _) => Source::Mains,
+    }
+}
+
+/// The power source, cheaply: `GetSystemPowerStatus` on Windows, `/sys/class/power_supply` on
+/// Linux, `pmset -g batt` on macOS (a short process; called at most every half minute).
+#[cfg(windows)]
+pub fn source() -> Source {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut st = SYSTEM_POWER_STATUS::default();
+    // SAFETY: writes the struct only.
+    if unsafe { GetSystemPowerStatus(&mut st) }.is_err() {
+        return Source::NoBattery;
+    }
+    // BatteryFlag 128: no system battery; 255: unknown. ACLineStatus 0 offline, 1 online, 255 unknown.
+    let battery = st.BatteryFlag != 128 && st.BatteryFlag != 255;
+    let ac = match st.ACLineStatus {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    source_of(ac, battery)
+}
+
+#[cfg(target_os = "linux")]
+pub fn source() -> Source {
+    linux::source()
+}
+
+#[cfg(target_os = "macos")]
+pub fn source() -> Source {
+    match crate::platform::run_capture("pmset", &["-g", "batt"], std::time::Duration::from_secs(3)) {
+        Ok(text) => {
+            let (ac, battery) = parse::parse_pmset_batt(&text);
+            source_of(ac, battery.is_some())
+        }
+        Err(_) => Source::NoBattery,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn source() -> Source {
+    Source::NoBattery
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
