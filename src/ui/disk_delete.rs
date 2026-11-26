@@ -402,7 +402,7 @@ impl App {
         // --- elevation relaunch
         if self.pro.del.relaunch.poll() {
             match self.pro.del.relaunch.get() {
-                Some(Ok(())) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Some(Ok(())) => self.quit(ctx),
                 Some(Err(e)) => self.status = e.clone(),
                 None => {}
             }

@@ -21,13 +21,14 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 
 /// Width of the section list, and the sections it lists (in page order).
 const NAV_W: f32 = 180.0;
-const SECTIONS: [&str; 9] = ["Appearance", "Graphs", "General", "Alerts", "Window management", "Other options", TASK_MANAGER, "Skins and files", "About"];
-/// The section only Windows has (see [`shown_sections`]).
+const SECTIONS: [&str; 10] = ["Appearance", "Graphs", "General", "Alerts", "Window management", "Other options", TRAY, TASK_MANAGER, "Skins and files", "About"];
+/// The sections only Windows has (see [`shown_sections`]).
+const TRAY: &str = "Notification area";
 const TASK_MANAGER: &str = "Task Manager";
 
 /// [`SECTIONS`] this OS shows. A hidden section's settings keep their values in the file.
 fn shown_sections(caps: &Caps) -> Vec<&'static str> {
-    SECTIONS.into_iter().filter(|s| *s != TASK_MANAGER || caps.taskmgr_replace).collect()
+    SECTIONS.into_iter().filter(|s| (*s != TASK_MANAGER || caps.taskmgr_replace) && (*s != TRAY || caps.tray)).collect()
 }
 
 /// The choices of `general.highlightSeconds` (Settings → General → Highlight duration).
@@ -456,9 +457,11 @@ fn accent_row(ui: &mut egui::Ui, pal: &Palette, a: &mut settings::Appearance, ba
 // Rows and section cards
 // ---------------------------------------------------------------------------
 
-/// Index of the section titled `name` (any case, e.g. `graphs`).
-pub(super) fn section_index(name: &str) -> Option<usize> {
-    SECTIONS.iter().position(|s| s.eq_ignore_ascii_case(name.trim()))
+/// Index of the section titled `name` among the sections `caps` shows (any case, `-` for a
+/// space, e.g. `graphs` or `notification-area`).
+pub(super) fn section_index(name: &str, caps: &Caps) -> Option<usize> {
+    let name = name.trim().replace('-', " ");
+    shown_sections(caps).iter().position(|s| s.eq_ignore_ascii_case(&name))
 }
 
 /// Where the section list and the cards meet: the card tops of this frame and a pending jump.
@@ -499,7 +502,7 @@ fn row(ui: &mut egui::Ui, pal: &Palette, label: &str, controls: impl FnOnce(&mut
 
 /// A settings row: a hairline, the label (and a faint hint line under it) at the left and the
 /// controls at the right. Controls are added right to left: the first one added is the rightmost.
-fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn row_hint(ui: &mut egui::Ui, pal: &Palette, label: &str, hint: &str, controls: impl FnOnce(&mut egui::Ui)) {
     let w = ui.available_width();
     let text_w = if hint.is_empty() { w } else { (w * 0.62).clamp(160.0, 560.0) };
     let label_g = ui.painter().layout(label.to_string(), theme::ui(13.0), pal.text, text_w);
@@ -829,10 +832,13 @@ impl App {
                                 }
                             }
                         });
+                        if caps.tray {
+                            section(ui, &pal, &mut sections, TRAY, |ui| self.tray_section(ui, &pal));
+                        }
                         if caps.taskmgr_replace {
                             section(ui, &pal, &mut sections, TASK_MANAGER, |ui| self.replace_section(ui, &pal));
                         }
-                        section(ui, &pal, &mut sections, SECTIONS[7], |ui| {
+                        section(ui, &pal, &mut sections, SECTIONS[8], |ui| {
                             ui.add_space(2.0);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -946,9 +952,9 @@ impl App {
             match settings::import_tmog() {
                 Ok(load) => {
                     self.status = load.describe("Imported TMOG settings");
-                    // A read-only file (newer TMOP, or no backup) stays protected after an import.
-                    let read_only = self.settings.read_only;
-                    self.settings = Settings { read_only, ..load.settings };
+                    // A read-only file (newer TMOP, or no backup) stays protected after an
+                    // import, and tray mode stays as it is (its icon and shortcut do too).
+                    self.settings = settings::after_import(&self.settings, load.settings);
                     self.settings_dirty = true;
                 }
                 Err(e) => self.status = format!("Import failed: {e}"),
@@ -1039,13 +1045,15 @@ fn title_case(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The Task Manager section is Windows-only; the others stay in page order.
+    /// The notification area and Task Manager sections are Windows-only; the others stay in
+    /// page order.
     #[test]
     fn sections_follow_caps() {
         assert_eq!(shown_sections(&Caps::WINDOWS), SECTIONS.to_vec());
         let linux = shown_sections(&Caps::LINUX);
-        assert_eq!(linux.len(), SECTIONS.len() - 1);
-        assert!(!linux.contains(&TASK_MANAGER) && linux.last() == Some(&"About"));
+        assert_eq!(linux.len(), SECTIONS.len() - 2);
+        assert!(!linux.contains(&TASK_MANAGER) && !linux.contains(&TRAY) && linux.last() == Some(&"About"));
+        assert_eq!(shown_sections(&Caps { tray: false, ..Caps::WINDOWS }).len(), SECTIONS.len() - 1);
     }
 
     /// Without window levels (Wayland) the popout offers no desktop or topmost mode, and a saved
@@ -1143,9 +1151,20 @@ mod tests {
 
     #[test]
     fn sections_are_found_by_name() {
-        assert_eq!(section_index("graphs"), Some(1));
-        assert_eq!(section_index(" About "), Some(8));
-        assert_eq!(section_index("nope"), None);
+        let w = Caps::WINDOWS;
+        assert_eq!(section_index("graphs", &w), Some(1));
+        assert_eq!(section_index("alerts", &w), Some(3));
+        assert_eq!(section_index(" About ", &w), Some(9));
+        assert_eq!(section_index("nope", &w), None);
+        // The Windows-only sections take a spelling without spaces for --settings-section=.
+        assert_eq!(section_index("notification-area", &w), Some(6));
+        assert_eq!(section_index("Notification area", &w), Some(6));
+        assert_eq!(section_index("task-manager", &w), Some(7));
+        // The index counts the cards this OS shows, so a later section is found where it is drawn.
+        let linux = Caps::LINUX;
+        assert_eq!(section_index("notification-area", &linux), None);
+        assert_eq!(section_index("skins-and-files", &linux), Some(6));
+        assert_eq!(section_index("about", &linux), Some(7));
     }
 
     /// The accent swatches lay out and change nothing until clicked; the active entry follows the

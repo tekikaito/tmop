@@ -57,6 +57,13 @@ const FLAG_OPTIONS: &[&str] = &[
     "--record",
     "--restore-taskmgr",
     "--manual",
+    // The notification area (Windows): start hidden there (the Run entry passes `--tray`), and
+    // ask a running TMOP to exit.
+    crate::tray::FLAG,
+    crate::tray::FLAG_ALIAS,
+    "--exit",
+    // Internal: a copy TMOP starts in its own place (update, restart as administrator).
+    crate::tray::REPLACING_FLAG,
     // Internal: the Docker engine relay (Run key) and the elevated helpers.
     "--engine-relay",
     "--engine-relay-stop",
@@ -111,6 +118,9 @@ Options:
                            --theme=dark|light, --settings-section=<name>, --wait=<s>,
                            --frames=<n> --every=<ms> and --shot-home=<dir>
   --restore-taskmgr        stop opening TMOP in place of Windows Task Manager (Windows)
+  --tray, --hidden         start hidden in the notification area when Settings keeps TMOP
+                           running there (Windows)
+  --exit                   ask the running TMOP to exit (Windows)
   -V, --version            print the version and exit
   -h, --help               print this text and exit
 ",
@@ -214,10 +224,29 @@ mod tests {
             "--engine-relay-stop",
             "--volume-caches=query:C",
             "--manual",
+            "--replacing",
         ] {
             assert_eq!(p(&[a]), Cli::Run, "{a}");
         }
         assert_eq!(p(&["--page=disk-space", "--disk-root=\"C:\\Program Files\""]), Cli::Run);
+    }
+
+    /// The notification-area switches: the Run entry starts `"<exe>" --tray`, scripts run
+    /// `--exit`, and the updater and the elevated restart pass `--replacing`. Rejecting any of
+    /// them would end that start with exit code 2 before the window opens.
+    #[test]
+    fn tray_switches_are_known() {
+        for a in [crate::tray::FLAG, crate::tray::FLAG_ALIAS, crate::tray::REPLACING_FLAG, "--exit"] {
+            assert_eq!(p(&[a]), Cli::Run, "{a}");
+        }
+        assert_eq!(p(&["--tray", "--page=processes"]), Cli::Run);
+        assert_eq!(p(&["--replacing", "--page=settings"]), Cli::Run);
+        // The Run entry's own command line, split as Windows passes it.
+        let cmd = crate::tray::autostart::command(std::path::Path::new(r"C:\Apps\TMOP.exe"));
+        let args: Vec<&str> = cmd.split(' ').skip(1).collect();
+        assert_eq!(p(&args), Cli::Run, "{cmd}");
+        assert_eq!(p(&["--tray=1"]), Cli::Unknown("--tray=1".into()));
+        assert_eq!(p(&["--exits"]), Cli::Unknown("--exits".into()));
     }
 
     #[test]
@@ -249,7 +278,7 @@ mod tests {
     fn texts() {
         assert_eq!(version_text(), format!("tmop {}\n", env!("CARGO_PKG_VERSION")));
         let help = help_text();
-        for o in ["--dump", "--screenshot=<file.png>", "--version", "--help", "--page=<id>"] {
+        for o in ["--dump", "--screenshot=<file.png>", "--version", "--help", "--page=<id>", "--tray", "--hidden", "--exit"] {
             assert!(help.contains(o), "{o}");
         }
         assert!(unknown_text("--x").contains("--help"));

@@ -10,7 +10,16 @@
 //!   `--set-taskmgr-replacement=on|off`, which makes the change and exits without a window.
 //! * TMOP only removes values that point at a TMOP.exe; another program's value is left alone.
 //! * A Task Manager launch is handed to an already running main window over a named pipe, the
-//!   way Task Manager brings its own window back instead of opening a second one.
+//!   way Task Manager brings its own window back instead of opening a second one. Tray mode
+//!   uses the same pipe for a second start and `--exit` (see [`crate::tray`]). The test
+//!   override `TMOP_TASKMGR_PIPE` names another pipe, so a test copy never reaches a TMOP the
+//!   user is running.
+//! * The pipe's name is predictable, so both ends check each other. The listener creates the
+//!   first instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` (when the name is taken it does not
+//!   listen at all), keeps an instance open at all times, and gives the pipe a descriptor
+//!   ([`pipe_sddl`]) that lets in only this user and SYSTEM, with a medium label so an
+//!   elevated TMOP still hears starts that are not elevated. A start sends nothing, and grants
+//!   no foreground right, to a server process of another user ([`plan`]).
 //! * [`open_real`] starts the real Task Manager past the replacement, as a debuggee that is
 //!   detached at once (Windows skips the `Debugger` value for processes started under a debugger).
 //!   It does so from an elevated copy, because a non-elevated Task Manager restarts itself
@@ -90,11 +99,11 @@ pub fn classify(value: Option<&str>, current: &Path, resolve: impl Fn(&Path) -> 
         return State::Default;
     };
     let path = debugger_path(value);
-    let resolved = resolve(&path);
-    if same_path(&path, current) || resolved.as_deref().map(|r| same_path(r, current)).unwrap_or(false) {
+    if is_this_exe(&path, current, &resolve) {
         State::Ours
     } else if is_tmop_exe(&path) {
-        State::OtherTmop { path, exists: resolved.is_some() }
+        let exists = resolve(&path).is_some();
+        State::OtherTmop { path, exists }
     } else {
         State::Foreign(value.to_string())
     }
@@ -105,12 +114,13 @@ fn is_tmop_exe(path: &Path) -> bool {
 }
 
 /// Path text without the `\\?\` prefix `current_exe` can return.
-fn plain(p: &Path) -> String {
+pub fn plain(p: &Path) -> String {
     let s = p.display().to_string();
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+/// Whether two Windows paths name the same file, ignoring case, slash style and a trailing slash.
+pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| plain(p).replace('/', "\\").trim_end_matches('\\').to_lowercase();
     norm(a) == norm(b)
 }
@@ -298,10 +308,40 @@ pub fn describe_exit(code: i32) -> String {
     }
 }
 
-/// The running exe in its full long form (no 8.3 short names), as it is registered.
+/// The running exe in its full long form (no 8.3 short names), as it is registered (the
+/// `Debugger` value, the Run entry). In a Scoop install that is the `current` spelling (see
+/// [`stable_exe`]).
 pub fn this_exe() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
-    std::fs::canonicalize(&exe).map(|p| PathBuf::from(plain(&p))).unwrap_or(exe)
+    let canonical = std::fs::canonicalize(&exe).map(|p| PathBuf::from(plain(&p))).unwrap_or(exe);
+    stable_exe(&canonical, crate::update::is_scoop_install(), |p| std::fs::canonicalize(p).ok())
+}
+
+/// The path to register for `canonical` (the running exe with junctions resolved). Scoop keeps
+/// each version in `...\apps\<name>\<version>\` and points the junction `...\apps\<name>\current`
+/// at the newest one; resolving the junction would register the version folder, and after
+/// `scoop update` the old version would go on starting. So when `scoop` (this is a Scoop
+/// install) and the sibling `current` resolves to the exe's folder, the `current` spelling is
+/// returned. `resolve` gives a path with junctions resolved, when it exists.
+pub fn stable_exe(canonical: &Path, scoop: bool, resolve: impl Fn(&Path) -> Option<PathBuf>) -> PathBuf {
+    let stable = || {
+        let (dir, file) = (canonical.parent()?, canonical.file_name()?);
+        let current = dir.parent()?.join("current");
+        let points_here = !same_path(dir, &current) && resolve(&current).is_some_and(|r| same_path(&r, dir));
+        points_here.then(|| current.join(file))
+    };
+    scoop.then(stable).flatten().unwrap_or_else(|| canonical.to_path_buf())
+}
+
+/// Whether a registered `path` is the running exe `current`: the same spelling, or both resolve
+/// to the same file (`resolve` gives the full long form with junctions resolved), so an 8.3
+/// short name and Scoop's `current` and version spellings count as this copy.
+pub fn is_this_exe(path: &Path, current: &Path, resolve: impl Fn(&Path) -> Option<PathBuf>) -> bool {
+    if same_path(path, current) {
+        return true;
+    }
+    let Some(resolved) = resolve(path) else { return false };
+    same_path(&resolved, current) || resolve(current).is_some_and(|c| same_path(&resolved, &c))
 }
 
 /// Current state, read from the registry.
@@ -362,10 +402,59 @@ pub fn open_real() -> Result<(), String> {
     win::open_real()
 }
 
-/// Hands a Task Manager launch to a running TMOP window. Returns false when none answers.
-/// `page` is a page id, or empty to keep that window's page.
+/// Who answers on the hand-off pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Peer {
+    /// A process of another user, or one whose user TMOP cannot tell: nothing is sent to it,
+    /// and it gets no right to take the foreground.
+    Foreign,
+    /// A process of this user; `elevated` as far as Windows says.
+    Ours { elevated: Option<bool> },
+}
+
+/// What a start does with the TMOP that answers on the pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// Hand the request over.
+    Send,
+    /// Leave it alone and start normally.
+    Skip,
+    /// Ask it to exit, and start in its place.
+    AskToExit,
+}
+
+/// The rule: only a TMOP of this user gets the request. With `prefer_elevated` (a start that
+/// opens the window), an elevated start does not hand over to a TMOP that is not elevated: the
+/// user asked for administrator rights, so the old copy exits and this one takes its place.
+pub fn plan(peer: Peer, self_elevated: bool, prefer_elevated: bool) -> Plan {
+    match peer {
+        Peer::Foreign => Plan::Skip,
+        Peer::Ours { elevated: Some(false) } if self_elevated && prefer_elevated => Plan::AskToExit,
+        Peer::Ours { .. } => Plan::Send,
+    }
+}
+
+/// What [`hand_off_start`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandOff {
+    /// The running TMOP has the request; this start ends.
+    Delivered,
+    /// No TMOP of this user listens: start normally.
+    NoServer,
+    /// This start is elevated and the running TMOP is not. It was asked to exit; this start
+    /// takes its place as a `--replacing` start does.
+    Replacing,
+}
+
+/// Hands a Task Manager launch (or `--exit`) to a running TMOP window. Returns false when none
+/// of this user answers. `page` is a page id, or empty to keep that window's page.
 pub fn hand_off(page: &str) -> bool {
-    win::hand_off(page)
+    win::hand_off(page, false) == HandOff::Delivered
+}
+
+/// Hands a second start in tray mode to the running TMOP (see [`plan`] for `prefer_elevated`).
+pub fn hand_off_start(message: &str, prefer_elevated: bool) -> HandOff {
+    win::hand_off(message, prefer_elevated)
 }
 
 /// Requests from later Task Manager launches, filled by a background listener.
@@ -386,10 +475,22 @@ impl Inbox {
     }
 }
 
-/// Starts listening for Task Manager launches. `wake` is called after each request.
-pub fn listen(wake: impl Fn() + Send + 'static) -> Option<Inbox> {
+/// Starts listening for Task Manager launches and later starts. `wake` is called after each
+/// request. Only one TMOP listens: `None` when another process has the pipe already (this
+/// TMOP is then not the primary copy). With `claim_for` (a `--replacing` start, whose
+/// predecessor is still exiting), the pipe is claimed in the background for up to that long,
+/// and the inbox is returned at once.
+pub fn listen(wake: impl Fn() + Send + 'static, claim_for: std::time::Duration) -> Option<Inbox> {
     let inbox = Inbox::default();
-    win::listen(inbox.clone(), Box::new(wake)).then_some(inbox)
+    win::listen(inbox.clone(), Box::new(wake), claim_for).then_some(inbox)
+}
+
+/// The pipe's security descriptor: owned by `user_sid`, full access for that user and SYSTEM
+/// only, and a medium integrity label, so that an elevated TMOP still hears the same user's
+/// starts that are not elevated (by default its pipe would have an administrators-only DACL
+/// and a high label).
+pub fn pipe_sddl(user_sid: &str) -> String {
+    format!("O:{user_sid}D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)S:(ML;;NW;;;ME)")
 }
 
 fn message(text: &str, error: bool) {
@@ -404,8 +505,10 @@ mod win {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::{Path, PathBuf};
     use windows::core::{w, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE};
-    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, PIPE_ACCESS_INBOUND};
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND};
     use windows::Win32::System::Diagnostics::Debug::{DebugActiveProcessStop, DebugSetProcessKillOnExit};
     use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
     use windows::Win32::System::Registry::{
@@ -642,6 +745,9 @@ mod win {
     }
 
     fn pipe_name() -> String {
+        if let Some(name) = std::env::var_os("TMOP_TASKMGR_PIPE").and_then(|n| n.into_string().ok()).filter(|n| !n.is_empty()) {
+            return format!(r"\\.\pipe\{name}");
+        }
         let mut session = 0u32;
         // SAFETY: writes the session id of this process.
         unsafe {
@@ -650,48 +756,154 @@ mod win {
         format!(r"\\.\pipe\tmop-taskmgr-{session}")
     }
 
-    pub fn hand_off(page: &str) -> bool {
-        let name = pipe_name();
-        for _ in 0..10 {
-            match std::fs::OpenOptions::new().write(true).open(&name) {
-                Ok(mut f) => {
-                    let mut pid = 0u32;
-                    // Our keypress gave this process the right to take the foreground; pass it on.
-                    // SAFETY: `f` is an open pipe handle.
-                    unsafe {
-                        if GetNamedPipeServerProcessId(HANDLE(f.as_raw_handle()), &mut pid).is_ok() {
-                            let _ = AllowSetForegroundWindow(pid);
-                        }
-                    }
-                    return f.write_all(page.as_bytes()).is_ok();
+    pub fn hand_off(message: &str, prefer_elevated: bool) -> super::HandOff {
+        hand_off_to(&pipe_name(), message, prefer_elevated)
+    }
+
+    /// Opens the pipe `name` and, when [`super::plan`] says so, sends `message`.
+    pub(super) fn hand_off_to(name: &str, message: &str, prefer_elevated: bool) -> super::HandOff {
+        use super::{HandOff, Plan};
+        let Some(mut f) = open_pipe(name) else { return HandOff::NoServer };
+        let (pid, peer) = server_of(&f);
+        let elevated = crate::engine::winreg::current_process_elevated().unwrap_or_else(crate::platform::is_elevated);
+        let plan = super::plan(peer, elevated, prefer_elevated);
+        let text = match plan {
+            Plan::Skip => return HandOff::NoServer,
+            Plan::Send => message,
+            Plan::AskToExit => crate::tray::EXIT_REQUEST,
+        };
+        if plan == Plan::Send {
+            if let Some(pid) = pid {
+                // Our keypress gave this process the right to take the foreground; pass it on,
+                // to a TMOP of this user only.
+                // SAFETY: plain call with a process id.
+                unsafe {
+                    let _ = AllowSetForegroundWindow(pid);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
-                // Busy between two listener instances; try again shortly.
+            }
+        }
+        match (f.write_all(text.as_bytes()).is_ok(), plan) {
+            (true, Plan::AskToExit) => HandOff::Replacing,
+            (true, _) => HandOff::Delivered,
+            (false, _) => HandOff::NoServer,
+        }
+    }
+
+    /// The pipe `name` opened for writing; `None` when nobody listens (or it stays busy).
+    fn open_pipe(name: &str) -> Option<std::fs::File> {
+        for _ in 0..10 {
+            match std::fs::OpenOptions::new().write(true).open(name) {
+                Ok(f) => return Some(f),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+                // Busy between two listener instances; try again shortly. Access denied (a
+                // pipe of another user) ends the same way, after half a second.
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
             }
         }
-        false
+        None
     }
 
-    pub fn listen(inbox: Inbox, wake: Box<dyn Fn() + Send>) -> bool {
-        let name = wide(&pipe_name());
+    /// The process that serves `pipe`, and whether it is this user's. A server whose process
+    /// cannot be read (an elevated TMOP seen from a start that is not) is identified by the
+    /// pipe's owner, which a TMOP sets to its user (see [`super::pipe_sddl`]).
+    fn server_of(pipe: &std::fs::File) -> (Option<u32>, super::Peer) {
+        use super::Peer;
+        let handle = HANDLE(pipe.as_raw_handle());
+        let mut pid = 0u32;
+        // SAFETY: `handle` is an open pipe handle.
+        let pid = unsafe { GetNamedPipeServerProcessId(handle, &mut pid) }.ok().map(|()| pid);
+        let Ok(me) = crate::engine::winreg::current_user_sid() else { return (pid, Peer::Foreign) };
+        if let Some(Ok((sid, elevated))) = pid.map(crate::engine::winreg::process_user) {
+            return (pid, if sid == me { Peer::Ours { elevated } } else { Peer::Foreign });
+        }
+        let ours = pipe_owner(handle).is_some_and(|owner| owner == me);
+        (pid, if ours { Peer::Ours { elevated: None } } else { Peer::Foreign })
+    }
+
+    /// The owner SID of a pipe (or any kernel object) handle.
+    pub(super) fn pipe_owner(handle: HANDLE) -> Option<String> {
+        let mut owner = PSID::default();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `handle` is open; `sd` receives a LocalAlloc'ed descriptor that `owner` points into.
+        let st = unsafe { GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, Some(&mut sd)) };
+        if st != ERROR_SUCCESS {
+            return None;
+        }
+        // SAFETY: `owner` points into `sd`, which is freed once, after the copy.
+        unsafe {
+            let sid = crate::engine::winreg::sid_string(owner).ok();
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+            sid
+        }
+    }
+
+    /// The pipe's security attributes for this user (see [`super::pipe_sddl`]).
+    fn pipe_security() -> Result<crate::engine::winreg::SecurityAttributes, String> {
+        crate::engine::winreg::security_attributes_from_sddl(&super::pipe_sddl(&crate::engine::winreg::current_user_sid()?))
+    }
+
+    /// Creates an instance of the pipe `name`. `first`: the first one, which fails when the name
+    /// exists already (another TMOP, or anything else that took it).
+    fn create_instance(name: &[u16], security: &crate::engine::winreg::SecurityAttributes, first: bool) -> Option<HANDLE> {
+        let mode = if first { PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE } else { PIPE_ACCESS_INBOUND };
+        // SAFETY: valid NUL-terminated name; the attributes outlive the call.
+        let h = unsafe { CreateNamedPipeW(PCWSTR(name.as_ptr()), mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 0, 512, 0, Some(security.as_ptr())) };
+        (!h.is_invalid()).then_some(h)
+    }
+
+    pub fn listen(inbox: Inbox, wake: Box<dyn Fn() + Send>, claim_for: std::time::Duration) -> bool {
+        listen_on(&pipe_name(), inbox, wake, claim_for)
+    }
+
+    pub(super) fn listen_on(name: &str, inbox: Inbox, wake: Box<dyn Fn() + Send>, claim_for: std::time::Duration) -> bool {
+        let Ok(security) = pipe_security() else { return false };
+        let name = wide(name);
+        let first = create_instance(&name, &security, true);
+        if first.is_none() && claim_for.is_zero() {
+            return false;
+        }
+        struct Raw(HANDLE);
+        // SAFETY: a pipe handle may be used from any thread.
+        unsafe impl Send for Raw {}
+        let first = first.map(Raw);
         std::thread::Builder::new()
             .name("tmop-taskmgr-pipe".into())
-            .spawn(move || loop {
-                // SAFETY: valid NUL-terminated name; the handle is owned by `File` below.
-                let h = unsafe { CreateNamedPipeW(PCWSTR(name.as_ptr()), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 0, 512, 0, None) };
-                if h.is_invalid() {
-                    return;
-                }
-                // SAFETY: `h` is a valid pipe handle; a client that connected first is fine too.
-                let connected = unsafe { ConnectNamedPipe(h, None) };
-                // SAFETY: `h` is ours and closed when the File drops.
-                let f = unsafe { std::fs::File::from_raw_handle(h.0) };
-                if connected.is_ok() || connected.as_ref().err().map(|e| e.code() == ERROR_PIPE_CONNECTED.to_hresult()).unwrap_or(false) {
-                    let mut page = String::new();
-                    if f.take(256).read_to_string(&mut page).is_ok() {
-                        inbox.put(page.trim().to_string());
-                        wake();
+            .spawn(move || {
+                let deadline = std::time::Instant::now() + claim_for;
+                let mut current = match first {
+                    Some(Raw(h)) => h,
+                    None => loop {
+                        // The TMOP this one replaces still has the pipe; it is exiting.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if let Some(h) = create_instance(&name, &security, true) {
+                            break h;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                    },
+                };
+                loop {
+                    // SAFETY: `current` is a valid pipe handle. A client may have connected before
+                    // (ERROR_PIPE_CONNECTED), or even written and closed already (ERROR_NO_DATA):
+                    // what it wrote is still there to read.
+                    let connected = unsafe { ConnectNamedPipe(current, None) };
+                    // The next instance exists before this one closes, so the name never lapses
+                    // and no other process can take it in between.
+                    let next = create_instance(&name, &security, false);
+                    // SAFETY: `current` is ours and closed when the File drops.
+                    let f = unsafe { std::fs::File::from_raw_handle(current.0) };
+                    let early = |e: &windows::core::Error| e.code() == ERROR_PIPE_CONNECTED.to_hresult() || e.code() == ERROR_NO_DATA.to_hresult();
+                    if connected.as_ref().err().is_none_or(early) {
+                        let mut page = String::new();
+                        if f.take(256).read_to_string(&mut page).is_ok() {
+                            inbox.put(page.trim().to_string());
+                            wake();
+                        }
+                    }
+                    match next {
+                        Some(h) => current = h,
+                        None => return,
                     }
                 }
             })
@@ -741,10 +953,10 @@ mod win {
     pub fn open_real() -> Result<(), String> {
         Err("only available on Windows".into())
     }
-    pub fn hand_off(_: &str) -> bool {
-        false
+    pub fn hand_off(_: &str, _: bool) -> super::HandOff {
+        super::HandOff::NoServer
     }
-    pub fn listen(_: Inbox, _: Box<dyn Fn() + Send>) -> bool {
+    pub fn listen(_: Inbox, _: Box<dyn Fn() + Send>, _: std::time::Duration) -> bool {
         false
     }
     pub fn message(text: &str, _: bool) {
@@ -822,6 +1034,239 @@ mod tests {
         let foreign = classify(Some(r#""C:\Sys\procexp64.exe""#), cur, none);
         assert_eq!(foreign, State::Foreign(r#""C:\Sys\procexp64.exe""#.into()));
         assert!(!foreign.is_tmop());
+    }
+
+    /// Scoop: the version folder that `current` points at is registered as `current`, so the
+    /// registration follows `scoop update`. Anything else stays as it is.
+    #[cfg(windows)]
+    #[test]
+    fn scoop_installs_register_the_current_junction() {
+        let version = Path::new(r"C:\Users\me\scoop\apps\tmop\0.11.2\TMOP.exe");
+        let current = PathBuf::from(r"C:\Users\me\scoop\apps\tmop\current\TMOP.exe");
+        let to = |target: &'static str| move |p: &Path| plain(p).to_lowercase().ends_with(r"\apps\tmop\current").then(|| PathBuf::from(format!(r"\\?\C:\Users\me\scoop\apps\tmop\{target}")));
+        assert_eq!(stable_exe(version, true, to("0.11.2")), current);
+        // `current` points at another version (this one is an older copy still on disk).
+        assert_eq!(stable_exe(version, true, to("0.12.0")), version);
+        // Not a Scoop install, or no `current` next to it.
+        assert_eq!(stable_exe(version, false, to("0.11.2")), version);
+        assert_eq!(stable_exe(version, true, |_: &Path| None), version);
+        // Already the `current` spelling (its junction was not resolved).
+        assert_eq!(stable_exe(&current, true, to("0.11.2")), current);
+        let portable = Path::new(r"D:\Tools\TMOP.exe");
+        assert_eq!(stable_exe(portable, true, |p: &Path| Some(p.to_path_buf())), portable);
+        // Both spellings are this copy for the Task Manager registration.
+        let junction = |p: &Path| Some(PathBuf::from(plain(p).to_lowercase().replace(r"\current\", r"\0.11.2\")));
+        assert_eq!(classify(Some(&debugger_value(version)), &current, junction), State::Ours);
+        assert_eq!(classify(Some(&debugger_value(&current)), version, junction), State::Ours);
+        let old = r#""C:\Users\me\scoop\apps\tmop\0.11.1\TMOP.exe""#;
+        assert!(matches!(classify(Some(old), &current, junction), State::OtherTmop { exists: true, .. }));
+    }
+
+    /// The same with a real directory junction (`mklink /J` needs no administrator rights).
+    #[cfg(windows)]
+    #[test]
+    fn stable_exe_follows_a_real_junction() {
+        let root = std::env::temp_dir().join(format!("tmop-scoop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The temp folder can be an 8.3 spelling; compare long forms.
+        let root = PathBuf::from(plain(&std::fs::canonicalize(&root).unwrap()));
+        let version = root.join(r"apps\tmop\0.11.2");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(version.join("TMOP.exe"), b"").unwrap();
+        let current = root.join(r"apps\tmop\current");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&current).arg(&version).output().map(|o| o.status.success()).unwrap_or(false);
+        let resolve = |p: &Path| std::fs::canonicalize(p).ok();
+        let canonical = resolve(&current.join("TMOP.exe")).map(|p| PathBuf::from(plain(&p)));
+        let stable = canonical.as_deref().map(|c| stable_exe(c, true, resolve));
+        let same = canonical.as_deref().zip(stable.as_deref()).is_some_and(|(c, s)| is_this_exe(c, s, resolve));
+        // Cleaned up before the checks, so a failure leaves nothing behind.
+        let _ = std::fs::remove_dir(&current);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(made, "mklink /J failed");
+        assert!(same_path(canonical.as_deref().unwrap(), &version.join("TMOP.exe")), "{canonical:?}");
+        assert!(same_path(stable.as_deref().unwrap(), &current.join("TMOP.exe")), "{stable:?}");
+        assert!(same);
+    }
+
+    /// Nothing goes to a process of another user; an elevated start replaces a TMOP that is not
+    /// elevated only when it opens the window.
+    #[test]
+    fn hand_off_plan() {
+        let ours = |elevated| Peer::Ours { elevated };
+        for (self_elevated, prefer) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(plan(Peer::Foreign, self_elevated, prefer), Plan::Skip);
+            assert_eq!(plan(ours(Some(true)), self_elevated, prefer), Plan::Send);
+            // Unknown elevation: the pipe's owner said it is ours, its token could not be read
+            // (an elevated TMOP seen from a start that is not).
+            assert_eq!(plan(ours(None), self_elevated, prefer), Plan::Send);
+        }
+        assert_eq!(plan(ours(Some(false)), false, true), Plan::Send);
+        assert_eq!(plan(ours(Some(false)), true, false), Plan::Send, "--tray and --exit never replace");
+        assert_eq!(plan(ours(Some(false)), true, true), Plan::AskToExit);
+    }
+
+    #[test]
+    fn pipe_descriptor_text() {
+        let sddl = pipe_sddl("S-1-5-21-1-2-3-1001");
+        assert_eq!(sddl, "O:S-1-5-21-1-2-3-1001D:P(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)S:(ML;;NW;;;ME)");
+    }
+
+    #[cfg(windows)]
+    mod pipe {
+        use super::super::win::{hand_off_to, listen_on};
+        use super::super::*;
+        use std::time::{Duration, Instant};
+
+        fn unique(tag: &str) -> String {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            format!(r"\\.\pipe\tmop-test-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+        }
+
+        fn wait_for(inbox: &Inbox) -> Option<String> {
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until {
+                if let Some(m) = inbox.take() {
+                    return Some(m);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            None
+        }
+
+        /// A TMOP of this user hears later starts, again and again; with no listener nobody does.
+        #[test]
+        fn hands_over_to_a_listener_of_this_user() {
+            let name = unique("ok");
+            assert_eq!(hand_off_to(&name, "x", false), HandOff::NoServer);
+            let inbox = Inbox::default();
+            assert!(listen_on(&name, inbox.clone(), Box::new(|| {}), Duration::ZERO));
+            for page in ["processes", "", "performance"] {
+                assert_eq!(hand_off_to(&name, page, true), HandOff::Delivered);
+                assert_eq!(wait_for(&inbox).as_deref(), Some(page));
+            }
+        }
+
+        /// One listener per name: a second TMOP (or anything that took the name first) does not
+        /// get it, so it is not the primary copy.
+        #[test]
+        fn the_first_instance_is_exclusive() {
+            let name = unique("first");
+            assert!(listen_on(&name, Inbox::default(), Box::new(|| {}), Duration::ZERO));
+            assert!(!listen_on(&name, Inbox::default(), Box::new(|| {}), Duration::ZERO));
+
+            // A squatter with a plain pipe of that name.
+            use windows::core::PCWSTR;
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+            use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+            let squat = unique("squat");
+            let w = crate::pro::winutil::wide(&squat);
+            // SAFETY: valid name; the handle is closed below.
+            let h = unsafe { CreateNamedPipeW(PCWSTR(w.as_ptr()), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, 0, 512, 0, None) };
+            assert!(!h.is_invalid());
+            assert!(!listen_on(&squat, Inbox::default(), Box::new(|| {}), Duration::ZERO));
+            // SAFETY: created above.
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+        }
+
+        /// A `--replacing` start gets the pipe once the TMOP before it lets go.
+        #[test]
+        fn a_replacing_start_claims_the_pipe_once_it_is_free() {
+            let name = unique("claim");
+            use windows::core::PCWSTR;
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+            use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+            let w = crate::pro::winutil::wide(&name);
+            // SAFETY: valid name; the handle is closed below.
+            let old = unsafe { CreateNamedPipeW(PCWSTR(w.as_ptr()), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, 0, 512, 0, None) };
+            assert!(!old.is_invalid());
+            let inbox = Inbox::default();
+            assert!(listen_on(&name, inbox.clone(), Box::new(|| {}), Duration::from_secs(3)));
+            std::thread::sleep(Duration::from_millis(300));
+            // SAFETY: created above; the old TMOP exits.
+            unsafe {
+                let _ = CloseHandle(old);
+            }
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut result = HandOff::NoServer;
+            while Instant::now() < until && result != HandOff::Delivered {
+                result = hand_off_to(&name, "summary", false);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(result, HandOff::Delivered);
+            assert_eq!(wait_for(&inbox).as_deref(), Some("summary"));
+        }
+
+        /// The pipe Windows made carries the descriptor: this user owns it, only this user and
+        /// SYSTEM have access, and its label is medium (so starts that are not elevated reach
+        /// an elevated TMOP). What it means across elevation can only be seen elevated.
+        #[test]
+        fn the_pipe_has_the_descriptor() {
+            use crate::engine::winreg::{current_user_sid, security_attributes_from_sddl, take_local_wide};
+            use windows::core::{PCWSTR, PWSTR};
+            use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HLOCAL};
+            use windows::Win32::Security::Authorization::{ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT};
+            use windows::Win32::Security::{DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+            use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+            use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+            let sid = current_user_sid().unwrap();
+            let attrs = security_attributes_from_sddl(&pipe_sddl(&sid)).unwrap();
+            let w = crate::pro::winutil::wide(&unique("sd"));
+            // SAFETY: valid name and attributes; the handle is closed below.
+            let h = unsafe { CreateNamedPipeW(PCWSTR(w.as_ptr()), PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, 0, 512, 0, Some(attrs.as_ptr())) };
+            assert!(!h.is_invalid());
+            let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            let mut owner = PSID::default();
+            // SAFETY: `h` is open; `sd` is freed below, `owner` points into it.
+            let st = unsafe { GetSecurityInfo(h, SE_KERNEL_OBJECT, info, Some(&mut owner), None, None, None, Some(&mut sd)) };
+            assert_eq!(st, ERROR_SUCCESS);
+            // SAFETY: `owner` points into `sd`, which is still alive.
+            let owner = unsafe { crate::engine::winreg::sid_string(owner) }.unwrap();
+            let mut text = PWSTR::null();
+            // SAFETY: `sd` is valid; `text` is freed by take_local_wide.
+            unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, info & !OWNER_SECURITY_INFORMATION, &mut text, None) }.unwrap();
+            let text = take_local_wide(text);
+            // SAFETY: allocated by GetSecurityInfo; the pipe was created above.
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(sd.0)));
+                let _ = CloseHandle(h);
+            }
+            assert_eq!(owner, sid);
+            // SDDL may print a well-known alias for the user (LA for the built-in Administrator).
+            let aces: Vec<&str> = text.strip_prefix("D:P").unwrap_or_else(|| panic!("{text}")).split("S:").next().unwrap().split(')').filter(|a| !a.is_empty()).collect();
+            assert_eq!(aces.len(), 2, "{text}");
+            assert!(aces.iter().all(|a| a.starts_with("(A;;FA;;;")), "{text}");
+            assert!(aces.iter().any(|a| a.ends_with(";;;SY")), "{text}");
+            assert!(text.contains("(ML;;NW;;;ME)"), "{text}");
+        }
+
+        /// When the server's process cannot be read (an elevated TMOP seen from a start that is
+        /// not), the pipe's owner tells: a client's write handle can read it, and it is this user.
+        #[test]
+        fn a_client_reads_the_pipe_owner() {
+            use std::os::windows::io::AsRawHandle;
+            let name = unique("owner");
+            assert!(listen_on(&name, Inbox::default(), Box::new(|| {}), Duration::ZERO));
+            let f = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+            let owner = super::super::win::pipe_owner(windows::Win32::Foundation::HANDLE(f.as_raw_handle()));
+            assert_eq!(owner, crate::engine::winreg::current_user_sid().ok());
+        }
+
+        /// The listener's own process is this user's, and its elevation is known.
+        #[test]
+        fn this_process_is_ours() {
+            let (sid, elevated) = crate::engine::winreg::process_user(std::process::id()).unwrap();
+            assert_eq!(sid, crate::engine::winreg::current_user_sid().unwrap());
+            assert_eq!(elevated, crate::engine::winreg::current_process_elevated());
+            assert!(elevated.is_some());
+            // The System process cannot be read (or is not this user's).
+            assert!(crate::engine::winreg::process_user(4).map(|(s, _)| s != sid).unwrap_or(true));
+        }
     }
 
     #[test]

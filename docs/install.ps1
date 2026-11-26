@@ -95,6 +95,13 @@ $exe = Join-Path $dir 'TMOP.exe'
 Get-Process -Name TMOP -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 
+# Start with Windows: this copy's entry would start nothing once TMOP.exe is gone.
+$run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$entry = (Get-ItemProperty $run -Name TMOP -ErrorAction SilentlyContinue).TMOP
+if ($entry -and $entry.Trim() -like "`"$exe`"*") {
+    Remove-ItemProperty $run -Name TMOP -Force -ErrorAction SilentlyContinue
+}
+
 # If this copy opens instead of Task Manager, hand that back to Windows first, or
 # Ctrl+Shift+Esc would open nothing once TMOP.exe is gone.
 $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe'

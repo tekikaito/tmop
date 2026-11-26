@@ -475,6 +475,45 @@ mod tests {
         assert_eq!(t.step(&r, s(60), Some(95.0)), Some(Event::Fire));
     }
 
+    /// Hidden in the notification area TMOP samples every [`crate::tray::HIDDEN_INTERVAL`] (5 s).
+    /// The hold time is measured between the sample times, so an alert never fires early: it
+    /// fires at the first sample at least `hold` after the first one seen above the limit, which
+    /// is at most one interval late. The interval is below [`MAX_GAP`], so the slower samples
+    /// still make one unbroken stretch, and the alert does fire.
+    #[test]
+    fn hidden_sampling_fires_on_time_or_one_interval_late_never_early() {
+        const { assert!(crate::tray::HIDDEN_INTERVAL.as_secs() <= MAX_GAP.as_secs()) };
+        let step = crate::tray::HIDDEN_INTERVAL.as_secs();
+        for hold_s in [1, 2, 5, 7, 30, 60, 61, 3600] {
+            let r = Rule { hold: s(hold_s), ..rule() };
+            let mut t = Tracker::default();
+            let samples: Vec<_> = (0..=(3600 + 2 * step) / step).map(|i| (i * step, Some(95.0))).collect();
+            let fired = run(&mut t, &r, &samples);
+            assert_eq!(fired.len(), 1, "hold {hold_s} s: {fired:?}");
+            let at = fired[0].0;
+            assert!(at >= hold_s && at < hold_s + step, "hold {hold_s} s fired at {at} s");
+        }
+    }
+
+    /// Hiding the window in the middle of a stretch above the limit (1 s samples, then 5 s ones)
+    /// keeps the time already counted; showing it again does the same the other way.
+    #[test]
+    fn hiding_mid_stretch_keeps_the_time_counted() {
+        let step = crate::tray::HIDDEN_INTERVAL.as_secs();
+        let r = rule();
+        let mut t = Tracker::default();
+        assert!(run(&mut t, &r, &hold(95.0, 0, 40)).is_empty(), "shown: 40 s above");
+        // Hidden: 45, 50 and 55 s are not yet 60 s; 60 s is the first hidden sample past the hold.
+        let hidden: Vec<_> = (1..=3).map(|i| (40 + i * step, Some(95.0))).collect();
+        assert!(run(&mut t, &r, &hidden).is_empty());
+        assert_eq!(t.step(&r, s(40 + 4 * step), Some(95.0)), Some(Event::Fire));
+        // Hidden first, shown later: the same stretch.
+        let mut t = Tracker::default();
+        assert!(run(&mut t, &r, &[(0, Some(95.0)), (step, Some(95.0)), (2 * step, Some(95.0))]).is_empty());
+        assert!(run(&mut t, &r, &hold(95.0, 11, 59)).is_empty());
+        assert_eq!(t.step(&r, s(60), Some(95.0)), Some(Event::Fire));
+    }
+
     #[test]
     fn a_long_gap_keeps_a_fired_alert_fired() {
         let mut t = Tracker::default();
