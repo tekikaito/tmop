@@ -725,18 +725,21 @@ impl Sampler {
                 .name("tmop-sampler".into())
                 .spawn(move || {
                     let mut collector = Collector::new();
-                    let mut last = Instant::now() - Duration::from_secs(3600);
+                    // None before the first sample. Not "now minus an hour": an Instant cannot go back
+                    // before the boot on some platforms, and that would panic in the first hour.
+                    let mut last: Option<Instant> = None;
+                    let since_last = |last: Option<Instant>| last.map_or(Duration::MAX, |t| t.elapsed());
                     while !stop.load(Ordering::Relaxed) {
                         let ms = interval_ms.load(Ordering::Relaxed);
-                        let due = (ms > 0 && last.elapsed() >= Duration::from_millis(ms)) || refresh_now.swap(false, Ordering::Relaxed);
+                        let due = (ms > 0 && since_last(last) >= Duration::from_millis(ms)) || refresh_now.swap(false, Ordering::Relaxed);
                         if !due {
                             // Until the next sample is due, or a refresh, a new interval or the end.
                             let ready = || stop.load(Ordering::Relaxed) || refresh_now.load(Ordering::Relaxed) || interval_ms.load(Ordering::Relaxed) != ms;
-                            wake.sleep(sampler_wait(ms, last.elapsed()), ready);
+                            wake.sleep(sampler_wait(ms, since_last(last)), ready);
                             continue;
                         }
                         {
-                            last = Instant::now();
+                            last = Some(Instant::now());
                             let (mut snap, procs) = cost::time(cost::Part::Collect, || collector.collect());
                             // Invariant: CPU% normalisers divide by it.
                             snap.cpu.logical_count = snap.cpu.logical_count.max(1);
@@ -807,6 +810,23 @@ mod tests {
         assert_eq!(rx.recv_timeout(wait), Ok(3), "woken by the new interval");
         assert_eq!(rx.recv_timeout(wait), Ok(4), "and sampling at it");
         drop(s);
+    }
+
+    /// Dropping the sampler ends its thread, also while it sleeps: the thread owns the callback,
+    /// so the callback's channel disconnects once the thread is gone.
+    #[test]
+    fn dropping_the_sampler_ends_its_thread() {
+        for interval in [Some(Duration::from_millis(50)), None, Some(Duration::from_secs(3600))] {
+            let (tx, rx) = std::sync::mpsc::channel::<u64>();
+            let tx = Mutex::new(tx);
+            let s = Sampler::start(interval, 8, move |snap, _| {
+                let _ = tx.lock().map(|t| t.send(snap.seq));
+            });
+            assert_eq!(rx.recv_timeout(Duration::from_secs(20)), Ok(1), "{interval:?}: the first sample");
+            drop(s);
+            let gone = (0..200).any(|_| matches!(rx.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
+            assert!(gone, "{interval:?}: the thread ended");
+        }
     }
 
     #[test]
