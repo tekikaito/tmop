@@ -518,8 +518,11 @@ pub struct App {
     pub font_list: settings_page::FontList,
     last_seq: u64,
     last_sample_at: Instant,
+    /// The history time of the sample last taken (`Stamp::t`): App history counts each sample
+    /// as long as it really was since the one before (#201).
+    last_sample_t: Option<f64>,
     /// The interval the sampler was last given (slower while hidden in the tray; see
-    /// [`App::set_sample_interval`]); App history counts each sample as that long.
+    /// [`App::set_sample_interval`]); App history counts a sample without a time as that long.
     sample_interval: Option<Duration>,
     /// The power source, for "Turn on automatically on battery" (#194).
     battery: crate::lowpower::BatteryWatch,
@@ -660,6 +663,7 @@ impl App {
             font_list: settings_page::FontList::default(),
             last_seq: 0,
             last_sample_at: Instant::now(),
+            last_sample_t: None,
             sample_interval: None,
             battery,
             last_frame_at: Instant::now(),
@@ -1065,8 +1069,8 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe 0.37 skips `ui` while the window is minimized or hidden (0.29 still ran `update`
         // then): new samples are taken in here, so recording and App history go on meanwhile.
-        let (snap, _, rows) = self.snapshot();
-        self.take_sample(&snap, &rows, Instant::now());
+        let (snap, hist, rows) = self.snapshot();
+        self.take_sample(&snap, &hist, &rows, Instant::now());
         // The sample rate follows low-power mode, the battery and a recording also while the
         // window is minimized (#194). Hidden in the notification area, `window_logic` sets its
         // own, slower rate (`tray::hidden_interval`, from this same interval).
@@ -1299,14 +1303,20 @@ impl App {
 
     /// Feeds a sample the sampler has not delivered before to the recorder, App history and the
     /// temperature log.
-    fn take_sample(&mut self, snap: &Snapshot, rows: &[ProcessRow], now: Instant) {
+    fn take_sample(&mut self, snap: &Snapshot, hist: &History, rows: &[ProcessRow], now: Instant) {
         if snap.seq != self.last_seq {
             self.last_seq = snap.seq;
             self.last_sample_at = now;
             self.recorder.docker = (self.docker.last_status == EngineStatus::Connected).then_some(self.docker.ui.snap.totals);
             self.recorder.on_sample(snap, rows);
-            let dt = self.sample_interval.or_else(|| self.interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
-            self.pro.inv.history.update(rows, dt);
+            let interval = self.sample_interval.or_else(|| self.interval()).map(|d| d.as_secs_f64()).unwrap_or(1.0);
+            let t = hist.times.back().map(|s| s.t);
+            let dt = match (t, self.last_sample_t) {
+                (Some(t), Some(before)) if t > before => t - before,
+                _ => interval,
+            };
+            self.last_sample_t = t;
+            self.pro.inv.history.update(rows, dt, interval);
             self.perf.note_temperature(snap.thermal.max_c());
         }
     }
@@ -1356,7 +1366,7 @@ impl App {
         self.last_frame_at = now;
         // Cleared here: what this frame draws says whether the next one comes at the frame rate.
         let _ = widgets::take_motion();
-        self.take_sample(&snap, &rows, now);
+        self.take_sample(&snap, &hist, &rows, now);
         let interval = self.interval();
         // Low-power mode (#194): no glide, no glow or fill on graphs; the settings stay as they are.
         let low = self.low_power().is_some();

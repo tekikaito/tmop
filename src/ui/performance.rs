@@ -12,7 +12,7 @@ use super::theme::{self, lighten, mix, with_alpha, Palette};
 use super::widgets::{self, draw_graph, Button, ButtonSize, Graph, GraphLine, Icon};
 use super::{App, Device, FrameData};
 use crate::docker::model::{Container, EngineStatus};
-use crate::metrics::{DiskDrive, GpuAdapter, GpuTempKind, Series, SOURCES};
+use crate::metrics::{Clock, DiskDrive, GpuAdapter, GpuTempKind, Series, SOURCES};
 use crate::process::{format_bytes, format_rate};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, Rect, Sense, Shape, Stroke};
 use super::widgets::ScrollArea029 as _;
@@ -448,7 +448,7 @@ impl App {
             if d == Device::Docker {
                 widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
             } else {
-                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+                widgets::sparkline_timed(&p, spark, &view.lines, 0.12, view.dashed_second, fd.hist.sample_clock());
             }
             if resp.clicked() {
                 *act = Some(match (adapter, drive) {
@@ -459,7 +459,7 @@ impl App {
             }
             y += card_h + 6.0;
         }
-        let span = span_text(widgets::spark_visible(list.width() - 24.0, fd.hist.cpu.values.len(), fd.hist.cpu.capacity), self.interval());
+        let span = span_text(widgets::spark_secs(list.width() - 24.0, &fd.hist.cpu, fd.hist.sample_clock(), self.interval()));
         p.text(pos2(list.left() + 2.0, y + 2.0), Align2::LEFT_TOP, format!("previews: last {span}"), theme::mono(11.0), pal.text_faint);
         let button = Rect::from_min_size(pos2(list.left(), y + 18.0), vec2(120.0, 28.0));
         if kit::row_ui(ui, button, |ui| Button::ghost("Refresh").size(ButtonSize::Compact).icon(Icon::Refresh).show(ui, &pal).clicked()) {
@@ -481,7 +481,7 @@ impl App {
         let mut cy = y + 20.0;
         let iv = self.interval();
         let gs = &self.settings.graphs;
-        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv, phase: fd.phase, glide: fd.glide };
+        let pc = PlotCtx { pal: &pal, smooth: gs.smooth_curves, bloom: fd.bloom, neutral: !gs.color_keyed, regions: widgets::regions_for(gs.history_multiplier, gs.compressed_time), px_per_update: gs.pixels_per_update.clamp(2, 64) as f32, interval: iv, phase: fd.phase, glide: fd.glide, clock: fd.hist.sample_clock() };
         let s = fd.snap;
         match self.device {
             Device::Cpu => {
@@ -497,7 +497,7 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let accent = pal.accent;
                 let lines = [PlotLine::new(&fd.hist.cpu, accent, (0.0, 100.0)), PlotLine::new(&fd.hist.kernel, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {:.0}%", ago(iv, age), at(&fd.hist.cpu, age), at(&fd.hist.kernel, age));
+                let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {:.0}%", pc.ago(age), at(&fd.hist.cpu, age), at(&fd.hist.kernel, age));
                 let (ph, hover) = plot(ui, &pc, "cpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let temp = s.thermal.cpu.as_ref().map(|c| c.1).or_else(|| s.thermal.board_max_c()).map(|t| self.temp(t)).unwrap_or_else(|| "\u{2014}".to_string());
@@ -519,7 +519,7 @@ impl App {
                 let hd = Head { title: "Memory", sub: format!("{} total physical memory", format_bytes(s.memory.total as f64)), value: (format!("{:.0}", fd.smooth.memory), "%".into()), side: bytes_pair(used, s.memory.total) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.memory, c, (0.0, 100.0))];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {}", ago(iv, age), at(&fd.hist.memory, age), format_bytes(at(&fd.hist.memory_bytes, age) as f64));
+                let readout = |age: usize| format!("{} \u{b7} {:.0}% \u{b7} {}", pc.ago(age), at(&fd.hist.memory, age), format_bytes(at(&fd.hist.memory_bytes, age) as f64));
                 let (ph, hover) = plot(ui, &pc, "memory", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let m = &s.memory;
@@ -598,7 +598,7 @@ impl App {
                 let hd = Head { title: &title, sub: sub.into(), value, side: gpu_temp.clone().unwrap_or_default() };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(series, c, (0.0, 100.0))];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(series, age));
+                let readout = |age: usize| format!("{} \u{b7} {:.0}%", pc.ago(age), at(series, age));
                 let (ph, hover) = plot(ui, &pc, "gpu", ix, cy, gw, 200.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let g = &s.gpu;
@@ -680,7 +680,7 @@ impl App {
                 let hd = Head { title, sub: sub.into(), value, side: format!("R {} \u{b7} W {}", format_rate(read_bps), format_rate(write_bps)) };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(h_active, c, (0.0, 100.0))];
-                let readout = |age: usize| format!("{} \u{b7} {:.0}%", ago(iv, age), at(h_active, age));
+                let readout = |age: usize| format!("{} \u{b7} {:.0}%", pc.ago(age), at(h_active, age));
                 let (ph, hover) = plot(ui, &pc, "disk", ix, cy, gw, 150.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let which = match one {
@@ -695,7 +695,7 @@ impl App {
                 cy += 34.0;
                 let m = widgets::eased(ui.ctx(), "perf-disk-rate", h_read.max().max(h_write.max()).max(1024.0 * 1024.0));
                 let lines = [PlotLine::new(h_read, c, (0.0, m)), PlotLine::new(h_write, write, (0.0, m))];
-                let readout = |age: usize| format!("{} \u{b7} R {} \u{b7} W {}", ago(iv, age), format_rate(at(h_read, age) as f64), format_rate(at(h_write, age) as f64));
+                let readout = |age: usize| format!("{} \u{b7} R {} \u{b7} W {}", pc.ago(age), format_rate(at(h_read, age) as f64), format_rate(at(h_write, age) as f64));
                 let (ph, hover) = plot(ui, &pc, "disk-rate", ix, cy, iw, 130.0, 64.0, &rate_labels(m), &lines, &readout);
                 cy += ph + 10.0;
                 legend_row(&p, &pal, ix + 64.0, cy + 12.0, &[("Read", c, false), ("Write", write, false)], hover.as_deref(), ix + iw);
@@ -722,7 +722,7 @@ impl App {
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let m = widgets::eased(ui.ctx(), "perf-net-rate", fd.hist.net_rx.max().max(fd.hist.net_tx.max()).max(100.0 * 1024.0));
                 let lines = [PlotLine::new(&fd.hist.net_rx, c, (0.0, m)), PlotLine::new(&fd.hist.net_tx, c, (0.0, m)).dashed(c)];
-                let readout = |age: usize| format!("{} \u{b7} \u{2193} {} \u{b7} \u{2191} {}", ago(iv, age), format_rate(at(&fd.hist.net_rx, age) as f64), format_rate(at(&fd.hist.net_tx, age) as f64));
+                let readout = |age: usize| format!("{} \u{b7} \u{2193} {} \u{b7} \u{2191} {}", pc.ago(age), format_rate(at(&fd.hist.net_rx, age) as f64), format_rate(at(&fd.hist.net_tx, age) as f64));
                 let (ph, hover) = plot(ui, &pc, "network", ix, cy, gw, 200.0, 64.0, &rate_labels(m), &lines, &readout);
                 if figure {
                     let n = &s.network;
@@ -754,7 +754,7 @@ impl App {
                 let hd = Head { title: "Thermals", sub: src, value, side };
                 cy += head(&p, &pal, ix, cy, iw, &hd) + 10.0;
                 let lines = [PlotLine::new(&fd.hist.thermal, c, (0.0, THERMAL_MAX_C))];
-                let readout = |age: usize| format!("{} \u{b7} {}", ago(iv, age), temp_or_none(at(&fd.hist.thermal, age), |t| self.temp(t)));
+                let readout = |age: usize| format!("{} \u{b7} {}", pc.ago(age), temp_or_none(at(&fd.hist.thermal, age), |t| self.temp(t)));
                 let labels = thermal_axis_labels(self.settings.fahrenheit());
                 let (ph, hover) = plot(ui, &pc, "thermal", ix, cy, gw, 200.0, 36.0, &labels, &lines, &readout);
                 if figure {
@@ -797,7 +797,7 @@ impl App {
                 let lines = [PlotLine::new(&self.perf_docker.totals_cpu, c, (0.0, 100.0)), PlotLine::new(&self.perf_docker.totals_mem, mem_c, (0.0, mem_max))];
                 let readout = |age: usize| format!("{} \u{b7} {:.1}% \u{b7} {}", ago(iv, age), at(&self.perf_docker.totals_cpu, age), format_bytes(at(&self.perf_docker.totals_mem, age) as f64));
                 // Docker stats arrive on their own clock, so the plot does not glide on the sampler's.
-                let still = PlotCtx { phase: 0.0, glide: false, ..pc };
+                let still = PlotCtx { phase: 0.0, glide: false, clock: None, ..pc };
                 let (ph, hover) = plot(ui, &still, "docker", ix, cy, gw, 160.0, 36.0, &percent_labels(), &lines, &readout);
                 if figure {
                     let known = |v: &str| dash_or((v != "N/A").then(|| v.to_string()));
@@ -882,7 +882,7 @@ impl App {
             if *d == Device::Docker {
                 widgets::sparkline_unsynced(&p, spark, &view.lines, 0.12);
             } else {
-                widgets::sparkline(&p, spark, &view.lines, 0.12, view.dashed_second);
+                widgets::sparkline_timed(&p, spark, &view.lines, 0.12, view.dashed_second, fd.hist.sample_clock());
             }
             if resp.clicked() {
                 *act = Some(Act::Device(*d));
@@ -934,7 +934,7 @@ impl App {
         let left = Rect::from_min_size(pos2(x, y), vec2(lw, h));
         // What a core's sparkline (the cell less its 1 px inset) shows of the history.
         let spark_w = (c_w - 6.0 * (cols - 1) as f32) / cols as f32 - 2.0;
-        let span = span_text(fd.hist.per_core.first().map_or(0, |s| widgets::spark_visible(spark_w, s.values.len(), s.capacity)), iv);
+        let span = span_text(fd.hist.per_core.first().map_or(samples_secs(0, iv), |s| widgets::spark_secs(spark_w, s, fd.hist.sample_clock(), iv)));
         let c = kit::section_card(&p, left, &pal, &format!("Logical processors \u{b7} last {span}"), "");
         // View toggle and fold button at the right of the heading.
         let mut tx = left.right() - 22.0;
@@ -978,7 +978,7 @@ impl App {
                 match self.perf.core_view {
                     CoreView::Graphs => {
                         p.rect_filled(cell, 4.0, pal.well());
-                        widgets::sparkline(&p, Rect::from_min_max(pos2(cell.left() + 1.0, cell.top() + 18.0), cell.max - vec2(1.0, 1.0)), &[(series, pal.accent, (0.0, 100.0))], 0.2, false);
+                        widgets::sparkline_timed(&p, Rect::from_min_max(pos2(cell.left() + 1.0, cell.top() + 18.0), cell.max - vec2(1.0, 1.0)), &[(series, pal.accent, (0.0, 100.0))], 0.2, false, fd.hist.sample_clock());
                         p.rect_stroke(cell, 4.0, Stroke::new(1.0_f32, pal.row_rule()), egui::StrokeKind::Outside);
                         p.text(cell.left_top() + vec2(6.0, 5.0), Align2::LEFT_TOP, i.to_string(), theme::mono(10.0), pal.text_faint);
                         p.text(cell.right_top() + vec2(-6.0, 4.0), Align2::RIGHT_TOP, format!("{pct:.0}%"), theme::mono(11.0), pal.text_dim);
@@ -998,7 +998,7 @@ impl App {
         // Top CPU consumers.
         let right = if wide { Rect::from_min_size(pos2(x + lw + GAP, y), vec2(rw, h)) } else { Rect::from_min_size(pos2(x, y + h + GAP), vec2(rw, right_natural)) };
         let secs = self.perf.top_spark.values().map(|s| s.values.len()).max().unwrap_or(0);
-        let tc = kit::section_card(&p, right, &pal, &format!("Top CPU consumers \u{b7} {}", span_text(secs, iv)), "");
+        let tc = kit::section_card(&p, right, &pal, &format!("Top CPU consumers \u{b7} {}", span_text(samples_secs(secs, iv))), "");
         let cap = self.spark_cap();
         let hi = order.iter().filter_map(|g| self.perf.top_spark.get(&g.key)).map(|s| s.max()).fold(5.0_f32, f32::max);
         for (i, g) in order.iter().enumerate() {
@@ -1181,11 +1181,25 @@ struct PlotCtx<'a> {
     /// history across the width.
     regions: u32,
     px_per_update: f32,
-    /// The update interval, for the time labels.
+    /// The update interval, for the time labels of lines without a `clock`.
     interval: Option<Duration>,
     /// The newest sample scrolls in over the update interval (`FrameData::phase`, `glide`).
     phase: f32,
     glide: bool,
+    /// When the samples were taken, for lines of the system history (#201): positions, time
+    /// labels and the hover readout follow the real times. `None` for other series.
+    clock: Option<Clock<'a>>,
+}
+
+impl PlotCtx<'_> {
+    /// "-m:ss" for the sample `age` samples back from the newest: by its time where the clock has
+    /// it, else by the update interval.
+    fn ago(&self, age: usize) -> String {
+        match self.clock {
+            Some(c) => ago_secs(c.secs(age) as f32),
+            None => ago(self.interval, age),
+        }
+    }
 }
 
 /// A history graph with y labels, time labels and a readout on hover. `gutter` is the width
@@ -1220,13 +1234,17 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
         g.dashed = l.dashed;
         g.phase = cx.phase;
         g.glide = cx.glide;
+        g.clock = cx.clock;
         draw_graph(&p, gr, &g);
     }
-    // Time labels from the history length and the update interval.
+    // The clock places the lines it covers by time; the first line decides for labels and hover.
+    let n = lines.first().map_or(0, |l| l.series.values.len());
+    let clock = cx.clock.filter(|c| c.covers(n));
+    // Time labels: x is time, in updates of the clock's step (or of the update interval).
     let label_y = gr.bottom() + 6.0;
-    if let Some(iv) = cx.interval {
+    if let Some(step) = clock.map(|c| c.step()).or_else(|| cx.interval.map(|iv| iv.as_secs_f32())) {
         for i in 0..6 {
-            let secs = (axis.age_at(gr.width() * (5 - i) as f32 / 5.0) * iv.as_secs_f32()).round() as u64;
+            let secs = (axis.age_at(gr.width() * (5 - i) as f32 / 5.0) * step).round() as u64;
             let text = if i == 5 { "now".to_string() } else { format!("\u{2212}{}:{:02}", secs / 60, secs % 60) };
             let lx = gr.left() + gr.width() * i as f32 / 5.0;
             let anchor = match i {
@@ -1240,13 +1258,17 @@ fn plot(ui: &mut egui::Ui, cx: &PlotCtx<'_>, id: &str, x: f32, y: f32, w: f32, h
     // Cursor.
     let resp = ui.interact(gr, ui.scope_id().with(("plot", id)), Sense::hover());
     let mut text = None;
-    if let (Some(pos), Some(first)) = (resp.hover_pos(), lines.first()) {
-        let n = first.series.values.len();
+    if let Some(pos) = resp.hover_pos().filter(|_| !lines.is_empty()) {
         // The samples sit where draw_graph put them this frame (shifted by the glide).
         let offset = if cx.glide && n >= 2 { cx.phase.clamp(0.0, 1.0) - 1.0 } else { cx.phase.clamp(0.0, 1.0) };
-        let age = (axis.age_at(gr.right() - pos.x) - offset).round().max(0.0) as usize;
-        if age < n {
-            let cx = axis.x_of(age as f32 + offset).min(gr.right());
+        let u = axis.age_at(gr.right() - pos.x) - offset;
+        // The sample nearest the pointer and its position in updates: by time, or one apart.
+        let hit = match clock {
+            Some(c) => c.nearest(u, n).map(|age| (age, c.age(age))),
+            None => Some(u.round().max(0.0) as usize).filter(|a| *a < n).map(|a| (a, a as f32)),
+        };
+        if let Some((age, at_u)) = hit {
+            let cx = axis.x_of(at_u + offset).min(gr.right());
             p.line_segment([pos2(cx, gr.top()), pos2(cx, gr.bottom())], Stroke::new(1.0_f32, pal.raise(0.3)));
             for l in lines {
                 // A sample without a reading (NaN) has no point on the trace.
@@ -1345,18 +1367,25 @@ fn at(s: &Series, age: usize) -> f32 {
 /// "-m:ss" for a sample `age` updates old.
 fn ago(iv: Option<Duration>, age: usize) -> String {
     match iv {
-        Some(iv) => {
-            let secs = (age as f32 * iv.as_secs_f32()).round() as u64;
-            format!("\u{2212}{}:{:02}", secs / 60, secs % 60)
-        }
+        Some(iv) => ago_secs(age as f32 * iv.as_secs_f32()),
         None => format!("\u{2212}{age}"),
     }
 }
 
-/// How long `samples` updates cover: "45 s", "16 min", "2.5 h".
-fn span_text(samples: usize, iv: Option<Duration>) -> String {
-    let Some(iv) = iv else { return "history".to_string() };
-    let secs = (samples.saturating_sub(1)) as f32 * iv.as_secs_f32();
+/// "-m:ss" for a sample `secs` seconds old.
+fn ago_secs(secs: f32) -> String {
+    let secs = secs.round().max(0.0) as u64;
+    format!("\u{2212}{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The time `samples` updates of `iv` cover (from the first to the last); `None` while paused.
+fn samples_secs(samples: usize, iv: Option<Duration>) -> Option<f32> {
+    iv.map(|iv| samples.saturating_sub(1) as f32 * iv.as_secs_f32())
+}
+
+/// How long `secs` seconds of history are: "45 s", "16 min", "2.5 h" ("history" if unknown).
+fn span_text(secs: Option<f32>) -> String {
+    let Some(secs) = secs else { return "history".to_string() };
     if secs < 90.0 {
         format!("{:.0} s", secs.max(1.0))
     } else if secs < 5400.0 {
@@ -1551,6 +1580,33 @@ mod tests {
         }
     }
 
+    /// After a switch from 1 s to 2 s sampling the readout names the real age of the sample under
+    /// the pointer, and that sample is the one drawn there (#201).
+    #[test]
+    fn the_hover_readout_follows_the_sample_times() {
+        let pal = theme::DARK;
+        let mut h = crate::metrics::History::new(60);
+        let (one, two) = (Some(Duration::from_secs(1)), Some(Duration::from_secs(2)));
+        for i in 0..50 {
+            let mut snap = crate::metrics::Snapshot::default();
+            snap.cpu.total_pct = i as f32;
+            let (t, iv) = if i < 30 { (i as f64, one) } else { (31.0 + 2.0 * (i - 30) as f64, two) };
+            h.push_at(&snap, t, iv);
+        }
+        let mut texts = Vec::new();
+        frames(|ui| {
+            for clock in [h.sample_clock(), None] {
+                let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: two, phase: 0.0, glide: false, clock };
+                let lines = [PlotLine::new(&h.cpu, pal.accent, (0.0, 100.0))];
+                // 300 px left of the right edge is 31.4 updates of 2 s: 62.8 s back, the sample at 6 s.
+                let (_, text) = plot(ui, &cx, "timed", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| format!("{} \u{b7} {:.0}", cx.ago(age), at(&h.cpu, age)));
+                texts.extend(text);
+            }
+        });
+        assert_eq!(texts.first().map(String::as_str), Some("\u{2212}1:03 \u{b7} 6"), "{texts:?}");
+        assert_eq!(texts.get(1).map(String::as_str), Some("\u{2212}1:02 \u{b7} 18"), "without times: 31 samples back, counted at 2 s");
+    }
+
     #[test]
     fn the_shared_parts_draw_and_read_out_on_hover() {
         let pal = theme::DARK;
@@ -1565,7 +1621,7 @@ mod tests {
             let p = ui.painter().clone();
             let head = Head { title: "Intel(R) Core(TM) Ultra 9 285K Processor", sub: "8 cores".into(), value: ("23".into(), "%".into()), side: "8% kernel".into() };
             assert_eq!(super::head(&p, &pal, 20.0, 20.0, 600.0, &head), 48.0);
-            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false };
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false, clock: None };
             let lines = [PlotLine::new(&a, pal.accent, (0.0, 100.0)), PlotLine::new(&b, pal.text_faint, (0.0, 100.0)).dashed(pal.text_faint)];
             let (h, text) = plot(ui, &cx, "t", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| ago(cx.interval, age));
             assert_eq!(h, 220.0);
@@ -1593,7 +1649,7 @@ mod tests {
         assert_eq!(never.max(), 0.0, "an absent reading does not count as a value");
         let mut texts = Vec::new();
         frames(|ui| {
-            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.5, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false };
+            let cx = PlotCtx { pal: &pal, smooth: true, bloom: 0.5, neutral: false, regions: 1, px_per_update: 16.0, interval: Some(Duration::from_secs(1)), phase: 0.0, glide: false, clock: None };
             for s in [&never, &late, &gappy] {
                 let lines = [PlotLine::new(s, pal.accent, (0.0, 110.0))];
                 let (_, text) = plot(ui, &cx, "gap", 20.0, 20.0, 600.0, 200.0, 36.0, &percent_labels(), &lines, &|age| temp_or_none(at(s, age), |t| format!("{t:.0}")));
@@ -1608,7 +1664,7 @@ mod tests {
         let pal = theme::LIGHT;
         let empty = Series::new(4);
         frames(|ui| {
-            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None, phase: 0.0, glide: false };
+            let cx = PlotCtx { pal: &pal, smooth: false, bloom: 0.0, neutral: false, regions: 1, px_per_update: 16.0, interval: None, phase: 0.0, glide: false, clock: None };
             let lines = [PlotLine::new(&empty, pal.accent, (0.0, 100.0))];
             let (_, text) = plot(ui, &cx, "empty", 20.0, 20.0, 300.0, 100.0, 36.0, &percent_labels(), &lines, &|_| String::new());
             assert!(text.is_none());
@@ -1696,10 +1752,10 @@ mod tests {
     #[test]
     fn spans_read_naturally() {
         let s = Duration::from_secs(1);
-        assert_eq!(span_text(61, Some(s)), "60 s");
-        assert_eq!(span_text(961, Some(s)), "16 min");
-        assert_eq!(span_text(10_000, Some(s)), "2.8 h");
-        assert_eq!(span_text(10, None), "history");
+        assert_eq!(span_text(samples_secs(61, Some(s))), "60 s");
+        assert_eq!(span_text(samples_secs(961, Some(s))), "16 min");
+        assert_eq!(span_text(samples_secs(10_000, Some(s))), "2.8 h");
+        assert_eq!(span_text(samples_secs(10, None)), "history");
         assert_eq!(ago(Some(s), 185), "\u{2212}3:05");
     }
 

@@ -205,7 +205,14 @@ impl App {
         let st = theme::status(&pal);
         let p = ui.painter().clone();
         let n = fd.hist.clock.values.len();
-        let span = self.interval().map(|d| fmt_span((d.as_secs_f32() * n as f32).round() as u64)).filter(|_| n > 1);
+        // From the sample times (#201): the oldest sample in view to the newest, plus one update,
+        // as `n` evenly spaced samples cover `n` updates.
+        let window = (fd.hist.clock.capacity.max(n).max(2) - 1) as f32;
+        let secs = match fd.hist.sample_clock().filter(|c| c.covers(n)) {
+            Some(c) => Some(c.span(n, window) as f32 + c.step()),
+            None => self.interval().map(|d| d.as_secs_f32() * n as f32),
+        };
+        let span = secs.map(|s| fmt_span(s.round() as u64)).filter(|_| n > 1);
         let title = match span {
             Some(s) => format!("Clock history \u{b7} {s}"),
             None => "Clock history".into(),
@@ -241,6 +248,7 @@ impl App {
             g.line_width = width;
             g.fill = fill;
             (g.phase, g.glide) = (fd.phase, fd.glide);
+            g.clock = fd.hist.sample_clock();
             draw_graph(&p, graph, &g);
         };
         if base > 0.0 {

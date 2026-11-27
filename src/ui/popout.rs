@@ -638,6 +638,7 @@ pub fn draw(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, opac
                 g.fill = 0.18;
                 g.line_width = 1.5;
                 g.markers = false;
+                g.clock = fd.hist.sample_clock();
                 draw_graph(&painter, gr, &g);
             }
             MeterStyle::Gauge => draw_gauge(skin, &painter, cell, r, acc, unlit, &p, &label_f, &value_f, bloom),
@@ -786,7 +787,7 @@ fn draw_classic(ui: &mut egui::Ui, rect: Rect, skin: &Skin, fd: &FrameData<'_>, 
         let (series, max) = series_for(fd, q, &mut scratch);
         let fill = if matches!(q, Quadrant::Cpu | Quadrant::Memory) { 0.2 } else { 0.0 };
         let graph = Rect::from_min_size(pos2(cell.left() + 10.0, cell.top() + 24.0), vec2(cell.width() - 20.0, graph_h));
-        widgets::sparkline(&painter, graph, &[(series, acc, (0.0, max))], fill, false);
+        widgets::sparkline_timed(&painter, graph, &[(series, acc, (0.0, max))], fill, false, fd.hist.sample_clock());
     }
     y += l.meters_h;
     hline(y - 0.5);

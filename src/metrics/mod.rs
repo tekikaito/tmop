@@ -521,6 +521,126 @@ pub struct History {
     pub clock_max: Series,
     /// Used physical memory in bytes.
     pub memory_bytes: Series,
+    /// When each sample was taken, oldest first (#201). Every series above is pushed once per
+    /// sample, so the newest value of each lines up with the newest stamp, the one before with
+    /// the stamp before, and so on; a series that started later is just shorter.
+    pub times: VecDeque<Stamp>,
+    /// The sampling interval of the newest sample taken while not paused, in seconds (0 before
+    /// the first). Graphs count their px-per-update scale in it.
+    pub step: f32,
+    /// The interval in force at the newest sample (`None`: paused).
+    last_interval: Option<Duration>,
+}
+
+/// When a sample of a [`History`] was taken: seconds on the sampler's monotonic clock, and
+/// whether a gap (pause, sleep, a stalled sampler) lies between it and the sample before it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stamp {
+    pub t: f64,
+    pub gap: bool,
+}
+
+/// Slack on top of twice the interval before a pause between samples counts as a gap: a busy
+/// machine can delay a sample by a few hundred ms without breaking the trace.
+const GAP_MARGIN: f64 = 0.25;
+
+/// Whether `dt` seconds between two samples is a gap rather than the sampling rate: more than
+/// twice the slower of the intervals in force at the two samples (plus [`GAP_MARGIN`]). After a
+/// change of interval the slower one is what the time between them may legitimately be; two
+/// samples taken while paused (refreshes) always have a gap between them.
+pub fn is_gap(dt: f64, before: Option<Duration>, now: Option<Duration>) -> bool {
+    // `None` orders below any `Some`: the slower interval of those known.
+    match before.max(now) {
+        Some(iv) => dt > 2.0 * iv.as_secs_f64() + GAP_MARGIN,
+        None => true,
+    }
+}
+
+/// Where the samples of a [`History`] sit in time, for graphs (#201). Ages are counted back
+/// from the newest sample, in seconds or in updates of [`History::step`] seconds (fractional),
+/// the unit graph scales use. Evenly spaced samples have ages 0, 1, 2, ... updates.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock<'a> {
+    times: &'a VecDeque<Stamp>,
+    step: f64,
+    /// `1 / step`, so placing a point costs a multiplication.
+    per_sec: f64,
+}
+
+impl<'a> Clock<'a> {
+    /// A clock over `times` counting updates of `step` seconds; `None` without either.
+    pub fn new(times: &'a VecDeque<Stamp>, step: f32) -> Option<Self> {
+        (step > 0.0 && !times.is_empty()).then(|| Self { times, step: step as f64, per_sec: 1.0 / step as f64 })
+    }
+
+    /// Whether a series of `n` values pushed along with these stamps can be placed by them. A
+    /// series filled some other way (a preview) can be longer and keeps the evenly spaced layout.
+    pub fn covers(&self, n: usize) -> bool {
+        n <= self.times.len()
+    }
+
+    /// Seconds per update.
+    pub fn step(&self) -> f32 {
+        self.step as f32
+    }
+
+    fn newest(&self) -> f64 {
+        self.times.back().map_or(0.0, |s| s.t)
+    }
+
+    /// Seconds from the sample `age` samples back to the newest one (the oldest beyond).
+    pub fn secs(&self, age: usize) -> f64 {
+        let i = self.times.len().saturating_sub(1 + age);
+        self.newest() - self.times.get(i).map_or(0.0, |s| s.t)
+    }
+
+    /// The same in updates.
+    pub fn age(&self, age: usize) -> f32 {
+        (self.secs(age) * self.per_sec) as f32
+    }
+
+    /// Newest first: each sample's age in updates, and whether a gap lies between it and the
+    /// next older sample (where the trace breaks).
+    pub fn ages(&self) -> impl Iterator<Item = (f32, bool)> + 'a {
+        let (newest, per_sec) = (self.newest(), self.per_sec);
+        self.times.iter().rev().map(move |s| (((newest - s.t) * per_sec) as f32, s.gap))
+    }
+
+    /// Index of the stamp at or before which a time `u` updates before the newest falls.
+    fn split(&self, u: f32) -> usize {
+        let target = self.newest() - u as f64 * self.step;
+        self.times.partition_point(|s| s.t < target)
+    }
+
+    /// The sample (age in samples) of a series of `n` values nearest to `u` updates before the
+    /// newest; `None` more than half an update beyond its oldest, as an evenly spaced graph has
+    /// no sample there either.
+    pub fn nearest(&self, u: f32, n: usize) -> Option<usize> {
+        let n = n.min(self.times.len());
+        if n == 0 || u >= self.age(n - 1) + 0.5 {
+            return None;
+        }
+        let len = self.times.len();
+        let first = len - n;
+        let i = self.split(u).clamp(first, len - 1);
+        let target = self.newest() - u as f64 * self.step;
+        // The older neighbour wins a tie, as `round` sends x.5 to the older sample.
+        let i = if i > first && target - self.times[i - 1].t <= self.times[i].t - target { i - 1 } else { i };
+        Some(len - 1 - i)
+    }
+
+    /// Seconds a graph of `n` values `window` updates wide shows: from the oldest of its samples
+    /// inside the window to the newest.
+    pub fn span(&self, n: usize, window: f32) -> f64 {
+        let n = n.min(self.times.len());
+        if n == 0 {
+            return 0.0;
+        }
+        let len = self.times.len();
+        // A sample right on the edge counts, as with whole updates.
+        let i = self.split(window + 1e-3).clamp(len - n, len - 1);
+        self.newest() - self.times[i].t
+    }
 }
 
 impl History {
@@ -544,6 +664,9 @@ impl History {
             clock: s(),
             clock_max: s(),
             memory_bytes: s(),
+            times: VecDeque::with_capacity(capacity),
+            step: 0.0,
+            last_interval: None,
         }
     }
 
@@ -551,7 +674,33 @@ impl History {
         self.cpu.capacity
     }
 
+    /// Where the samples sit in time; `None` before the first sample taken at an interval.
+    pub fn sample_clock(&self) -> Option<Clock<'_>> {
+        Clock::new(&self.times, self.step)
+    }
+
+    /// Adds a sample one second after the previous one (tests and previews).
     pub fn push(&mut self, snap: &Snapshot) {
+        let t = self.times.back().map_or(0.0, |s| s.t + 1.0);
+        self.push_at(snap, t, Some(Duration::from_secs(1)));
+    }
+
+    /// Adds a sample taken at `t` seconds (a monotonic clock) while sampling every `interval`
+    /// (`None`: paused, a refresh).
+    pub fn push_at(&mut self, snap: &Snapshot, t: f64, interval: Option<Duration>) {
+        let gap = self.times.back().is_some_and(|b| is_gap(t - b.t, self.last_interval, interval));
+        self.push_values(snap);
+        if self.times.len() >= self.capacity() {
+            self.times.pop_front();
+        }
+        self.times.push_back(Stamp { t, gap });
+        self.last_interval = interval;
+        if let Some(iv) = interval {
+            self.step = iv.as_secs_f32();
+        }
+    }
+
+    fn push_values(&mut self, snap: &Snapshot) {
         let cap = self.capacity();
         self.cpu.push(snap.cpu.total_pct);
         self.kernel.push(snap.cpu.kernel_pct);
@@ -627,6 +776,9 @@ impl History {
             for s in [&mut d.active, &mut d.read, &mut d.write] {
                 s.resize(capacity);
             }
+        }
+        while self.times.len() > self.cpu.capacity {
+            self.times.pop_front();
         }
     }
 
@@ -728,6 +880,8 @@ impl Sampler {
                     // None before the first sample. Not "now minus an hour": an Instant cannot go back
                     // before the boot on some platforms, and that would panic in the first hour.
                     let mut last: Option<Instant> = None;
+                    // The history's clock (#201): seconds since the thread started.
+                    let epoch = Instant::now();
                     let since_last = |last: Option<Instant>| last.map_or(Duration::MAX, |t| t.elapsed());
                     while !stop.load(Ordering::Relaxed) {
                         let ms = interval_ms.load(Ordering::Relaxed);
@@ -739,14 +893,16 @@ impl Sampler {
                             continue;
                         }
                         {
-                            last = Some(Instant::now());
+                            let at = Instant::now();
+                            last = Some(at);
                             let (mut snap, procs) = cost::time(cost::Part::Collect, || collector.collect());
                             // Invariant: CPU% normalisers divide by it.
                             snap.cpu.logical_count = snap.cpu.logical_count.max(1);
                             let (snap, procs) = (Arc::new(snap), Arc::new(procs));
                             if let Ok(mut g) = shared.lock() {
                                 // Copy-on-write: clones only if a frame still holds the old one.
-                                Arc::make_mut(&mut g.history).push(&snap);
+                                let interval = (ms > 0).then(|| Duration::from_millis(ms));
+                                Arc::make_mut(&mut g.history).push_at(&snap, at.duration_since(epoch).as_secs_f64(), interval);
                                 g.latest = snap.clone();
                                 g.processes = procs.clone();
                             }
@@ -827,6 +983,78 @@ mod tests {
             let gone = (0..200).any(|_| matches!(rx.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)));
             assert!(gone, "{interval:?}: the thread ended");
         }
+    }
+
+    #[test]
+    fn a_gap_is_more_than_the_slower_interval_allows() {
+        let (half, one, five) = (Some(Duration::from_millis(500)), Some(Duration::from_secs(1)), Some(Duration::from_secs(5)));
+        assert!(!is_gap(1.0, one, one));
+        assert!(!is_gap(2.2, one, one), "a late sample");
+        assert!(is_gap(2.3, one, one));
+        assert!(!is_gap(5.0, five, one), "back from the notification area at 5 s");
+        assert!(!is_gap(1.0, half, one), "into low-power mode");
+        assert!(is_gap(30.0, one, None), "a refresh after a pause");
+        assert!(is_gap(30.0, None, one), "resumed after a pause");
+        assert!(!is_gap(0.8, None, one), "resumed at once");
+        assert!(is_gap(0.1, None, None), "two refreshes while paused");
+    }
+
+    fn stamped(cap: usize, times: &[(f64, Option<Duration>)]) -> History {
+        let mut h = History::new(cap);
+        for (t, iv) in times {
+            h.push_at(&Snapshot::default(), *t, *iv);
+        }
+        h
+    }
+
+    #[test]
+    fn the_history_stamps_each_sample() {
+        let (one, two) = (Some(Duration::from_secs(1)), Some(Duration::from_secs(2)));
+        assert!(History::new(4).sample_clock().is_none(), "no clock before the first sample");
+        let h = stamped(8, &[(0.0, one), (1.0, one), (3.0, two), (5.0, two), (20.0, None), (21.0, None)]);
+        assert_eq!(h.times.iter().map(|s| s.gap).collect::<Vec<_>>(), vec![false, false, false, false, true, true]);
+        assert_eq!(h.step, 2.0, "the last interval while sampling; paused keeps it");
+        let c = h.sample_clock().expect("a clock");
+        assert_eq!((0..6).map(|a| c.secs(a)).collect::<Vec<_>>(), vec![0.0, 1.0, 16.0, 18.0, 20.0, 21.0]);
+        assert_eq!(c.age(3), 9.0, "in updates of 2 s");
+        // Wraps with the series and shrinks with them.
+        let mut h = stamped(4, &(0..10).map(|i| (i as f64, one)).collect::<Vec<_>>());
+        assert_eq!((h.times.len(), h.times.front().map(|s| s.t)), (4, Some(6.0)));
+        h.resize(2);
+        assert_eq!((h.times.len(), h.cpu.values.len()), (2, 2));
+        // Previews push without a time: one second apart.
+        let mut h = History::new(4);
+        h.push(&Snapshot::default());
+        h.push(&Snapshot::default());
+        assert_eq!(h.sample_clock().map(|c| c.secs(1)), Some(1.0));
+    }
+
+    #[test]
+    fn the_clock_finds_samples_and_spans_by_time() {
+        let (one, two) = (Some(Duration::from_secs(1)), Some(Duration::from_secs(2)));
+        // 1 s samples, then 2 s ones: newest first, ages in updates of 2 s are 0, 1, 2, 3, 3.5, 4, 4.5.
+        let h = stamped(16, &[(0.0, one), (1.0, one), (2.0, one), (3.0, one), (5.0, two), (7.0, two), (9.0, two)]);
+        let c = h.sample_clock().expect("a clock");
+        let n = h.cpu.values.len();
+        assert_eq!([0.0, 0.4, 0.6, 2.2, 3.4, 3.8, 4.9].map(|u| c.nearest(u, n)), [0, 0, 1, 2, 4, 5, 6].map(Some));
+        assert_eq!(c.nearest(-3.0, n), Some(0), "right of the newest sample");
+        assert_eq!(c.nearest(5.0, n), None, "beyond the oldest");
+        assert_eq!(c.nearest(1.4, 2), Some(1), "only the newest two belong to a short series");
+        assert_eq!(c.nearest(1.5, 2), None);
+        assert_eq!(c.span(n, 100.0), 9.0, "the whole history");
+        assert_eq!(c.span(n, 2.0), 4.0, "two updates of 2 s");
+        assert_eq!(c.span(n, 2.6), 4.0, "the newest three are inside");
+        assert_eq!(c.span(n, 3.0), 6.0);
+        assert_eq!(c.span(3, 100.0), 4.0, "a short series");
+        // Evenly spaced: the same as counting samples.
+        let h = stamped(64, &(0..40).map(|i| (100.0 + i as f64 * 0.5, Some(Duration::from_millis(500)))).collect::<Vec<_>>());
+        let c = h.sample_clock().expect("a clock");
+        for u in [0.0_f32, 0.49, 0.5, 0.51, 7.2, 38.6, 39.4] {
+            assert_eq!(c.nearest(u, 40), Some((u.round() as usize).min(39)), "u {u}");
+        }
+        assert_eq!(c.nearest(39.5, 40), None);
+        assert_eq!(c.span(40, 10.0), 5.0);
+        assert_eq!(c.span(40, 10.5), 5.0);
     }
 
     #[test]

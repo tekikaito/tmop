@@ -469,9 +469,9 @@ impl App {
             }
             let spark = Rect::from_min_size(pos2(r.left() + 20.0, r.top() + 20.0 + 52.0 + 10.0), vec2(r.width() - 40.0, 40.0));
             if self.settings.graphs.dashed_summary {
-                widgets::sparkline_dashed(&p, spark, &c.lines);
+                widgets::sparkline_dashed(&p, spark, &c.lines, fd.hist.sample_clock());
             } else {
-                widgets::sparkline(&p, spark, &c.lines, 0.12, false);
+                widgets::sparkline_timed(&p, spark, &c.lines, 0.12, false, fd.hist.sample_clock());
             }
             widgets::text_fit(&p, pos2(r.left() + 20.0, spark.bottom() + 10.0), Align2::LEFT_TOP, &c.footer, theme::mono(12.0), pal.text_faint, r.width() - 40.0);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {

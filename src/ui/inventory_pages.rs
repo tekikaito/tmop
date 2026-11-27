@@ -130,8 +130,9 @@ fn short_account(user: &str) -> &str {
 }
 
 impl AppHistory {
-    /// Feeds one sample; `dt` is the time since the previous sample.
-    pub fn update(&mut self, rows: &[ProcessRow], dt: f64) {
+    /// Feeds one sample; `dt` is the time since the previous sample, `interval` the sampling
+    /// interval (it sizes the per-account series, which a long `dt` after a pause must not).
+    pub fn update(&mut self, rows: &[ProcessRow], dt: f64, interval: f64) {
         self.since.get_or_insert_with(Instant::now);
         for e in self.apps.values_mut() {
             e.running = 0;
@@ -155,12 +156,13 @@ impl AppHistory {
             next.insert(r.pid, (r.create_time, r.cpu_time));
         }
         self.seen = next;
-        self.update_users(rows, dt);
+        self.update_users(rows, interval);
     }
 
-    /// Pushes this sample's CPU use of every (account, session); the series cover about a minute.
-    fn update_users(&mut self, rows: &[ProcessRow], dt: f64) {
-        let cap = (60.0 / dt.max(0.05)).round().clamp(10.0, 600.0) as usize;
+    /// Pushes this sample's CPU use of every (account, session); the series cover about a minute
+    /// at `interval` seconds per sample.
+    fn update_users(&mut self, rows: &[ProcessRow], interval: f64) {
+        let cap = (60.0 / interval.max(0.05)).round().clamp(10.0, 600.0) as usize;
         let mut sums: HashMap<(String, u32), f32> = HashMap::new();
         for r in rows.iter().filter(|r| r.pid != 0) {
             *sums.entry((user_label(r), r.session_id)).or_default() += r.cpu_pct;
@@ -1099,9 +1101,9 @@ mod tests {
     #[test]
     fn history_accumulates_deltas_and_launches() {
         let mut h = AppHistory::default();
-        h.update(&[row(10, "a.exe", 1, 1000)], 1.0);
-        h.update(&[row(10, "a.exe", 1, 1500), row(11, "A.exe", 2, 50)], 1.0);
-        h.update(&[row(11, "A.exe", 2, 80)], 1.0);
+        h.update(&[row(10, "a.exe", 1, 1000)], 1.0, 1.0);
+        h.update(&[row(10, "a.exe", 1, 1500), row(11, "A.exe", 2, 50)], 1.0, 1.0);
+        h.update(&[row(11, "A.exe", 2, 80)], 1.0, 1.0);
         let e = &h.apps["a.exe"];
         assert_eq!(e.launches, 2);
         assert_eq!(e.cpu_time, 530);
@@ -1117,8 +1119,8 @@ mod tests {
     #[test]
     fn user_trends_follow_sessions() {
         let mut h = AppHistory::default();
-        h.update(&[user_row(10, "a.exe", r"PC\alex", 1, 2.0, 1), user_row(11, "b.exe", r"PC\alex", 1, 3.0, 1), user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0);
-        h.update(&[user_row(10, "a.exe", r"PC\alex", 1, 4.0, 1), user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0);
+        h.update(&[user_row(10, "a.exe", r"PC\alex", 1, 2.0, 1), user_row(11, "b.exe", r"PC\alex", 1, 3.0, 1), user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0, 1.0);
+        h.update(&[user_row(10, "a.exe", r"PC\alex", 1, 4.0, 1), user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0, 1.0);
         assert_eq!(h.user_trend(1, |u| short_account(u) == "alex"), vec![5.0, 4.0]);
         assert_eq!(h.user_trend(0, |u| u == r"NT AUTHORITY\SYSTEM"), vec![1.0, 1.0]);
         assert!(h.user_trend(1, |u| u == "alex").is_empty(), "full names must match exactly");
@@ -1126,7 +1128,7 @@ mod tests {
         assert!(h.apps.is_empty() && h.since.is_none());
         assert_eq!(h.user_cpu.len(), 2, "resetting the app history keeps the user trends");
         // A session that is gone loses its series.
-        h.update(&[user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0);
+        h.update(&[user_row(12, "s.exe", r"NT AUTHORITY\SYSTEM", 0, 1.0, 1)], 1.0, 1.0);
         assert_eq!(h.user_cpu.len(), 1);
     }
 
