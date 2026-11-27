@@ -4,7 +4,7 @@
 
 use super::hardware::Iso;
 use super::theme::{self, lighten, mix, with_alpha, Palette};
-use crate::metrics::Series;
+use crate::metrics::{Clock, Series};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, TextureId, Ui, Vec2};
 use eframe::egui::epaint::CornerRadiusF32;
 use std::cell::Cell;
@@ -443,6 +443,9 @@ pub struct Graph<'a> {
     /// Alpha of the area fill under each line (0 = none).
     pub fill: f32,
     pub line_width: f32,
+    /// When the samples were taken (#201): places them by time instead of one update apart. A
+    /// line it does not cover keeps the evenly spaced layout.
+    pub clock: Option<Clock<'a>>,
 }
 
 impl<'a> Graph<'a> {
@@ -462,6 +465,7 @@ impl<'a> Graph<'a> {
             markers: true,
             fill: 0.0,
             line_width: 2.0,
+            clock: None,
         }
     }
 }
@@ -625,25 +629,7 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         // update interval, so the visible end moves continuously from the previous value to the
         // new one instead of jumping when a sample arrives.
         let offset = if g.glide && n >= 2 { shift - 1.0 } else { shift };
-        // Samples without a reading (NaN) are gaps: the trace is drawn in runs of real samples.
-        let mut runs: Vec<Vec<Pos2>> = Vec::new();
-        let mut run: Vec<Pos2> = Vec::with_capacity(n + 2);
-        for (age, v) in line.series.values.iter().rev().enumerate() {
-            let x = axis.x_of(age as f32 + offset);
-            if v.is_nan() {
-                if !run.is_empty() {
-                    runs.push(std::mem::take(&mut run));
-                }
-            } else {
-                run.push(pos2(x, y_of(*v)));
-            }
-            if x < rect.left() - p {
-                break;
-            }
-        }
-        if !run.is_empty() {
-            runs.push(run);
-        }
+        let runs = trace_runs(line.series, g.clock, &axis, offset, rect.left() - p, y_of);
         let ends_at_newest = line.series.values.back().is_some_and(|v| !v.is_nan());
         for (i, mut pts) in runs.into_iter().enumerate() {
             pts.reverse();
@@ -653,6 +639,13 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
             if current && newest.x < rect.right() - 0.5 {
                 // Hold the newest value to the right edge so the trace always meets the marker.
                 pts.push(pos2(rect.right(), newest.y));
+            }
+            if pts.len() == 1 {
+                // A lone sample between gaps has no line to sit on: a dot.
+                if newest.x <= rect.right() + 0.5 {
+                    painter.circle_filled(newest, g.line_width * 0.75, line.color);
+                }
+                continue;
             }
             let mut drawn = if g.smooth { smooth_points(&pts, y_clamp) } else { pts.clone() };
             cut_at_x(&mut drawn, rect.right());
@@ -686,6 +679,39 @@ pub fn draw_graph(painter: &egui::Painter, rect: Rect, g: &Graph<'_>) {
         }
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, b), egui::StrokeKind::Outside);
     }
+}
+
+/// The points of a trace of `series`, newest first, in runs of samples to connect. A sample `a`
+/// updates old sits at `axis.x_of(a + offset)`: one update apart, or by its time where `clock`
+/// covers the series (#201). Samples without a reading (NaN) are gaps between runs, and so is a
+/// pause in the sampling (a gap in the clock): time without samples stays empty. Stops at the
+/// first point left of `x_min`.
+fn trace_runs(series: &Series, clock: Option<Clock<'_>>, axis: &TimeAxis, offset: f32, x_min: f32, y_of: impl Fn(f32) -> f32) -> Vec<Vec<Pos2>> {
+    let n = series.values.len();
+    let mut runs: Vec<Vec<Pos2>> = Vec::new();
+    let mut run: Vec<Pos2> = Vec::with_capacity(n + 2);
+    let mut ages = clock.filter(|c| c.covers(n)).map(|c| c.ages());
+    for (k, v) in series.values.iter().rev().enumerate() {
+        let (age, gap) = ages.as_mut().and_then(|a| a.next()).unwrap_or((k as f32, false));
+        let x = axis.x_of(age + offset);
+        if v.is_nan() {
+            if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+        } else {
+            run.push(pos2(x, y_of(*v)));
+            if gap {
+                runs.push(std::mem::take(&mut run));
+            }
+        }
+        if x < x_min {
+            break;
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    runs
 }
 
 /// Truncates a polyline ordered by x at `x_max`, ending exactly on the edge (interpolated).
@@ -1430,22 +1456,28 @@ pub fn spark_color(i: usize, color: Color32) -> Color32 {
 /// Each line is `(series, colour, (low, high))`. With `dashed_second` the second series is dashed
 /// and unfilled (network down solid, up dashed).
 pub fn sparkline(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_second: bool) {
-    spark_lines(p, rect, lines, fill, true, true, |i| dashed_second && i == 1);
+    spark_lines(p, rect, lines, fill, true, true, None, |i| dashed_second && i == 1);
+}
+
+/// [`sparkline`] of series of the system history, placed by the time of each sample
+/// (`History::clock`, #201).
+pub fn sparkline_timed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, dashed_second: bool, clock: Option<Clock<'_>>) {
+    spark_lines(p, rect, lines, fill, true, true, clock, |i| dashed_second && i == 1);
 }
 
 /// [`sparkline`] for a series that is not sampled live (e.g. past benchmark results): no glide.
 pub fn sparkline_static(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
-    spark_lines(p, rect, lines, fill, false, false, |_| false);
+    spark_lines(p, rect, lines, fill, false, false, None, |_| false);
 }
 
-/// [`sparkline`] with every line dashed and unfilled (`graphs.dashedSummary`).
-pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))]) {
-    spark_lines(p, rect, lines, 0.0, true, true, |_| true);
+/// [`sparkline_timed`] with every line dashed and unfilled (`graphs.dashedSummary`).
+pub fn sparkline_dashed(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], clock: Option<Clock<'_>>) {
+    spark_lines(p, rect, lines, 0.0, true, true, clock, |_| true);
 }
 
 /// [`sparkline`] for live samples on a clock of their own (Docker stats): fixed scale, no glide.
 pub fn sparkline_unsynced(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32) {
-    spark_lines(p, rect, lines, fill, true, false, |_| false);
+    spark_lines(p, rect, lines, fill, true, false, None, |_| false);
 }
 
 /// Spacing of the samples of a live sparkline whose history would be packed denser than 1 px per
@@ -1463,7 +1495,18 @@ pub fn spark_visible(width: f32, len: usize, cap: usize) -> usize {
     len.min((width / spark_px(width, cap.max(len))).floor() as usize + 1)
 }
 
-fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, glide: bool, dashed_at: impl Fn(usize) -> bool) {
+/// Seconds the newest part of `s` a live sparkline `width` px wide shows covers: by the sample
+/// times where `clock` places the series (#201), else `interval` per sample. `None` without either.
+pub fn spark_secs(width: f32, s: &Series, clock: Option<Clock<'_>>, interval: Option<std::time::Duration>) -> Option<f32> {
+    let n = s.values.len();
+    match clock.filter(|c| c.covers(n)) {
+        Some(c) => Some(c.span(n, width / spark_px(width, s.capacity.max(n))) as f32),
+        None => interval.map(|iv| spark_visible(width, n, s.capacity).saturating_sub(1) as f32 * iv.as_secs_f32()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, f32))], fill: f32, live: bool, glide: bool, clock: Option<Clock<'_>>, dashed_at: impl Fn(usize) -> bool) {
     if lines.iter().map(|(s, _, _)| s.values.len()).max().unwrap_or(0) < 2 {
         return;
     }
@@ -1487,6 +1530,7 @@ fn spark_lines(p: &egui::Painter, rect: Rect, lines: &[(&Series, Color32, (f32, 
         g.phase = phase;
         g.glide = glide;
         g.fill = if dashed { 0.0 } else { fill };
+        g.clock = clock;
         draw_graph(p, rect, &g);
     }
 }
@@ -2063,7 +2107,115 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::Series;
+    use crate::metrics::{History, Series, Snapshot};
+    use std::time::Duration;
+
+    /// A history with one sample at each of `times` (seconds) taken at `interval`, CPU reading
+    /// its index.
+    fn timed_history(cap: usize, times: &[(f64, Option<Duration>)]) -> History {
+        let mut h = History::new(cap);
+        for (i, (t, iv)) in times.iter().enumerate() {
+            let mut snap = Snapshot::default();
+            snap.cpu.total_pct = i as f32;
+            h.push_at(&snap, *t, *iv);
+        }
+        h
+    }
+
+    fn xs(runs: &[Vec<Pos2>]) -> Vec<Vec<f32>> {
+        runs.iter().map(|r| r.iter().map(|p| p.x).collect()).collect()
+    }
+
+    /// Evenly spaced samples land exactly where they did before samples had times: the same
+    /// points, bit for bit, with and without glide and with compressed time, also after the ring
+    /// wrapped.
+    #[test]
+    fn evenly_spaced_samples_keep_their_old_positions() {
+        for (step, count) in [(1.0_f64, 30), (0.5, 30), (0.25, 200), (2.0, 7)] {
+            let iv = Some(Duration::from_secs_f64(step));
+            let times: Vec<_> = (0..count).map(|i| (1000.0 + i as f64 * step, iv)).collect();
+            let h = timed_history(64, &times);
+            let clock = h.sample_clock();
+            assert!(clock.is_some_and(|c| c.covers(h.cpu.values.len())));
+            for regions in [1, 4] {
+                let axis = TimeAxis::new(700.0, 700.0, 16.0, regions);
+                for offset in [0.0, 0.3, -0.7] {
+                    let old = trace_runs(&h.cpu, None, &axis, offset, 0.0, |v| v);
+                    let new = trace_runs(&h.cpu, clock, &axis, offset, 0.0, |v| v);
+                    assert_eq!(old, new, "step {step}, regions {regions}, offset {offset}");
+                }
+            }
+        }
+        // Intervals without an exact binary fraction, and the jitter of a real sampler (1 ms):
+        // within a hundredth of a pixel at 16 px per update.
+        for (step, jitter) in [(0.1_f64, 0.0), (0.3, 0.0), (1.0, 0.001)] {
+            let iv = Some(Duration::from_secs_f64(step));
+            let times: Vec<_> = (0..64).map(|i| (12345.678 + i as f64 * step + if i % 2 == 1 { jitter } else { 0.0 }, iv)).collect();
+            let h = timed_history(64, &times);
+            let axis = TimeAxis::new(1024.0, 1024.0, 16.0, 1);
+            let (old, new) = (trace_runs(&h.cpu, None, &axis, 0.0, 0.0, |v| v), trace_runs(&h.cpu, h.sample_clock(), &axis, 0.0, 0.0, |v| v));
+            assert_eq!((old.len(), new.len()), (1, 1));
+            for (a, b) in old[0].iter().zip(&new[0]) {
+                assert!((a.x - b.x).abs() < 0.02 && a.y == b.y, "step {step}: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// Samples taken at another interval sit by their time: after a switch from 1 s to 2 s
+    /// sampling (low-power mode) the older samples are half an update apart.
+    #[test]
+    fn mixed_intervals_place_samples_by_time() {
+        let (one, two) = (Some(Duration::from_secs(1)), Some(Duration::from_secs(2)));
+        let h = timed_history(64, &[(0.0, one), (1.0, one), (2.0, one), (4.0, two), (6.0, two)]);
+        let axis = TimeAxis::new(100.0, 100.0, 10.0, 1);
+        let runs = trace_runs(&h.cpu, h.sample_clock(), &axis, 0.0, 0.0, |v| v);
+        // Updates of 2 s: ages 0, 1, 2, 2.5, 3.
+        assert_eq!(xs(&runs), vec![vec![100.0, 90.0, 80.0, 75.0, 70.0]]);
+        // Before the change every point was one update apart, which put the old samples too far left.
+        let old = trace_runs(&h.cpu, None, &axis, 0.0, 0.0, |v| v);
+        assert_eq!(xs(&old), vec![vec![100.0, 90.0, 80.0, 70.0, 60.0]]);
+    }
+
+    /// A pause leaves the time between the samples empty: the trace breaks there instead of
+    /// joining the two sides, and the older side sits as far back as the pause was long.
+    #[test]
+    fn a_pause_is_a_gap_in_the_trace() {
+        let one = Some(Duration::from_secs(1));
+        let h = timed_history(64, &[(0.0, one), (1.0, one), (2.0, one), (12.0, one), (13.0, one)]);
+        let axis = TimeAxis::new(200.0, 200.0, 10.0, 1);
+        let runs = trace_runs(&h.cpu, h.sample_clock(), &axis, 0.0, 0.0, |v| v);
+        assert_eq!(xs(&runs), vec![vec![200.0, 190.0], vec![90.0, 80.0, 70.0]]);
+        // A refresh while paused stands alone (drawn as a dot); the trace stops one point beyond
+        // the left edge.
+        let h = timed_history(64, &[(0.0, one), (1.0, one), (10.0, None), (20.0, one), (21.0, one)]);
+        let runs = trace_runs(&h.cpu, h.sample_clock(), &axis, 0.0, 0.0, |v| v);
+        assert_eq!(xs(&runs), vec![vec![200.0, 190.0], vec![90.0], vec![0.0, -10.0]]);
+    }
+
+    /// After the ring wrapped, the series and the stamps still line up at the newest sample, and
+    /// a series that started later (a GPU that appeared) is placed by the newest stamps.
+    #[test]
+    fn the_ring_wraps_with_its_stamps() {
+        let one = Some(Duration::from_secs(1));
+        let times: Vec<_> = (0..20).map(|i| (if i < 10 { i as f64 * 2.0 } else { 20.0 + (i - 10) as f64 }, one)).collect();
+        let h = timed_history(6, &times);
+        assert_eq!((h.times.len(), h.cpu.values.len()), (6, 6));
+        let c = h.sample_clock().expect("a clock");
+        assert_eq!((0..6).map(|a| c.age(a)).collect::<Vec<_>>(), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let mut late = Series::new(6);
+        for v in [1.0, 2.0, 3.0] {
+            late.push(v);
+        }
+        let axis = TimeAxis::new(100.0, 100.0, 10.0, 1);
+        assert_eq!(xs(&trace_runs(&late, Some(c), &axis, 0.0, 0.0, |v| v)), vec![vec![100.0, 90.0, 80.0]]);
+        // A longer series than the stamps (a preview filled by hand) keeps one update per sample.
+        let mut long = Series::new(10);
+        for v in 0..10 {
+            long.push(v as f32);
+        }
+        assert!(!c.covers(10));
+        assert_eq!(trace_runs(&long, Some(c), &axis, 0.0, 0.0, |v| v), trace_runs(&long, None, &axis, 0.0, 0.0, |v| v));
+    }
 
     #[test]
     fn hex_colours_are_read_leniently_and_strictly() {

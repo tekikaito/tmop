@@ -387,8 +387,11 @@ On one Windows desktop (no battery), TMOP's own CPU use fell from roughly 5-9 % 
 about 1 %. These are rough figures from two 30-second runs per page, not a promise for your
 computer. The battery option has been tested by unit tests only, not on a real laptop.
 
-Known limit: right after the mode switches on or off, the "last N s" labels on the graphs can be
-off for a while (by up to a factor of two).
+The system graphs (Summary, Performance, Power and the popout) know when each sample was
+taken, so a change of the sampling rate (this mode, the notification area, a new update speed)
+keeps their time labels right and their older samples in the right place. A pause shows as a
+gap in the trace. The graph scale stays a number of
+pixels per update, so after a change of rate the graphs cover a longer or shorter time.
 
 Separately, and without a setting, pages that show no moving graph redraw only when something
 changes.
